@@ -207,6 +207,11 @@ steps:
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
         --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} || true
 
+# Add the required logging configuration to work with custom service account
+options:
+  logging: CLOUD_LOGGING_ONLY
+  serviceAccount: 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
+
 # Add any required substitutions
 substitutions:
   _ENVIRONMENT: 'production'
