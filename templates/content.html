@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page_title|default('Content Page') }} - Threat Intelligence Platform{% endblock %}
+
+{% block head %}
+<style type="text/tailwindcss">
+    /* Additional styles for this template */
+    .data-card {
+        @apply bg-white rounded-lg shadow-md overflow-hidden transition-all duration-300;
+    }
+    .data-card:hover {
+        @apply shadow-lg;
+    }
+    .data-card-header {
+        @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center;
+    }
+    .data-card-body {
+        @apply p-6;
+    }
+    .data-card-title {
+        @apply font-semibold flex items-center;
+    }
+    .data-card-icon {
+        @apply mr-2 text-blue-600;
+    }
+    .data-grid {
+        @apply grid gap-6;
+    }
+    .data-grid-1 {
+        @apply grid-cols-1;
+    }
+    .data-grid-2 {
+        @apply grid-cols-1 md:grid-cols-2;
+    }
+    .data-grid-3 {
+        @apply grid-cols-1 md:grid-cols-2 lg:grid-cols-3;
+    }
+    .data-grid-4 {
+        @apply grid-cols-1 sm:grid-cols-2 lg:grid-cols-4;
+    }
+    .data-table {
+        @apply min-w-full divide-y divide-gray-200;
+    }
+    .data-table-header {
+        @apply bg-gray-50;
+    }
+    .data-table-header th {
+        @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider;
+    }
+    .data-table-body {
+        @apply bg-white divide-y divide-gray-200;
+    }
+    .data-table-body tr {
+        @apply hover:bg-gray-50;
+    }
+    .data-table-body td {
+        @apply px-6 py-4 whitespace-nowrap;
+    }
+    .page-header {
+        @apply flex justify-between items-center mb-6;
+    }
+    .page-title {
+        @apply text-2xl font-bold flex items-center;
+    }
+    .page-title-icon {
+        @apply mr-2 text-blue-600;
+    }
+    .page-subtitle {
+        @apply text-gray-600;
+    }
+    .button-primary {
+        @apply bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded;
+    }
+    .button-secondary {
+        @apply bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-4 rounded;
+    }
+    .button-danger {
+        @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded;
+    }
+    .pill-badge {
+        @apply text-xs font-medium px-2.5 py-0.5 rounded-full;
+    }
+    .section-divider {
+        @apply my-6 border-t border-gray-200;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{# This is a flexible content template that can be used for various pages #}
+{# The main sections are controlled by variables passed to the template #}
+
+{# Page Header #}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">
+            <i class="fas fa-{{ page_icon|default('file-alt') }} page-title-icon"></i>
+            {{ page_title|default('Content Page') }}
+        </h1>
+        {% if page_subtitle %}
+        <p class="page-subtitle">{{ page_subtitle }}</p>
+        {% endif %}
+    </div>
+    
+    <div class="flex space-x-2">
+        {% if show_time_filter|default(true) %}
+        <div class="relative inline-block text-left" id="timeFilterDropdown">
+            <button id="timeRangeButton" class="button-secondary flex items-center space-x-2">
+                <span>{{ days|default(30) }} Days</span>
+                <i class="fas fa-chevron-down text-xs ml-2"></i>
+            </button>
+            <div id="timeRangeDropdown" class="hidden origin-top-right absolute right-0 mt-2 w-40 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
+                <div class="py-1">
+                    <a href="{{ url_for(current_endpoint, days=7) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">7 Days</a>
+                    <a href="{{ url_for(current_endpoint, days=30) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">30 Days</a>
+                    <a href="{{ url_for(current_endpoint, days=90) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">90 Days</a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if action_buttons %}
+        {% for button in action_buttons %}
+        <a href="{{ button.url }}" class="button-{{ button.type|default('secondary') }}">
+            <i class="fas fa-{{ button.icon }} mr-2"></i>{{ button.text }}
+        </a>
+        {% endfor %}
+        {% endif %}
+    </div>
+</div>
+
+{# Summary Stats #}
+{% if summary_stats %}
+<div class="data-grid data-grid-4 mb-6">
+    {% for stat in summary_stats %}
+    <div class="bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg">
+        <div class="flex justify-between">
+            <div>
+                <div class="text-4xl text-{{ stat.color|default('blue') }}-600 mb-4">
+                    <i class="fas fa-{{ stat.icon }}"></i>
+                </div>
+                <div class="text-3xl font-bold">{{ stat.value }}</div>
+                <div class="text-gray-500">{{ stat.label }}</div>
+            </div>
+            {% if stat.chart_id %}
+            <div class="self-center">
+                <div id="{{ stat.chart_id }}" class="w-24 h-12"></div>
+            </div>
+            {% endif %}
+        </div>
+        {% if stat.trend %}
+        <div class="mt-2 text-sm text-{{ stat.trend_direction == 'up' ? 'green' : 'red' }}-600">
+            <i class="fas fa-arrow-{{ stat.trend_direction }} mr-1"></i>
+            <span>{{ stat.trend }}</span>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# Main Content Cards #}
+{% if content_cards %}
+<div class="data-grid {{ content_cards_layout|default('data-grid-2') }} mb-6">
+    {% for card in content_cards %}
+    <div class="data-card">
+        <div class="data-card-header">
+            <h3 class="data-card-title">
+                <i class="fas fa-{{ card.icon }} data-card-icon"></i>
+                {{ card.title }}
+            </h3>
+            {% if card.action %}
+            <a href="{{ card.action.url }}" class="text-sm text-blue-600 hover:underline">{{ card.action.text }}</a>
+            {% endif %}
+        </div>
+        <div class="data-card-body">
+            {% if card.chart_id %}
+            <div id="{{ card.chart_id }}" class="h-80"></div>
+            {% endif %}
+            
+            {% if card.table %}
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="data-table-header">
+                        <tr>
+                            {% for column in card.table.columns %}
+                            <th>{{ column }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody class="data-table-body">
+                        {% if card.table.rows %}
+                        {% for row in card.table.rows %}
+                        <tr>
+                            {% for cell in row %}
+                            <td>{{ cell|safe }}</td>
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                        {% else %}
+                        <tr>
+                            <td colspan="{{ card.table.columns|length }}" class="px-6 py-4 text-center text-gray-500">No data available</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+                
+                {% if card.table.pagination %}
+                <div class="flex justify-between items-center mt-4">
+                    <div class="text-sm text-gray-500">
+                        Showing {{ card.table.pagination.start }} to {{ card.table.pagination.end }} of {{ card.table.pagination.total }} entries
+                    </div>
+                    <div class="flex space-x-2">
+                        <a href="{{ card.table.pagination.prev_url }}" class="button-secondary py-1 px-3 {{ 'opacity-50 cursor-not-allowed' if not card.table.pagination.has_prev else '' }}">
+                            <i class="fas fa-chevron-left"></i>
+                        </a>
+                        <a href="{{ card.table.pagination.next_url }}" class="button-secondary py-1 px-3 {{ 'opacity-50 cursor-not-allowed' if not card.table.pagination.has_next else '' }}">
+                            <i class="fas fa-chevron-right"></i>
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            
+            {% if card.content %}
+            {{ card.content|safe }}
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# Detail Sections #}
+{% if detail_sections %}
+{% for section in detail_sections %}
+<div class="data-card mb-6">
+    <div class="data-card-header">
+        <h3 class="data-card-title">
+            <i class="fas fa-{{ section.icon }} data-card-icon"></i>
+            {{ section.title }}
+        </h3>
+        {% if section.action %}
+        <a href="{{ section.action.url }}" class="text-sm text-blue-600 hover:underline">{{ section.action.text }}</a>
+        {% endif %}
+    </div>
+    <div class="data-card-body">
+        {% if section.content %}
+        {{ section.content|safe }}
+        {% endif %}
+        
+        {% if section.tabs %}
+        <div class="border-b border-gray-200 mb-4">
+            <nav class="flex -mb-px space-x-8">
+                {% for tab in section.tabs %}
+                <a href="#{{ tab.id }}" data-tab="{{ tab.id }}" class="tab-link py-4 px-1 border-b-2 font-medium text-sm {{ loop.first ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300' }}">
+                    {% if tab.icon %}<i class="fas fa-{{ tab.icon }} mr-2"></i>{% endif %}
+                    {{ tab.title }}
+                </a>
+                {% endfor %}
+            </nav>
+        </div>
+        
+        <div class="tab-content-container">
+            {% for tab in section.tabs %}
+            <div id="tab-{{ tab.id }}" class="tab-content {{ loop.first ? 'block' : 'hidden' }}">
+                {{ tab.content|safe }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{# Raw Content #}
+{% if raw_content %}
+{{ raw_content|safe }}
+{% endif %}
+
+{# Custom Page Elements #}
+{% block page_content %}{% endblock %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Time Range Dropdown Toggle
+    const timeRangeButton = document.getElementById('timeRangeButton');
+    const timeRangeDropdown = document.getElementById('timeRangeDropdown');
+    
+    if (timeRangeButton && timeRangeDropdown) {
+        timeRangeButton.addEventListener('click', () => {
+            timeRangeDropdown.classList.toggle('hidden');
+        });
+        
+        document.addEventListener('click', (event) => {
+            if (!timeRangeButton.contains(event.target)) {
+                timeRangeDropdown.classList.add('hidden');
+            }
+        });
+    }
+    
+    // Tab Navigation
+    const tabLinks = document.querySelectorAll('.tab-link');
+    const tabContents = document.querySelectorAll('.tab-content');
+    
+    if (tabLinks.length > 0) {
+        tabLinks.forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                
+                // Remove active class from all tabs
+                tabLinks.forEach(tabLink => {
+                    tabLink.classList.remove('border-blue-500', 'text-blue-600');
+                    tabLink.classList.add('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+                });
+                
+                // Add active class to clicked tab
+                link.classList.add('border-blue-500', 'text-blue-600');
+                link.classList.remove('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+                
+                // Hide all tab content
+                tabContents.forEach(content => {
+                    content.classList.add('hidden');
+                });
+                
+                // Show relevant tab content
+                const tabId = link.getAttribute('data-tab');
+                document.getElementById('tab-' + tabId).classList.remove('hidden');
+            });
+        });
+    }
+    
+    // Chart rendering (if provided)
+    {% if chart_scripts %}
+    {{ chart_scripts|safe }}
+    {% endif %}
+    
+    // Additional page-specific scripts
+    {% block page_scripts %}{% endblock %}
+</script>
+{% endblock %}
