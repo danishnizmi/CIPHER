@@ -45,6 +45,10 @@ spec:
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
+        - name: REQUIRE_AUTH
+          value: "true"
+        - name: SERVICE_ACCOUNT
+          value: "malware-platform-sa@primal-chariot-382610.iam.gserviceaccount.com"
         startupProbe:
           httpGet:
             path: /api/health
