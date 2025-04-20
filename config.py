@@ -7,7 +7,6 @@ import os
 from typing import Dict, List, Any, Optional
 import json
 import logging
-from google.cloud import secretmanager
 import uuid
 import hashlib
 
@@ -34,12 +33,38 @@ SECRET_NAMES = [
 # Configuration cache
 _config_cache = {}
 
+# Import Secret Manager
+try:
+    from google.cloud import secretmanager
+    SECRET_MANAGER_AVAILABLE = True
+    logger.info("Google Cloud Secret Manager is available")
+except ImportError:
+    SECRET_MANAGER_AVAILABLE = False
+    logger.warning("Google Cloud Secret Manager is not available, using environment variables")
+
 
 def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
     """Load a secret from Secret Manager"""
+    # First check environment variables as a fallback
+    env_var_name = f"{secret_name.upper().replace('-', '_')}"
+    if env_var_name in os.environ:
+        try:
+            return json.loads(os.environ[env_var_name])
+        except json.JSONDecodeError:
+            return {"value": os.environ[env_var_name]}
+    
+    # Then try Secret Manager if available
+    if not SECRET_MANAGER_AVAILABLE:
+        logger.warning(f"Secret Manager not available, could not load {secret_name}")
+        return None
+    
     try:
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/latest"
+        
+        # Log the secret access attempt (without the secret name for security)
+        logger.info(f"Attempting to access secret from project {PROJECT_ID}")
+        
         response = client.access_secret_version(request={"name": name})
         payload = response.payload.data.decode("UTF-8")
         
@@ -52,11 +77,25 @@ def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
             
     except Exception as e:
         logger.warning(f"Error loading secret {secret_name}: {str(e)}")
+        
+        # Check if we got permission denied error or not found error
+        if "Permission denied" in str(e):
+            logger.error(f"Permission denied accessing secret. Check IAM permissions for the service account.")
+        elif "NotFound" in str(e):
+            logger.error(f"Secret {secret_name} not found in project {PROJECT_ID}")
+        
         return None
 
 
 def create_or_update_secret(secret_name: str, secret_data: Dict[str, Any]) -> bool:
     """Create or update a secret in Secret Manager"""
+    # If Secret Manager is not available, set as environment variable
+    if not SECRET_MANAGER_AVAILABLE:
+        env_var_name = f"{secret_name.upper().replace('-', '_')}"
+        os.environ[env_var_name] = json.dumps(secret_data)
+        logger.info(f"Set environment variable {env_var_name} (Secret Manager not available)")
+        return True
+    
     try:
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{PROJECT_ID}/secrets/{secret_name}"
@@ -65,24 +104,34 @@ def create_or_update_secret(secret_name: str, secret_data: Dict[str, Any]) -> bo
         # Check if secret exists
         try:
             client.get_secret(request={"name": parent})
-        except Exception:
+            logger.info(f"Secret {secret_name} already exists, adding new version")
+        except Exception as e:
             # Create secret if it doesn't exist
+            logger.info(f"Secret {secret_name} doesn't exist, creating new secret")
             parent_resource = f"projects/{PROJECT_ID}"
-            client.create_secret(
-                request={
-                    "parent": parent_resource,
-                    "secret_id": secret_name,
-                    "secret": {"replication": {"automatic": {}}},
-                }
-            )
-            logger.info(f"Created new secret: {secret_name}")
+            try:
+                client.create_secret(
+                    request={
+                        "parent": parent_resource,
+                        "secret_id": secret_name,
+                        "secret": {"replication": {"automatic": {}}},
+                    }
+                )
+                logger.info(f"Created new secret: {secret_name}")
+            except Exception as create_error:
+                logger.error(f"Error creating secret {secret_name}: {str(create_error)}")
+                # Still try to use an existing secret if possible
         
         # Add new version
-        client.add_secret_version(
-            request={"parent": parent, "payload": {"data": payload}}
-        )
-        logger.info(f"Updated secret: {secret_name}")
-        return True
+        try:
+            client.add_secret_version(
+                request={"parent": parent, "payload": {"data": payload}}
+            )
+            logger.info(f"Updated secret: {secret_name}")
+            return True
+        except Exception as version_error:
+            logger.error(f"Error adding version to secret {secret_name}: {str(version_error)}")
+            return False
     
     except Exception as e:
         logger.error(f"Failed to update secret {secret_name}: {str(e)}")
@@ -149,6 +198,18 @@ def init_app_config():
     for key, value in config.items():
         if isinstance(value, str) and not os.environ.get(key):
             os.environ[key] = value
+    
+    # Try to access the CIPHER GitHub OAuth token if it exists
+    if SECRET_MANAGER_AVAILABLE:
+        try:
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{PROJECT_ID}/secrets/CIPHER-github-oauthtoken-a9e194/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            payload = response.payload.data.decode("UTF-8")
+            os.environ["GITHUB_TOKEN"] = payload
+            logger.info("Successfully loaded GitHub token from Secret Manager")
+        except Exception as e:
+            logger.warning(f"Could not load GitHub token from Secret Manager: {str(e)}")
     
     # Create default API key if missing
     if not config.get("API_KEY"):
