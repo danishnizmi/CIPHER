@@ -58,21 +58,21 @@ steps:
     - '-c'
     - |
       # Check and create secrets with placeholder values if they don't exist
-      for SECRET_NAME in api-keys database-credentials feed-config auth-config; do
-        if ! gcloud secrets describe $SECRET_NAME 2>/dev/null; then
+      for SECRET in api-keys database-credentials feed-config auth-config; do
+        if ! gcloud secrets describe $$SECRET 2>/dev/null; then
           echo "{\"created_by_deployment\": true}" | \
-          gcloud secrets create $SECRET_NAME \
+          gcloud secrets create $$SECRET \
             --replication-policy="automatic" \
             --data-file=-
-          echo "Created placeholder for $SECRET_NAME"
+          echo "Created placeholder for $$SECRET"
         else
-          echo "Secret $SECRET_NAME already exists"
+          echo "Secret $$SECRET already exists"
         fi
       done
       
       # Grant the service account access to the secrets
-      for SECRET_NAME in api-keys database-credentials feed-config auth-config; do
-        gcloud secrets add-iam-policy-binding $SECRET_NAME \
+      for SECRET in api-keys database-credentials feed-config auth-config; do
+        gcloud secrets add-iam-policy-binding $$SECRET \
           --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/secretmanager.secretAccessor"
       done
@@ -193,7 +193,7 @@ steps:
       # Wait for deployment to be ready
       sleep 10
       SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
-      curl -sS "$SERVICE_URL/api/health" | grep -q "status.*ok" && echo "Health check successful" || echo "Health check failed"
+      curl -sS "$$SERVICE_URL/api/health" | grep -q "status.*ok" && echo "Health check successful" || echo "Health check failed"
 
 # Clean up old container images to save costs
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -207,7 +207,7 @@ steps:
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
         --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} || true
 
-# Add the required logging configuration to work with custom service account
+# Add the required logging configuration
 options:
   logging: CLOUD_LOGGING_ONLY
 
