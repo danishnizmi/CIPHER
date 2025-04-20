@@ -1,6 +1,6 @@
 steps:
 # Install dependencies
-- name: 'python:3.10'
+- name: 'python:3.9'
   id: 'install-dependencies'
   entrypoint: pip
   args:
@@ -10,7 +10,7 @@ steps:
     - '--user'
 
 # Run tests
-- name: 'python:3.10'
+- name: 'python:3.9'
   id: 'run-tests'
   entrypoint: python
   args:
