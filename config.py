@@ -8,6 +8,8 @@ from typing import Dict, List, Any, Optional
 import json
 import logging
 from google.cloud import secretmanager
+import uuid
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Constants
 PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
 REGION = os.environ.get("GCP_REGION", "us-central1")
-SERVICE_ACCOUNT = os.environ.get("SERVICE_ACCOUNT", "malware-platform-sa@primal-chariot-382610.iam.gserviceaccount.com")
+SERVICE_ACCOUNT = os.environ.get("SERVICE_ACCOUNT", "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com")
 
 # Default environment type
 ENV = os.environ.get("ENVIRONMENT", "development")
@@ -187,9 +189,6 @@ def init_app_config():
     # Create default auth config if missing
     if not config.get("FLASK_SECRET_KEY"):
         logger.warning("Auth configuration missing, setting defaults")
-        import hashlib
-        import uuid
-        
         # Generate a random secret key
         random_key = str(uuid.uuid4())
         
