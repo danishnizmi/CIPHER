@@ -73,7 +73,7 @@ steps:
       # Grant the service account access to the secrets
       for SECRET_NAME in api-keys database-credentials feed-config auth-config; do
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/secretmanager.secretAccessor"
       done
 
@@ -99,7 +99,7 @@ steps:
     - '--set-env-vars'
     - 'ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID'
     - '--service-account'
-    - 'malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com'
+    - 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
 
 # Create/update BigQuery dataset and tables
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -144,7 +144,7 @@ steps:
         --runtime=python39 \
         --trigger-http \
         --allow-unauthenticated \
-        --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID
 
 # Deploy Cloud Function for analysis
@@ -159,7 +159,7 @@ steps:
         --region=us-central1 \
         --runtime=python39 \
         --trigger-topic=threat-data-ingestion \
-        --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID
 
 # Set up Cloud Scheduler jobs for periodic feed updates
@@ -178,6 +178,10 @@ steps:
         --time-zone="UTC" \
         --attempt-deadline=30m \
         --description="Hourly threat feed update" || true
+      
+      # Add service account to scheduler job
+      gcloud scheduler jobs update http update-threat-feeds \
+        --oauth-service-account-email=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com || true
 
 # Run post-deployment tests
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
