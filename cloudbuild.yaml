@@ -1,1 +1,203 @@
-placeholder
+steps:
+# Install dependencies
+- name: 'python:3.9'
+  id: 'install-dependencies'
+  entrypoint: pip
+  args:
+    - 'install'
+    - '-r'
+    - 'requirements.txt'
+    - '--user'
+
+# Run tests
+- name: 'python:3.9'
+  id: 'run-tests'
+  entrypoint: python
+  args:
+    - '-m'
+    - 'pytest'
+    - '-v'
+    - 'tests/'
+  env:
+    - 'ENVIRONMENT=test'
+    - 'GCP_PROJECT=$PROJECT_ID'
+
+# Build frontend static files
+- name: 'node:16'
+  id: 'build-frontend'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      npm install tailwindcss postcss autoprefixer
+      npx tailwindcss build -i static/src/input.css -o static/dist/output.css --minify
+
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'build-container'
+  args:
+    - 'build'
+    - '-t'
+    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+    - '-t'
+    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+    - '.'
+
+# Push the container image to Container Registry
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'push-container'
+  args:
+    - 'push'
+    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+
+# Deploy container image to Cloud Run
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-cloudrun'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - 'threat-intelligence-platform'
+    - '--image'
+    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+    - '--region'
+    - 'us-central1'
+    - '--platform'
+    - 'managed'
+    - '--allow-unauthenticated'
+    - '--cpu'
+    - '2'
+    - '--memory'
+    - '2Gi'
+    - '--set-env-vars'
+    - 'ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID'
+    - '--service-account'
+    - 'malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com'
+
+# Create/update BigQuery dataset and tables
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-bigquery'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Create dataset if not exists
+      bq --location=US mk --dataset \
+        --description "Threat Intelligence Dataset" \
+        $PROJECT_ID:threat_intelligence || true
+      
+      # Run table creation scripts
+      python scripts/setup_bigquery_tables.py
+
+# Set up Pub/Sub topics
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-pubsub'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Create Pub/Sub topics if they don't exist
+      gcloud pubsub topics create threat-data-ingestion || true
+      gcloud pubsub topics create threat-analysis-events || true
+      
+      # Create subscriptions if they don't exist
+      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic threat-data-ingestion || true
+      gcloud pubsub subscriptions create threat-analysis-events-sub --topic threat-analysis-events || true
+
+# Deploy Cloud Function for feed ingestion
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-ingestion-function'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      cd functions/ingestion
+      gcloud functions deploy ingest_threat_data \
+        --region=us-central1 \
+        --runtime=python39 \
+        --trigger-http \
+        --allow-unauthenticated \
+        --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID
+
+# Deploy Cloud Function for analysis
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-analysis-function'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      cd functions/analysis
+      gcloud functions deploy analyze_threat_data \
+        --region=us-central1 \
+        --runtime=python39 \
+        --trigger-topic=threat-data-ingestion \
+        --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID
+
+# Set up Cloud Scheduler jobs for periodic feed updates
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-scheduler'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Create scheduler job for feed updates (runs every hour)
+      gcloud scheduler jobs create http update-threat-feeds \
+        --schedule="0 * * * *" \
+        --uri="https://us-central1-$PROJECT_ID.cloudfunctions.net/ingest_threat_data" \
+        --http-method=POST \
+        --message-body='{"process_all": true}' \
+        --time-zone="UTC" \
+        --attempt-deadline=30m \
+        --description="Hourly threat feed update" || true
+
+# Add API key to Secret Manager if it doesn't exist
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-secrets'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Create API key secret if it doesn't exist
+      gcloud secrets describe api-keys || \
+      gcloud secrets create api-keys \
+        --replication-policy="automatic" \
+        --data-file=secrets/api-keys.json
+
+# Run post-deployment tests
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'post-deployment-check'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Wait for deployment to be ready
+      sleep 10
+      SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
+      curl -sS "$SERVICE_URL/api/health" | grep -q "status.*ok" && echo "Health check successful" || echo "Health check failed"
+
+# Clean up old container images to save costs
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'cleanup-old-images'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Keep only the 5 most recent images
+      gcloud container images list-tags gcr.io/$PROJECT_ID/threat-intelligence-platform \
+        --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
+        --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} || true
+
+# Add any required substitutions
+substitutions:
+  _ENVIRONMENT: 'production'
+  _REGION: 'us-central1'
+
+# Specify the images that will be preserved as outputs of this build
+images:
+  - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+
+# Configure build timeout
+timeout: '2700s'
