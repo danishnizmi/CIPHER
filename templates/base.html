@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Threat Intelligence Platform{% endblock %}</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Plotly.js -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#0d6efd',
+                        secondary: '#6c757d',
+                        success: '#198754',
+                        info: '#0dcaf0',
+                        warning: '#ffc107',
+                        danger: '#dc3545',
+                        light: '#f8f9fa',
+                        dark: '#212529',
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style type="text/tailwindcss">
+        @layer components {
+            .badge-ioc {
+                @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block;
+            }
+            .badge-ip { @apply bg-amber-300 text-gray-800; }
+            .badge-domain { @apply bg-emerald-400 text-gray-800; }
+            .badge-url { @apply bg-blue-500 text-white; }
+            .badge-md5 { @apply bg-pink-500 text-white; }
+            .badge-sha1 { @apply bg-blue-900 text-white; }
+            .badge-sha256 { @apply bg-purple-700 text-white; }
+            .badge-email { @apply bg-orange-500 text-gray-800; }
+            
+            .severity-badge {
+                @apply inline-block px-2 py-1 rounded text-xs font-bold uppercase;
+            }
+            .severity-badge.critical { @apply bg-red-600 text-white; }
+            .severity-badge.high { @apply bg-orange-500 text-white; }
+            .severity-badge.medium { @apply bg-amber-400 text-gray-800; }
+            .severity-badge.low { @apply bg-teal-500 text-white; }
+        }
+    </style>
+    
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-gray-100 text-gray-800">
+    <!-- Navigation Bar -->
+    <nav class="bg-gray-900 text-white shadow-md">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <a href="{{ url_for('dashboard') }}" class="flex items-center">
+                <i class="fas fa-shield-alt mr-2 text-xl"></i>
+                <span class="font-bold text-lg">Threat Intelligence Platform</span>
+            </a>
+            <div class="flex items-center space-x-4">
+                {% if session.get('logged_in') %}
+                <a href="{{ url_for('alerts') }}" class="relative">
+                    <i class="fas fa-bell text-lg"></i>
+                    <span class="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">3</span>
+                </a>
+                <div class="relative group">
+                    <button class="flex items-center space-x-2">
+                        <i class="fas fa-user-circle text-lg"></i>
+                        <span>{{ session.get('username', 'User') }}</span>
+                        <span class="bg-blue-600 text-xs px-2 py-1 rounded">{{ session.get('role', 'user') }}</span>
+                        <i class="fas fa-chevron-down text-xs"></i>
+                    </button>
+                    <div class="absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg hidden group-hover:block z-10">
+                        <a href="{{ url_for('profile') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-user-cog mr-2"></i> Profile
+                        </a>
+                        <a href="{{ url_for('settings') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-cog mr-2"></i> Settings
+                        </a>
+                        <div class="border-t border-gray-200"></div>
+                        <a href="{{ url_for('logout') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-sign-out-alt mr-2"></i> Logout
+                        </a>
+                    </div>
+                </div>
+                {% else %}
+                <a href="{{ url_for('login') }}" class="flex items-center">
+                    <i class="fas fa-sign-in-alt mr-1"></i>
+                    <span>Login</span>
+                </a>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+    
+    <div class="container mx-auto px-4 flex">
+        <!-- Sidebar -->
+        <div class="w-64 flex-shrink-0 hidden md:block">
+            <div class="bg-white rounded-lg shadow-md mt-4 p-4">
+                <!-- Search Box -->
+                <form action="{{ url_for('search') }}" method="get" class="mb-6">
+                    <div class="relative">
+                        <input type="text" name="q" placeholder="Search..." class="w-full rounded-full border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <button type="submit" class="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </div>
+                </form>
+                
+                <!-- Navigation Menu -->
+                <div class="space-y-1">
+                    <a href="{{ url_for('dashboard') }}" class="block px-4 py-2 rounded {% if request.path == url_for('dashboard') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-tachometer-alt w-5 mr-2"></i> Dashboard
+                    </a>
+                    <a href="{{ url_for('feeds') }}" class="block px-4 py-2 rounded {% if request.path == url_for('feeds') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-rss w-5 mr-2"></i> Threat Feeds
+                    </a>
+                    <a href="{{ url_for('campaigns') }}" class="block px-4 py-2 rounded {% if request.path == url_for('campaigns') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-project-diagram w-5 mr-2"></i> Campaigns
+                    </a>
+                    <a href="{{ url_for('iocs') }}" class="block px-4 py-2 rounded {% if request.path == url_for('iocs') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-fingerprint w-5 mr-2"></i> IOCs
+                    </a>
+                    <a href="{{ url_for('reports') }}" class="block px-4 py-2 rounded {% if request.path == url_for('reports') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-chart-bar w-5 mr-2"></i> Reports
+                    </a>
+                    <a href="{{ url_for('alerts') }}" class="block px-4 py-2 rounded {% if request.path == url_for('alerts') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-bell w-5 mr-2"></i> Alerts
+                        <span class="bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 ml-1">3</span>
+                    </a>
+                    <a href="{{ url_for('explore') }}" class="block px-4 py-2 rounded {% if request.path == url_for('explore') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-search w-5 mr-2"></i> Data Explorer
+                    </a>
+                </div>
+                
+                {% if session.get('role') in ['admin', 'analyst'] %}
+                <div class="border-t border-gray-200 my-4"></div>
+                <div class="text-xs text-gray-500 px-4 mb-2">Administration</div>
+                
+                <div class="space-y-1">
+                    <a href="{{ url_for('settings') }}" class="block px-4 py-2 rounded {% if request.path == url_for('settings') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-cog w-5 mr-2"></i> Settings
+                    </a>
+                    
+                    {% if session.get('role') == 'admin' %}
+                    <a href="{{ url_for('users') }}" class="block px-4 py-2 rounded {% if request.path == url_for('users') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                        <i class="fas fa-users-cog w-5 mr-2"></i> User Management
+                    </a>
+                    {% endif %}
+                </div>
+                {% endif %}
+                
+                <!-- System Status -->
+                <div class="mt-auto pt-4">
+                    <div class="bg-gray-50 rounded-lg p-3 mt-4">
+                        <h6 class="text-sm font-semibold mb-2">
+                            <i class="fas fa-shield-alt mr-1"></i> System Status
+                        </h6>
+                        <div class="flex justify-between items-center mb-2 text-sm">
+                            <div class="flex items-center">
+                                <div class="w-2 h-2 rounded-full bg-green-500 mr-2"></div>
+                                <span>API Service</span>
+                            </div>
+                            <span class="text-green-600">Operational</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <div class="flex items-center">
+                                <div class="w-2 h-2 rounded-full bg-green-500 mr-2"></div>
+                                <span>Feed Collection</span>
+                            </div>
+                            <span class="text-green-600">Operational</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="flex-grow p-4">
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="mb-4 px-4 py-3 rounded relative {% if category == 'danger' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% elif category == 'warning' %}bg-yellow-100 text-yellow-700{% else %}bg-blue-100 text-blue-700{% endif %}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <!-- Page Content -->
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+    
+    <!-- Footer -->
+    <footer class="bg-white shadow-inner mt-8 py-4">
+        <div class="container mx-auto px-4 text-center text-gray-500 text-sm">
+            <p>&copy; {{ now.year if now else 2025 }} Threat Intelligence Platform. All rights reserved.</p>
+            <p class="mt-1">Powered by Google Cloud Platform</p>
+        </div>
+    </footer>
+    
+    <!-- Custom Scripts -->
+    <script>
+        // Hide alerts after 5 seconds
+        document.addEventListener('DOMContentLoaded', () => {
+            const alerts = document.querySelectorAll('[role="alert"]');
+            alerts.forEach(alert => {
+                setTimeout(() => {
+                    alert.style.display = 'none';
+                }, 5000);
+            });
+        });
+    </script>
+    
+    {% block scripts %}{% endblock %}
+</body>
+</html>
