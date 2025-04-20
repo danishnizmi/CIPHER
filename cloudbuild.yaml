@@ -2,12 +2,12 @@ steps:
 # Install dependencies
 - name: 'python:3.9'
   id: 'install-dependencies'
-  entrypoint: pip
+  entrypoint: bash
   args:
-    - 'install'
-    - '-r'
-    - 'requirements.txt'
-    - '--user'
+    - '-c'
+    - |
+      pip install --upgrade pip
+      pip install -r requirements.txt --user
 
 # Run tests
 - name: 'python:3.9'
