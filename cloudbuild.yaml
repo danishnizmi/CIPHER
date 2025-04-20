@@ -50,6 +50,33 @@ steps:
     - 'push'
     - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
 
+# Add required secrets to Secret Manager
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-secrets'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Check and create secrets with placeholder values if they don't exist
+      for SECRET_NAME in api-keys database-credentials feed-config auth-config; do
+        if ! gcloud secrets describe $SECRET_NAME 2>/dev/null; then
+          echo "{\"created_by_deployment\": true}" | \
+          gcloud secrets create $SECRET_NAME \
+            --replication-policy="automatic" \
+            --data-file=-
+          echo "Created placeholder for $SECRET_NAME"
+        else
+          echo "Secret $SECRET_NAME already exists"
+        fi
+      done
+      
+      # Grant the service account access to the secrets
+      for SECRET_NAME in api-keys database-credentials feed-config auth-config; do
+        gcloud secrets add-iam-policy-binding $SECRET_NAME \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/secretmanager.secretAccessor"
+      done
+
 # Deploy container image to Cloud Run
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
@@ -151,19 +178,6 @@ steps:
         --time-zone="UTC" \
         --attempt-deadline=30m \
         --description="Hourly threat feed update" || true
-
-# Add API key to Secret Manager if it doesn't exist
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'setup-secrets'
-  entrypoint: 'bash'
-  args:
-    - '-c'
-    - |
-      # Create API key secret if it doesn't exist
-      gcloud secrets describe api-keys || \
-      gcloud secrets create api-keys \
-        --replication-policy="automatic" \
-        --data-file=secrets/api-keys.json
 
 # Run post-deployment tests
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
