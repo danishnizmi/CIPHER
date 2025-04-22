@@ -7,7 +7,8 @@ import os
 import logging
 import traceback
 from typing import Optional
-from flask import Flask, Blueprint, redirect, url_for
+from datetime import datetime
+from flask import Flask, Blueprint, redirect, url_for, render_template
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Configure logging
@@ -22,6 +23,9 @@ def create_app() -> Flask:
     Returns:
         Flask: Configured Flask application
     """
+    # Create a minimal Flask app first to ensure we have something to return
+    app = Flask(__name__)
+    
     # Initialize config first with error handling
     try:
         from config import init_app_config, get
@@ -30,10 +34,14 @@ def create_app() -> Flask:
     except Exception as e:
         logger.error(f"Error initializing config: {str(e)}")
         logger.error(traceback.format_exc())
-        # Continue with default configuration
         config = {}
     
     # Import components after config is initialized
+    has_frontend = False
+    has_api = False
+    frontend_app = None
+    api_app = None
+    
     try:
         from frontend import app as frontend_app
         has_frontend = True
@@ -41,7 +49,6 @@ def create_app() -> Flask:
     except Exception as e:
         logger.error(f"Error importing frontend module: {str(e)}")
         logger.error(traceback.format_exc())
-        has_frontend = False
     
     try:
         from api import app as api_app
@@ -50,7 +57,6 @@ def create_app() -> Flask:
     except Exception as e:
         logger.error(f"Error importing API module: {str(e)}")
         logger.error(traceback.format_exc())
-        has_api = False
     
     # Choose which app to use as the primary one with error handling
     if has_api:
@@ -63,7 +69,8 @@ def create_app() -> Flask:
                 # Extract blueprints from frontend app to merge
                 for blueprint_name in frontend_app.blueprints:
                     blueprint = frontend_app.blueprints[blueprint_name]
-                    app.register_blueprint(blueprint)
+                    if not app.blueprints.get(blueprint_name):  # Only register if not already registered
+                        app.register_blueprint(blueprint)
                 
                 # Copy over template folder and static folder settings
                 if not app.template_folder and frontend_app.template_folder:
@@ -74,20 +81,19 @@ def create_app() -> Flask:
                     app.static_url_path = frontend_app.static_url_path
                     
                 logger.info("Integrated frontend components into API application")
+                
+                # Remove duplicate routes (critical fix)
+                for endpoint in list(frontend_app.view_functions.keys()):
+                    if endpoint in app.view_functions and endpoint != 'static':
+                        logger.warning(f"Removing duplicate endpoint '{endpoint}' from frontend")
+                        # Skip registering this endpoint from frontend_app
+                        frontend_app.view_functions.pop(endpoint, None)
             except Exception as e:
                 logger.error(f"Error integrating frontend components: {str(e)}")
                 logger.error(traceback.format_exc())
     elif has_frontend:
         app = frontend_app
         logger.info("Using frontend as primary application")
-    else:
-        # Create a minimal Flask app if neither is available
-        app = Flask(__name__)
-        logger.warning("Neither API nor frontend available, creating minimal app")
-        
-        @app.route('/')
-        def home():
-            return "Threat Intelligence Platform - Service Running"
     
     # Apply common configurations with error handling
     try:
@@ -115,34 +121,52 @@ def create_app() -> Flask:
         @app.errorhandler(404)
         def page_not_found(e):
             """Custom 404 handler"""
-            if hasattr(app, 'render_template'):
-                return app.render_template('404.html'), 404
-            return "Page not found", 404
+            try:
+                return render_template('404.html'), 404
+            except:
+                return "Page not found", 404
 
         @app.errorhandler(500)
         def server_error(e):
             """Custom 500 handler"""
             logger.error(f"Server error: {str(e)}")
-            if hasattr(app, 'render_template'):
-                return app.render_template('500.html'), 500
-            return "Internal server error", 500
+            try:
+                return render_template('500.html'), 500
+            except:
+                return "Internal server error", 500
         
-        # Add a health check endpoint that always succeeds
-        # This is crucial for Cloud Run to not kill the container
+        # Make sure we have a health check endpoint (critical fix)
+        # Remove existing route if any, to prevent conflicts
+        if 'health_check' in app.view_functions:
+            app.view_functions.pop('health_check', None)
+            for rule in list(app.url_map.iter_rules()):
+                if rule.endpoint == 'health_check':
+                    app.url_map._rules.remove(rule)
+                    app.url_map._rules_by_endpoint.pop('health_check', None)
+        
         @app.route('/api/health')
         def health_check():
             """Health check endpoint - always returns 200 OK"""
             return {
                 "status": "ok",
                 "environment": environment,
-                "project": project_id
+                "project": project_id,
+                "timestamp": datetime.utcnow().isoformat()
             }, 200
         
-        # Add a redirect from root to dashboard if applicable
-        if has_frontend and 'dashboard' in app.view_functions:
+        # Make sure we have a root endpoint
+        if 'index' not in app.view_functions and '/' not in [rule.rule for rule in app.url_map.iter_rules()]:
             @app.route('/')
             def index():
-                return redirect(url_for('dashboard'))
+                if 'dashboard' in app.view_functions:
+                    return redirect(url_for('dashboard'))
+                try:
+                    return render_template('dashboard.html')
+                except:
+                    try:
+                        return render_template('base.html')
+                    except:
+                        return "Threat Intelligence Platform"
         
         # Initialize GCP clients with error handling
         try:
