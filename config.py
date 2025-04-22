@@ -1,23 +1,26 @@
 """
 Configuration module for Threat Intelligence Platform.
 Loads environment variables from GCP Secret Manager or environment.
+Provides automatic setup of required resources and credentials.
 """
 
 import os
-from typing import Dict, List, Any, Optional
+import base64
 import json
 import logging
 import uuid
 import hashlib
+import datetime
+from typing import Dict, List, Any, Optional, Union
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
-PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
+PROJECT_ID = os.environ.get("GCP_PROJECT")
 REGION = os.environ.get("GCP_REGION", "us-central1")
-SERVICE_ACCOUNT = os.environ.get("SERVICE_ACCOUNT", "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com")
+SERVICE_ACCOUNT = os.environ.get("SERVICE_ACCOUNT")
 
 # Default environment type
 ENV = os.environ.get("ENVIRONMENT", "development")
@@ -56,7 +59,7 @@ except Exception as e:
 
 
 def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
-    """Load a secret from Secret Manager"""
+    """Load a secret from Secret Manager or environment variables"""
     # First check environment variables as a fallback
     env_var_name = f"{secret_name.upper().replace('-', '_')}"
     if env_var_name in os.environ:
@@ -75,7 +78,7 @@ def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
         name = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/latest"
         
         # Log the secret access attempt (without the secret name for security)
-        logger.info(f"Attempting to access secret from project {PROJECT_ID}")
+        logger.info(f"Accessing secret from project {PROJECT_ID}")
         
         response = client.access_secret_version(request={"name": name})
         payload = response.payload.data.decode("UTF-8")
@@ -94,7 +97,7 @@ def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
         if "Permission denied" in str(e):
             logger.error(f"Permission denied accessing secret. Check IAM permissions for the service account.")
         elif "NotFound" in str(e):
-            logger.error(f"Secret {secret_name} not found in project {PROJECT_ID}")
+            logger.warning(f"Secret {secret_name} not found in project {PROJECT_ID}")
         
         return None
 
@@ -110,34 +113,40 @@ def create_or_update_secret(secret_name: str, secret_data: Dict[str, Any]) -> bo
     
     try:
         client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{PROJECT_ID}/secrets/{secret_name}"
-        payload = json.dumps(secret_data).encode("UTF-8")
+        parent = f"projects/{PROJECT_ID}"
+        secret_id = secret_name
         
         # Check if secret exists
         try:
-            client.get_secret(request={"name": parent})
-            logger.info(f"Secret {secret_name} already exists, adding new version")
-        except Exception as e:
-            # Create secret if it doesn't exist
-            logger.info(f"Secret {secret_name} doesn't exist, creating new secret")
-            parent_resource = f"projects/{PROJECT_ID}"
+            secret_path = f"{parent}/secrets/{secret_id}"
+            client.get_secret(request={"name": secret_path})
+            secret_exists = True
+            logger.info(f"Secret {secret_name} already exists")
+        except Exception:
+            secret_exists = False
+            logger.info(f"Secret {secret_name} doesn't exist, creating new")
+        
+        # Create secret if it doesn't exist
+        if not secret_exists:
             try:
                 client.create_secret(
                     request={
-                        "parent": parent_resource,
-                        "secret_id": secret_name,
+                        "parent": parent,
+                        "secret_id": secret_id,
                         "secret": {"replication": {"automatic": {}}},
                     }
                 )
                 logger.info(f"Created new secret: {secret_name}")
             except Exception as create_error:
                 logger.error(f"Error creating secret {secret_name}: {str(create_error)}")
-                # Still try to use an existing secret if possible
         
         # Add new version
+        payload = json.dumps(secret_data).encode("UTF-8")
+        secret_path = f"{parent}/secrets/{secret_id}"
+        
         try:
             client.add_secret_version(
-                request={"parent": parent, "payload": {"data": payload}}
+                request={"parent": secret_path, "payload": {"data": payload}}
             )
             logger.info(f"Updated secret: {secret_name}")
             return True
@@ -150,6 +159,152 @@ def create_or_update_secret(secret_name: str, secret_data: Dict[str, Any]) -> bo
         return False
 
 
+def auto_detect_project_id() -> str:
+    """Auto-detect GCP Project ID from metadata server or instance"""
+    if PROJECT_ID:
+        return PROJECT_ID
+    
+    # Try to get from metadata server
+    try:
+        import requests
+        metadata_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+        headers = {"Metadata-Flavor": "Google"}
+        response = requests.get(metadata_url, headers=headers, timeout=2)
+        if response.status_code == 200:
+            return response.text
+    except Exception:
+        pass
+    
+    # Try to get from Application Default Credentials
+    try:
+        import google.auth
+        credentials, project_id = google.auth.default()
+        if project_id:
+            return project_id
+    except Exception:
+        pass
+    
+    # Generate a unique project ID for development
+    if ENV == "development":
+        logger.warning("Generating development project ID")
+        return f"dev-threat-intel-{str(uuid.uuid4())[:8]}"
+    
+    # Last resort - use a placeholder
+    logger.error("Could not detect GCP Project ID")
+    return "threat-intelligence-platform"
+
+
+def get_database_configuration() -> Dict[str, Any]:
+    """Determine appropriate database configuration based on environment"""
+    # Default to BigQuery for data storage
+    db_name = f"threat_intelligence_{ENV.lower()}"
+    
+    # Check if Cloud SQL is available
+    cloud_sql_available = False
+    if PROJECT_ID and ENV != "development":
+        try:
+            from google.cloud import sql_admin_v1
+            cloud_sql_available = True
+        except ImportError:
+            cloud_sql_available = False
+    
+    # Generate configuration based on environment
+    if cloud_sql_available:
+        # Use Cloud SQL with IAM authentication
+        region = REGION
+        instance = f"{PROJECT_ID}:{region}:threat-intelligence-db"
+        
+        return {
+            "DATABASE_TYPE": "cloud_sql",
+            "DATABASE_NAME": db_name,
+            "DATABASE_INSTANCE": instance,
+            "USE_IAM_AUTH": "true",
+            "DATABASE_USER": "threat_app_user",
+            "DATABASE_HOST": f"/cloudsql/{instance}",
+            "DATABASE_PORT": "5432"
+        }
+    else:
+        # Use BigQuery as primary data store
+        return {
+            "DATABASE_TYPE": "bigquery",
+            "DATABASE_NAME": "threat_intelligence",
+            "BIGQUERY_DATASET": os.environ.get("BIGQUERY_DATASET", "threat_intelligence"),
+            "USE_APPLICATION_DEFAULT": "true"
+        }
+
+
+def get_feed_configurations() -> Dict[str, Dict[str, Any]]:
+    """Get the feed configurations with sensible defaults"""
+    return {
+        "alienvault": {
+            "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
+            "auth_header": "X-OTX-API-KEY",
+            "auth_key": "",
+            "active": True,
+            "table_id": "alienvault_pulses"
+        },
+        "misp": {
+            "url": "",  # Empty by default, user needs to provide
+            "auth_header": "Authorization",
+            "auth_key": "",
+            "active": False,  # Inactive by default since URL is empty
+            "table_id": "misp_events"
+        },
+        "threatfox": {
+            "url": "https://threatfox-api.abuse.ch/api/v1/",
+            "auth_header": "",
+            "auth_key": "",
+            "active": True,
+            "table_id": "threatfox_iocs"
+        },
+        "mandiant": {
+            "url": "https://api.intelligence.mandiant.com/",
+            "auth_header": "X-API-KEY",
+            "auth_key": "",
+            "active": False,
+            "table_id": "mandiant_reports"
+        }
+    }
+
+
+def get_auth_config() -> Dict[str, Any]:
+    """Get authentication configuration with sensible defaults"""
+    # Generate a random secret key for sessions
+    secret_key = str(uuid.uuid4())
+    
+    # Default admin password (should be changed on first login)
+    default_password = hashlib.sha256("changeme".encode()).hexdigest()
+    
+    return {
+        "FLASK_SECRET_KEY": secret_key,
+        "REQUIRE_AUTH": ENV != "development",
+        "ALLOW_REGISTRATION": ENV == "development",
+        "SESSION_TIMEOUT": 3600,  # 1 hour
+        "USERS": {
+            "admin": {
+                "password": default_password,
+                "role": "admin",
+                "created_at": datetime.datetime.now().isoformat(),
+                "last_login": None
+            }
+        }
+    }
+
+
+def get_api_keys_config() -> Dict[str, Any]:
+    """Get API keys configuration with sensible defaults"""
+    # Generate a random API key for internal use
+    api_key = base64.b64encode(os.urandom(24)).decode('utf-8')
+    
+    return {
+        "API_KEY": api_key,
+        "VIRUSTOTAL_API_KEY": "",
+        "ALIENVAULT_API_KEY": "",
+        "MISP_API_KEY": "",
+        "MANDIANT_API_KEY": ""
+    }
+
+
 def get_config() -> Dict[str, Any]:
     """Get the complete configuration"""
     global _config_cache
@@ -158,16 +313,20 @@ def get_config() -> Dict[str, Any]:
     if _config_cache:
         return _config_cache
     
+    # Auto-detect and set project ID
+    detected_project_id = auto_detect_project_id()
+    if detected_project_id != PROJECT_ID and PROJECT_ID is None:
+        os.environ["GCP_PROJECT"] = detected_project_id
+    
     # Start with environment variables
     config = {
-        "PROJECT_ID": PROJECT_ID,
+        "PROJECT_ID": detected_project_id,
         "REGION": REGION,
         "ENVIRONMENT": ENV,
-        "API_URL": os.environ.get("API_URL", f"https://api-{ENV}.{PROJECT_ID}.cloudfunctions.net"),
+        "API_URL": os.environ.get("API_URL", f"https://api-{ENV}.{detected_project_id}.cloudfunctions.net"),
         "BIGQUERY_DATASET": os.environ.get("BIGQUERY_DATASET", "threat_intelligence"),
-        "GCS_BUCKET": os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data"),
+        "GCS_BUCKET": os.environ.get("GCS_BUCKET", f"{detected_project_id}-threat-data"),
         "PUBSUB_TOPIC": os.environ.get("PUBSUB_TOPIC", "threat-data-ingestion"),
-        "FLASK_SECRET_KEY": os.environ.get("FLASK_SECRET_KEY", "dev-key-change-in-production"),
     }
     
     # Load secrets
@@ -189,15 +348,107 @@ def get(key: str, default: Any = None) -> Any:
     return config.get(key, default)
 
 
-# Expose key configuration variables
-project_id = PROJECT_ID
-region = REGION
-environment = ENV
-bigquery_dataset = get("BIGQUERY_DATASET")
-gcs_bucket = get("GCS_BUCKET")
-api_url = get("API_URL")
-api_key = get("API_KEY")
-feed_configs = get("FEED_CONFIG", {})
+def update_api_key(service: str, key: str) -> bool:
+    """Update an API key for a specific service"""
+    api_keys = get_config().get("api-keys", {})
+    if not api_keys:
+        api_keys = get_api_keys_config()
+    
+    if service.upper() + "_API_KEY" in api_keys:
+        api_keys[service.upper() + "_API_KEY"] = key
+        result = create_or_update_secret("api-keys", api_keys)
+        
+        # Clear the cache to force a reload
+        global _config_cache
+        _config_cache = {}
+        
+        return result
+    
+    return False
+
+
+def update_feed_config(feed_name: str, config_update: Dict[str, Any]) -> bool:
+    """Update configuration for a specific feed"""
+    feed_config = get_config().get("FEED_CONFIG", {})
+    if not feed_config:
+        feed_config = {"FEED_CONFIG": get_feed_configurations()}
+    
+    if feed_name in feed_config.get("FEED_CONFIG", {}):
+        for key, value in config_update.items():
+            feed_config["FEED_CONFIG"][feed_name][key] = value
+        
+        result = create_or_update_secret("feed-config", feed_config)
+        
+        # Clear the cache to force a reload
+        global _config_cache
+        _config_cache = {}
+        
+        return result
+    
+    return False
+
+
+def add_user(username: str, password: str, role: str = "readonly") -> bool:
+    """Add a new user to the auth configuration"""
+    auth_config = get_config().get("auth-config", {})
+    if not auth_config:
+        auth_config = get_auth_config()
+    
+    users = auth_config.get("USERS", {})
+    
+    # Check if user already exists
+    if username in users:
+        return False
+    
+    # Hash the password
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
+    # Add the user
+    users[username] = {
+        "password": hashed_password,
+        "role": role,
+        "created_at": datetime.datetime.now().isoformat(),
+        "last_login": None
+    }
+    
+    auth_config["USERS"] = users
+    result = create_or_update_secret("auth-config", auth_config)
+    
+    # Clear the cache to force a reload
+    global _config_cache
+    _config_cache = {}
+    
+    return result
+
+
+def update_user(username: str, updates: Dict[str, Any]) -> bool:
+    """Update a user in the auth configuration"""
+    auth_config = get_config().get("auth-config", {})
+    if not auth_config:
+        auth_config = get_auth_config()
+    
+    users = auth_config.get("USERS", {})
+    
+    # Check if user exists
+    if username not in users:
+        return False
+    
+    # Update the user
+    for key, value in updates.items():
+        if key == "password":
+            # Hash the password
+            value = hashlib.sha256(value.encode()).hexdigest()
+        
+        users[username][key] = value
+    
+    auth_config["USERS"] = users
+    result = create_or_update_secret("auth-config", auth_config)
+    
+    # Clear the cache to force a reload
+    global _config_cache
+    _config_cache = {}
+    
+    return result
 
 
 def init_app_config():
@@ -215,89 +466,29 @@ def init_app_config():
     if IS_BUILD_MODE:
         logger.info("Build mode: skipping additional Secret Manager operations")
     else:
-        # Try to access the CIPHER GitHub OAuth token if it exists
-        if SECRET_MANAGER_AVAILABLE:
-            try:
-                client = secretmanager.SecretManagerServiceClient()
-                name = f"projects/{PROJECT_ID}/secrets/CIPHER-github-oauthtoken-a9e194/versions/latest"
-                response = client.access_secret_version(request={"name": name})
-                payload = response.payload.data.decode("UTF-8")
-                os.environ["GITHUB_TOKEN"] = payload
-                logger.info("Successfully loaded GitHub token from Secret Manager")
-            except Exception as e:
-                logger.warning(f"Could not load GitHub token from Secret Manager: {str(e)}")
-    
-    # Create default API key if missing
-    if not config.get("API_KEY"):
-        logger.warning("API_KEY missing, setting default (insecure)")
-        api_keys_data = {
-            "API_KEY": f"dev-key-{PROJECT_ID}",
-            "VIRUSTOTAL_API_KEY": "",
-            "ALIENVAULT_API_KEY": "",
-            "MISP_API_KEY": ""
-        }
-        create_or_update_secret("api-keys", api_keys_data)
-    
-    # Create default feed configurations if missing
-    if not config.get("FEED_CONFIG"):
-        logger.warning("Feed configuration missing, setting defaults")
-        default_feed_config = {
-            "FEED_CONFIG": {
-                "alienvault": {
-                    "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
-                    "auth_header": "X-OTX-API-KEY",
-                    "auth_key": "",
-                    "table_id": "alienvault_pulses"
-                },
-                "misp": {
-                    "url": "https://your-misp-instance.com/events/restSearch",
-                    "auth_header": "Authorization",
-                    "auth_key": "",
-                    "table_id": "misp_events"
-                },
-                "threatfox": {
-                    "url": "https://threatfox-api.abuse.ch/api/v1/",
-                    "table_id": "threatfox_iocs"
-                }
-            }
-        }
-        create_or_update_secret("feed-config", default_feed_config)
-    
-    # Create default auth config if missing
-    if not config.get("FLASK_SECRET_KEY"):
-        logger.warning("Auth configuration missing, setting defaults")
-        # Generate a random secret key
-        random_key = str(uuid.uuid4())
+        # Create default API keys if missing
+        if not config.get("API_KEY"):
+            logger.warning("API_KEY missing, setting defaults")
+            api_keys_data = get_api_keys_config()
+            create_or_update_secret("api-keys", api_keys_data)
         
-        auth_config = {
-            "FLASK_SECRET_KEY": random_key,
-            "USERS": {
-                "admin": {
-                    "password": hashlib.sha256("changeme".encode()).hexdigest(),
-                    "role": "admin"
-                },
-                "analyst": {
-                    "password": hashlib.sha256("analyst123".encode()).hexdigest(),
-                    "role": "analyst"
-                },
-                "readonly": {
-                    "password": hashlib.sha256("readonly".encode()).hexdigest(),
-                    "role": "readonly"
-                }
-            }
-        }
-        create_or_update_secret("auth-config", auth_config)
-    
-    # Create default database credentials if missing
-    if not config.get("DATABASE_USER"):
-        logger.warning("Database credentials missing, setting defaults")
-        db_credentials = {
-            "DATABASE_USER": "",
-            "DATABASE_PASSWORD": "",
-            "DATABASE_NAME": "threat_intelligence",
-            "DATABASE_HOST": ""
-        }
-        create_or_update_secret("database-credentials", db_credentials)
+        # Create default feed configurations if missing
+        if not config.get("FEED_CONFIG"):
+            logger.warning("Feed configuration missing, setting defaults")
+            feed_config = {"FEED_CONFIG": get_feed_configurations()}
+            create_or_update_secret("feed-config", feed_config)
+        
+        # Create default auth config if missing
+        if not config.get("FLASK_SECRET_KEY"):
+            logger.warning("Auth configuration missing, setting defaults")
+            auth_config = get_auth_config()
+            create_or_update_secret("auth-config", auth_config)
+        
+        # Create default database credentials if missing
+        if not config.get("DATABASE_TYPE"):
+            logger.warning("Database credentials missing, setting defaults")
+            db_credentials = get_database_configuration()
+            create_or_update_secret("database-credentials", db_credentials)
     
     # Only reload config if we're not in build mode
     if not IS_BUILD_MODE:
@@ -308,3 +499,21 @@ def init_app_config():
         return updated_config
     
     return config
+
+
+# Expose key configuration variables
+project_id = get("PROJECT_ID")
+region = get("REGION")
+environment = get("ENVIRONMENT")
+bigquery_dataset = get("BIGQUERY_DATASET")
+gcs_bucket = get("GCS_BUCKET")
+api_url = get("API_URL")
+api_key = get("API_KEY")
+feed_configs = get("FEED_CONFIG", {})
+
+
+# Initialize if this module is imported directly
+if __name__ != "__main__":
+    # Only initialize if not already initialized
+    if not _config_cache:
+        init_app_config()
