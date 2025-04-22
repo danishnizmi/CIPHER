@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
@@ -23,21 +23,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories and __init__.py files
-RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis && \
-    touch __init__.py && \
+# Create necessary directories
+RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis
+
+# Create __init__.py files for Python modules
+RUN touch __init__.py && \
     touch functions/__init__.py && \
     touch functions/ingestion/__init__.py && \
     touch functions/analysis/__init__.py
 
-# Create placeholder files for BigQuery setup
-RUN echo 'import os\nfrom google.cloud import bigquery\nPROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")\nDATASET_ID = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")\nclient = bigquery.Client(project=PROJECT_ID)\ntry:\n    dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")\n    dataset.location = "US"\n    client.create_dataset(dataset, exists_ok=True)\n    print(f"Dataset {DATASET_ID} created or already exists")\nexcept Exception as e:\n    print(f"Error creating dataset: {str(e)}")\n' > scripts/setup_bigquery_tables.py
-
-# Create placeholder Cloud Functions files
-RUN echo 'def ingest_threat_data(request):\n    return {"status": "ok"}' > functions/ingestion/main.py && \
-    echo 'def analyze_threat_data(event, context):\n    return {"status": "ok"}' > functions/analysis/main.py
-
-# Copy the application code (will overwrite placeholders)
+# Copy the application code
 COPY . .
 
 # Ensure all __init__.py files exist after copying code
@@ -46,7 +41,7 @@ RUN touch __init__.py && \
     touch functions/ingestion/__init__.py && \
     touch functions/analysis/__init__.py
 
-# Create secrets directory for mounting at runtime (if needed)
+# Create secrets directory for mounting at runtime
 RUN mkdir -p /secrets && chmod 755 /secrets
 
 # Run as non-root user for security
@@ -57,8 +52,10 @@ USER appuser
 # Expose port
 EXPOSE $PORT
 
-# Create startup script to handle initialization at runtime
+# Create comprehensive startup script with robust error handling
 RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
 # Switch to runtime mode\n\
 export CONTAINER_BUILD=false\n\
 \n\
@@ -75,15 +72,33 @@ if [ ! -f app.py ]; then\n\
   exit 1\n\
 fi\n\
 \n\
-# Create required __init__.py files again to be safe\n\
+# Create required __init__.py files\n\
 touch __init__.py\n\
 touch functions/__init__.py\n\
 touch functions/ingestion/__init__.py\n\
 touch functions/analysis/__init__.py\n\
 \n\
-# Make sure PYTHONPATH includes app directory\n\
+# Make sure PYTHONPATH is correctly set\n\
 export PYTHONPATH=/app:$PYTHONPATH\n\
 echo "PYTHONPATH: $PYTHONPATH"\n\
+\n\
+# Create empty config files if they don\'t exist to prevent errors\n\
+if [ ! -d "static/dist" ]; then\n\
+  mkdir -p static/dist\n\
+fi\n\
+\n\
+if [ ! -f "static/dist/output.css" ]; then\n\
+  echo "/* Default CSS */" > static/dist/output.css\n\
+fi\n\
+\n\
+# Check for templates directory\n\
+if [ ! -d "templates" ]; then\n\
+  mkdir -p templates\n\
+  echo "<!DOCTYPE html><html><body><h1>Threat Intelligence Platform</h1></body></html>" > templates/dashboard.html\n\
+  echo "<!DOCTYPE html><html><body><h1>Login</h1></body></html>" > templates/login.html\n\
+  echo "<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>" > templates/404.html\n\
+  echo "<!DOCTYPE html><html><body><h1>500 Server Error</h1></body></html>" > templates/500.html\n\
+fi\n\
 \n\
 # Display available modules\n\
 echo "Checking if key modules are importable:"\n\
@@ -94,7 +109,7 @@ python -c "import flask; print(\"flask module found\")" || echo "flask module no
 python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
 \n\
 echo "Starting gunicorn with app:app..."\n\
-cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug app:app\n\
+cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug --access-logfile - app:app\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Use the startup script as entrypoint
