@@ -3,26 +3,24 @@
 {% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
 {% block content %}
-<div class="flex justify-between items-center mb-6">
+<div class="page-header">
     <div>
-        <h1 class="text-2xl font-bold flex items-center">
-            <i class="fas fa-tachometer-alt mr-2 text-blue-600"></i>
+        <h1 class="page-title">
+            <i class="fas fa-tachometer-alt page-icon"></i>
             Threat Intelligence Dashboard
         </h1>
         <p class="text-gray-600">Real-time overview of threat intelligence with actionable insights</p>
     </div>
-    <div>
-        <div class="relative inline-block text-left">
-            <button id="timeRangeButton" class="bg-white border border-gray-300 rounded-md px-4 py-2 flex items-center space-x-2 focus:outline-none focus:ring-2 focus:ring-blue-500" aria-expanded="false" aria-haspopup="true">
-                <span>{{ days }} Days</span>
-                <i class="fas fa-chevron-down text-xs ml-2"></i>
-            </button>
-            <div id="timeRangeDropdown" class="hidden origin-top-right absolute right-0 mt-2 w-40 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
-                <div class="py-1">
-                    <a href="{{ url_for('dashboard', days=7) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">7 Days</a>
-                    <a href="{{ url_for('dashboard', days=30) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">30 Days</a>
-                    <a href="{{ url_for('dashboard', days=90) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">90 Days</a>
-                </div>
+    <div class="relative inline-block text-left">
+        <button id="timeRangeButton" class="btn btn-light flex items-center">
+            <span>{{ days }} Days</span>
+            <i class="fas fa-chevron-down text-xs ml-2"></i>
+        </button>
+        <div id="timeRangeDropdown" class="hidden origin-top-right absolute right-0 mt-2 w-40 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
+            <div class="py-1">
+                <a href="{{ url_for('dashboard', days=7) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">7 Days</a>
+                <a href="{{ url_for('dashboard', days=30) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">30 Days</a>
+                <a href="{{ url_for('dashboard', days=90) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">90 Days</a>
             </div>
         </div>
     </div>
@@ -30,7 +28,7 @@
 
 <!-- Main metrics -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-    <div class="bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg">
+    <div class="stat-card">
         <div class="flex justify-between">
             <div>
                 <div class="text-4xl text-blue-600 mb-4">
@@ -49,7 +47,7 @@
         </div>
     </div>
     
-    <div class="bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg">
+    <div class="stat-card">
         <div class="flex justify-between">
             <div>
                 <div class="text-4xl text-red-600 mb-4">
@@ -68,7 +66,7 @@
         </div>
     </div>
     
-    <div class="bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg">
+    <div class="stat-card">
         <div class="flex justify-between">
             <div>
                 <div class="text-4xl text-green-600 mb-4">
@@ -87,7 +85,7 @@
         </div>
     </div>
     
-    <div class="bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg">
+    <div class="stat-card">
         <div class="flex justify-between">
             <div>
                 <div class="text-4xl text-cyan-600 mb-4">
@@ -108,42 +106,46 @@
 </div>
 
 <!-- GCP Metrics -->
-<div class="bg-white rounded-lg shadow-md p-4 mb-6">
-    <h2 class="text-lg font-semibold mb-4 flex items-center">
-        <i class="fas fa-cloud mr-2 text-blue-600"></i>
-        GCP Platform Usage
-    </h2>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
-        <div class="p-4 border rounded-lg">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-gray-500 text-sm">BigQuery Tables</p>
-                    <p class="text-xl font-bold">{{ gcp_metrics.table_count|default(12) }}</p>
-                </div>
-                <div class="text-2xl text-blue-500">
-                    <i class="fas fa-database"></i>
-                </div>
-            </div>
-        </div>
-        <div class="p-4 border rounded-lg">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-gray-500 text-sm">Storage Objects</p>
-                    <p class="text-xl font-bold">{{ gcp_metrics.storage_objects|default(456) }}</p>
-                </div>
-                <div class="text-2xl text-blue-500">
-                    <i class="fas fa-hdd"></i>
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h2 class="panel-title">
+            <i class="fas fa-cloud panel-icon"></i>
+            GCP Platform Usage
+        </h2>
+    </div>
+    <div class="p-4">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">BigQuery Tables</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.table_count|default(0) }}</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-database"></i>
+                    </div>
                 </div>
             </div>
-        </div>
-        <div class="p-4 border rounded-lg">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-gray-500 text-sm">Storage Used</p>
-                    <p class="text-xl font-bold">{{ gcp_metrics.storage_size|default(245)|round(1) }} MB</p>
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">Storage Objects</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_objects|default(0) }}</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-hdd"></i>
+                    </div>
                 </div>
-                <div class="text-2xl text-blue-500">
-                    <i class="fas fa-save"></i>
+            </div>
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">Storage Used</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_size|default(0)|round(1) }} MB</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-save"></i>
+                    </div>
                 </div>
             </div>
         </div>
@@ -153,10 +155,10 @@
 <!-- Main Visualization Sections -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
     <!-- Threat Map -->
-    <div class="lg:col-span-2 bg-white rounded-lg shadow-md overflow-hidden">
-        <div class="flex justify-between items-center px-6 py-4 border-b">
-            <h3 class="font-semibold flex items-center">
-                <i class="fas fa-globe mr-2 text-blue-600"></i>
+    <div class="lg:col-span-2 panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-globe panel-icon"></i>
                 Threat Geographic Distribution
             </h3>
             <div class="flex items-center">
@@ -174,10 +176,10 @@
     
     <!-- Quick Actions and Alerts -->
     <div class="lg:col-span-1">
-        <div class="bg-white rounded-lg shadow-md mb-6">
-            <div class="px-6 py-4 border-b">
-                <h3 class="font-semibold flex items-center">
-                    <i class="fas fa-bolt mr-2 text-yellow-500"></i>
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-bolt text-yellow-500 mr-2"></i>
                     Quick Actions
                 </h3>
             </div>
@@ -202,10 +204,10 @@
             </div>
         </div>
         
-        <div class="bg-white rounded-lg shadow-md">
-            <div class="px-6 py-4 border-b">
-                <h3 class="font-semibold flex items-center">
-                    <i class="fas fa-exclamation-triangle mr-2 text-amber-500"></i>
+        <div class="panel">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-exclamation-triangle text-amber-500 mr-2"></i>
                     Recent Alerts
                 </h3>
             </div>
@@ -247,10 +249,10 @@
 
 <!-- Charts Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    <div class="bg-white rounded-lg shadow-md">
-        <div class="flex justify-between items-center px-6 py-4 border-b">
-            <h3 class="font-semibold flex items-center">
-                <i class="fas fa-chart-pie mr-2 text-blue-600"></i>
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-pie panel-icon"></i>
                 IOC Types Distribution
             </h3>
             <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
@@ -260,10 +262,10 @@
         </div>
     </div>
     
-    <div class="bg-white rounded-lg shadow-md">
-        <div class="flex justify-between items-center px-6 py-4 border-b">
-            <h3 class="font-semibold flex items-center">
-                <i class="fas fa-chart-line mr-2 text-blue-600"></i>
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-line panel-icon"></i>
                 Intelligence Collection Trends
             </h3>
             <a href="{{ url_for('feeds') }}" class="text-sm text-blue-600 hover:underline">View Feeds</a>
@@ -276,37 +278,37 @@
 
 <!-- Tables Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    <div class="bg-white rounded-lg shadow-md">
-        <div class="flex justify-between items-center px-6 py-4 border-b">
-            <h3 class="font-semibold flex items-center">
-                <i class="fas fa-project-diagram mr-2 text-blue-600"></i>
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-project-diagram panel-icon"></i>
                 Recent Campaigns
             </h3>
             <a href="{{ url_for('campaigns') }}" class="text-sm text-blue-600 hover:underline">View All</a>
         </div>
         <div class="overflow-x-auto">
-            <table class="w-full">
-                <thead class="bg-gray-50">
+            <table class="data-table">
+                <thead class="table-header">
                     <tr>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campaign</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Threat Actor</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sources</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Seen</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Severity</th>
+                        <th>Campaign</th>
+                        <th>Threat Actor</th>
+                        <th>Sources</th>
+                        <th>Last Seen</th>
+                        <th>Severity</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-200">
+                <tbody class="table-body">
                     {% for campaign in campaigns %}
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-6 py-4 whitespace-nowrap">
+                    <tr>
+                        <td>
                             <a href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
                                 {{ campaign.campaign_name }}
                             </a>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap">{{ campaign.threat_actor|default('Unknown') }}</td>
-                        <td class="px-6 py-4 whitespace-nowrap">{{ campaign.source_count }}</td>
-                        <td class="px-6 py-4 whitespace-nowrap">{{ campaign.last_seen|default('N/A') }}</td>
-                        <td class="px-6 py-4 whitespace-nowrap">
+                        <td>{{ campaign.threat_actor|default('Unknown') }}</td>
+                        <td>{{ campaign.source_count }}</td>
+                        <td>{{ campaign.last_seen|default('N/A') }}</td>
+                        <td>
                             {% if campaign.source_count > 8 %}
                             <span class="severity-badge critical">Critical</span>
                             {% elif campaign.source_count > 5 %}
@@ -328,37 +330,37 @@
         </div>
     </div>
     
-    <div class="bg-white rounded-lg shadow-md">
-        <div class="flex justify-between items-center px-6 py-4 border-b">
-            <h3 class="font-semibold flex items-center">
-                <i class="fas fa-fingerprint mr-2 text-blue-600"></i>
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-fingerprint panel-icon"></i>
                 Top Indicators of Compromise
             </h3>
             <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
         </div>
         <div class="overflow-x-auto">
-            <table class="w-full">
-                <thead class="bg-gray-50">
+            <table class="data-table">
+                <thead class="table-header">
                     <tr>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sources</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Confidence</th>
+                        <th>Type</th>
+                        <th>Value</th>
+                        <th>Sources</th>
+                        <th>Confidence</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-200">
+                <tbody class="table-body">
                     {% for ioc in top_iocs %}
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-6 py-4 whitespace-nowrap">
+                    <tr>
+                        <td>
                             <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap">
+                        <td>
                             <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
                                 {{ ioc.value }}
                             </a>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap">{{ ioc.sources|default(ioc.count) }}</td>
-                        <td class="px-6 py-4 whitespace-nowrap">
+                        <td>{{ ioc.sources|default(ioc.count) }}</td>
+                        <td>
                             {% set confidence = namespace(value=ioc.count|default(1)) %}
                             {% if confidence.value > 8 %}
                             <div class="w-24 bg-gray-200 rounded-full h-1.5">
@@ -451,29 +453,6 @@
     }], activityLayout);
     
     // Small Trend Charts
-    function createSparkline(elementId, trend, color) {
-        const data = [];
-        // Generate random trending data
-        for (let i = 0; i < 10; i++) {
-            data.push(Math.floor(Math.random() * 20) + (i * trend));
-        }
-        
-        Plotly.newPlot(elementId, [{
-            y: data,
-            type: 'scatter',
-            mode: 'lines',
-            fill: 'tozeroy',
-            line: { color: color, width: 2, shape: 'spline' }
-        }], {
-            margin: { t: 0, r: 0, l: 0, b: 0 },
-            xaxis: { showticklabels: false, showgrid: false, zeroline: false },
-            yaxis: { showticklabels: false, showgrid: false, zeroline: false },
-            showlegend: false,
-            paper_bgcolor: 'rgba(0,0,0,0)',
-            plot_bgcolor: 'rgba(0,0,0,0)'
-        });
-    }
-    
     createSparkline('feedTrendChart', 1, '#3b82f6');
     createSparkline('iocTrendChart', 2, '#ef4444');
     createSparkline('campaignTrendChart', 1.5, '#10b981');
