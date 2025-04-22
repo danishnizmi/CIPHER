@@ -21,15 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt && \
-    # Explicitly install GCP packages to ensure they're properly installed
-    pip install --no-cache-dir \
-    google-cloud-bigquery \
-    google-cloud-storage \
-    google-cloud-pubsub \
-    google-cloud-language \
-    google-cloud-secretmanager \
-    vertexai
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Create necessary directories and __init__.py files
 RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis && \
