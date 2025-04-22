@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Union, Tuple
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, Blueprint, request, jsonify, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -29,7 +29,17 @@ logger = logging.getLogger(__name__)
 # Configuration from config module
 PROJECT_ID = config.project_id
 DATASET_ID = config.bigquery_dataset
-API_KEY = config.api_key
+
+# Get API key from config
+if not hasattr(config, 'api_key') or config.api_key is None:
+    # Attempt to load API key from environment or config
+    API_KEY = os.environ.get("API_KEY", "")
+    if not API_KEY:
+        # Try to get from cached config
+        api_keys_config = config.get_cached_config('api-keys')
+        API_KEY = api_keys_config.get('platform_api_key', "")
+else:
+    API_KEY = config.api_key
 
 # API Configuration
 MAX_RESULTS = 1000  # Maximum results to return in a single query
@@ -49,7 +59,11 @@ limiter = Limiter(
 bq_client = bigquery.Client(project=PROJECT_ID)
 
 # Initialize Storage client
-storage_client = storage.Client(project=PROJECT_ID)
+try:
+    storage_client = storage.Client(project=PROJECT_ID)
+except Exception as e:
+    logger.warning(f"Failed to initialize storage client: {str(e)}")
+    storage_client = None
 
 
 # Authentication decorator
@@ -116,7 +130,7 @@ def execute_bigquery(query: str, params: Optional[Dict] = None) -> Tuple[List[Di
         return [], e
 
 
-@app.route('/api/health', methods=['GET'])
+@app.route('/health', methods=['GET'])
 @handle_exceptions
 def health_check():
     """Health check endpoint"""
@@ -130,7 +144,7 @@ def health_check():
     })
 
 
-@app.route('/api/config', methods=['GET'])
+@app.route('/config', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def get_public_config():
@@ -148,7 +162,7 @@ def get_public_config():
     })
 
 
-@app.route('/api/feeds', methods=['GET'])
+@app.route('/feeds', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def list_feeds():
@@ -172,7 +186,7 @@ def list_feeds():
     })
 
 
-@app.route('/api/feeds/<feed_name>/stats', methods=['GET'])
+@app.route('/feeds/<feed_name>/stats', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def feed_stats(feed_name: str):
@@ -238,7 +252,7 @@ def feed_stats(feed_name: str):
     return jsonify(stats)
 
 
-@app.route('/api/feeds/<feed_name>/data', methods=['GET'])
+@app.route('/feeds/<feed_name>/data', methods=['GET'])
 @require_api_key
 @limiter.limit("20 per minute")  # Higher limit for data access
 @handle_exceptions
@@ -308,7 +322,7 @@ def feed_data(feed_name: str):
     })
 
 
-@app.route('/api/iocs', methods=['GET'])
+@app.route('/iocs', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def search_iocs():
@@ -384,7 +398,7 @@ def search_iocs():
     })
 
 
-@app.route('/api/campaigns', methods=['GET'])
+@app.route('/campaigns', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def list_campaigns():
@@ -437,7 +451,7 @@ def list_campaigns():
     })
 
 
-@app.route('/api/campaigns/<campaign_id>', methods=['GET'])
+@app.route('/campaigns/<campaign_id>', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def campaign_details(campaign_id: str):
@@ -481,7 +495,7 @@ def campaign_details(campaign_id: str):
     return jsonify(campaign)
 
 
-@app.route('/api/search', methods=['GET'])
+@app.route('/search', methods=['GET'])
 @require_api_key
 @limiter.limit("10 per minute")  # Lower limit for complex search
 @handle_exceptions
@@ -658,7 +672,7 @@ def search():
     })
 
 
-@app.route('/api/stats', methods=['GET'])
+@app.route('/stats', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def platform_stats():
@@ -763,7 +777,7 @@ def platform_stats():
     return jsonify(stats)
 
 
-@app.route('/api/reports/feed_summary', methods=['GET'])
+@app.route('/reports/feed_summary', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def feed_summary_report():
@@ -794,8 +808,8 @@ def feed_summary_report():
         SELECT
           '{feed_name}' AS feed_name,
           COUNT(*) AS record_count,
-          MIN(_ingestion_timestamp) AS earliest_record,
-          MAX(_ingestion_timestamp) AS latest_record
+          MIN(_ingestion_timestamp) as earliest_record,
+          MAX(_ingestion_timestamp) as latest_record
         FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
         WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         """
@@ -827,7 +841,7 @@ def feed_summary_report():
     })
 
 
-@app.route('/api/export/iocs', methods=['GET'])
+@app.route('/export/iocs', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def export_iocs():
@@ -983,7 +997,7 @@ def export_iocs():
         return jsonify({"error": f"Unsupported format: {format_type}"}), 400
 
 
-@app.route('/api/alerts', methods=['GET'])
+@app.route('/alerts', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def list_alerts():
@@ -1025,49 +1039,42 @@ def list_alerts():
                 if isinstance(value, datetime):
                     alert[key] = value.isoformat()
             alerts.append(alert)
+        
+        return jsonify({
+            "alerts": alerts,
+            "count": len(alerts)
+        })
     else:
-        # Generate sample alerts if table doesn't exist
-        # This is for demonstration/testing purposes
-        alerts = [
-            {
-                "id": "alert1",
-                "title": "New Ransomware Campaign Detected",
-                "severity": "critical",
-                "timestamp": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
-                "description": "Multiple indicators of BlackCat ransomware detected in financial sector.",
-                "iocs": [
-                    {"type": "ip", "value": "192.168.1.1"},
-                    {"type": "domain", "value": "evil-ransomware.com"}
-                ]
-            },
-            {
-                "id": "alert2",
-                "title": "APT Activity Detected",
-                "severity": "high",
-                "timestamp": (datetime.utcnow() - timedelta(hours=5)).isoformat(),
-                "description": "Suspected nation-state actor targeting critical infrastructure.",
-                "iocs": [
-                    {"type": "ip", "value": "10.0.0.1"},
-                    {"type": "hash", "value": "5f4dcc3b5aa765d61d8327deb882cf99"}
-                ]
-            },
-            {
-                "id": "alert3",
-                "title": "Unusual Authentication Activity",
-                "severity": "medium",
-                "timestamp": (datetime.utcnow() - timedelta(days=1)).isoformat(),
-                "description": "Multiple failed login attempts detected from unusual locations.",
-                "iocs": []
-            }
-        ]
-    
-    return jsonify({
-        "alerts": alerts,
-        "count": len(alerts)
-    })
+        # Create empty table structure to avoid errors
+        try:
+            schema = [
+                bigquery.SchemaField("id", "STRING"),
+                bigquery.SchemaField("title", "STRING"),
+                bigquery.SchemaField("severity", "STRING"),
+                bigquery.SchemaField("description", "STRING"),
+                bigquery.SchemaField("created_at", "TIMESTAMP"),
+                bigquery.SchemaField("iocs", "STRING")
+            ]
+            
+            table = bigquery.Table(alerts_table_id, schema=schema)
+            bq_client.create_table(table, exists_ok=True)
+            logger.info(f"Created alerts table: {alerts_table_id}")
+            
+            return jsonify({
+                "alerts": [],
+                "count": 0,
+                "table_created": True
+            })
+        except Exception as e:
+            logger.error(f"Failed to create alerts table: {str(e)}")
+            return jsonify({
+                "alerts": [],
+                "count": 0,
+                "error": "Alerts feature not initialized"
+            })
 
 
-# Main entry point
+# Main entry point for standalone operation
 if __name__ == "__main__":
     # Initialize app with config from secret manager
     config.init_app_config()
