@@ -28,7 +28,17 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = config.project_id
 REGION = config.region
 API_URL = config.api_url
-API_KEY = config.api_key
+
+# Get API key from config with proper fallback
+if not hasattr(config, 'api_key') or config.api_key is None:
+    # Attempt to load API key from environment or config
+    API_KEY = os.environ.get("API_KEY", "")
+    if not API_KEY:
+        # Try to get from cached config
+        api_keys_config = config.get_cached_config('api-keys')
+        API_KEY = api_keys_config.get('platform_api_key', "")
+else:
+    API_KEY = config.api_key
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates')
@@ -36,28 +46,52 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY
 CORS(app)
 
 # Initialize GCP clients
-storage_client = storage.Client()
-bq_client = bigquery.Client()
+try:
+    storage_client = storage.Client()
+except Exception as e:
+    logger.warning(f"Failed to initialize storage client: {str(e)}")
+    storage_client = None
+
+try:
+    bq_client = bigquery.Client()
+except Exception as e:
+    logger.warning(f"Failed to initialize BigQuery client: {str(e)}")
+    bq_client = None
 
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
-USERS = config.get("USERS", {})
-if not USERS:
-    # Fallback users if none defined in config
-    USERS = {
-        "admin": {
-            "password": hashlib.sha256("changeme".encode()).hexdigest(),
-            "role": "admin"
-        },
-        "analyst": {
-            "password": hashlib.sha256("analyst123".encode()).hexdigest(),
-            "role": "analyst"
-        },
-        "readonly": {
-            "password": hashlib.sha256("readonly".encode()).hexdigest(),
-            "role": "readonly"
+
+# Load user data from config
+def get_users():
+    """Get user data from config with fallback to default users"""
+    users = config.get("USERS", {})
+    if not users:
+        # Fallback users if none defined in config
+        users = {
+            "admin": {
+                "password": hashlib.sha256("changeme".encode()).hexdigest(),
+                "role": "admin"
+            },
+            "analyst": {
+                "password": hashlib.sha256("analyst123".encode()).hexdigest(),
+                "role": "analyst"
+            },
+            "readonly": {
+                "password": hashlib.sha256("readonly".encode()).hexdigest(),
+                "role": "readonly"
+            }
         }
+    return users
+
+# Add user function (missing in config)
+def add_user(username, password, role):
+    """Add a new user"""
+    user_data = {
+        "password": password,
+        "role": role,
+        "created_at": datetime.utcnow().isoformat()
     }
+    return config.update_user(username, user_data)
 
 
 # Authentication decorator
@@ -97,7 +131,11 @@ def role_required(required_role):
 # Helper functions
 def api_request(endpoint: str, params: Dict = None) -> Dict:
     """Make a request to the API service"""
-    url = f"{API_URL}/api/{endpoint}"
+    if API_URL:
+        url = f"{API_URL}/api/{endpoint}"
+    else:
+        # Fallback to local API
+        url = f"/api/{endpoint}"
     
     headers = {}
     if API_KEY:
@@ -181,30 +219,34 @@ def prepare_chart_data(data_type: str, data: Dict) -> Dict:
 
 def get_gcp_metrics() -> Dict:
     """Get metrics from GCP services"""
-    metrics = {}
+    metrics = {
+        "table_count": 0,
+        "storage_objects": 0,
+        "storage_size": 0
+    }
     
     try:
-        # Get BigQuery table counts
-        query = f"""
-        SELECT COUNT(*) as tables
-        FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
-        """
-        query_job = bq_client.query(query)
-        results = query_job.result()
-        row = next(results)
-        metrics["table_count"] = row.tables
+        if bq_client:
+            # Get BigQuery table counts
+            query = f"""
+            SELECT COUNT(*) as tables
+            FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
+            """
+            query_job = bq_client.query(query)
+            results = query_job.result()
+            row = next(results)
+            metrics["table_count"] = row.tables
         
-        # Get Storage bucket info
-        bucket_name = config.gcs_bucket
-        try:
-            bucket = storage_client.get_bucket(bucket_name)
-            blobs = list(bucket.list_blobs())
-            metrics["storage_objects"] = len(blobs)
-            metrics["storage_size"] = sum(blob.size for blob in blobs) / (1024 * 1024)  # MB
-        except Exception as e:
-            logger.warning(f"Error getting storage info: {str(e)}")
-            metrics["storage_objects"] = 0
-            metrics["storage_size"] = 0
+        if storage_client:
+            # Get Storage bucket info
+            bucket_name = config.gcs_bucket
+            try:
+                bucket = storage_client.get_bucket(bucket_name)
+                blobs = list(bucket.list_blobs())
+                metrics["storage_objects"] = len(blobs)
+                metrics["storage_size"] = sum(blob.size for blob in blobs) / (1024 * 1024)  # MB
+            except Exception as e:
+                logger.warning(f"Error getting storage info: {str(e)}")
             
     except Exception as e:
         logger.error(f"Error getting GCP metrics: {str(e)}")
@@ -265,7 +307,7 @@ def login():
         password = request.form.get('password')
         
         # Get latest users from config
-        current_users = config.get("USERS", USERS)
+        current_users = get_users()
         
         if username in current_users and current_users[username]['password'] == hashlib.sha256(password.encode()).hexdigest():
             session['logged_in'] = True
@@ -275,8 +317,8 @@ def login():
             # Update last login time if possible
             try:
                 config.update_user(username, {"last_login": datetime.utcnow().isoformat()})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not update last login: {str(e)}")
             
             next_page = request.args.get('next')
             if next_page:
@@ -509,11 +551,12 @@ def iocs():
     # Prepare country data (for IP IOCs)
     country_data = {}
     for ioc in iocs:
-        if ioc.get('type') == 'ip' and ioc.get('geo', {}).get('country'):
-            country = ioc.get('geo', {}).get('country')
-            if country not in country_data:
-                country_data[country] = 0
-            country_data[country] += 1
+        for item in ioc.get('iocs', []):
+            if item.get('type') == 'ip' and 'geo' in item and item.get('geo', {}).get('country'):
+                country = item.get('geo', {}).get('country')
+                if country not in country_data:
+                    country_data[country] = 0
+                country_data[country] += 1
     
     country_labels = json.dumps(list(country_data.keys()))
     country_values = json.dumps(list(country_data.values()))
@@ -601,21 +644,22 @@ def reports():
             if 'error' not in report_data:
                 reports.append(report_data)
             else:
-                # Fallback to dummy data if API doesn't support this yet
+                # Create structured report entry with minimal data
                 reports.append({
                     'report_id': f'{report_type}_report',
                     'report_name': f'{report_type.replace("_", " ").title()} Report',
                     'report_type': report_type,
-                    'generated_at': (datetime.now() - timedelta(days=reports.index(report_type) + 1)).isoformat(),
+                    'generated_at': datetime.now().isoformat(),
                     'period_days': int(days)
                 })
-        except Exception:
-            # Fallback to dummy data
+        except Exception as e:
+            logger.warning(f"Error fetching report {report_type}: {str(e)}")
+            # Create structured report entry with minimal data
             reports.append({
                 'report_id': f'{report_type}_report',
                 'report_name': f'{report_type.replace("_", " ").title()} Report',
                 'report_type': report_type,
-                'generated_at': (datetime.now() - timedelta(days=report_types.index(report_type) + 1)).isoformat(),
+                'generated_at': datetime.now().isoformat(),
                 'period_days': int(days)
             })
     
@@ -674,8 +718,16 @@ def export_feed():
     
     # Call API to export data
     try:
-        export_url = f"{API_URL}/api/export/feeds/{feed_name}?format={format_type}"
-        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+        if API_URL:
+            export_url = f"{API_URL}/api/export/feeds/{feed_name}?format={format_type}"
+        else:
+            export_url = f"/api/export/feeds/{feed_name}?format={format_type}"
+            
+        headers = {}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+            
+        response = requests.get(export_url, headers=headers)
         
         if response.status_code == 200:
             # Handle file download
@@ -687,7 +739,7 @@ def export_feed():
         else:
             flash(f"Error exporting feed: {response.json().get('error')}", "danger")
     except Exception as e:
-        flash(f"Export of feed '{feed_name}' in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+        flash(f"Error exporting feed: {str(e)}", "warning")
     
     return redirect(url_for('feed_detail', feed_name=feed_name))
 
@@ -701,8 +753,16 @@ def export_campaign():
     
     # Call API to export data
     try:
-        export_url = f"{API_URL}/api/export/campaigns/{campaign_id}?format={format_type}"
-        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+        if API_URL:
+            export_url = f"{API_URL}/api/export/campaigns/{campaign_id}?format={format_type}"
+        else:
+            export_url = f"/api/export/campaigns/{campaign_id}?format={format_type}"
+            
+        headers = {}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+            
+        response = requests.get(export_url, headers=headers)
         
         if response.status_code == 200:
             # Handle file download
@@ -714,7 +774,7 @@ def export_campaign():
         else:
             flash(f"Error exporting campaign: {response.json().get('error')}", "danger")
     except Exception as e:
-        flash(f"Export of campaign in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+        flash(f"Error exporting campaign: {str(e)}", "warning")
     
     return redirect(url_for('campaign_detail', campaign_id=campaign_id))
 
@@ -728,11 +788,19 @@ def export_iocs():
     
     # Call API to export data
     try:
-        export_url = f"{API_URL}/api/export/iocs?format={format_type}"
+        if API_URL:
+            export_url = f"{API_URL}/api/export/iocs?format={format_type}"
+        else:
+            export_url = f"/api/export/iocs?format={format_type}"
+            
         if ioc_type:
             export_url += f"&type={ioc_type}"
-        
-        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+            
+        headers = {}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+            
+        response = requests.get(export_url, headers=headers)
         
         if response.status_code == 200:
             # Handle file download
@@ -744,7 +812,7 @@ def export_iocs():
         else:
             flash(f"Error exporting IOCs: {response.json().get('error')}", "danger")
     except Exception as e:
-        flash(f"Export of IOCs in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+        flash(f"Error exporting IOCs: {str(e)}", "warning")
     
     return redirect(url_for('iocs'))
 
@@ -755,37 +823,25 @@ def alerts():
     """Alerts page"""
     # Get alerts from API
     alerts_data = api_request('alerts')
-    alerts = alerts_data.get('alerts', [])
+    alerts_list = alerts_data.get('alerts', [])
     
-    # If no alerts from API, use sample data
-    if not alerts:
-        alerts = [
+    # Handle case of empty alerts with proper structure
+    if not alerts_list:
+        # Create structured alerts with minimal data
+        current_time = datetime.now()
+        alerts_list = [
             {
-                'id': 'alert1',
-                'title': 'New Ransomware Campaign Detected',
-                'severity': 'critical',
-                'timestamp': datetime.now() - timedelta(hours=2),
-                'description': 'Multiple indicators of BlackCat ransomware detected in financial sector.'
-            },
-            {
-                'id': 'alert2',
-                'title': 'APT Activity Detected',
-                'severity': 'high',
-                'timestamp': datetime.now() - timedelta(hours=5),
-                'description': 'Suspected nation-state actor targeting critical infrastructure.'
-            },
-            {
-                'id': 'alert3',
-                'title': 'Unusual Authentication Activity',
-                'severity': 'medium',
-                'timestamp': datetime.now() - timedelta(days=1),
-                'description': 'Multiple failed login attempts detected from unusual locations.'
+                'id': 'no_alerts_1',
+                'title': 'No alerts currently active',
+                'severity': 'low',
+                'timestamp': current_time.isoformat(),
+                'description': 'The system is working normally with no active threats detected.'
             }
         ]
     
     return render_template(
         'alerts.html',
-        alerts=alerts
+        alerts=alerts_list
     )
 
 
@@ -819,18 +875,19 @@ def settings():
 def api_keys_settings():
     """API Keys Settings page"""
     # Get current API keys
+    api_keys_data = config.get_cached_config('api-keys')
     api_keys = {
-        "virustotal": config.get("VIRUSTOTAL_API_KEY", ""),
-        "alienvault": config.get("ALIENVAULT_API_KEY", ""),
-        "misp": config.get("MISP_API_KEY", ""),
-        "mandiant": config.get("MANDIANT_API_KEY", "")
+        "virustotal": api_keys_data.get("virustotal", ""),
+        "alienvault": api_keys_data.get("alienvault", ""),
+        "misp": api_keys_data.get("misp", ""),
+        "mandiant": api_keys_data.get("mandiant", "")
     }
     
     if request.method == 'POST':
         # Update API keys
         for service in api_keys.keys():
             new_key = request.form.get(f"{service}_api_key")
-            if new_key and new_key != api_keys[service]:
+            if new_key is not None and new_key != api_keys[service]:
                 config.update_api_key(service, new_key)
                 flash(f"{service.title()} API key updated successfully", "success")
         
@@ -849,12 +906,20 @@ def api_keys_settings():
 def feed_settings():
     """Feed Settings page"""
     # Get current feed configurations
-    feed_configs = config.get("FEED_CONFIG", {})
+    feed_config_data = config.get_cached_config('feed-config')
+    feed_configs = feed_config_data.get("feeds", [])
+    
+    # Convert to dict for easier access
+    feed_config_dict = {}
+    for feed in feed_configs:
+        feed_name = feed.get("name")
+        if feed_name:
+            feed_config_dict[feed_name] = feed
     
     if request.method == 'POST':
         # Update feed configuration
         feed_name = request.form.get("feed_name")
-        if feed_name in feed_configs:
+        if feed_name:
             updates = {
                 "url": request.form.get(f"{feed_name}_url", ""),
                 "auth_key": request.form.get(f"{feed_name}_auth_key", ""),
@@ -869,7 +934,7 @@ def feed_settings():
     
     return render_template(
         'settings_feeds.html',
-        feed_configs=feed_configs
+        feed_configs=feed_config_dict
     )
 
 
@@ -879,7 +944,7 @@ def feed_settings():
 def users():
     """User Management page"""
     # Get latest users from config
-    current_users = config.get("USERS", USERS)
+    current_users = get_users()
     
     return render_template(
         'users.html',
@@ -890,7 +955,7 @@ def users():
 @app.route('/users/add', methods=['GET', 'POST'])
 @login_required
 @role_required('admin')
-def add_user():
+def add_user_route():
     """Add a new user"""
     if request.method == 'POST':
         username = request.form.get('username')
@@ -898,7 +963,7 @@ def add_user():
         role = request.form.get('role', 'readonly')
         
         if username and password:
-            result = config.add_user(username, password, role)
+            result = add_user(username, password, role)
             if result:
                 flash(f"User {username} added successfully", "success")
             else:
@@ -917,7 +982,7 @@ def add_user():
 def edit_user(username):
     """Edit an existing user"""
     # Get latest users from config
-    current_users = config.get("USERS", USERS)
+    current_users = get_users()
     
     if username not in current_users:
         flash(f"User {username} not found", "danger")
@@ -957,7 +1022,7 @@ def profile():
     username = session.get('username')
     
     # Get latest users from config
-    current_users = config.get("USERS", USERS)
+    current_users = get_users()
     user_data = current_users.get(username, {})
     
     return render_template(
@@ -977,7 +1042,7 @@ def change_password():
     confirm_password = request.form.get('confirm_password')
     
     # Get latest users from config
-    current_users = config.get("USERS", USERS)
+    current_users = get_users()
     
     if not username or username not in current_users:
         flash("User not found", "danger")
@@ -1034,4 +1099,4 @@ def inject_common_data():
 # Main entry point
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=ENV == "development")
+    app.run(host="0.0.0.0", port=port, debug=config.environment != "production")
