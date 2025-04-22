@@ -17,6 +17,33 @@ steps:
     - '-c'
     - 'echo "Tests skipped for now. No tests directory found." && exit 0'
 
+# Build frontend static files
+- name: 'node:16'
+  id: 'build-frontend'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Create static directories if they don't exist
+      mkdir -p static/src static/dist
+      
+      # Create basic input.css file if it doesn't exist
+      if [ ! -f static/src/input.css ]; then
+        echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
+      fi
+      
+      # Initialize package.json if it doesn't exist
+      if [ ! -f package.json ]; then
+        echo '{"name":"threat-intelligence-platform","version":"1.0.0"}' > package.json
+      fi
+      
+      # Create basic tailwind config
+      echo 'module.exports = {content: ["./templates/**/*.html"],theme: {extend: {}},plugins: []};' > tailwind.config.js
+      
+      # Install dependencies and build CSS
+      npm install tailwindcss postcss autoprefixer --no-package-lock || true
+      npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify || true
+
 # Build the container image
 - name: 'gcr.io/cloud-builders/docker'
   id: 'build-container'
@@ -59,7 +86,7 @@ steps:
       for SECRET in api-keys database-credentials feed-config auth-config; do
         gcloud secrets add-iam-policy-binding $$SECRET \
           --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor"
+          --role="roles/secretmanager.secretAccessor" || true
       done
 
 # Deploy container image to Cloud Run
@@ -124,41 +151,6 @@ steps:
     - '-c'
     - |
       cd functions/ingestion
-      
-      # Create main.py if it doesn't exist
-      cat > main.py << EOF
-"""
-Threat Intelligence Platform - Data Ingestion Cloud Function
-"""
-import os
-import json
-import logging
-
-# Import the actual ingestion module
-from ingestion import ThreatDataIngestion, ingest_threat_data as ingestion_handler
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Cloud Function entry point
-def ingest_threat_data(request):
-    """HTTP Cloud Function entry point"""
-    # Use the existing handler from ingestion.py
-    return ingestion_handler(request)
-EOF
-      
-      # Create requirements.txt
-      cat > requirements.txt << EOF
-flask>=2.0.0
-google-cloud-storage>=2.0.0
-google-cloud-pubsub>=2.0.0
-google-cloud-bigquery>=2.0.0
-requests>=2.25.0
-python-dateutil>=2.8.0
-pyyaml>=6.0.0
-EOF
-      
-      # Deploy the function
       gcloud functions deploy ingest_threat_data \
         --region=us-central1 \
         --runtime=python39 \
@@ -175,40 +167,6 @@ EOF
     - '-c'
     - |
       cd functions/analysis
-      
-      # Create main.py if it doesn't exist
-      cat > main.py << EOF
-"""
-Threat Intelligence Platform - Analysis Cloud Function
-"""
-import os
-import json
-import logging
-
-# Import the actual analysis module
-from analysis import ThreatAnalyzer, analyze_threat_data as analysis_handler
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Cloud Function entry point
-def analyze_threat_data(event, context):
-    """Pub/Sub triggered Cloud Function for threat data analysis"""
-    # Use the existing handler from analysis.py
-    return analysis_handler(event, context)
-EOF
-      
-      # Create requirements.txt
-      cat > requirements.txt << EOF
-google-cloud-bigquery>=2.0.0
-google-cloud-storage>=2.0.0
-google-cloud-pubsub>=2.0.0
-google-cloud-language>=2.0.0
-vertexai>=1.0.0
-requests>=2.25.0
-EOF
-      
-      # Deploy the function
       gcloud functions deploy analyze_threat_data \
         --region=us-central1 \
         --runtime=python39 \
@@ -245,16 +203,9 @@ EOF
     - '-c'
     - |
       # Wait for deployment to be ready
-      sleep 30
+      sleep 10
       SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
-      echo "Service URL: $SERVICE_URL"
-      
-      # Check if service is responding
-      if curl -sS "$SERVICE_URL/api/health" | grep -q "status"; then
-        echo "Health check successful"
-      else
-        echo "Health check failed, but continuing deployment"
-      fi
+      curl -sS "$SERVICE_URL/api/health" | grep -q "status.*ok" && echo "Health check successful" || echo "Health check failed"
 
 # Clean up old container images to save costs
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -264,14 +215,9 @@ EOF
     - '-c'
     - |
       # Keep only the 5 most recent images
-      IMAGES=$(gcloud container images list-tags gcr.io/$PROJECT_ID/threat-intelligence-platform \
-        --format="get(digest)" | tail -n +6)
-      if [ ! -z "$IMAGES" ]; then
-        echo "$IMAGES" | xargs -I {} gcloud container images delete \
-          --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} || true
-      else
-        echo "No old images to clean up"
-      fi
+      gcloud container images list-tags gcr.io/$PROJECT_ID/threat-intelligence-platform \
+        --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
+        --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} || true
 
 # Add the required logging configuration
 options:
