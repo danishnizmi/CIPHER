@@ -239,3 +239,4 @@ region = REGION
 gcs_bucket = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
 bigquery_dataset = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_url = API_URL
+environment = ENVIRONMENT  # Add this line to expose environment to other modules
