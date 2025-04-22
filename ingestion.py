@@ -31,15 +31,41 @@ DATASET_ID = config.bigquery_dataset
 PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-data-ingestion")
 
 # Initialize GCP clients
-storage_client = storage.Client()
-bq_client = bigquery.Client()
-publisher = pubsub_v1.PublisherClient()
+try:
+    storage_client = storage.Client()
+except Exception as e:
+    logger.error(f"Failed to initialize storage client: {str(e)}")
+    storage_client = None
+
+try:
+    bq_client = bigquery.Client()
+except Exception as e:
+    logger.error(f"Failed to initialize BigQuery client: {str(e)}")
+    bq_client = None
+
+try:
+    publisher = pubsub_v1.PublisherClient()
+except Exception as e:
+    logger.error(f"Failed to initialize PubSub client: {str(e)}")
+    publisher = None
 
 # Get OSINT Feed Configuration from config module
-FEED_CONFIG = config.get("FEED_CONFIG", {})
-if not FEED_CONFIG:
+def get_feed_config():
+    """Get feed configuration with fallback"""
+    feed_config = config.get_cached_config('feed-config')
+    
+    if 'feeds' in feed_config:
+        # Convert list to dict structure using 'name' as key
+        feed_dict = {}
+        for feed in feed_config.get('feeds', []):
+            if 'name' in feed:
+                feed_dict[feed['name']] = feed
+        
+        if feed_dict:
+            return feed_dict
+    
     # Fallback configuration if not in config module
-    FEED_CONFIG = {
+    return {
         "alienvault": {
             "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
             "auth_header": "X-OTX-API-KEY",
@@ -81,6 +107,8 @@ if not FEED_CONFIG:
         }
     }
 
+# Load feed configuration
+FEED_CONFIG = get_feed_config()
 
 class ThreatDataIngestion:
     """Main class for handling threat data ingestion"""
@@ -92,28 +120,30 @@ class ThreatDataIngestion:
     def _ensure_resources_exist(self):
         """Ensure required GCP resources exist (bucket, dataset, tables)"""
         # Create GCS bucket if it doesn't exist
-        try:
-            storage_client.get_bucket(BUCKET_NAME)
-            logger.info(f"Bucket {BUCKET_NAME} exists")
-        except Exception as e:
+        if storage_client:
             try:
-                bucket = storage_client.create_bucket(BUCKET_NAME, location="us-central1")
-                logger.info(f"Created bucket {bucket.name}")
-            except Exception as create_e:
-                logger.error(f"Error creating bucket: {str(create_e)}")
+                storage_client.get_bucket(BUCKET_NAME)
+                logger.info(f"Bucket {BUCKET_NAME} exists")
+            except Exception as e:
+                try:
+                    bucket = storage_client.create_bucket(BUCKET_NAME, location="us-central1")
+                    logger.info(f"Created bucket {bucket.name}")
+                except Exception as create_e:
+                    logger.error(f"Error creating bucket: {str(create_e)}")
         
         # Create BigQuery dataset if it doesn't exist
-        try:
-            bq_client.get_dataset(DATASET_ID)
-            logger.info(f"Dataset {DATASET_ID} exists")
-        except Exception as e:
+        if bq_client:
             try:
-                dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
-                dataset.location = "US"
-                dataset = bq_client.create_dataset(dataset)
-                logger.info(f"Created dataset {DATASET_ID}")
-            except Exception as create_e:
-                logger.error(f"Error creating dataset: {str(create_e)}")
+                bq_client.get_dataset(DATASET_ID)
+                logger.info(f"Dataset {DATASET_ID} exists")
+            except Exception as e:
+                try:
+                    dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
+                    dataset.location = "US"
+                    dataset = bq_client.create_dataset(dataset)
+                    logger.info(f"Created dataset {DATASET_ID}")
+                except Exception as create_e:
+                    logger.error(f"Error creating dataset: {str(create_e)}")
         
         # Tables will be created on first insert with auto-detected schema
     
@@ -363,6 +393,10 @@ class ThreatDataIngestion:
             logger.warning(f"No data to store for feed {feed_name}")
             return ""
         
+        if not storage_client:
+            logger.error("Storage client not initialized")
+            return ""
+            
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         blob_name = f"{feed_name}/{timestamp}.json"
         
@@ -386,6 +420,10 @@ class ThreatDataIngestion:
         """Load processed data to BigQuery"""
         if not data:
             logger.warning(f"No data to load to BigQuery for feed {feed_name}")
+            return 0
+            
+        if not bq_client:
+            logger.error("BigQuery client not initialized")
             return 0
         
         feed_config = self._get_feed_config(feed_name)
@@ -448,6 +486,10 @@ class ThreatDataIngestion:
     
     def publish_ingestion_event(self, feed_name: str, count: int, gcs_path: str) -> None:
         """Publish ingestion event to Pub/Sub for downstream processing"""
+        if not publisher:
+            logger.error("PubSub publisher not initialized")
+            return
+            
         topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
         
         message = {
@@ -552,6 +594,10 @@ class ThreatDataIngestion:
             "timestamp": datetime.utcnow().isoformat()
         }
         
+        if not bq_client:
+            logger.error("BigQuery client not initialized")
+            return stats
+            
         for feed_name, config in FEED_CONFIG.items():
             table_id = f"{PROJECT_ID}.{DATASET_ID}.{config['table_id']}"
             
