@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     libffi-dev \
     git \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache
@@ -38,6 +39,14 @@ COPY . .
 # Ensure templates directory has the necessary files
 RUN mkdir -p /app/templates
 COPY templates/*.html /app/templates/
+
+# Ensure static directory structure is correct
+RUN mkdir -p /app/static/dist
+
+# Create placeholder CSS file if it doesn't exist
+RUN if [ ! -f /app/static/dist/output.css ]; then \
+    echo "/* Default CSS */" > /app/static/dist/output.css; \
+    fi
 
 # Ensure all __init__.py files exist after copying code
 RUN touch __init__.py && \
@@ -108,13 +117,23 @@ echo "Templates directory contents:"\n\
 ls -la templates/\n\
 \n\
 # Verify required template files exist\n\
-for template in login.html dashboard.html 404.html 500.html base.html content.html; do\n\
+required_templates=("login.html" "dashboard.html" "404.html" "500.html" "base.html" "content.html")\n\
+for template in "${required_templates[@]}"; do\n\
   if [ ! -f "templates/$template" ]; then\n\
     echo "WARNING: $template not found in templates directory!"\n\
   else\n\
     echo "Template $template found."\n\
   fi\n\
 done\n\
+\n\
+# Check for static directory and its contents\n\
+if [ ! -d "static" ]; then\n\
+  echo "WARNING: static directory not found, creating it..."\n\
+  mkdir -p static/dist static/src\n\
+fi\n\
+\n\
+echo "Static directory contents:"\n\
+ls -la static/\n\
 \n\
 # Verify module imports\n\
 echo "Checking if key modules are importable:"\n\
@@ -123,6 +142,7 @@ python -c "import app; print(\"app module found\")" || echo "app module not foun
 python -c "import config; print(\"config module found\")" || echo "config module not found"\n\
 python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
 python -c "import frontend; print(\"frontend module found\")" || echo "frontend module not found"\n\
+python -c "import api; print(\"api module found\")" || echo "api module not found"\n\
 python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
 python -c "from google.cloud import secretmanager; print(\"secretmanager module found\")" || echo "secretmanager module not found"\n\
 \n\
