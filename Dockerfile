@@ -52,9 +52,12 @@ USER appuser
 # Expose port
 EXPOSE $PORT
 
-# Create comprehensive startup script with robust error handling
+# Create improved startup script with robust error handling
 RUN echo '#!/bin/bash\n\
 set -e\n\
+\n\
+# Enable more verbose debugging\n\
+export PS4="\${BASH_SOURCE}:\${LINENO}: "\n\
 \n\
 # Switch to runtime mode\n\
 export CONTAINER_BUILD=false\n\
@@ -100,16 +103,37 @@ if [ ! -d "templates" ]; then\n\
   echo "<!DOCTYPE html><html><body><h1>500 Server Error</h1></body></html>" > templates/500.html\n\
 fi\n\
 \n\
-# Display available modules\n\
+# Verify module imports\n\
 echo "Checking if key modules are importable:"\n\
 python -c "import sys; print(sys.path)"\n\
 python -c "import app; print(\"app module found\")" || echo "app module not found, this will cause the application to fail"\n\
 python -c "import config; print(\"config module found\")" || echo "config module not found"\n\
 python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
+python -c "import frontend; print(\"frontend module found\")" || echo "frontend module not found"\n\
 python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
+python -c "from google.cloud import secretmanager; print(\"secretmanager module found\")" || echo "secretmanager module not found"\n\
 \n\
+# Validate app initialization\n\
+echo "Pre-initializing the application to test startup..."\n\
+python -c "import app; print(\"App module loaded successfully\")" || echo "WARNING: Failed to import app module"\n\
+\n\
+# Print Python environment information\n\
+echo "Python environment:"\n\
+pip list\n\
+\n\
+# Start with gunicorn with more robust settings\n\
 echo "Starting gunicorn with app:app..."\n\
-cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug --access-logfile - app:app\n\
+cd /app && exec gunicorn \\\n\
+  --bind :$PORT \\\n\
+  --workers 2 \\\n\
+  --threads 8 \\\n\
+  --timeout 0 \\\n\
+  --log-level debug \\\n\
+  --access-logfile - \\\n\
+  --error-logfile - \\\n\
+  --capture-output \\\n\
+  --preload \\\n\
+  app:app\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Use the startup script as entrypoint
