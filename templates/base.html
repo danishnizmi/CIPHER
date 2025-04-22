@@ -54,6 +54,95 @@
             .severity-badge.high { @apply bg-orange-500 text-white; }
             .severity-badge.medium { @apply bg-amber-400 text-gray-800; }
             .severity-badge.low { @apply bg-teal-500 text-white; }
+            
+            .panel {
+                @apply bg-white rounded-lg shadow-md overflow-hidden mb-6;
+            }
+            .panel-header {
+                @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center;
+            }
+            .panel-title {
+                @apply font-semibold flex items-center;
+            }
+            .panel-icon {
+                @apply mr-2 text-blue-600;
+            }
+            .panel-body {
+                @apply p-6;
+            }
+            .panel-footer {
+                @apply px-6 py-4 border-t border-gray-200;
+            }
+            
+            .stat-card {
+                @apply bg-white rounded-lg shadow-md p-6 transform transition-transform hover:-translate-y-1 hover:shadow-lg;
+            }
+            
+            .btn {
+                @apply px-4 py-2 rounded-md font-medium transition-colors duration-200;
+            }
+            .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
+            .btn-success { @apply bg-green-600 text-white hover:bg-green-700; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+            .btn-warning { @apply bg-yellow-500 text-gray-800 hover:bg-yellow-600; }
+            .btn-info { @apply bg-cyan-500 text-white hover:bg-cyan-600; }
+            .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50; }
+            
+            .form-group {
+                @apply mb-4;
+            }
+            .form-label {
+                @apply block text-sm font-medium text-gray-700 mb-1;
+            }
+            .form-control {
+                @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
+            }
+            
+            .page-header {
+                @apply flex justify-between items-center mb-6;
+            }
+            .page-title {
+                @apply text-2xl font-bold flex items-center;
+            }
+            .page-icon {
+                @apply mr-2 text-blue-600;
+            }
+            .page-actions {
+                @apply flex space-x-3;
+            }
+            
+            .sidebar-item {
+                @apply block px-4 py-2 rounded;
+            }
+            .sidebar-item.active {
+                @apply bg-blue-50 text-blue-600 border-l-4 border-blue-500;
+            }
+            .sidebar-item:not(.active) {
+                @apply hover:bg-gray-50;
+            }
+            
+            .data-table {
+                @apply min-w-full divide-y divide-gray-200;
+            }
+            .table-header {
+                @apply bg-gray-50;
+            }
+            .table-header th {
+                @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider;
+            }
+            .table-body {
+                @apply bg-white divide-y divide-gray-200;
+            }
+            .table-body tr {
+                @apply hover:bg-gray-50;
+            }
+            .table-body td {
+                @apply px-6 py-4 whitespace-nowrap;
+            }
+            .table-pagination {
+                @apply border-t border-gray-200 px-6 py-4 flex items-center justify-between;
+            }
         }
     </style>
     
@@ -110,7 +199,7 @@
                 <!-- Search Box -->
                 <form action="{{ url_for('search') }}" method="get" class="mb-6">
                     <div class="relative">
-                        <input type="text" name="q" placeholder="Search..." class="w-full rounded-full border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <input type="text" name="q" placeholder="Search..." class="form-control" value="{{ request.args.get('q', '') }}">
                         <button type="submit" class="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center">
                             <i class="fas fa-search"></i>
                         </button>
@@ -119,26 +208,26 @@
                 
                 <!-- Navigation Menu -->
                 <div class="space-y-1">
-                    <a href="{{ url_for('dashboard') }}" class="block px-4 py-2 rounded {% if request.path == url_for('dashboard') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('dashboard') }}" class="sidebar-item {% if request.path == url_for('dashboard') %}active{% endif %}">
                         <i class="fas fa-tachometer-alt w-5 mr-2"></i> Dashboard
                     </a>
-                    <a href="{{ url_for('feeds') }}" class="block px-4 py-2 rounded {% if request.path == url_for('feeds') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('feeds') }}" class="sidebar-item {% if request.path == url_for('feeds') %}active{% endif %}">
                         <i class="fas fa-rss w-5 mr-2"></i> Threat Feeds
                     </a>
-                    <a href="{{ url_for('campaigns') }}" class="block px-4 py-2 rounded {% if request.path == url_for('campaigns') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('campaigns') }}" class="sidebar-item {% if request.path == url_for('campaigns') %}active{% endif %}">
                         <i class="fas fa-project-diagram w-5 mr-2"></i> Campaigns
                     </a>
-                    <a href="{{ url_for('iocs') }}" class="block px-4 py-2 rounded {% if request.path == url_for('iocs') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('iocs') }}" class="sidebar-item {% if request.path == url_for('iocs') %}active{% endif %}">
                         <i class="fas fa-fingerprint w-5 mr-2"></i> IOCs
                     </a>
-                    <a href="{{ url_for('reports') }}" class="block px-4 py-2 rounded {% if request.path == url_for('reports') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('reports') }}" class="sidebar-item {% if request.path == url_for('reports') %}active{% endif %}">
                         <i class="fas fa-chart-bar w-5 mr-2"></i> Reports
                     </a>
-                    <a href="{{ url_for('alerts') }}" class="block px-4 py-2 rounded {% if request.path == url_for('alerts') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('alerts') }}" class="sidebar-item {% if request.path == url_for('alerts') %}active{% endif %}">
                         <i class="fas fa-bell w-5 mr-2"></i> Alerts
                         <span class="bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 ml-1">3</span>
                     </a>
-                    <a href="{{ url_for('explore') }}" class="block px-4 py-2 rounded {% if request.path == url_for('explore') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('explore') }}" class="sidebar-item {% if request.path == url_for('explore') %}active{% endif %}">
                         <i class="fas fa-search w-5 mr-2"></i> Data Explorer
                     </a>
                 </div>
@@ -148,12 +237,12 @@
                 <div class="text-xs text-gray-500 px-4 mb-2">Administration</div>
                 
                 <div class="space-y-1">
-                    <a href="{{ url_for('settings') }}" class="block px-4 py-2 rounded {% if request.path == url_for('settings') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('settings') }}" class="sidebar-item {% if request.path == url_for('settings') %}active{% endif %}">
                         <i class="fas fa-cog w-5 mr-2"></i> Settings
                     </a>
                     
                     {% if session.get('role') == 'admin' %}
-                    <a href="{{ url_for('users') }}" class="block px-4 py-2 rounded {% if request.path == url_for('users') %}bg-blue-50 text-blue-600 border-l-4 border-blue-500{% else %}hover:bg-gray-50{% endif %}">
+                    <a href="{{ url_for('users') }}" class="sidebar-item {% if request.path == url_for('users') %}active{% endif %}">
                         <i class="fas fa-users-cog w-5 mr-2"></i> User Management
                     </a>
                     {% endif %}
@@ -185,6 +274,13 @@
             </div>
         </div>
         
+        <!-- Mobile Nav Toggle -->
+        <div class="md:hidden fixed bottom-4 right-4 z-10">
+            <button id="mobileNavToggle" class="btn btn-primary rounded-full w-12 h-12 flex items-center justify-center">
+                <i class="fas fa-bars"></i>
+            </button>
+        </div>
+        
         <!-- Main Content -->
         <div class="flex-grow p-4">
             <!-- Flash Messages -->
@@ -214,8 +310,30 @@
         </div>
     </footer>
     
-    <!-- Custom Scripts -->
+    <!-- Common Scripts -->
     <script>
+        // Mobile navigation toggle
+        document.addEventListener('DOMContentLoaded', function() {
+            const mobileNavToggle = document.getElementById('mobileNavToggle');
+            if (mobileNavToggle) {
+                const sidebar = document.querySelector('.md\\:block');
+                mobileNavToggle.addEventListener('click', function() {
+                    sidebar.classList.toggle('hidden');
+                    sidebar.classList.toggle('fixed');
+                    sidebar.classList.toggle('inset-0');
+                    sidebar.classList.toggle('z-50');
+                    sidebar.classList.toggle('bg-white');
+                    sidebar.classList.toggle('p-4');
+                    sidebar.classList.toggle('overflow-y-auto');
+                    
+                    // Toggle icon
+                    const icon = mobileNavToggle.querySelector('i');
+                    icon.classList.toggle('fa-bars');
+                    icon.classList.toggle('fa-times');
+                });
+            }
+        });
+    
         // Hide alerts after 5 seconds
         document.addEventListener('DOMContentLoaded', () => {
             const alerts = document.querySelectorAll('[role="alert"]');
@@ -225,8 +343,33 @@
                 }, 5000);
             });
         });
+
+        // Utility functions for charts
+        function createSparkline(elementId, trend = 1, color = '#3b82f6') {
+            const data = [];
+            // Generate random trending data
+            for (let i = 0; i < 10; i++) {
+                data.push(Math.floor(Math.random() * 20) + (i * trend));
+            }
+            
+            Plotly.newPlot(elementId, [{
+                y: data,
+                type: 'scatter',
+                mode: 'lines',
+                fill: 'tozeroy',
+                line: { color: color, width: 2, shape: 'spline' }
+            }], {
+                margin: { t: 0, r: 0, l: 0, b: 0 },
+                xaxis: { showticklabels: false, showgrid: false, zeroline: false },
+                yaxis: { showticklabels: false, showgrid: false, zeroline: false },
+                showlegend: false,
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)'
+            });
+        }
     </script>
     
+    <!-- Page-specific scripts -->
     {% block scripts %}{% endblock %}
 </body>
 </html>
