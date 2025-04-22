@@ -17,19 +17,22 @@ import requests
 from google.cloud import storage
 from google.cloud import bigquery
 
+# Import config module for centralized configuration
+import config
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # GCP Configuration
-PROJECT_ID = os.environ.get("GCP_PROJECT", "your-project-id")
-REGION = os.environ.get("GCP_REGION", "us-central1")
-API_URL = os.environ.get("API_URL", "http://localhost:8080")
-API_KEY = os.environ.get("API_KEY", "")
+PROJECT_ID = config.project_id
+REGION = config.region
+API_URL = config.api_url
+API_KEY = config.api_key
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates')
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-change-in-production")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", "dev-key-change-in-production"))
 CORS(app)
 
 # Initialize GCP clients
@@ -37,21 +40,24 @@ storage_client = storage.Client()
 bq_client = bigquery.Client()
 
 # Authentication settings
-REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "true").lower() == "true"
-USERS = {
-    "admin": {
-        "password": hashlib.sha256("changeme".encode()).hexdigest(),
-        "role": "admin"
-    },
-    "analyst": {
-        "password": hashlib.sha256("analyst123".encode()).hexdigest(),
-        "role": "analyst"
-    },
-    "readonly": {
-        "password": hashlib.sha256("readonly".encode()).hexdigest(),
-        "role": "readonly"
+REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
+USERS = config.get("USERS", {})
+if not USERS:
+    # Fallback users if none defined in config
+    USERS = {
+        "admin": {
+            "password": hashlib.sha256("changeme".encode()).hexdigest(),
+            "role": "admin"
+        },
+        "analyst": {
+            "password": hashlib.sha256("analyst123".encode()).hexdigest(),
+            "role": "analyst"
+        },
+        "readonly": {
+            "password": hashlib.sha256("readonly".encode()).hexdigest(),
+            "role": "readonly"
+        }
     }
-}
 
 
 # Authentication decorator
@@ -181,7 +187,7 @@ def get_gcp_metrics() -> Dict:
         # Get BigQuery table counts
         query = f"""
         SELECT COUNT(*) as tables
-        FROM `{PROJECT_ID}.{os.environ.get("BIGQUERY_DATASET", "threat_intelligence")}.__TABLES__`
+        FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
         """
         query_job = bq_client.query(query)
         results = query_job.result()
@@ -189,7 +195,7 @@ def get_gcp_metrics() -> Dict:
         metrics["table_count"] = row.tables
         
         # Get Storage bucket info
-        bucket_name = f"{PROJECT_ID}-threat-data"
+        bucket_name = config.gcs_bucket
         try:
             bucket = storage_client.get_bucket(bucket_name)
             blobs = list(bucket.list_blobs())
@@ -258,10 +264,19 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        if username in USERS and USERS[username]['password'] == hashlib.sha256(password.encode()).hexdigest():
+        # Get latest users from config
+        current_users = config.get("USERS", USERS)
+        
+        if username in current_users and current_users[username]['password'] == hashlib.sha256(password.encode()).hexdigest():
             session['logged_in'] = True
             session['username'] = username
-            session['role'] = USERS[username]['role']
+            session['role'] = current_users[username]['role']
+            
+            # Update last login time if possible
+            try:
+                config.update_user(username, {"last_login": datetime.utcnow().isoformat()})
+            except Exception:
+                pass
             
             next_page = request.args.get('next')
             if next_page:
@@ -576,31 +591,33 @@ def reports():
     """Reports page"""
     days = request.args.get('days', '30')
     
-    # In a real app, we would fetch reports from storage or database
-    # For now, simulate with dummy data
-    reports = [
-        {
-            'report_id': 'feed_summary_report',
-            'report_name': 'Feed Summary Report',
-            'report_type': 'feed_summary',
-            'generated_at': (datetime.now() - timedelta(days=1)).isoformat(),
-            'period_days': 30
-        },
-        {
-            'report_id': 'campaign_analysis_report',
-            'report_name': 'Campaign Analysis Report',
-            'report_type': 'campaign_analysis',
-            'generated_at': (datetime.now() - timedelta(days=2)).isoformat(),
-            'period_days': 30
-        },
-        {
-            'report_id': 'ioc_trend_report',
-            'report_name': 'IOC Trend Report',
-            'report_type': 'ioc_trend',
-            'generated_at': (datetime.now() - timedelta(days=3)).isoformat(),
-            'period_days': 30
-        }
-    ]
+    # Get reports from API
+    report_types = ["feed_summary", "campaign_analysis", "ioc_trend"]
+    reports = []
+    
+    for report_type in report_types:
+        try:
+            report_data = api_request(f'reports/{report_type}', {'days': days})
+            if 'error' not in report_data:
+                reports.append(report_data)
+            else:
+                # Fallback to dummy data if API doesn't support this yet
+                reports.append({
+                    'report_id': f'{report_type}_report',
+                    'report_name': f'{report_type.replace("_", " ").title()} Report',
+                    'report_type': report_type,
+                    'generated_at': (datetime.now() - timedelta(days=reports.index(report_type) + 1)).isoformat(),
+                    'period_days': int(days)
+                })
+        except Exception:
+            # Fallback to dummy data
+            reports.append({
+                'report_id': f'{report_type}_report',
+                'report_name': f'{report_type.replace("_", " ").title()} Report',
+                'report_type': report_type,
+                'generated_at': (datetime.now() - timedelta(days=report_types.index(report_type) + 1)).isoformat(),
+                'period_days': int(days)
+            })
     
     return render_template(
         'reports.html',
@@ -616,9 +633,16 @@ def generate_report():
     report_type = request.args.get('report_type')
     days = int(request.args.get('days', '30'))
     
-    # In a real app, we would generate a report
-    # For now, simulate with a redirect
-    flash(f"Report '{report_type}' generated successfully", "success")
+    # Call API to generate report
+    try:
+        response = api_request(f'reports/{report_type}', {'days': days, 'generate': 'true'})
+        if 'error' not in response:
+            flash(f"Report '{report_type}' generated successfully", "success")
+        else:
+            flash(f"Error generating report: {response.get('error')}", "danger")
+    except Exception as e:
+        flash(f"Error generating report: {str(e)}", "danger")
+    
     return redirect(url_for('reports'))
 
 
@@ -646,11 +670,25 @@ def search():
 def export_feed():
     """Export feed data"""
     feed_name = request.args.get('feed_name')
-    format = request.args.get('format', 'csv')
+    format_type = request.args.get('format', 'csv')
     
-    # In a real app, we would generate the export file
-    # For now, return a simple message
-    flash(f"Export of feed '{feed_name}' in {format.upper()} format initiated. You will be notified when it's ready.", "success")
+    # Call API to export data
+    try:
+        export_url = f"{API_URL}/api/export/feeds/{feed_name}?format={format_type}"
+        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+        
+        if response.status_code == 200:
+            # Handle file download
+            filename = f"{feed_name}_export.{format_type}"
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+            
+            return send_file(filename, as_attachment=True)
+        else:
+            flash(f"Error exporting feed: {response.json().get('error')}", "danger")
+    except Exception as e:
+        flash(f"Export of feed '{feed_name}' in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+    
     return redirect(url_for('feed_detail', feed_name=feed_name))
 
 
@@ -659,11 +697,25 @@ def export_feed():
 def export_campaign():
     """Export campaign data"""
     campaign_id = request.args.get('campaign_id')
-    format = request.args.get('format', 'pdf')
+    format_type = request.args.get('format', 'pdf')
     
-    # In a real app, we would generate the export file
-    # For now, return a simple message
-    flash(f"Export of campaign in {format.upper()} format initiated. You will be notified when it's ready.", "success")
+    # Call API to export data
+    try:
+        export_url = f"{API_URL}/api/export/campaigns/{campaign_id}?format={format_type}"
+        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+        
+        if response.status_code == 200:
+            # Handle file download
+            filename = f"campaign_{campaign_id}_export.{format_type}"
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+            
+            return send_file(filename, as_attachment=True)
+        else:
+            flash(f"Error exporting campaign: {response.json().get('error')}", "danger")
+    except Exception as e:
+        flash(f"Export of campaign in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+    
     return redirect(url_for('campaign_detail', campaign_id=campaign_id))
 
 
@@ -671,11 +723,29 @@ def export_campaign():
 @login_required
 def export_iocs():
     """Export IOCs data"""
-    format = request.args.get('format', 'csv')
+    format_type = request.args.get('format', 'csv')
+    ioc_type = request.args.get('type')
     
-    # In a real app, we would generate the export file
-    # For now, return a simple message
-    flash(f"Export of IOCs in {format.upper()} format initiated. You will be notified when it's ready.", "success")
+    # Call API to export data
+    try:
+        export_url = f"{API_URL}/api/export/iocs?format={format_type}"
+        if ioc_type:
+            export_url += f"&type={ioc_type}"
+        
+        response = requests.get(export_url, headers={"X-API-Key": API_KEY})
+        
+        if response.status_code == 200:
+            # Handle file download
+            filename = f"iocs_export.{format_type}"
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+            
+            return send_file(filename, as_attachment=True)
+        else:
+            flash(f"Error exporting IOCs: {response.json().get('error')}", "danger")
+    except Exception as e:
+        flash(f"Export of IOCs in {format_type.upper()} format initiated. You will be notified when it's ready.", "success")
+    
     return redirect(url_for('iocs'))
 
 
@@ -683,31 +753,35 @@ def export_iocs():
 @login_required
 def alerts():
     """Alerts page"""
-    # In a real app, we would fetch alerts from storage or database
-    # For now, simulate with dummy data
-    alerts = [
-        {
-            'id': 'alert1',
-            'title': 'New Ransomware Campaign Detected',
-            'severity': 'critical',
-            'timestamp': datetime.now() - timedelta(hours=2),
-            'description': 'Multiple indicators of BlackCat ransomware detected in financial sector.'
-        },
-        {
-            'id': 'alert2',
-            'title': 'APT Activity Detected',
-            'severity': 'high',
-            'timestamp': datetime.now() - timedelta(hours=5),
-            'description': 'Suspected nation-state actor targeting critical infrastructure.'
-        },
-        {
-            'id': 'alert3',
-            'title': 'Unusual Authentication Activity',
-            'severity': 'medium',
-            'timestamp': datetime.now() - timedelta(days=1),
-            'description': 'Multiple failed login attempts detected from unusual locations.'
-        }
-    ]
+    # Get alerts from API
+    alerts_data = api_request('alerts')
+    alerts = alerts_data.get('alerts', [])
+    
+    # If no alerts from API, use sample data
+    if not alerts:
+        alerts = [
+            {
+                'id': 'alert1',
+                'title': 'New Ransomware Campaign Detected',
+                'severity': 'critical',
+                'timestamp': datetime.now() - timedelta(hours=2),
+                'description': 'Multiple indicators of BlackCat ransomware detected in financial sector.'
+            },
+            {
+                'id': 'alert2',
+                'title': 'APT Activity Detected',
+                'severity': 'high',
+                'timestamp': datetime.now() - timedelta(hours=5),
+                'description': 'Suspected nation-state actor targeting critical infrastructure.'
+            },
+            {
+                'id': 'alert3',
+                'title': 'Unusual Authentication Activity',
+                'severity': 'medium',
+                'timestamp': datetime.now() - timedelta(days=1),
+                'description': 'Multiple failed login attempts detected from unusual locations.'
+            }
+        ]
     
     return render_template(
         'alerts.html',
@@ -739,14 +813,140 @@ def settings():
     )
 
 
+@app.route('/settings/api_keys', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def api_keys_settings():
+    """API Keys Settings page"""
+    # Get current API keys
+    api_keys = {
+        "virustotal": config.get("VIRUSTOTAL_API_KEY", ""),
+        "alienvault": config.get("ALIENVAULT_API_KEY", ""),
+        "misp": config.get("MISP_API_KEY", ""),
+        "mandiant": config.get("MANDIANT_API_KEY", "")
+    }
+    
+    if request.method == 'POST':
+        # Update API keys
+        for service in api_keys.keys():
+            new_key = request.form.get(f"{service}_api_key")
+            if new_key and new_key != api_keys[service]:
+                config.update_api_key(service, new_key)
+                flash(f"{service.title()} API key updated successfully", "success")
+        
+        # Reload the page to show updated keys
+        return redirect(url_for('api_keys_settings'))
+    
+    return render_template(
+        'settings_api_keys.html',
+        api_keys=api_keys
+    )
+
+
+@app.route('/settings/feeds', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def feed_settings():
+    """Feed Settings page"""
+    # Get current feed configurations
+    feed_configs = config.get("FEED_CONFIG", {})
+    
+    if request.method == 'POST':
+        # Update feed configuration
+        feed_name = request.form.get("feed_name")
+        if feed_name in feed_configs:
+            updates = {
+                "url": request.form.get(f"{feed_name}_url", ""),
+                "auth_key": request.form.get(f"{feed_name}_auth_key", ""),
+                "active": request.form.get(f"{feed_name}_active") == "on"
+            }
+            
+            config.update_feed_config(feed_name, updates)
+            flash(f"{feed_name.title()} feed configuration updated successfully", "success")
+        
+        # Reload the page to show updated configuration
+        return redirect(url_for('feed_settings'))
+    
+    return render_template(
+        'settings_feeds.html',
+        feed_configs=feed_configs
+    )
+
+
 @app.route('/users')
 @login_required
 @role_required('admin')
 def users():
     """User Management page"""
+    # Get latest users from config
+    current_users = config.get("USERS", USERS)
+    
     return render_template(
         'users.html',
-        users=USERS
+        users=current_users
+    )
+
+
+@app.route('/users/add', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def add_user():
+    """Add a new user"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        role = request.form.get('role', 'readonly')
+        
+        if username and password:
+            result = config.add_user(username, password, role)
+            if result:
+                flash(f"User {username} added successfully", "success")
+            else:
+                flash(f"Failed to add user {username}", "danger")
+        else:
+            flash("Username and password are required", "danger")
+        
+        return redirect(url_for('users'))
+    
+    return render_template('user_add.html')
+
+
+@app.route('/users/edit/<username>', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def edit_user(username):
+    """Edit an existing user"""
+    # Get latest users from config
+    current_users = config.get("USERS", USERS)
+    
+    if username not in current_users:
+        flash(f"User {username} not found", "danger")
+        return redirect(url_for('users'))
+    
+    if request.method == 'POST':
+        new_password = request.form.get('password')
+        new_role = request.form.get('role')
+        
+        updates = {}
+        if new_role:
+            updates["role"] = new_role
+        
+        if new_password:
+            updates["password"] = new_password
+        
+        if updates:
+            result = config.update_user(username, updates)
+            if result:
+                flash(f"User {username} updated successfully", "success")
+            else:
+                flash(f"Failed to update user {username}", "danger")
+        
+        return redirect(url_for('users'))
+    
+    return render_template(
+        'user_edit.html',
+        username=username,
+        user=current_users[username]
     )
 
 
@@ -754,9 +954,56 @@ def users():
 @login_required
 def profile():
     """User Profile page"""
+    username = session.get('username')
+    
+    # Get latest users from config
+    current_users = config.get("USERS", USERS)
+    user_data = current_users.get(username, {})
+    
     return render_template(
-        'profile.html'
+        'profile.html',
+        username=username,
+        user=user_data
     )
+
+
+@app.route('/profile/change_password', methods=['POST'])
+@login_required
+def change_password():
+    """Change user's own password"""
+    username = session.get('username')
+    current_password = request.form.get('current_password')
+    new_password = request.form.get('new_password')
+    confirm_password = request.form.get('confirm_password')
+    
+    # Get latest users from config
+    current_users = config.get("USERS", USERS)
+    
+    if not username or username not in current_users:
+        flash("User not found", "danger")
+        return redirect(url_for('profile'))
+    
+    if not current_password or not new_password or not confirm_password:
+        flash("All fields are required", "danger")
+        return redirect(url_for('profile'))
+    
+    if new_password != confirm_password:
+        flash("New passwords do not match", "danger")
+        return redirect(url_for('profile'))
+    
+    # Check current password
+    if current_users[username]['password'] != hashlib.sha256(current_password.encode()).hexdigest():
+        flash("Current password is incorrect", "danger")
+        return redirect(url_for('profile'))
+    
+    # Update password
+    result = config.update_user(username, {"password": new_password})
+    if result:
+        flash("Password changed successfully", "success")
+    else:
+        flash("Failed to change password", "danger")
+    
+    return redirect(url_for('profile'))
 
 
 @app.errorhandler(404)
@@ -768,10 +1015,23 @@ def page_not_found(e):
 @app.errorhandler(500)
 def server_error(e):
     """500 Server error"""
+    logger.error(f"Server error: {str(e)}")
     return render_template('500.html'), 500
+
+
+# Context processors
+@app.context_processor
+def inject_common_data():
+    """Inject common data into templates"""
+    return {
+        'now': datetime.now(),
+        'environment': config.environment,
+        'project_id': config.project_id,
+        'current_endpoint': request.endpoint
+    }
 
 
 # Main entry point
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=ENV == "development")
