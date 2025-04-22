@@ -14,6 +14,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Flag to track if Secret Manager is available
+SECRET_MANAGER_AVAILABLE = False
+
 def create_app() -> Flask:
     """
     Application factory function to create and configure the Flask application.
@@ -28,38 +31,31 @@ def create_app() -> Flask:
     app.config['PROJECT_ID'] = project_id
     app.config['ENVIRONMENT'] = environment
     
-    # Try to initialize config first
-    config_initialized = False
+    # Try to load Secret Manager
+    global SECRET_MANAGER_AVAILABLE
     try:
-        from config import init_app_config, get
-        config = init_app_config()
-        config_initialized = True
-        logger.info("Configuration initialized successfully")
+        from google.cloud import secretmanager
+        SECRET_MANAGER_AVAILABLE = True
+        logger.info("Secret Manager library available")
+    except ImportError:
+        logger.warning("Secret Manager library not available - will use environment variables")
+        SECRET_MANAGER_AVAILABLE = False
+    
+    # Generate a random key for Flask sessions
+    import secrets
+    secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+    app.config['SECRET_KEY'] = secret_key
+    
+    # Initialize config if possible
+    try:
+        if SECRET_MANAGER_AVAILABLE:
+            from config import init_app_config
+            config = init_app_config()
+            logger.info("Configuration initialized successfully with Secret Manager")
+        else:
+            logger.warning("Using basic configuration without Secret Manager")
     except Exception as e:
         logger.error(f"Error initializing config: {str(e)}")
-        logger.error(traceback.format_exc())
-        config = {}
-    
-    # Set secret key (critical for session security)
-    if config_initialized:
-        try:
-            secret_key = get("FLASK_SECRET_KEY")
-            if secret_key:
-                app.config['SECRET_KEY'] = secret_key
-                logger.info("Secret key loaded from Secret Manager")
-            else:
-                raise ValueError("Secret key not found")
-        except Exception:
-            # Fallback to environment variable or generate one
-            secret_key = os.environ.get('FLASK_SECRET_KEY')
-            if not secret_key:
-                import secrets
-                secret_key = secrets.token_hex(32)
-                logger.warning("Using randomly generated secret key")
-            app.config['SECRET_KEY'] = secret_key
-    else:
-        # Fallback if config module not available
-        app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', os.urandom(24).hex())
     
     # Import components
     try:
@@ -99,7 +95,7 @@ def create_app() -> Flask:
     # Configure proxy support
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Register essential routes
+    # Register essential routes via blueprint to avoid conflicts
     health_bp = Blueprint('health_api', __name__)
     
     @health_bp.route('/api/health')
@@ -110,10 +106,10 @@ def create_app() -> Flask:
             "environment": environment,
             "project": project_id,
             "timestamp": datetime.utcnow().isoformat(),
-            "version": os.environ.get("VERSION", "1.0.0")
+            "secret_manager_available": SECRET_MANAGER_AVAILABLE
         }), 200
     
-    # Add health endpoint only if not already present
+    # Check if health endpoint already exists
     health_route_exists = False
     for rule in app.url_map.iter_rules():
         if rule.rule == '/api/health':
@@ -139,11 +135,7 @@ def create_app() -> Flask:
             try:
                 return render_template('dashboard.html')
             except Exception:
-                try:
-                    return render_template('base.html')
-                except Exception:
-                    return "Threat Intelligence Platform"
-        logger.info("Registered root endpoint")
+                return "Threat Intelligence Platform"
     
     # Error handlers
     @app.errorhandler(404)
@@ -161,33 +153,20 @@ def create_app() -> Flask:
         except:
             return "Internal server error", 500
     
-    # Initialize GCP clients if needed
+    # Initialize GCP clients
     try:
-        # Initialize Secret Manager client (for other modules to access)
-        from google.cloud import secretmanager
-        secretmanager_client = secretmanager.SecretManagerServiceClient()
-        app.config['SECRETMANAGER_CLIENT'] = secretmanager_client
-        logger.info("Secret Manager client initialized")
+        # Initialize core GCP services
+        from google.cloud import bigquery, storage, pubsub_v1
         
-        # Initialize other services as needed
-        if not app.config.get('BIGQUERY_CLIENT'):
-            from google.cloud import bigquery
-            app.config['BIGQUERY_CLIENT'] = bigquery.Client(project=project_id)
-            logger.info("BigQuery client initialized")
-            
-        if not app.config.get('STORAGE_CLIENT'):
-            from google.cloud import storage
-            app.config['STORAGE_CLIENT'] = storage.Client(project=project_id)
-            logger.info("Storage client initialized")
-            
-        if not app.config.get('PUBSUB_PUBLISHER'):
-            from google.cloud import pubsub_v1
-            app.config['PUBSUB_PUBLISHER'] = pubsub_v1.PublisherClient()
-            app.config['PUBSUB_SUBSCRIBER'] = pubsub_v1.SubscriberClient()
-            logger.info("Pub/Sub clients initialized")
+        app.config['BIGQUERY_CLIENT'] = bigquery.Client(project=project_id)
+        app.config['STORAGE_CLIENT'] = storage.Client(project=project_id)
+        app.config['PUBSUB_PUBLISHER'] = pubsub_v1.PublisherClient()
+        app.config['PUBSUB_SUBSCRIBER'] = pubsub_v1.SubscriberClient()
+        
+        logger.info("GCP core services initialized")
     except Exception as e:
-        logger.warning(f"Error initializing GCP clients: {str(e)}")
-        
+        logger.warning(f"Error initializing GCP services: {str(e)}")
+    
     logger.info(f"Application initialized in {environment} environment")
     return app
 
