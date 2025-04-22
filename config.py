@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 # Environment variables
 PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+REGION = os.environ.get("GCP_REGION", "us-central1")
+API_URL = os.environ.get("API_URL", "")
+api_key = None  # Will be loaded from Secret Manager
 
 # Secret Manager client
 secret_client = None
@@ -107,3 +110,101 @@ def load_configs(force_refresh=False):
         'auth': get_cached_config('auth-config', force_refresh)
     }
     return configs
+
+def init_app_config():
+    """Initialize application configuration from secrets."""
+    return load_configs()
+
+def get(key, default=None):
+    """Get configuration value from environment or secrets."""
+    if key in os.environ:
+        return os.environ[key]
+    
+    # Try to get from auth config in Secret Manager
+    auth_config = get_cached_config('auth-config')
+    if key in auth_config:
+        return auth_config[key]
+    
+    return default
+
+def update_user(username, updates):
+    """Update user information in the auth config."""
+    auth_config = get_cached_config('auth-config', force_refresh=True)
+    
+    if 'users' not in auth_config:
+        auth_config['users'] = {}
+    
+    if username not in auth_config['users']:
+        auth_config['users'][username] = {}
+    
+    # Update user data
+    for key, value in updates.items():
+        if key == 'password':
+            import hashlib
+            # Hash the password
+            auth_config['users'][username]['password'] = hashlib.sha256(value.encode()).hexdigest()
+        else:
+            auth_config['users'][username][key] = value
+    
+    # Save updated config
+    result = create_or_update_secret('auth-config', json.dumps(auth_config))
+    
+    # Update cache
+    if result:
+        _config_cache['auth-config'] = auth_config
+    
+    return result
+
+def update_api_key(service, api_key):
+    """Update API key for a service."""
+    api_keys = get_cached_config('api-keys', force_refresh=True)
+    
+    # Update API key
+    api_keys[service] = api_key
+    
+    # Save updated config
+    result = create_or_update_secret('api-keys', json.dumps(api_keys))
+    
+    # Update cache
+    if result:
+        _config_cache['api-keys'] = api_keys
+    
+    return result
+
+def update_feed_config(feed_name, updates):
+    """Update feed configuration."""
+    feed_config = get_cached_config('feed-config', force_refresh=True)
+    
+    if 'feeds' not in feed_config:
+        feed_config['feeds'] = []
+    
+    # Find feed in the list
+    found = False
+    for i, feed in enumerate(feed_config['feeds']):
+        if feed.get('name') == feed_name:
+            # Update feed
+            for key, value in updates.items():
+                feed_config['feeds'][i][key] = value
+            found = True
+            break
+    
+    # If feed not found, add it
+    if not found:
+        updates['name'] = feed_name
+        feed_config['feeds'].append(updates)
+    
+    # Save updated config
+    result = create_or_update_secret('feed-config', json.dumps(feed_config))
+    
+    # Update cache
+    if result:
+        _config_cache['feed-config'] = feed_config
+    
+    return result
+
+# Properties used by other modules
+project_id = PROJECT_ID
+region = REGION
+gcs_bucket = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
+bigquery_dataset = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
+api_url = API_URL
