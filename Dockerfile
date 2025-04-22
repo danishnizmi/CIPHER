@@ -46,9 +46,6 @@ RUN touch __init__.py && \
     touch functions/ingestion/__init__.py && \
     touch functions/analysis/__init__.py
 
-# Initialize and apply configurations in build mode with error handling
-RUN python -c "import sys; print('Python path:', sys.path); try: from config import init_app_config; init_app_config(); print('Config initialized successfully') except Exception as e: print(f'Config initialization error: {str(e)}')"
-
 # Create secrets directory for mounting at runtime (if needed)
 RUN mkdir -p /secrets && chmod 755 /secrets
 
@@ -96,8 +93,8 @@ python -c "import config; print(\"config module found\")" || echo "config module
 python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
 python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
 \n\
-echo "Starting gunicorn with app:create_app()..."\n\
-cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug "app:create_app()"\n\
+echo "Starting gunicorn with app:app..."\n\
+cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug app:app\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Use the startup script as entrypoint
