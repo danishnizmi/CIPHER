@@ -6,9 +6,9 @@ Provides the main application factory and initialization logic.
 import os
 import logging
 import traceback
-from typing import Optional
 from datetime import datetime
-from flask import Flask, Blueprint, redirect, url_for, render_template
+from typing import Dict, Any
+from flask import Flask, Blueprint, redirect, url_for, render_template, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Configure logging
@@ -28,7 +28,7 @@ def create_app() -> Flask:
     
     # Initialize config first with error handling
     try:
-        from config import init_app_config, get
+        from config import init_app_config
         config = init_app_config()
         logger.info("Configuration initialized successfully")
     except Exception as e:
@@ -36,31 +36,87 @@ def create_app() -> Flask:
         logger.error(traceback.format_exc())
         config = {}
     
+    # Initialize base app configuration
+    project_id = os.environ.get('PROJECT_ID', os.environ.get('GCP_PROJECT', 'primal-chariot-382610'))
+    environment = os.environ.get('ENVIRONMENT', 'production')
+    
+    app.config['PROJECT_ID'] = project_id
+    app.config['ENVIRONMENT'] = environment
+    
+    # Set the secret key
+    secret_key = os.environ.get('FLASK_SECRET_KEY')
+    if not secret_key:
+        # Generate a random key if none is available
+        import secrets
+        secret_key = secrets.token_hex(24)
+        logger.warning("Using randomly generated secret key - sessions will not persist across restarts")
+    
+    app.config['SECRET_KEY'] = secret_key
+    
     # Import components after config is initialized
     has_frontend = False
     has_api = False
     frontend_app = None
     api_app = None
     
+    # Create route collection to detect conflicts
+    registered_routes = set()
+    
+    # Check for reserved endpoints (routes we'll add ourselves)
+    reserved_endpoints = {'/api/health'}
+    
+    # A function to safely register a route
+    def safe_register_route(route_app, route, endpoint, view_func):
+        if route in registered_routes or route in reserved_endpoints:
+            logger.warning(f"Route {route} already registered, skipping registration")
+            return False
+        
+        if endpoint in route_app.view_functions:
+            logger.warning(f"Endpoint {endpoint} already registered, skipping registration")
+            return False
+            
+        try:
+            route_app.add_url_rule(route, endpoint, view_func)
+            registered_routes.add(route)
+            logger.info(f"Successfully registered route: {route}")
+            return True
+        except Exception as e:
+            logger.error(f"Error registering route {route}: {str(e)}")
+            return False
+    
+    # Try loading the frontend module
     try:
         from frontend import app as frontend_app
         has_frontend = True
         logger.info("Frontend module loaded successfully")
+        
+        # Track frontend routes 
+        for rule in frontend_app.url_map.iter_rules():
+            registered_routes.add(rule.rule)
+            
     except Exception as e:
         logger.error(f"Error importing frontend module: {str(e)}")
         logger.error(traceback.format_exc())
     
+    # Try loading the API module
     try:
         from api import app as api_app
         has_api = True
         logger.info("API module loaded successfully")
+        
+        # Track API routes
+        for rule in api_app.url_map.iter_rules():
+            registered_routes.add(rule.rule)
+            
     except Exception as e:
         logger.error(f"Error importing API module: {str(e)}")
         logger.error(traceback.format_exc())
     
     # Choose which app to use as the primary one with error handling
+    primary_app = app  # Default to our base app
+    
     if has_api:
-        app = api_app
+        primary_app = api_app
         logger.info("Using API as primary application")
         
         # Mount frontend as a blueprint if available
@@ -69,54 +125,35 @@ def create_app() -> Flask:
                 # Extract blueprints from frontend app to merge
                 for blueprint_name in frontend_app.blueprints:
                     blueprint = frontend_app.blueprints[blueprint_name]
-                    if not app.blueprints.get(blueprint_name):  # Only register if not already registered
-                        app.register_blueprint(blueprint)
+                    if not primary_app.blueprints.get(blueprint_name):  # Only register if not already registered
+                        primary_app.register_blueprint(blueprint)
                 
                 # Copy over template folder and static folder settings
-                if not app.template_folder and frontend_app.template_folder:
-                    app.template_folder = frontend_app.template_folder
+                if not primary_app.template_folder and frontend_app.template_folder:
+                    primary_app.template_folder = frontend_app.template_folder
                 
-                if not app.static_folder and frontend_app.static_folder:
-                    app.static_folder = frontend_app.static_folder
-                    app.static_url_path = frontend_app.static_url_path
+                if not primary_app.static_folder and frontend_app.static_folder:
+                    primary_app.static_folder = frontend_app.static_folder
+                    primary_app.static_url_path = frontend_app.static_url_path
                     
                 logger.info("Integrated frontend components into API application")
-                
-                # Remove duplicate routes (critical fix)
-                for endpoint in list(frontend_app.view_functions.keys()):
-                    if endpoint in app.view_functions and endpoint != 'static':
-                        logger.warning(f"Removing duplicate endpoint '{endpoint}' from frontend")
-                        # Skip registering this endpoint from frontend_app
-                        frontend_app.view_functions.pop(endpoint, None)
             except Exception as e:
                 logger.error(f"Error integrating frontend components: {str(e)}")
                 logger.error(traceback.format_exc())
     elif has_frontend:
-        app = frontend_app
+        primary_app = frontend_app
         logger.info("Using frontend as primary application")
+    else:
+        logger.warning("Neither API nor Frontend modules loaded, using minimal Flask app")
+    
+    # Use the selected primary app
+    app = primary_app
+    
+    # Configure for running behind proxies
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
     # Apply common configurations with error handling
     try:
-        # Set environment variables to app config
-        project_id = os.environ.get('PROJECT_ID', os.environ.get('GCP_PROJECT', 'primal-chariot-382610'))
-        environment = os.environ.get('ENVIRONMENT', 'production')
-        
-        app.config['PROJECT_ID'] = project_id
-        app.config['ENVIRONMENT'] = environment
-        
-        # Set the secret key
-        secret_key = os.environ.get('FLASK_SECRET_KEY')
-        if not secret_key:
-            # Generate a random key if none is available
-            import secrets
-            secret_key = secrets.token_hex(24)
-            logger.warning("Using randomly generated secret key - sessions will not persist across restarts")
-        
-        app.config['SECRET_KEY'] = secret_key
-        
-        # Configure for running behind proxies
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-        
         # Add custom error handlers
         @app.errorhandler(404)
         def page_not_found(e):
@@ -135,35 +172,29 @@ def create_app() -> Flask:
             except:
                 return "Internal server error", 500
         
-        # Check if health_check route already exists
-        health_check_exists = False
-        for rule in app.url_map.iter_rules():
-            if rule.rule == '/api/health':
-                health_check_exists = True
-                logger.info("Health check route already exists, skipping registration")
-                break
+        # Create a new health check blueprint to avoid endpoint conflicts
+        health_bp = Blueprint('health_api', __name__)
         
-        # Add health check endpoint only if it doesn't exist
-        if not health_check_exists and 'health_check' not in app.view_functions:
-            @app.route('/api/health')
-            def health_check():
-                """Health check endpoint - always returns 200 OK"""
-                return {
-                    "status": "ok",
-                    "environment": environment,
-                    "project": project_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }, 200
-            logger.info("Registered health check endpoint")
+        @health_bp.route('/api/health')
+        def health_check():
+            """Health check endpoint - always returns 200 OK"""
+            return jsonify({
+                "status": "ok",
+                "environment": environment,
+                "project": project_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }), 200
+            
+        # Register the health blueprint
+        if '/api/health' not in registered_routes:
+            app.register_blueprint(health_bp)
+            registered_routes.add('/api/health')
+            logger.info("Registered health check endpoint via blueprint")
+        else:
+            logger.info("Health check endpoint already exists, skipping registration")
         
         # Make sure we have a root endpoint
-        root_exists = False
-        for rule in app.url_map.iter_rules():
-            if rule.rule == '/':
-                root_exists = True
-                break
-        
-        if not root_exists and 'index' not in app.view_functions:
+        if '/' not in registered_routes:
             @app.route('/')
             def index():
                 if 'dashboard' in app.view_functions:
