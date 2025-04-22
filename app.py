@@ -135,27 +135,35 @@ def create_app() -> Flask:
             except:
                 return "Internal server error", 500
         
-        # Make sure we have a health check endpoint (critical fix)
-        # Remove existing route if any, to prevent conflicts
-        if 'health_check' in app.view_functions:
-            app.view_functions.pop('health_check', None)
-            for rule in list(app.url_map.iter_rules()):
-                if rule.endpoint == 'health_check':
-                    app.url_map._rules.remove(rule)
-                    app.url_map._rules_by_endpoint.pop('health_check', None)
+        # Check if health_check route already exists
+        health_check_exists = False
+        for rule in app.url_map.iter_rules():
+            if rule.rule == '/api/health':
+                health_check_exists = True
+                logger.info("Health check route already exists, skipping registration")
+                break
         
-        @app.route('/api/health')
-        def health_check():
-            """Health check endpoint - always returns 200 OK"""
-            return {
-                "status": "ok",
-                "environment": environment,
-                "project": project_id,
-                "timestamp": datetime.utcnow().isoformat()
-            }, 200
+        # Add health check endpoint only if it doesn't exist
+        if not health_check_exists and 'health_check' not in app.view_functions:
+            @app.route('/api/health')
+            def health_check():
+                """Health check endpoint - always returns 200 OK"""
+                return {
+                    "status": "ok",
+                    "environment": environment,
+                    "project": project_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }, 200
+            logger.info("Registered health check endpoint")
         
         # Make sure we have a root endpoint
-        if 'index' not in app.view_functions and '/' not in [rule.rule for rule in app.url_map.iter_rules()]:
+        root_exists = False
+        for rule in app.url_map.iter_rules():
+            if rule.rule == '/':
+                root_exists = True
+                break
+        
+        if not root_exists and 'index' not in app.view_functions:
             @app.route('/')
             def index():
                 if 'dashboard' in app.view_functions:
@@ -167,6 +175,7 @@ def create_app() -> Flask:
                         return render_template('base.html')
                     except:
                         return "Threat Intelligence Platform"
+            logger.info("Registered root endpoint")
         
         # Initialize GCP clients with error handling
         try:
