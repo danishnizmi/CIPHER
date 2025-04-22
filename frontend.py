@@ -1,23 +1,21 @@
 """
 Threat Intelligence Platform - Frontend Module
-Provides web interface for the threat intelligence platform.
+Provides web interface for the threat intelligence platform using existing templates.
 """
 
 import os
 import json
 import logging
 import hashlib
-import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, send_file, abort
-from flask_cors import CORS
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, send_file
 import requests
+from flask_cors import CORS
 from google.cloud import storage
 from google.cloud import bigquery
-from google.cloud import secretmanager
 
 # Import config module for centralized configuration
 import config
@@ -42,15 +40,9 @@ if not hasattr(config, 'api_key') or config.api_key is None:
 else:
     API_KEY = config.api_key
 
-# Initialize Flask app with template directory safeguards
-template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-if not os.path.exists(template_dir):
-    logger.warning(f"Template directory not found at {template_dir}, creating it")
-    os.makedirs(template_dir, exist_ok=True)
-
-app = Flask(__name__, template_folder=template_dir)
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates')
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", "dev-key-change-in-production"))
-app.config['TEMPLATES_AUTO_RELOAD'] = True
 CORS(app)
 
 # Initialize GCP clients
@@ -67,47 +59,6 @@ try:
 except Exception as e:
     logger.warning(f"Failed to initialize BigQuery client: {str(e)}")
     bq_client = None
-
-try:
-    secret_client = secretmanager.SecretManagerServiceClient()
-    logger.info("Secret Manager client initialized successfully")
-except Exception as e:
-    logger.warning(f"Failed to initialize Secret Manager client: {str(e)}")
-    secret_client = None
-
-# Check for template files in Secret Manager
-def check_secret_templates():
-    """Check if templates exist in Secret Manager and save to filesystem if needed"""
-    if not secret_client:
-        return
-
-    template_files = ['login.html', 'dashboard.html', '404.html', '500.html', 'base.html', 'content.html']
-    
-    for template_name in template_files:
-        # Check if template already exists in filesystem
-        template_path = os.path.join(template_dir, template_name)
-        if os.path.exists(template_path):
-            continue
-            
-        # Try to get template from Secret Manager
-        secret_id = f"template-{template_name.replace('.html', '')}"
-        try:
-            name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/latest"
-            response = secret_client.access_secret_version(request={"name": name})
-            template_content = response.payload.data.decode("UTF-8")
-            
-            with open(template_path, 'w') as f:
-                f.write(template_content)
-                
-            logger.info(f"Saved template {template_name} from Secret Manager")
-        except Exception as e:
-            logger.warning(f"Couldn't retrieve template {template_name} from Secret Manager: {e}")
-
-# Run template check at startup
-try:
-    check_secret_templates()
-except Exception as e:
-    logger.error(f"Error checking secret templates: {e}")
 
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
@@ -180,20 +131,6 @@ def role_required(required_role):
 # Helper functions
 def api_request(endpoint: str, params: Dict = None) -> Dict:
     """Make a request to the API service"""
-    # First try direct API if on same instance
-    try:
-        import api
-        if hasattr(api, 'api_bp') and endpoint in api.api_bp.view_functions:
-            # Create test request context
-            with app.test_request_context(f'/api/{endpoint}', query_string=params):
-                response = api.api_bp.view_functions[endpoint]()
-                if isinstance(response, tuple):
-                    return response[0]
-                return response
-    except Exception as e:
-        logger.debug(f"Direct API call failed, falling back to HTTP: {e}")
-    
-    # Fall back to HTTP request
     if API_URL:
         url = f"{API_URL}/api/{endpoint}"
     else:
@@ -212,84 +149,6 @@ def api_request(endpoint: str, params: Dict = None) -> Dict:
         logger.error(f"API request error: {str(e)}")
         return {"error": str(e)}
 
-# Ensure templates exist
-def ensure_template_exists(template_name):
-    """Ensure the template exists, return fallback if it doesn't"""
-    template_path = os.path.join(template_dir, template_name)
-    if os.path.exists(template_path):
-        return template_name
-    
-    logger.warning(f"Template {template_name} not found, using fallback")
-    
-    # Define fallbacks for critical templates
-    fallbacks = {
-        '404.html': 'error_404.html',
-        '500.html': 'error_500.html',
-        'login.html': 'fallback_login.html',
-        'dashboard.html': 'base.html',
-    }
-    
-    if template_name in fallbacks:
-        fallback = fallbacks[template_name]
-        if os.path.exists(os.path.join(template_dir, fallback)):
-            return fallback
-    
-    # If no fallback exists, create a minimal emergency template
-    emergency_templates = {
-        '404.html': """<!DOCTYPE html><html><head><title>404 Not Found</title></head>
-            <body><h1>404 - Page Not Found</h1><p>The page you requested could not be found.</p>
-            <a href="/">Return to Home</a></body></html>""",
-            
-        '500.html': """<!DOCTYPE html><html><head><title>500 Server Error</title></head>
-            <body><h1>500 - Server Error</h1><p>The server encountered an error processing your request.</p>
-            <a href="/">Return to Home</a></body></html>""",
-            
-        'login.html': """<!DOCTYPE html><html><head><title>Login</title></head>
-            <body><h1>Login</h1><form action="/login" method="post">
-            Username: <input type="text" name="username"><br>
-            Password: <input type="password" name="password"><br>
-            <button type="submit">Login</button></form></body></html>""",
-            
-        'dashboard.html': """<!DOCTYPE html><html><head><title>Dashboard</title></head>
-            <body><h1>Dashboard</h1><p>Welcome to the Threat Intelligence Platform.</p>
-            <a href="/logout">Logout</a></body></html>"""
-    }
-    
-    if template_name in emergency_templates:
-        emergency_content = emergency_templates[template_name]
-        try:
-            with open(template_path, 'w') as f:
-                f.write(emergency_content)
-            logger.info(f"Created emergency template for {template_name}")
-            return template_name
-        except Exception as e:
-            logger.error(f"Failed to create emergency template: {e}")
-    
-    # If all else fails, use 500.html as a last resort
-    if template_name != '500.html' and os.path.exists(os.path.join(template_dir, '500.html')):
-        return '500.html'
-    
-    # We have no templates at all - return error string
-    # This will bypass template rendering and just return the string
-    abort(500, description=f"Template {template_name} not found and no fallbacks available")
-
-# Safe render template function
-def safe_render_template(template_name, **context):
-    """Safely render a template with fallbacks"""
-    try:
-        # Ensure the template exists
-        template_to_use = ensure_template_exists(template_name)
-        return render_template(template_to_use, **context)
-    except Exception as e:
-        logger.error(f"Error rendering template {template_name}: {e}")
-        logger.error(traceback.format_exc())
-        
-        # Fall back to a minimal error template
-        error_message = f"Error rendering template: {str(e)}"
-        return f"""<!DOCTYPE html><html><head><title>Error</title></head>
-            <body><h1>Error Rendering Page</h1><p>{error_message}</p>
-            <a href="/">Return to Home</a></body></html>"""
-
 # Route handlers
 @app.route('/')
 @login_required
@@ -297,60 +156,38 @@ def dashboard():
     """Dashboard page"""
     days = request.args.get('days', '30')
     
-    # Get platform stats with error handling
-    try:
-        stats = api_request('stats', {'days': days})
-        if 'error' in stats:
-            logger.warning(f"Error fetching stats: {stats['error']}")
-            stats = {'feeds': {}, 'iocs': {}, 'campaigns': {}, 'analyses': {}}
-    except Exception as e:
-        logger.error(f"Exception fetching stats: {e}")
-        stats = {'feeds': {}, 'iocs': {}, 'campaigns': {}, 'analyses': {}}
+    # Get platform stats
+    stats = api_request('stats', {'days': days})
     
     # Get recent campaigns
-    try:
-        campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
-        campaigns = campaigns_data.get('campaigns', [])
-    except Exception as e:
-        logger.error(f"Exception fetching campaigns: {e}")
-        campaigns = []
+    campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
+    campaigns = campaigns_data.get('campaigns', [])
     
     # Get top IOCs
-    try:
-        iocs_data = api_request('iocs', {'days': days, 'limit': 5})
-        top_iocs = iocs_data.get('records', [])
-    except Exception as e:
-        logger.error(f"Exception fetching IOCs: {e}")
-        top_iocs = []
+    iocs_data = api_request('iocs', {'days': days, 'limit': 5})
+    top_iocs = iocs_data.get('records', [])
     
     # Get GCP metrics
     gcp_metrics = get_gcp_metrics()
     
-    # Default chart data if API fails
+    # Generate chart data
     ioc_type_labels = json.dumps(["ip", "domain", "url", "hash"])
     ioc_type_values = json.dumps([10, 20, 15, 25])
-    activity_dates = json.dumps([])
-    activity_counts = json.dumps([])
     
     # Try to get real chart data
-    try:
-        # Extract data from stats
-        if 'iocs' in stats and 'types' in stats['iocs']:
-            ioc_types = stats['iocs']['types']
-            labels = [item.get('type', 'unknown') for item in ioc_types]
-            values = [item.get('count', 0) for item in ioc_types]
-            ioc_type_labels = json.dumps(labels)
-            ioc_type_values = json.dumps(values)
-        
-        # Get activity data
-        activity_data = api_request('feeds/alienvault_pulses/stats', {'days': days})
-        if 'daily_counts' in activity_data:
-            activity_dates = json.dumps([item.get("date") for item in activity_data.get("daily_counts", [])])
-            activity_counts = json.dumps([item.get("count") for item in activity_data.get("daily_counts", [])])
-    except Exception as e:
-        logger.error(f"Error preparing chart data: {e}")
+    if 'iocs' in stats and 'types' in stats['iocs']:
+        ioc_types = stats['iocs']['types']
+        labels = [item.get('type', 'unknown') for item in ioc_types]
+        values = [item.get('count', 0) for item in ioc_types]
+        ioc_type_labels = json.dumps(labels)
+        ioc_type_values = json.dumps(values)
     
-    return safe_render_template(
+    # Generate activity data
+    activity_data = api_request('feeds/alienvault_pulses/stats', {'days': days})
+    activity_dates = json.dumps([item.get("date") for item in activity_data.get("daily_counts", [])])
+    activity_counts = json.dumps([item.get("count") for item in activity_data.get("daily_counts", [])])
+    
+    return render_template(
         'dashboard.html',
         days=days,
         stats=stats,
@@ -372,19 +209,9 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        if not username or not password:
-            error = "Username and password are required"
-            logger.warning("Login attempt with missing username/password")
-            return safe_render_template('login.html', error=error)
-        
         # Get latest users from config
-        try:
-            current_users = get_users()
-        except Exception as e:
-            logger.error(f"Error getting users: {e}")
-            current_users = {}
+        current_users = get_users()
         
-        # Check if user exists and password matches
         if username in current_users and current_users[username]['password'] == hashlib.sha256(password.encode()).hexdigest():
             session['logged_in'] = True
             session['username'] = username
@@ -396,24 +223,21 @@ def login():
             except Exception as e:
                 logger.warning(f"Could not update last login: {str(e)}")
             
-            logger.info(f"Successful login for user: {username}")
-            
             next_page = request.args.get('next')
             if next_page:
                 return redirect(next_page)
             return redirect(url_for('dashboard'))
         else:
             error = "Invalid username or password"
-            logger.warning(f"Failed login attempt for user: {username}")
     
-    return safe_render_template('login.html', error=error)
+    return render_template('login.html', error=error)
 
 @app.route('/logout')
 def logout():
     """Logout user"""
-    username = session.get('username')
-    session.clear()
-    logger.info(f"User logged out: {username}")
+    session.pop('logged_in', None)
+    session.pop('username', None)
+    session.pop('role', None)
     return redirect(url_for('login'))
 
 @app.route('/feeds')
@@ -422,69 +246,47 @@ def feeds():
     """Feeds overview page"""
     days = request.args.get('days', '30')
     
-    # Get feeds list with error handling
-    try:
-        feeds_data = api_request('feeds')
-        if 'error' in feeds_data:
-            logger.warning(f"Error fetching feeds: {feeds_data['error']}")
-            feeds_list = []
-        else:
-            feeds_list = feeds_data.get('feeds', [])
-    except Exception as e:
-        logger.error(f"Exception fetching feeds: {e}")
-        feeds_list = []
+    # Get feeds list
+    feeds_data = api_request('feeds')
     
     # Get stats for each feed
     feeds = []
     total_records = 0
     days_with_updates = 0
     
-    for feed_name in feeds_list:
-        try:
-            feed_stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
-            
-            if 'error' in feed_stats:
-                logger.warning(f"Error fetching feed stats for {feed_name}: {feed_stats['error']}")
-                continue
-                
-            feeds.append({
-                'feed_name': feed_name,
-                'record_count': feed_stats.get('total_records', 0),
-                'latest_record': feed_stats.get('latest_record'),
-                'earliest_record': feed_stats.get('earliest_record')
-            })
-            
-            total_records += feed_stats.get('total_records', 0)
-            days_with_updates += feed_stats.get('days_with_data', 0)
-        except Exception as e:
-            logger.error(f"Exception fetching feed stats for {feed_name}: {e}")
-    
-    # Prepare feed activity data with default
-    feed_activity = '{}'
-    
-    # Try to get real activity data
-    try:
-        activity_data = {}
-        for feed_name in feeds_list[:5]:  # Limit to 5 feeds to avoid overloading
-            feed_stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
-            if 'error' not in feed_stats and 'daily_counts' in feed_stats:
-                dates = []
-                counts = []
-                
-                for day_data in feed_stats.get('daily_counts', []):
-                    dates.append(day_data.get('date'))
-                    counts.append(day_data.get('count', 0))
-                
-                activity_data[feed_name] = {
-                    'dates': dates,
-                    'counts': counts
-                }
+    for feed_name in feeds_data.get('feeds', []):
+        feed_stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
         
-        feed_activity = json.dumps(activity_data)
-    except Exception as e:
-        logger.error(f"Error preparing feed activity data: {e}")
+        feeds.append({
+            'feed_name': feed_name,
+            'record_count': feed_stats.get('total_records', 0),
+            'latest_record': feed_stats.get('latest_record'),
+            'earliest_record': feed_stats.get('earliest_record')
+        })
+        
+        total_records += feed_stats.get('total_records', 0)
+        days_with_updates += feed_stats.get('days_with_data', 0)
     
-    return safe_render_template(
+    # Prepare feed activity data
+    feed_activity_data = {}
+    for feed_name in feeds_data.get('feeds', [])[:5]:  # Limit to 5 feeds
+        feed_stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
+        
+        dates = []
+        counts = []
+        
+        for day_data in feed_stats.get('daily_counts', []):
+            dates.append(day_data.get('date'))
+            counts.append(day_data.get('count', 0))
+        
+        feed_activity_data[feed_name] = {
+            'dates': dates,
+            'counts': counts
+        }
+    
+    feed_activity = json.dumps(feed_activity_data)
+    
+    return render_template(
         'feeds.html',
         days=days,
         feeds=feeds,
@@ -502,34 +304,17 @@ def feed_detail(feed_name: str):
     offset = int(request.args.get('offset', '0'))
     search = request.args.get('search', '')
     
-    # Get feed stats with error handling
-    try:
-        stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
-        if 'error' in stats:
-            logger.warning(f"Error fetching feed stats: {stats['error']}")
-            stats = {}
-    except Exception as e:
-        logger.error(f"Exception fetching feed stats: {e}")
-        stats = {}
+    # Get feed stats
+    stats = api_request(f'feeds/{feed_name}/stats', {'days': days})
     
-    # Get feed data with error handling
+    # Get feed data
     params = {'days': days, 'limit': limit, 'offset': offset}
     if search:
         params['search'] = search
     
-    try:
-        feed_data = api_request(f'feeds/{feed_name}/data', params)
-        if 'error' in feed_data:
-            logger.warning(f"Error fetching feed data: {feed_data['error']}")
-            records = []
-            total = 0
-        else:
-            records = feed_data.get('records', [])
-            total = feed_data.get('total', 0)
-    except Exception as e:
-        logger.error(f"Exception fetching feed data: {e}")
-        records = []
-        total = 0
+    feed_data = api_request(f'feeds/{feed_name}/data', params)
+    
+    records = feed_data.get('records', [])
     
     # Extract columns (use first record or empty list)
     columns = []
@@ -539,28 +324,18 @@ def feed_detail(feed_name: str):
     
     # Prepare pagination
     pagination = {
-        'total': total,
+        'total': feed_data.get('total', 0),
         'limit': limit,
         'offset': offset
     }
     
-    # Prepare daily counts chart data with defaults
+    # Prepare daily counts chart data
     daily_counts = {
-        'dates': json.dumps([]),
-        'counts': json.dumps([])
+        'dates': json.dumps([day_data.get('date') for day_data in stats.get('daily_counts', [])]),
+        'counts': json.dumps([day_data.get('count', 0) for day_data in stats.get('daily_counts', [])])
     }
     
-    # Try to get real chart data
-    try:
-        if 'daily_counts' in stats:
-            daily_counts = {
-                'dates': json.dumps([day_data.get('date') for day_data in stats.get('daily_counts', [])]),
-                'counts': json.dumps([day_data.get('count', 0) for day_data in stats.get('daily_counts', [])])
-            }
-    except Exception as e:
-        logger.error(f"Error preparing daily counts chart: {e}")
-    
-    return safe_render_template(
+    return render_template(
         'feed_detail.html',
         feed_name=feed_name,
         days=days,
@@ -582,7 +357,7 @@ def campaigns():
     min_sources = int(request.args.get('min_sources', '2'))
     search = request.args.get('search', '')
     
-    # Get campaigns list with error handling
+    # Get campaigns list
     params = {
         'days': days,
         'limit': limit,
@@ -590,31 +365,16 @@ def campaigns():
         'min_sources': min_sources
     }
     
-    try:
-        if search:
-            # Use search API for text search
-            search_data = api_request('search', {'q': search, 'days': days})
-            if 'error' in search_data:
-                logger.warning(f"Error in search API: {search_data['error']}")
-                campaigns = []
-                total = 0
-            else:
-                campaigns = search_data.get('results', {}).get('campaigns', [])
-                total = len(campaigns)
-        else:
-            # Get all campaigns
-            campaigns_data = api_request('campaigns', params)
-            if 'error' in campaigns_data:
-                logger.warning(f"Error fetching campaigns: {campaigns_data['error']}")
-                campaigns = []
-                total = 0
-            else:
-                campaigns = campaigns_data.get('campaigns', [])
-                total = campaigns_data.get('count', 0)
-    except Exception as e:
-        logger.error(f"Exception fetching campaigns: {e}")
-        campaigns = []
-        total = 0
+    if search:
+        # Use search API for text search
+        search_data = api_request('search', {'q': search, 'days': days})
+        campaigns = search_data.get('results', {}).get('campaigns', [])
+        total = len(campaigns)
+    else:
+        # Get all campaigns
+        campaigns_data = api_request('campaigns', params)
+        campaigns = campaigns_data.get('campaigns', [])
+        total = campaigns_data.get('count', 0)
     
     # Prepare pagination
     pagination = {
@@ -623,74 +383,52 @@ def campaigns():
         'offset': offset
     }
     
-    # Default chart data
-    chart_data = {
-        "actor_labels": json.dumps([]),
-        "actor_values": json.dumps([]),
-        "target_labels": json.dumps([]),
-        "target_values": json.dumps([])
-    }
+    # Count by actor and target for charts
+    actor_data = {}
+    target_data = {}
     
-    # Try to create real chart data
-    try:
+    for campaign in campaigns:
         # Count by actor
-        actor_data = {}
-        target_data = {}
+        actor = campaign.get('threat_actor', 'Unknown')
+        if actor not in actor_data:
+            actor_data[actor] = 0
+        actor_data[actor] += 1
         
-        for campaign in campaigns:
-            # Count by actor
-            actor = campaign.get('threat_actor', 'Unknown')
-            if actor not in actor_data:
-                actor_data[actor] = 0
-            actor_data[actor] += 1
-            
-            # Count by target
-            target = campaign.get('targets', 'Unknown')
-            if target not in target_data:
-                target_data[target] = 0
-            target_data[target] += 1
-        
-        # Convert to lists for charts
-        actor_labels = list(actor_data.keys())
-        actor_values = list(actor_data.values())
-        
-        target_labels = list(target_data.keys())
-        target_values = list(target_data.values())
-        
-        chart_data = {
-            "actor_labels": json.dumps(actor_labels),
-            "actor_values": json.dumps(actor_values),
-            "target_labels": json.dumps(target_labels),
-            "target_values": json.dumps(target_values)
-        }
-    except Exception as e:
-        logger.error(f"Error creating chart data: {e}")
+        # Count by target
+        target = campaign.get('targets', 'Unknown')
+        if target not in target_data:
+            target_data[target] = 0
+        target_data[target] += 1
     
-    return safe_render_template(
+    # Convert to lists for charts
+    actor_labels = list(actor_data.keys())
+    actor_values = list(actor_data.values())
+    
+    target_labels = list(target_data.keys())
+    target_values = list(target_data.values())
+    
+    return render_template(
         'campaigns.html',
         days=days,
         campaigns=campaigns,
         min_sources=min_sources,
         pagination=pagination,
         search=search,
-        **chart_data
+        actor_labels=json.dumps(actor_labels),
+        actor_values=json.dumps(actor_values),
+        target_labels=json.dumps(target_labels),
+        target_values=json.dumps(target_values)
     )
 
 @app.route('/campaigns/<campaign_id>')
 @login_required
 def campaign_detail(campaign_id: str):
     """Campaign detail page"""
-    # Get campaign details with error handling
-    try:
-        campaign_data = api_request(f'campaigns/{campaign_id}')
-        
-        if 'error' in campaign_data:
-            logger.warning(f"Error fetching campaign {campaign_id}: {campaign_data['error']}")
-            flash("Campaign not found", "danger")
-            return redirect(url_for("campaigns"))
-    except Exception as e:
-        logger.error(f"Exception fetching campaign {campaign_id}: {e}")
-        flash("Error fetching campaign details", "danger")
+    # Get campaign details
+    campaign_data = api_request(f'campaigns/{campaign_id}')
+    
+    if 'error' in campaign_data:
+        flash("Campaign not found", "danger")
         return redirect(url_for("campaigns"))
     
     # Prepare IOC type chart data
@@ -704,7 +442,7 @@ def campaign_detail(campaign_id: str):
     ioc_type_labels = json.dumps(list(ioc_types.keys()))
     ioc_type_values = json.dumps(list(ioc_types.values()))
     
-    return safe_render_template(
+    return render_template(
         'campaign_detail.html',
         campaign=campaign_data,
         ioc_type_labels=ioc_type_labels,
@@ -721,7 +459,7 @@ def iocs():
     search_value = request.args.get('value', '')
     search_type = request.args.get('type', '')
     
-    # Get IOCs data with error handling
+    # Get IOCs data
     params = {
         'days': days,
         'limit': limit,
@@ -733,70 +471,38 @@ def iocs():
     if search_type:
         params['type'] = search_type
     
-    try:
-        iocs_data = api_request('iocs', params)
-        if 'error' in iocs_data:
-            logger.warning(f"Error fetching IOCs: {iocs_data['error']}")
-            iocs = []
-            total = 0
-        else:
-            iocs = iocs_data.get('records', [])
-            total = iocs_data.get('count', 0)
-    except Exception as e:
-        logger.error(f"Exception fetching IOCs: {e}")
-        iocs = []
-        total = 0
+    iocs_data = api_request('iocs', params)
+    iocs = iocs_data.get('records', [])
     
-    # Get platform stats for IOC distribution with error handling
-    try:
-        stats = api_request('stats', {'days': days})
-        if 'error' in stats:
-            logger.warning(f"Error fetching stats: {stats['error']}")
-            ioc_types = []
-        else:
-            ioc_types = stats.get('iocs', {}).get('types', [])
-    except Exception as e:
-        logger.error(f"Exception fetching stats: {e}")
-        ioc_types = []
+    # Get platform stats for IOC distribution
+    stats = api_request('stats', {'days': days})
+    ioc_types = stats.get('iocs', {}).get('types', [])
     
-    # Prepare chart data with defaults
-    ioc_type_labels = json.dumps(["ip", "domain", "url", "hash"])
-    ioc_type_values = json.dumps([10, 20, 15, 25])
-    country_labels = json.dumps(["US", "RU", "CN", "DE"])
-    country_values = json.dumps([30, 20, 25, 15])
+    # Prepare chart data
+    ioc_type_labels = json.dumps([item.get('type', 'unknown') for item in ioc_types])
+    ioc_type_values = json.dumps([item.get('count', 0) for item in ioc_types])
     
-    # Try to create real chart data
-    try:
-        # Prepare IOC type chart
-        type_labels = [item.get('type', 'unknown') for item in ioc_types]
-        type_values = [item.get('count', 0) for item in ioc_types]
-        ioc_type_labels = json.dumps(type_labels)
-        ioc_type_values = json.dumps(type_values)
-        
-        # Prepare country data (for IP IOCs)
-        country_data = {}
-        for ioc in iocs:
-            for item in ioc.get('iocs', []):
-                if item.get('type') == 'ip' and 'geo' in item and item.get('geo', {}).get('country'):
-                    country = item.get('geo', {}).get('country')
-                    if country not in country_data:
-                        country_data[country] = 0
-                    country_data[country] += 1
-        
-        if country_data:
-            country_labels = json.dumps(list(country_data.keys()))
-            country_values = json.dumps(list(country_data.values()))
-    except Exception as e:
-        logger.error(f"Error creating IOC charts: {e}")
+    # Prepare country data (for IP IOCs)
+    country_data = {}
+    for ioc in iocs:
+        for item in ioc.get('iocs', []):
+            if item.get('type') == 'ip' and 'geo' in item and item.get('geo', {}).get('country'):
+                country = item.get('geo', {}).get('country')
+                if country not in country_data:
+                    country_data[country] = 0
+                country_data[country] += 1
+    
+    country_labels = json.dumps(list(country_data.keys()))
+    country_values = json.dumps(list(country_data.values()))
     
     # Prepare pagination
     pagination = {
-        'total': total,
+        'total': iocs_data.get('count', 0),
         'limit': limit,
         'offset': offset
     }
     
-    return safe_render_template(
+    return render_template(
         'iocs.html',
         days=days,
         iocs=iocs,
@@ -810,6 +516,50 @@ def iocs():
         limit=limit
     )
 
+@app.route('/iocs/<type>/<value>')
+@login_required
+def ioc_detail(type: str, value: str):
+    """IOC detail page"""
+    # Get IOC details
+    iocs_data = api_request('iocs', {'type': type, 'value': value, 'limit': 1})
+    if not iocs_data.get('records'):
+        flash("IOC not found", "danger")
+        return redirect(url_for("iocs"))
+    
+    ioc = iocs_data.get('records')[0]
+    
+    # Get campaigns that reference this IOC
+    search_data = api_request('search', {'q': value})
+    campaigns = search_data.get('results', {}).get('campaigns', [])
+    
+    # Get sources that reference this IOC
+    sources = search_data.get('results', {}).get('analyses', [])
+    
+    # Get related IOCs (same campaign or source)
+    related_iocs = []
+    for campaign in campaigns[:3]:  # Limit to first 3 campaigns
+        campaign_data = api_request(f'campaigns/{campaign.get("campaign_id")}')
+        for rel_ioc in campaign_data.get('iocs', [])[:5]:  # Limit to first 5 IOCs
+            if rel_ioc.get('value') != value:  # Skip the current IOC
+                related_iocs.append(rel_ioc)
+    
+    # Remove duplicates
+    seen = set()
+    unique_related_iocs = []
+    for rel_ioc in related_iocs:
+        ioc_key = f"{rel_ioc.get('type')}:{rel_ioc.get('value')}"
+        if ioc_key not in seen:
+            seen.add(ioc_key)
+            unique_related_iocs.append(rel_ioc)
+    
+    return render_template(
+        'ioc_detail.html',
+        ioc=ioc,
+        campaigns=campaigns,
+        sources=sources,
+        related_iocs=unique_related_iocs[:10]  # Limit to 10 related IOCs
+    )
+
 @app.route('/search')
 @login_required
 def search():
@@ -819,22 +569,13 @@ def search():
     if not query:
         return redirect(url_for('dashboard'))
     
-    # Search across all data with error handling
-    try:
-        search_data = api_request('search', {'q': query, 'days': 30})
-        if 'error' in search_data:
-            logger.warning(f"Error in search API: {search_data['error']}")
-            results = {'feeds': [], 'analyses': [], 'campaigns': []}
-        else:
-            results = search_data.get('results', {})
-    except Exception as e:
-        logger.error(f"Exception searching: {e}")
-        results = {'feeds': [], 'analyses': [], 'campaigns': []}
+    # Search across all data
+    search_data = api_request('search', {'q': query, 'days': 30})
     
-    return safe_render_template(
+    return render_template(
         'search_results.html',
         query=query,
-        results=results
+        results=search_data.get('results', {})
     )
 
 @app.route('/reports')
@@ -843,7 +584,7 @@ def reports():
     """Reports page"""
     days = request.args.get('days', '30')
     
-    # Get reports from API with error handling
+    # Get reports from API
     report_types = ["feed_summary", "campaign_analysis", "ioc_trend"]
     reports = []
     
@@ -872,27 +613,38 @@ def reports():
                 'period_days': int(days)
             })
     
-    return safe_render_template(
+    return render_template(
         'reports.html',
         days=days,
         reports=reports
     )
 
+@app.route('/generate_report')
+@login_required
+def generate_report():
+    """Generate a report"""
+    report_type = request.args.get('report_type')
+    days = int(request.args.get('days', '30'))
+    
+    # Call API to generate report
+    try:
+        response = api_request(f'reports/{report_type}', {'days': days, 'generate': 'true'})
+        if 'error' not in response:
+            flash(f"Report '{report_type}' generated successfully", "success")
+        else:
+            flash(f"Error generating report: {response.get('error')}", "danger")
+    except Exception as e:
+        flash(f"Error generating report: {str(e)}", "danger")
+    
+    return redirect(url_for('reports'))
+
 @app.route('/alerts')
 @login_required
 def alerts():
     """Alerts page"""
-    # Get alerts from API with error handling
-    try:
-        alerts_data = api_request('alerts')
-        if 'error' in alerts_data:
-            logger.warning(f"Error fetching alerts: {alerts_data['error']}")
-            alerts_list = []
-        else:
-            alerts_list = alerts_data.get('alerts', [])
-    except Exception as e:
-        logger.error(f"Exception fetching alerts: {e}")
-        alerts_list = []
+    # Get alerts from API
+    alerts_data = api_request('alerts')
+    alerts_list = alerts_data.get('alerts', [])
     
     # Handle case of empty alerts with proper structure
     if not alerts_list:
@@ -903,12 +655,12 @@ def alerts():
                 'id': 'no_alerts_1',
                 'title': 'No alerts currently active',
                 'severity': 'low',
-                'created_at': current_time.isoformat(),
+                'timestamp': current_time.isoformat(),
                 'description': 'The system is working normally with no active threats detected.'
             }
         ]
     
-    return safe_render_template(
+    return render_template(
         'alerts.html',
         alerts=alerts_list
     )
@@ -917,19 +669,11 @@ def alerts():
 @login_required
 def explore():
     """Data Explorer page"""
-    # Get available data sources with error handling
-    try:
-        feeds_data = api_request('feeds')
-        if 'error' in feeds_data:
-            logger.warning(f"Error fetching feeds: {feeds_data['error']}")
-            feeds = []
-        else:
-            feeds = feeds_data.get('feeds', [])
-    except Exception as e:
-        logger.error(f"Exception fetching feeds: {e}")
-        feeds = []
+    # Get available data sources
+    feeds_data = api_request('feeds')
+    feeds = feeds_data.get('feeds', [])
     
-    return safe_render_template(
+    return render_template(
         'explore.html',
         feeds=feeds
     )
@@ -939,8 +683,75 @@ def explore():
 @role_required('admin')
 def settings():
     """Settings page"""
-    return safe_render_template(
+    return render_template(
         'settings.html'
+    )
+
+@app.route('/settings/api_keys', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def api_keys_settings():
+    """API Keys Settings page"""
+    # Get current API keys
+    api_keys_data = config.get_cached_config('api-keys')
+    api_keys = {
+        "virustotal": api_keys_data.get("virustotal", ""),
+        "alienvault": api_keys_data.get("alienvault", ""),
+        "misp": api_keys_data.get("misp", ""),
+        "mandiant": api_keys_data.get("mandiant", "")
+    }
+    
+    if request.method == 'POST':
+        # Update API keys
+        for service in api_keys.keys():
+            new_key = request.form.get(f"{service}_api_key")
+            if new_key is not None and new_key != api_keys[service]:
+                config.update_api_key(service, new_key)
+                flash(f"{service.title()} API key updated successfully", "success")
+        
+        # Reload the page to show updated keys
+        return redirect(url_for('api_keys_settings'))
+    
+    return render_template(
+        'settings_api_keys.html',
+        api_keys=api_keys
+    )
+
+@app.route('/settings/feeds', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def feed_settings():
+    """Feed Settings page"""
+    # Get current feed configurations
+    feed_config_data = config.get_cached_config('feed-config')
+    feed_configs = feed_config_data.get("feeds", [])
+    
+    # Convert to dict for easier access
+    feed_config_dict = {}
+    for feed in feed_configs:
+        feed_name = feed.get("name")
+        if feed_name:
+            feed_config_dict[feed_name] = feed
+    
+    if request.method == 'POST':
+        # Update feed configuration
+        feed_name = request.form.get("feed_name")
+        if feed_name:
+            updates = {
+                "url": request.form.get(f"{feed_name}_url", ""),
+                "auth_key": request.form.get(f"{feed_name}_auth_key", ""),
+                "active": request.form.get(f"{feed_name}_active") == "on"
+            }
+            
+            config.update_feed_config(feed_name, updates)
+            flash(f"{feed_name.title()} feed configuration updated successfully", "success")
+        
+        # Reload the page to show updated configuration
+        return redirect(url_for('feed_settings'))
+    
+    return render_template(
+        'settings_feeds.html',
+        feed_configs=feed_config_dict
     )
 
 @app.route('/users')
@@ -949,16 +760,72 @@ def settings():
 def users():
     """User Management page"""
     # Get latest users from config
-    try:
-        current_users = get_users()
-    except Exception as e:
-        logger.error(f"Error getting users: {e}")
-        flash("Error retrieving user list", "danger")
-        current_users = {}
+    current_users = get_users()
     
-    return safe_render_template(
+    return render_template(
         'users.html',
         users=current_users
+    )
+
+@app.route('/users/add', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def add_user_route():
+    """Add a new user"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        role = request.form.get('role', 'readonly')
+        
+        if username and password:
+            result = config.add_user(username, password, role)
+            if result:
+                flash(f"User {username} added successfully", "success")
+            else:
+                flash(f"Failed to add user {username}", "danger")
+        else:
+            flash("Username and password are required", "danger")
+        
+        return redirect(url_for('users'))
+    
+    return render_template('user_add.html')
+
+@app.route('/users/edit/<username>', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def edit_user(username):
+    """Edit an existing user"""
+    # Get latest users from config
+    current_users = get_users()
+    
+    if username not in current_users:
+        flash(f"User {username} not found", "danger")
+        return redirect(url_for('users'))
+    
+    if request.method == 'POST':
+        new_password = request.form.get('password')
+        new_role = request.form.get('role')
+        
+        updates = {}
+        if new_role:
+            updates["role"] = new_role
+        
+        if new_password:
+            updates["password"] = new_password
+        
+        if updates:
+            result = config.update_user(username, updates)
+            if result:
+                flash(f"User {username} updated successfully", "success")
+            else:
+                flash(f"Failed to update user {username}", "danger")
+        
+        return redirect(url_for('users'))
+    
+    return render_template(
+        'user_edit.html',
+        username=username,
+        user=current_users[username]
     )
 
 @app.route('/profile')
@@ -968,15 +835,10 @@ def profile():
     username = session.get('username')
     
     # Get latest users from config
-    try:
-        current_users = get_users()
-        user_data = current_users.get(username, {})
-    except Exception as e:
-        logger.error(f"Error getting user profile: {e}")
-        flash("Error retrieving profile data", "danger")
-        user_data = {}
+    current_users = get_users()
+    user_data = current_users.get(username, {})
     
-    return safe_render_template(
+    return render_template(
         'profile.html',
         username=username,
         user=user_data
@@ -992,39 +854,105 @@ def change_password():
     confirm_password = request.form.get('confirm_password')
     
     # Get latest users from config
-    try:
-        current_users = get_users()
+    current_users = get_users()
     
-        if not username or username not in current_users:
-            flash("User not found", "danger")
-            return redirect(url_for('profile'))
-        
-        if not current_password or not new_password or not confirm_password:
-            flash("All fields are required", "danger")
-            return redirect(url_for('profile'))
-        
-        if new_password != confirm_password:
-            flash("New passwords do not match", "danger")
-            return redirect(url_for('profile'))
-        
-        # Check current password
-        if current_users[username]['password'] != hashlib.sha256(current_password.encode()).hexdigest():
-            flash("Current password is incorrect", "danger")
-            return redirect(url_for('profile'))
-        
-        # Update password
-        result = config.update_user(username, {"password": new_password})
-        if result:
-            flash("Password changed successfully", "success")
-        else:
-            flash("Failed to change password", "danger")
-    except Exception as e:
-        logger.error(f"Error changing password: {e}")
-        flash("Error changing password", "danger")
+    if not username or username not in current_users:
+        flash("User not found", "danger")
+        return redirect(url_for('profile'))
+    
+    if not current_password or not new_password or not confirm_password:
+        flash("All fields are required", "danger")
+        return redirect(url_for('profile'))
+    
+    if new_password != confirm_password:
+        flash("New passwords do not match", "danger")
+        return redirect(url_for('profile'))
+    
+    # Check current password
+    if current_users[username]['password'] != hashlib.sha256(current_password.encode()).hexdigest():
+        flash("Current password is incorrect", "danger")
+        return redirect(url_for('profile'))
+    
+    # Update password
+    result = config.update_user(username, {"password": new_password})
+    if result:
+        flash("Password changed successfully", "success")
+    else:
+        flash("Failed to change password", "danger")
     
     return redirect(url_for('profile'))
 
-# GCP Metrics helper function
+@app.route('/export_feed')
+@login_required
+def export_feed():
+    """Export feed data"""
+    feed_name = request.args.get('feed_name')
+    format_type = request.args.get('format', 'csv')
+    
+    # Call API to export data
+    try:
+        if API_URL:
+            export_url = f"{API_URL}/api/export/feeds/{feed_name}?format={format_type}"
+        else:
+            export_url = f"/api/export/feeds/{feed_name}?format={format_type}"
+            
+        headers = {}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+            
+        response = requests.get(export_url, headers=headers)
+        
+        if response.status_code == 200:
+            # Handle file download
+            filename = f"{feed_name}_export.{format_type}"
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+            
+            return send_file(filename, as_attachment=True)
+        else:
+            flash(f"Error exporting feed: {response.json().get('error')}", "danger")
+    except Exception as e:
+        flash(f"Error exporting feed: {str(e)}", "warning")
+    
+    return redirect(url_for('feed_detail', feed_name=feed_name))
+
+@app.route('/export_iocs')
+@login_required
+def export_iocs():
+    """Export IOCs data"""
+    format_type = request.args.get('format', 'csv')
+    ioc_type = request.args.get('type')
+    
+    # Call API to export data
+    try:
+        if API_URL:
+            export_url = f"{API_URL}/api/export/iocs?format={format_type}"
+        else:
+            export_url = f"/api/export/iocs?format={format_type}"
+            
+        if ioc_type:
+            export_url += f"&type={ioc_type}"
+            
+        headers = {}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+            
+        response = requests.get(export_url, headers=headers)
+        
+        if response.status_code == 200:
+            # Handle file download
+            filename = f"iocs_export.{format_type}"
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+            
+            return send_file(filename, as_attachment=True)
+        else:
+            flash(f"Error exporting IOCs: {response.json().get('error')}", "danger")
+    except Exception as e:
+        flash(f"Error exporting IOCs: {str(e)}", "warning")
+    
+    return redirect(url_for('iocs'))
+
 def get_gcp_metrics() -> Dict:
     """Get metrics from GCP services"""
     metrics = {
@@ -1035,21 +963,18 @@ def get_gcp_metrics() -> Dict:
     
     try:
         if bq_client:
-            # Get BigQuery table counts with better error handling
-            try:
-                query = f"""
-                SELECT COUNT(*) as tables
-                FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
-                """
-                query_job = bq_client.query(query)
-                results = query_job.result()
-                row = next(results)
-                metrics["table_count"] = row.tables
-            except Exception as e:
-                logger.warning(f"Error getting BigQuery table count: {e}")
+            # Get BigQuery table counts
+            query = f"""
+            SELECT COUNT(*) as tables
+            FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
+            """
+            query_job = bq_client.query(query)
+            results = query_job.result()
+            row = next(results)
+            metrics["table_count"] = row.tables
         
         if storage_client:
-            # Get Storage bucket info with better error handling
+            # Get Storage bucket info
             bucket_name = config.gcs_bucket
             try:
                 bucket = storage_client.get_bucket(bucket_name)
@@ -1064,36 +989,22 @@ def get_gcp_metrics() -> Dict:
     
     return metrics
 
-# Error handlers
 @app.errorhandler(404)
 def page_not_found(e):
     """404 Page not found"""
-    logger.warning(f"404 error: {request.path}")
-    return safe_render_template('404.html'), 404
+    return render_template('404.html'), 404
 
 @app.errorhandler(500)
 def server_error(e):
     """500 Server error"""
-    logger.error(f"500 error: {str(e)}")
-    logger.error(traceback.format_exc())
-    return safe_render_template('500.html'), 500
+    logger.error(f"Server error: {str(e)}")
+    return render_template('500.html'), 500
 
-# API endpoint for health checks
+# API health check for Cloud Run
 @app.route('/api/health', methods=['GET'])
 def api_health():
-    """Health check API endpoint"""
-    logger.info("Health check endpoint called")
+    """API health check endpoint"""
     version = os.environ.get("VERSION", "1.0.0")
-    
-    # Try to import API module for direct call
-    try:
-        import api
-        if hasattr(api, 'health_check'):
-            return api.health_check()
-    except Exception as e:
-        logger.debug(f"Direct API health check failed: {e}")
-    
-    # Fallback health response
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
@@ -1102,7 +1013,7 @@ def api_health():
         "project": PROJECT_ID
     })
 
-# Main health check endpoint at root level
+# Root health check
 @app.route('/health', methods=['GET'])
 def health():
     """Root health check endpoint"""
@@ -1118,20 +1029,6 @@ def inject_common_data():
         'project_id': config.project_id,
         'current_endpoint': request.endpoint
     }
-
-# Initialize during import
-if __name__ != "__main__":
-    # This code runs when the module is imported
-    logger.info("Initializing frontend module")
-    
-    # Check if API routes should be registered here
-    try:
-        from api import init_app as init_api
-        app = init_api(app)
-        logger.info("API routes registered through frontend module")
-    except Exception as e:
-        logger.warning(f"Failed to register API routes: {e}")
-        logger.warning("API routes will need to be registered separately")
 
 # Main entry point
 if __name__ == "__main__":
