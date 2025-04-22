@@ -2,8 +2,9 @@ import os
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import logging
-from config import load_configs, get_cached_config, create_or_update_secret
+from config import load_configs, get_cached_config, create_or_update_secret, access_secret
 import json
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,10 +39,164 @@ except Exception as e:
     logger.error(f"Failed to load configurations: {e}")
     app.config['AUTH'] = {}
 
+def check_gcp_services():
+    """Check if GCP services are running and properly configured."""
+    from config import project_id, region, bigquery_dataset, gcs_bucket
+    
+    services = {}
+    overall_status = "ok"
+    
+    # BigQuery check
+    try:
+        from google.cloud import bigquery
+        client = bigquery.Client()
+        
+        # Run a minimal query to verify connection
+        query_job = client.query("SELECT 1")
+        results = list(query_job.result())
+        
+        # Check if our dataset exists
+        try:
+            dataset_ref = client.dataset(bigquery_dataset)
+            dataset = client.get_dataset(dataset_ref)
+            services["bigquery"] = {"status": "ok", "dataset": bigquery_dataset}
+        except Exception as dataset_error:
+            services["bigquery"] = {
+                "status": "warning", 
+                "message": f"Connected but dataset error: {str(dataset_error)}",
+                "dataset": bigquery_dataset
+            }
+            overall_status = "degraded"
+    except Exception as e:
+        services["bigquery"] = {"status": "error", "message": str(e)}
+        overall_status = "degraded"
+    
+    # Cloud Storage check
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        
+        # Check if our bucket exists
+        try:
+            bucket = client.get_bucket(gcs_bucket)
+            services["storage"] = {"status": "ok", "bucket": gcs_bucket}
+        except Exception as bucket_error:
+            services["storage"] = {
+                "status": "warning", 
+                "message": f"Connected but bucket error: {str(bucket_error)}",
+                "bucket": gcs_bucket
+            }
+            overall_status = "degraded"
+    except Exception as e:
+        services["storage"] = {"status": "error", "message": str(e)}
+        overall_status = "degraded"
+    
+    # Secret Manager check
+    try:
+        # Check if we can access secrets config
+        secret_value = access_secret('api-keys')
+        if secret_value:
+            services["secret_manager"] = {"status": "ok"}
+        else:
+            services["secret_manager"] = {"status": "warning", "message": "Could not access api-keys secret"}
+            overall_status = "degraded"
+    except Exception as e:
+        services["secret_manager"] = {"status": "error", "message": str(e)}
+        overall_status = "degraded"
+    
+    # Pub/Sub check
+    try:
+        from google.cloud import pubsub_v1
+        publisher = pubsub_v1.PublisherClient()
+        
+        # List topics to verify connection
+        project_path = f"projects/{project_id}"
+        
+        # Check specific topics
+        pubsub_topic = os.environ.get("PUBSUB_TOPIC", "threat-data-ingestion")
+        topic_path = publisher.topic_path(project_id, pubsub_topic)
+        
+        try:
+            topic = publisher.get_topic(request={"topic": topic_path})
+            services["pubsub"] = {"status": "ok", "topic": pubsub_topic}
+        except Exception as topic_error:
+            services["pubsub"] = {
+                "status": "warning", 
+                "message": f"Topic error: {str(topic_error)}",
+                "topic": pubsub_topic
+            }
+            overall_status = "degraded"
+    except Exception as e:
+        services["pubsub"] = {"status": "error", "message": str(e)}
+        overall_status = "degraded"
+    
+    # Check Vertex AI (used for threat analysis)
+    try:
+        import vertexai
+        vertexai.init(project=project_id, location=region)
+        
+        # Try to load a model to verify configuration
+        try:
+            from vertexai.language_models import TextGenerationModel
+            model = TextGenerationModel.from_pretrained("text-bison")
+            services["vertexai"] = {"status": "ok", "model": "text-bison"}
+        except Exception as model_error:
+            services["vertexai"] = {
+                "status": "warning", 
+                "message": f"Model initialization error: {str(model_error)}"
+            }
+    except Exception as e:
+        services["vertexai"] = {"status": "error", "message": str(e)}
+        # Not marking as degraded since this might be optional
+    
+    # Check Cloud Functions (optional)
+    try:
+        from google.cloud import functions_v1
+        client = functions_v1.CloudFunctionsServiceClient()
+        
+        # List functions to verify access
+        parent = f"projects/{project_id}/locations/{region}"
+        functions = list(client.list_functions(request={"parent": parent, "page_size": 1}))
+        services["cloud_functions"] = {"status": "ok"}
+    except Exception as e:
+        services["cloud_functions"] = {"status": "warning", "message": str(e)}
+        # Not marking as degraded since this might be optional
+    
+    return {
+        "status": overall_status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": services,
+        "project": project_id,
+        "region": region,
+        "environment": ENVIRONMENT
+    }
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint."""
-    return jsonify({"status": "ok", "environment": ENVIRONMENT})
+    """Health check endpoint with optional GCP service status."""
+    from config import project_id
+    
+    version = os.environ.get("VERSION", "1.0.0")
+    
+    # Basic health info
+    health_info = {
+        "status": "ok", 
+        "environment": ENVIRONMENT,
+        "project": project_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": version
+    }
+    
+    # Add detailed GCP service checks if requested
+    if request.args.get('check_services', 'false').lower() == 'true':
+        service_status = check_gcp_services()
+        health_info["service_check"] = service_status
+        
+        # Update overall status based on service status
+        if service_status["status"] != "ok":
+            health_info["status"] = service_status["status"]
+    
+    return jsonify(health_info)
 
 @app.route('/api/config/<config_type>', methods=['GET'])
 def get_config_api(config_type):
