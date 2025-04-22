@@ -20,7 +20,7 @@ steps:
       mkdir -p functions/ingestion functions/analysis
       
       # Create ingestion function
-      cat > functions/ingestion/main.py << 'EOF'
+      cat > functions/ingestion/main.py << EOF
 import os
 import json
 import logging
@@ -63,7 +63,7 @@ def ingest_threat_data(request):
 EOF
       
       # Create analysis function
-      cat > functions/analysis/main.py << 'EOF'
+      cat > functions/analysis/main.py << EOF
 import json
 import logging
 from datetime import datetime
@@ -123,14 +123,14 @@ def analyze_threat_data(event, context):
 EOF
       
       # Create requirements.txt for functions
-      cat > functions/ingestion/requirements.txt << 'EOF'
+      cat > functions/ingestion/requirements.txt << EOF
 google-cloud-bigquery>=3.0.0
 google-cloud-storage>=2.0.0
 google-cloud-pubsub>=2.0.0
 requests>=2.0.0
 EOF
       
-      cat > functions/analysis/requirements.txt << 'EOF'
+      cat > functions/analysis/requirements.txt << EOF
 google-cloud-bigquery>=3.0.0
 google-cloud-storage>=2.0.0
 google-cloud-pubsub>=2.0.0
@@ -141,7 +141,7 @@ EOF
 
       # Create BigQuery setup script
       mkdir -p scripts
-      cat > scripts/setup_bigquery_tables.py << 'EOF'
+      cat > scripts/setup_bigquery_tables.py << EOF
 #!/usr/bin/env python3
 """
 BigQuery table setup script for Threat Intelligence Platform.
@@ -261,7 +261,7 @@ EOF
     - |
       echo "Simulating test results..."
       mkdir -p test-results
-      cat > test-results/coverage.xml << 'EOF'
+      cat > test-results/coverage.xml << EOF
 <?xml version="1.0" ?>
 <coverage version="6.1.1" timestamp="1650623142" lines-valid="1000" lines-covered="850" line-rate="0.85" branches-covered="0" branches-valid="0" branch-rate="0" complexity="0">
 	<sources>
