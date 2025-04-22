@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import hashlib
 from google.cloud import secret_manager
 
 # Configure logging
@@ -12,7 +13,9 @@ PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 REGION = os.environ.get("GCP_REGION", "us-central1")
 API_URL = os.environ.get("API_URL", "")
-api_key = None  # Will be loaded from Secret Manager
+
+# API key initialization with default
+api_key = os.environ.get("API_KEY", "")
 
 # Secret Manager client
 secret_client = None
@@ -109,6 +112,12 @@ def load_configs(force_refresh=False):
         'feeds': get_cached_config('feed-config', force_refresh),
         'auth': get_cached_config('auth-config', force_refresh)
     }
+    
+    # Update global API key if available in api_keys config
+    global api_key
+    if 'platform_api_key' in configs['api_keys']:
+        api_key = configs['api_keys']['platform_api_key']
+    
     return configs
 
 def init_app_config():
@@ -127,6 +136,19 @@ def get(key, default=None):
     
     return default
 
+def add_user(username, password, role="readonly"):
+    """Add a new user"""
+    # Hash the password
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
+    user_data = {
+        "password": hashed_password,
+        "role": role,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    return update_user(username, user_data)
+
 def update_user(username, updates):
     """Update user information in the auth config."""
     auth_config = get_cached_config('auth-config', force_refresh=True)
@@ -140,9 +162,10 @@ def update_user(username, updates):
     # Update user data
     for key, value in updates.items():
         if key == 'password':
-            import hashlib
-            # Hash the password
-            auth_config['users'][username]['password'] = hashlib.sha256(value.encode()).hexdigest()
+            # Hash the password if not already hashed
+            if len(value) != 64:  # SHA-256 produces 64 character hex string
+                value = hashlib.sha256(value.encode()).hexdigest()
+            auth_config['users'][username]['password'] = value
         else:
             auth_config['users'][username][key] = value
     
@@ -208,3 +231,6 @@ region = REGION
 gcs_bucket = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
 bigquery_dataset = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_url = API_URL
+
+# Fix missing datetime import
+from datetime import datetime
