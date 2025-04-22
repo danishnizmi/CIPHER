@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
     CONTAINER_BUILD=true \
-    GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json
+    PYTHONPATH=/app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,8 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt && \
     # Explicitly install GCP packages to ensure they're properly installed
     pip install --no-cache-dir \
     google-cloud-bigquery \
@@ -55,12 +54,8 @@ RUN touch __init__.py && \
     touch functions/ingestion/__init__.py && \
     touch functions/analysis/__init__.py
 
-# Make sure required files exist
-RUN if [ ! -f config.py ]; then echo "config.py not found, creating placeholder"; echo "def init_app_config(): return {}" > config.py; fi && \
-    if [ ! -f app.py ]; then echo "app.py not found, creating placeholder"; echo "def create_app(): from flask import Flask; app = Flask(__name__); return app" > app.py; fi
-
 # Initialize and apply configurations in build mode with error handling
-RUN python -c "import sys; print('Python path:', sys.path); print('Initializing config...'); from config import init_app_config; init_app_config(); print('Config initialized')" || echo "Config initialization skipped, will initialize at runtime"
+RUN python -c "import sys; print('Python path:', sys.path); try: from config import init_app_config; init_app_config(); print('Config initialized successfully') except Exception as e: print(f'Config initialization error: {str(e)}')"
 
 # Create secrets directory for mounting at runtime (if needed)
 RUN mkdir -p /secrets && chmod 755 /secrets
@@ -97,39 +92,20 @@ touch functions/__init__.py\n\
 touch functions/ingestion/__init__.py\n\
 touch functions/analysis/__init__.py\n\
 \n\
-# Check PYTHONPATH\n\
+# Make sure PYTHONPATH includes app directory\n\
+export PYTHONPATH=/app:$PYTHONPATH\n\
 echo "PYTHONPATH: $PYTHONPATH"\n\
-\n\
-# Add current directory to PYTHONPATH\n\
-export PYTHONPATH=$PYTHONPATH:/app\n\
 \n\
 # Display available modules\n\
 echo "Checking if key modules are importable:"\n\
 python -c "import sys; print(sys.path)"\n\
-python -c "import app; print(\"app module found\")" || echo "app module not found"\n\
+python -c "import app; print(\"app module found\")" || echo "app module not found, this will cause the application to fail"\n\
 python -c "import config; print(\"config module found\")" || echo "config module not found"\n\
 python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
 python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
-python -c "from google.cloud import storage; print(\"storage module found\")" || echo "storage module not found"\n\
-python -c "from google.cloud import pubsub_v1; print(\"pubsub module found\")" || echo "pubsub module not found"\n\
-python -c "from google.cloud import secretmanager; print(\"secretmanager module found\")" || echo "secretmanager module not found"\n\
 \n\
-# Check GCP authentication\n\
-echo "Checking GCP authentication:"\n\
-if [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then\n\
-  echo "Service account file exists: $GOOGLE_APPLICATION_CREDENTIALS"\n\
-else\n\
-  echo "Service account file not found, checking for application default credentials"\n\
-  python -c "import google.auth; creds, project = google.auth.default(); print(f\"Using default credentials with project: {project}\")" || echo "No application default credentials found"\n\
-fi\n\
-\n\
-# Run BigQuery setup script\n\
-echo "Setting up BigQuery tables:"\n\
-python scripts/setup_bigquery_tables.py || echo "BigQuery setup script failed, tables will be created on first insert"\n\
-\n\
-# Run the application\n\
 echo "Starting gunicorn with app:create_app()..."\n\
-exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level info "app:create_app()"\n\
+cd /app && exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 0 --log-level debug "app:create_app()"\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Use the startup script as entrypoint
