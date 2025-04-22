@@ -21,13 +21,13 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY . .
 
+# Initialize and apply configurations
+RUN python -c "from config import init_app_config; init_app_config()"
+
 # Run as non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 RUN chown -R appuser:appuser /app
 USER appuser
-
-# Initialize and apply configurations
-RUN python -c "from config import init_app_config; init_app_config()"
 
 # Expose port
 EXPOSE $PORT
