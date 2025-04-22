@@ -20,7 +20,7 @@ steps:
       mkdir -p functions/ingestion functions/analysis
       
       # Create ingestion function
-      cat > functions/ingestion/main.py << EOF
+      cat > functions/ingestion/main.py << 'EOF'
 import os
 import json
 import logging
@@ -63,7 +63,7 @@ def ingest_threat_data(request):
 EOF
       
       # Create analysis function
-      cat > functions/analysis/main.py << EOF
+      cat > functions/analysis/main.py << 'EOF'
 import json
 import logging
 from datetime import datetime
@@ -141,7 +141,7 @@ EOF
 
       # Create BigQuery setup script
       mkdir -p scripts
-      cat > scripts/setup_bigquery_tables.py << EOF
+      cat > scripts/setup_bigquery_tables.py << 'EOF'
 #!/usr/bin/env python3
 """
 BigQuery table setup script for Threat Intelligence Platform.
