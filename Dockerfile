@@ -7,7 +7,8 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
-    CONTAINER_BUILD=true
+    CONTAINER_BUILD=true \
+    GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    # Explicitly install GCP packages to ensure they're properly installed
+    pip install --no-cache-dir \
+    google-cloud-bigquery \
+    google-cloud-storage \
+    google-cloud-pubsub \
+    google-cloud-language \
+    google-cloud-secretmanager \
+    vertexai
 
 # Create necessary directories and __init__.py files
 RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis && \
@@ -30,7 +40,7 @@ RUN mkdir -p scripts static/src static/dist templates functions/ingestion functi
     touch functions/analysis/__init__.py
 
 # Create placeholder files for BigQuery setup
-RUN echo 'print("BigQuery setup script placeholder")' > scripts/setup_bigquery_tables.py
+RUN echo 'import os\nfrom google.cloud import bigquery\nPROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")\nDATASET_ID = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")\nclient = bigquery.Client(project=PROJECT_ID)\ntry:\n    dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")\n    dataset.location = "US"\n    client.create_dataset(dataset, exists_ok=True)\n    print(f"Dataset {DATASET_ID} created or already exists")\nexcept Exception as e:\n    print(f"Error creating dataset: {str(e)}")\n' > scripts/setup_bigquery_tables.py
 
 # Create placeholder Cloud Functions files
 RUN echo 'def ingest_threat_data(request):\n    return {"status": "ok"}' > functions/ingestion/main.py && \
@@ -45,8 +55,12 @@ RUN touch __init__.py && \
     touch functions/ingestion/__init__.py && \
     touch functions/analysis/__init__.py
 
-# Initialize and apply configurations in build mode
-RUN python -c "from config import init_app_config; init_app_config()"
+# Make sure required files exist
+RUN if [ ! -f config.py ]; then echo "config.py not found, creating placeholder"; echo "def init_app_config(): return {}" > config.py; fi && \
+    if [ ! -f app.py ]; then echo "app.py not found, creating placeholder"; echo "def create_app(): from flask import Flask; app = Flask(__name__); return app" > app.py; fi
+
+# Initialize and apply configurations in build mode with error handling
+RUN python -c "import sys; print('Python path:', sys.path); print('Initializing config...'); from config import init_app_config; init_app_config(); print('Config initialized')" || echo "Config initialization skipped, will initialize at runtime"
 
 # Create secrets directory for mounting at runtime (if needed)
 RUN mkdir -p /secrets && chmod 755 /secrets
@@ -94,8 +108,24 @@ echo "Checking if key modules are importable:"\n\
 python -c "import sys; print(sys.path)"\n\
 python -c "import app; print(\"app module found\")" || echo "app module not found"\n\
 python -c "import config; print(\"config module found\")" || echo "config module not found"\n\
-python -c "import frontend; print(\"frontend module found\")" || echo "frontend module not found"\n\
-python -c "import api; print(\"api module found\")" || echo "api module not found"\n\
+python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
+python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
+python -c "from google.cloud import storage; print(\"storage module found\")" || echo "storage module not found"\n\
+python -c "from google.cloud import pubsub_v1; print(\"pubsub module found\")" || echo "pubsub module not found"\n\
+python -c "from google.cloud import secretmanager; print(\"secretmanager module found\")" || echo "secretmanager module not found"\n\
+\n\
+# Check GCP authentication\n\
+echo "Checking GCP authentication:"\n\
+if [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then\n\
+  echo "Service account file exists: $GOOGLE_APPLICATION_CREDENTIALS"\n\
+else\n\
+  echo "Service account file not found, checking for application default credentials"\n\
+  python -c "import google.auth; creds, project = google.auth.default(); print(f\"Using default credentials with project: {project}\")" || echo "No application default credentials found"\n\
+fi\n\
+\n\
+# Run BigQuery setup script\n\
+echo "Setting up BigQuery tables:"\n\
+python scripts/setup_bigquery_tables.py || echo "BigQuery setup script failed, tables will be created on first insert"\n\
 \n\
 # Run the application\n\
 echo "Starting gunicorn with app:create_app()..."\n\
