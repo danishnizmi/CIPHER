@@ -26,14 +26,24 @@ try:
     config_result = config.init_app_config()
     logger.info(f"Configuration initialized: {config_result}")
     
-    # Step 2: Import frontend module which has the fully configured Flask app
+    # Step 2: Import API module for API endpoints
+    logger.info("Importing API module...")
+    import api
+    logger.info("API module imported successfully")
+    
+    # Step 3: Import frontend module which has the fully configured Flask app
     logger.info("Importing frontend module...")
     import frontend
     logger.info("Frontend module imported successfully")
     
-    # Step 3: Use the frontend's Flask app as our main app
+    # Step 4: Use the frontend's Flask app as our main app
     logger.info("Using frontend.app as the main application")
     app = frontend.app
+    
+    # Step 5: Initialize API with the app
+    logger.info("Initializing API routes...")
+    api.init_app(app)
+    logger.info("API routes initialized successfully")
     
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -122,7 +132,7 @@ except Exception as e:
         }
         
         # Test importing key modules
-        for module_name in ["flask", "config", "api", "frontend", "ingestion", "google.cloud.bigquery", 
+        for module_name in ["flask", "config", "api", "frontend", "ingestion", "analysis", "google.cloud.bigquery", 
                            "google.cloud.storage", "google.cloud.pubsub", "vertexai"]:
             try:
                 __import__(module_name)
@@ -143,10 +153,26 @@ except Exception as e:
         except Exception as e:
             debug_info["templates"] = {"error": str(e)}
         
+        # Check static directory
+        try:
+            static_path = os.path.join(os.getcwd(), "static")
+            static_exist = os.path.isdir(static_path)
+            static_contents = {
+                "root": os.listdir(static_path) if static_exist else [],
+                "dist": os.listdir(os.path.join(static_path, "dist")) if static_exist and os.path.isdir(os.path.join(static_path, "dist")) else []
+            }
+            debug_info["static"] = {
+                "exists": static_exist,
+                "path": static_path,
+                "contents": static_contents
+            }
+        except Exception as e:
+            debug_info["static"] = {"error": str(e)}
+        
         return jsonify(debug_info)
 
 # Entry point for running the application directly (not via gunicorn)
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     logger.info(f"Starting Flask app on port {port}...")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('ENVIRONMENT', 'development') != 'production')
