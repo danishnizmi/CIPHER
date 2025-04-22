@@ -2,7 +2,8 @@ import os
 import json
 import logging
 import hashlib
-from google.cloud import secret_manager
+from datetime import datetime
+from google.cloud import secretmanager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +26,7 @@ def get_secret_client():
     global secret_client
     if secret_client is None:
         try:
-            secret_client = secret_manager.SecretManagerServiceClient()
+            secret_client = secretmanager.SecretManagerServiceClient()
         except Exception as e:
             logger.error(f"Failed to initialize Secret Manager client: {e}")
             raise
@@ -115,14 +116,18 @@ def load_configs(force_refresh=False):
     
     # Update global API key if available in api_keys config
     global api_key
-    if 'platform_api_key' in configs['api_keys']:
+    if configs['api_keys'] and 'platform_api_key' in configs['api_keys']:
         api_key = configs['api_keys']['platform_api_key']
     
     return configs
 
 def init_app_config():
     """Initialize application configuration from secrets."""
-    return load_configs()
+    try:
+        return load_configs()
+    except Exception as e:
+        logger.error(f"Error initializing app config: {e}")
+        return {'error': str(e)}
 
 def get(key, default=None):
     """Get configuration value from environment or secrets."""
@@ -130,9 +135,12 @@ def get(key, default=None):
         return os.environ[key]
     
     # Try to get from auth config in Secret Manager
-    auth_config = get_cached_config('auth-config')
-    if key in auth_config:
-        return auth_config[key]
+    try:
+        auth_config = get_cached_config('auth-config')
+        if auth_config and key in auth_config:
+            return auth_config[key]
+    except Exception as e:
+        logger.warning(f"Could not get config from Secret Manager: {e}")
     
     return default
 
@@ -231,6 +239,3 @@ region = REGION
 gcs_bucket = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
 bigquery_dataset = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_url = API_URL
-
-# Fix missing datetime import
-from datetime import datetime
