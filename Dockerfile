@@ -35,6 +35,10 @@ RUN touch __init__.py && \
 # Copy the application code
 COPY . .
 
+# Ensure templates directory has the necessary files
+RUN mkdir -p /app/templates
+COPY templates/*.html /app/templates/
+
 # Ensure all __init__.py files exist after copying code
 RUN touch __init__.py && \
     touch functions/__init__.py && \
@@ -46,7 +50,7 @@ RUN mkdir -p /secrets && chmod 755 /secrets
 
 # Run as non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
-RUN chown -R appuser:appuser /app /secrets
+RUN chown -R appuser:appuser /app /secrets /app/templates
 USER appuser
 
 # Expose port
@@ -94,14 +98,23 @@ if [ ! -f "static/dist/output.css" ]; then\n\
   echo "/* Default CSS */" > static/dist/output.css\n\
 fi\n\
 \n\
-# Check for templates directory\n\
+# Check for templates directory and its contents\n\
 if [ ! -d "templates" ]; then\n\
+  echo "WARNING: templates directory not found, creating it..."\n\
   mkdir -p templates\n\
-  echo "<!DOCTYPE html><html><body><h1>Threat Intelligence Platform</h1></body></html>" > templates/dashboard.html\n\
-  echo "<!DOCTYPE html><html><body><h1>Login</h1></body></html>" > templates/login.html\n\
-  echo "<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>" > templates/404.html\n\
-  echo "<!DOCTYPE html><html><body><h1>500 Server Error</h1></body></html>" > templates/500.html\n\
 fi\n\
+\n\
+echo "Templates directory contents:"\n\
+ls -la templates/\n\
+\n\
+# Verify required template files exist\n\
+for template in login.html dashboard.html 404.html 500.html base.html content.html; do\n\
+  if [ ! -f "templates/$template" ]; then\n\
+    echo "WARNING: $template not found in templates directory!"\n\
+  else\n\
+    echo "Template $template found."\n\
+  fi\n\
+done\n\
 \n\
 # Verify module imports\n\
 echo "Checking if key modules are importable:"\n\
