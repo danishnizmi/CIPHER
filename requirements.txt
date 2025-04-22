@@ -1,15 +1,14 @@
-# Core web framework with no version constraints
+# Core web framework
 flask
 flask-cors
 gunicorn
 werkzeug
 
-# Google Cloud - no version constraints to avoid PyPI issues
+# Google Cloud core services
 google-cloud-bigquery
 google-cloud-storage
 google-cloud-pubsub
 google-cloud-language
-google-cloud-secretmanager
 google-auth
 
 # Data processing
