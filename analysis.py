@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # GCP Configuration
-PROJECT_ID = os.environ.get("GCP_PROJECT", "your-project-id")
+PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
 REGION = os.environ.get("GCP_REGION", "us-central1")
 DATASET_ID = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "threat-analysis-events")
@@ -33,7 +33,15 @@ PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "threat-analysis-events")
 bq_client = bigquery.Client()
 publisher = pubsub_v1.PublisherClient()
 language_client = language_v1.LanguageServiceClient()
-vertexai.init(project=PROJECT_ID, location=REGION)
+
+# Initialize Vertex AI with proper error handling
+try:
+    vertexai.init(project=PROJECT_ID, location=REGION)
+    VERTEX_AI_AVAILABLE = True
+    logger.info(f"Vertex AI initialized successfully in {REGION}")
+except Exception as e:
+    VERTEX_AI_AVAILABLE = False
+    logger.warning(f"Vertex AI initialization failed: {str(e)}")
 
 # Indicators of Compromise (IOC) Regex Patterns
 IOC_PATTERNS = {
@@ -45,7 +53,10 @@ IOC_PATTERNS = {
     "sha256": r'\b[a-fA-F0-9]{64}\b',
     "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
     "bitcoin_address": r'\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b',
-    "file_path": r'\b(?:[a-zA-Z]:)?\\(?:[^\\/:*?"<>|\r\n]+\\)+[^\\/:*?"<>|\r\n]*\b'
+    "file_path": r'\b(?:[a-zA-Z]:)?\\(?:[^\\/:*?"<>|\r\n]+\\)+[^\\/:*?"<>|\r\n]*\b',
+    "cve": r'CVE-\d{4}-\d{4,7}',
+    "registry_key": r'HKEY_[A-Z_]+(?:\\[A-Za-z0-9_]+)+',
+    "mac_address": r'\b([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})\b',
 }
 
 
@@ -54,18 +65,30 @@ class ThreatAnalyzer:
     
     def __init__(self):
         """Initialize analysis resources"""
-        self.llm = TextGenerationModel.from_pretrained("text-bison")
+        self.llm = None
+        if VERTEX_AI_AVAILABLE:
+            try:
+                self.llm = TextGenerationModel.from_pretrained("text-bison")
+                logger.info("Vertex AI LLM initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Vertex AI LLM: {str(e)}")
     
     def extract_iocs(self, text: str) -> Dict[str, List[str]]:
         """Extract IOCs from text using regex patterns"""
         results = {}
         
+        if not text:
+            return results
+            
         for ioc_type, pattern in IOC_PATTERNS.items():
             matches = re.findall(pattern, text)
             if matches:
                 # Remove duplicates while preserving order
                 unique_matches = list(dict.fromkeys(matches))
                 results[ioc_type] = unique_matches
+                
+                # Log count of extracted IOCs
+                logger.info(f"Extracted {len(unique_matches)} {ioc_type} indicators")
         
         return results
     
@@ -74,46 +97,63 @@ class ThreatAnalyzer:
         if not text:
             return {}
         
-        document = language_v1.Document(
-            content=text,
-            type_=language_v1.Document.Type.PLAIN_TEXT
-        )
-        
-        # Entity analysis
-        entity_response = language_client.analyze_entities(
-            request={"document": document}
-        )
-        
-        # Sentiment analysis
-        sentiment_response = language_client.analyze_sentiment(
-            request={"document": document}
-        )
-        
-        # Extract entities by type
-        entities = {}
-        for entity in entity_response.entities:
-            entity_type = language_v1.Entity.Type(entity.type_).name
-            if entity_type not in entities:
-                entities[entity_type] = []
+        try:
+            document = language_v1.Document(
+                content=text,
+                type_=language_v1.Document.Type.PLAIN_TEXT
+            )
             
-            entities[entity_type].append({
-                "name": entity.name,
-                "salience": entity.salience,
-                "mentions": len(entity.mentions)
-            })
-        
-        return {
-            "entities": entities,
-            "sentiment": {
-                "score": sentiment_response.document_sentiment.score,
-                "magnitude": sentiment_response.document_sentiment.magnitude
+            # Entity analysis
+            entity_response = language_client.analyze_entities(
+                request={"document": document}
+            )
+            
+            # Sentiment analysis
+            sentiment_response = language_client.analyze_sentiment(
+                request={"document": document}
+            )
+            
+            # Extract entities by type
+            entities = {}
+            for entity in entity_response.entities:
+                entity_type = language_v1.Entity.Type(entity.type_).name
+                if entity_type not in entities:
+                    entities[entity_type] = []
+                
+                entities[entity_type].append({
+                    "name": entity.name,
+                    "salience": entity.salience,
+                    "mentions": len(entity.mentions)
+                })
+            
+            return {
+                "entities": entities,
+                "sentiment": {
+                    "score": sentiment_response.document_sentiment.score,
+                    "magnitude": sentiment_response.document_sentiment.magnitude
+                }
             }
-        }
+        except Exception as e:
+            logger.error(f"Error analyzing with NLP: {str(e)}")
+            return {
+                "error": str(e),
+                "entities": {},
+                "sentiment": {"score": 0, "magnitude": 0}
+            }
     
     def analyze_with_vertex_ai(self, content: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze threat data using Vertex AI LLM"""
-        if not content:
+        if not content or not self.llm:
+            if not content:
+                logger.warning("Empty content for Vertex AI analysis")
+            if not self.llm:
+                logger.warning("Vertex AI LLM not available")
             return {}
+        
+        # Truncate content if it's too long (Vertex AI has context limits)
+        if len(content) > 8000:
+            logger.info(f"Truncating content from {len(content)} to 8000 chars")
+            content = content[:8000]
         
         # Construct prompt for threat analysis
         prompt = f"""
@@ -134,6 +174,7 @@ class ThreatAnalyzer:
         """
         
         try:
+            logger.info("Sending content to Vertex AI for analysis")
             response = self.llm.predict(prompt, temperature=0.1, max_output_tokens=1024)
             
             # Try to parse JSON from response
@@ -149,8 +190,10 @@ class ThreatAnalyzer:
                     analysis["source_type"] = metadata.get("type", "unknown")
                     analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
                     
+                    logger.info(f"Successfully extracted structured analysis from Vertex AI response")
                     return analysis
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON from Vertex AI response: {str(e)}")
                 # Fallback to structured extraction if JSON parsing fails
                 analysis = {
                     "summary": self._extract_section(response.text, "summary"),
@@ -164,6 +207,7 @@ class ThreatAnalyzer:
                     "source_type": metadata.get("type", "unknown"),
                     "analysis_timestamp": datetime.utcnow().isoformat()
                 }
+                logger.info(f"Used fallback section extraction for Vertex AI response")
                 return analysis
         
         except Exception as e:
@@ -201,7 +245,7 @@ class ThreatAnalyzer:
         # Enrich IP addresses
         if ioc_type == "ip":
             try:
-                response = requests.get(f"https://ipinfo.io/{ioc_value}/json")
+                response = requests.get(f"https://ipinfo.io/{ioc_value}/json", timeout=5)
                 if response.status_code == 200:
                     ip_data = response.json()
                     enrichment.update({
@@ -214,47 +258,87 @@ class ThreatAnalyzer:
                         "asn": ip_data.get("org"),
                         "hostname": ip_data.get("hostname")
                     })
+                    logger.info(f"Successfully enriched IP {ioc_value}")
             except Exception as e:
                 logger.warning(f"Error enriching IP {ioc_value}: {str(e)}")
         
         # Enrich domains
         elif ioc_type == "domain":
             try:
-                # Simple WHOIS data extraction
-                response = requests.get(f"https://whoisjson.com/api/v1/whois?domain={ioc_value}")
-                if response.status_code == 200:
-                    whois_data = response.json()
-                    enrichment.update({
-                        "registrar": whois_data.get("registrar"),
-                        "creation_date": whois_data.get("creation_date"),
-                        "expiration_date": whois_data.get("expiration_date")
-                    })
+                # Simple WHOIS data extraction or fallback to domain age check
+                try:
+                    response = requests.get(f"https://whoisjson.com/api/v1/whois?domain={ioc_value}", timeout=5)
+                    if response.status_code == 200:
+                        whois_data = response.json()
+                        enrichment.update({
+                            "registrar": whois_data.get("registrar"),
+                            "creation_date": whois_data.get("creation_date"),
+                            "expiration_date": whois_data.get("expiration_date")
+                        })
+                        logger.info(f"Successfully enriched domain {ioc_value} with WHOIS data")
+                except Exception:
+                    # If WHOIS fails, try to resolve the domain at least
+                    import socket
+                    try:
+                        ip = socket.gethostbyname(ioc_value)
+                        enrichment["resolved_ip"] = ip
+                        logger.info(f"Domain {ioc_value} resolves to {ip}")
+                    except socket.error:
+                        enrichment["resolved"] = False
+                        logger.info(f"Domain {ioc_value} does not resolve")
             except Exception as e:
                 logger.warning(f"Error enriching domain {ioc_value}: {str(e)}")
         
         # Enrich file hashes
         elif ioc_type in ["md5", "sha1", "sha256"]:
             try:
-                # Check VirusTotal API (requires API key)
+                # Check VirusTotal API if key available
                 vt_api_key = os.environ.get("VIRUSTOTAL_API_KEY")
                 if vt_api_key:
                     headers = {"x-apikey": vt_api_key}
                     response = requests.get(
                         f"https://www.virustotal.com/api/v3/files/{ioc_value}",
-                        headers=headers
+                        headers=headers,
+                        timeout=10
                     )
                     if response.status_code == 200:
                         vt_data = response.json()
                         attributes = vt_data.get("data", {}).get("attributes", {})
                         
+                        analysis_stats = attributes.get("last_analysis_stats", {})
+                        malicious_count = analysis_stats.get("malicious", 0)
+                        total_count = sum(analysis_stats.values()) if analysis_stats else 0
+                        
                         enrichment.update({
-                            "detection_ratio": f"{attributes.get('last_analysis_stats', {}).get('malicious', 0)}/{sum(attributes.get('last_analysis_stats', {}).values())}",
+                            "detection_ratio": f"{malicious_count}/{total_count}",
                             "first_seen": attributes.get("first_submission_date"),
                             "file_type": attributes.get("type_description"),
                             "names": attributes.get("names", [])[:5]  # Limit to top 5 names
                         })
+                        logger.info(f"Successfully enriched hash {ioc_value} with VirusTotal data")
+                else:
+                    logger.info("No VirusTotal API key available for hash enrichment")
             except Exception as e:
                 logger.warning(f"Error enriching hash {ioc_value}: {str(e)}")
+        
+        # Enrich URLs
+        elif ioc_type == "url":
+            try:
+                # Extract domain from URL for further enrichment
+                domain_match = re.search(r'https?://([^/]+)', ioc_value)
+                if domain_match:
+                    domain = domain_match.group(1)
+                    enrichment["domain"] = domain
+                    
+                    # Try to get domain reputation
+                    import socket
+                    try:
+                        ip = socket.gethostbyname(domain)
+                        enrichment["resolved_ip"] = ip
+                    except socket.error:
+                        enrichment["resolved"] = False
+            except Exception as e:
+                logger.warning(f"Error enriching URL {ioc_value}: {str(e)}")
         
         return enrichment
     
@@ -267,80 +351,136 @@ class ThreatAnalyzer:
         WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
         """
         
-        query_job = bq_client.query(query)
-        results = query_job.result()
-        
-        processed_count = 0
-        ioc_count = 0
-        analysis_results = []
-        
-        for row in results:
-            row_dict = dict(row.items())
+        try:
+            query_job = bq_client.query(query)
+            results = query_job.result()
             
-            # Different feeds have different structures
-            content = ""
-            metadata = {"id": row_dict.get("id", "unknown"), "type": feed_name}
+            processed_count = 0
+            ioc_count = 0
+            analysis_results = []
             
-            if feed_name == "alienvault_pulses":
-                content = row_dict.get("description", "") or ""
-                if "indicators" in row_dict:
-                    for indicator in row_dict["indicators"]:
-                        content += f"\n{indicator.get('title', '')}: {indicator.get('indicator', '')}"
+            for row in results:
+                row_dict = dict(row.items())
+                
+                # Different feeds have different structures
+                content = ""
+                metadata = {"id": row_dict.get("id", str(hash(str(row_dict)))), "type": feed_name}
+                
+                # Process based on feed type
+                if feed_name == "alienvault_pulses":
+                    content = row_dict.get("description", "") or ""
+                    if "indicators" in row_dict:
+                        for indicator in row_dict["indicators"]:
+                            content += f"\n{indicator.get('title', '')}: {indicator.get('indicator', '')}"
+                
+                elif feed_name == "misp_events":
+                    content = row_dict.get("info", "") or ""
+                    if "Attribute" in row_dict:
+                        for attr in row_dict["Attribute"]:
+                            content += f"\n{attr.get('type', '')}: {attr.get('value', '')}"
+                
+                elif feed_name == "threatfox_iocs":
+                    content = row_dict.get("threat_type_desc", "") or ""
+                    content += f"\n{row_dict.get('ioc_type', '')}: {row_dict.get('ioc', '')}"
+                
+                elif feed_name == "phishtank_urls":
+                    content = f"Phishing URL: {row_dict.get('url', '')}\n"
+                    content += f"Target: {row_dict.get('target', '')}\n"
+                    content += f"Verification: {row_dict.get('verified', 'Unknown')}"
+                
+                elif feed_name == "urlhaus_malware":
+                    content = f"Malicious URL: {row_dict.get('url', '')}\n"
+                    content += f"Status: {row_dict.get('status', '')}\n"
+                    content += f"Threat: {row_dict.get('threat', '')}\n"
+                    if row_dict.get('tags'):
+                        content += f"Tags: {', '.join(row_dict.get('tags', []))}\n"
+                
+                elif feed_name == "feodotracker_c2":
+                    content = f"C2 Server: {row_dict.get('ip_address', '')}:{row_dict.get('port', '')}\n"
+                    content += f"Malware: {row_dict.get('malware', '')}\n"
+                    content += f"Status: {row_dict.get('status', '')}\n"
+                    content += f"First Seen: {row_dict.get('first_seen', '')}"
+                
+                elif feed_name == "sslbl_certificates":
+                    content = f"Malicious SSL Certificate: {row_dict.get('ssl_fingerprint', '')}\n"
+                    content += f"Malware: {row_dict.get('malware', '')}\n"
+                    content += f"First Seen: {row_dict.get('first_seen', '')}\n"
+                    content += f"Last Seen: {row_dict.get('last_seen', '')}"
+                
+                # Generic fallback - convert row to text
+                else:
+                    for key, value in row_dict.items():
+                        if key != "_ingestion_timestamp" and value:
+                            content += f"{key}: {value}\n"
+                
+                # Skip if no content to analyze
+                if not content:
+                    logger.warning(f"No content to analyze for {feed_name} record {metadata['id']}")
+                    continue
+                
+                # Extract IOCs
+                iocs = self.extract_iocs(content)
+                all_iocs = []
+                
+                # Enrich IOCs
+                for ioc_type, values in iocs.items():
+                    for value in values:
+                        enriched_ioc = self.enrich_ioc(value, ioc_type)
+                        all_iocs.append(enriched_ioc)
+                        ioc_count += 1
+                
+                # Analyze with Cloud NLP
+                nlp_analysis = self.analyze_text_with_nlp(content)
+                
+                # Analyze with Vertex AI if available
+                vertex_analysis = {}
+                if self.llm:
+                    vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
+                else:
+                    logger.warning(f"Skipping Vertex AI analysis for {feed_name} as LLM is not available")
+                
+                # Combine results
+                analysis_result = {
+                    "source_id": metadata["id"],
+                    "source_type": metadata["type"],
+                    "iocs": all_iocs,
+                    "nlp_analysis": nlp_analysis,
+                    "vertex_analysis": vertex_analysis,
+                    "analysis_timestamp": datetime.utcnow().isoformat()
+                }
+                
+                # Store analysis result in BigQuery
+                self._store_analysis_result(analysis_result)
+                analysis_results.append(analysis_result)
+                
+                processed_count += 1
+                
+                # Log progress every 10 records
+                if processed_count % 10 == 0:
+                    logger.info(f"Processed {processed_count} items from {feed_name}")
             
-            elif feed_name == "misp_events":
-                content = row_dict.get("info", "") or ""
-                if "Attribute" in row_dict:
-                    for attr in row_dict["Attribute"]:
-                        content += f"\n{attr.get('type', '')}: {attr.get('value', '')}"
+            logger.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
             
-            elif feed_name == "threatfox_iocs":
-                content = row_dict.get("threat_type_desc", "") or ""
-                content += f"\n{row_dict.get('ioc_type', '')}: {row_dict.get('ioc', '')}"
+            # Publish event to notify of analysis completion
+            try:
+                self._publish_analysis_event(feed_name, processed_count, ioc_count)
+            except Exception as e:
+                logger.error(f"Failed to publish analysis event: {str(e)}")
             
-            # Skip if no content to analyze
-            if not content:
-                continue
-            
-            # Extract IOCs
-            iocs = self.extract_iocs(content)
-            all_iocs = []
-            
-            # Enrich IOCs
-            for ioc_type, values in iocs.items():
-                for value in values:
-                    enriched_ioc = self.enrich_ioc(value, ioc_type)
-                    all_iocs.append(enriched_ioc)
-                    ioc_count += 1
-            
-            # Analyze with Cloud NLP
-            nlp_analysis = self.analyze_text_with_nlp(content)
-            
-            # Analyze with Vertex AI
-            vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
-            
-            # Combine results
-            analysis_result = {
-                "source_id": metadata["id"],
-                "source_type": metadata["type"],
-                "iocs": all_iocs,
-                "nlp_analysis": nlp_analysis,
-                "vertex_analysis": vertex_analysis,
-                "analysis_timestamp": datetime.utcnow().isoformat()
+            return {
+                "feed_name": feed_name,
+                "processed_count": processed_count,
+                "ioc_count": ioc_count
             }
-            
-            # Store analysis result in BigQuery
-            self._store_analysis_result(analysis_result)
-            analysis_results.append(analysis_result)
-            
-            processed_count += 1
         
-        logger.info(f"Processed {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
-        
-        return {
-            "feed_name": feed_name,
-            "processed_count": processed_count,
-            "ioc_count": ioc_count
-        }
+        except Exception as e:
+            logger.error(f"Error analyzing feed {feed_name}: {str(e)}")
+            return {
+                "feed_name": feed_name,
+                "error": str(e),
+                "processed_count": 0,
+                "ioc_count": 0
+            }
     
     def _store_analysis_result(self, analysis_result: Dict[str, Any]) -> None:
         """Store analysis result in BigQuery"""
@@ -384,6 +524,23 @@ class ThreatAnalyzer:
                 if errors:
                     logger.error(f"Errors inserting rows after table creation: {errors}")
     
+    def _publish_analysis_event(self, feed_name: str, processed_count: int, ioc_count: int) -> None:
+        """Publish an event to Pub/Sub about completed analysis"""
+        topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
+        
+        message = {
+            "feed_name": feed_name,
+            "processed_count": processed_count,
+            "ioc_count": ioc_count,
+            "timestamp": datetime.utcnow().isoformat(),
+            "event_type": "analysis_complete"
+        }
+        
+        data = json.dumps(message).encode("utf-8")
+        future = publisher.publish(topic_path, data=data)
+        message_id = future.result()
+        logger.info(f"Published analysis event with ID {message_id}")
+    
     def detect_campaign(self, timespan_days: int = 7) -> List[Dict[str, Any]]:
         """Detect threat campaigns by clustering related IOCs and analyses"""
         # Query recent analyses
@@ -393,102 +550,126 @@ class ThreatAnalyzer:
         WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {timespan_days} DAY)
         """
         
-        query_job = bq_client.query(query)
-        results = query_job.result()
-        
-        # Group analyses by common attributes
-        campaigns = []
-        analysis_groups = {}
-        
-        for row in results:
-            row_dict = dict(row.items())
+        try:
+            query_job = bq_client.query(query)
+            results = query_job.result()
             
-            # Parse JSON fields
-            try:
-                vertex_analysis = json.loads(row_dict.get("vertex_analysis", "{}"))
-                iocs = json.loads(row_dict.get("iocs", "[]"))
-            except json.JSONDecodeError:
-                vertex_analysis = {}
-                iocs = []
+            # Group analyses by common attributes
+            campaigns = []
+            analysis_groups = {}
             
-            # Skip if missing key information
-            if not vertex_analysis or not iocs:
-                continue
+            for row in results:
+                row_dict = dict(row.items())
+                
+                # Parse JSON fields
+                try:
+                    vertex_analysis = json.loads(row_dict.get("vertex_analysis", "{}"))
+                    iocs = json.loads(row_dict.get("iocs", "[]"))
+                except json.JSONDecodeError:
+                    vertex_analysis = {}
+                    iocs = []
+                
+                # Skip if missing key information
+                if not vertex_analysis or not iocs:
+                    continue
+                
+                # Extract key campaign identifiers
+                threat_actor = vertex_analysis.get("threat_actor", "").lower()
+                malware = vertex_analysis.get("malware", "").lower()
+                techniques = vertex_analysis.get("techniques", "").lower()
+                targets = vertex_analysis.get("targets", "").lower()
+                
+                # Generate campaign identifiers
+                campaign_identifiers = []
+                
+                if threat_actor and len(threat_actor) > 3:
+                    campaign_identifiers.append(f"actor:{threat_actor}")
+                
+                if malware and len(malware) > 3:
+                    campaign_identifiers.append(f"malware:{malware}")
+                
+                # Try to match on techniques as well
+                if techniques and len(techniques) > 3:
+                    # Look for ATT&CK techniques (e.g., T1566)
+                    technique_matches = re.findall(r'T\d{4}(?:\.\d{3})?', techniques)
+                    for technique in technique_matches:
+                        campaign_identifiers.append(f"technique:{technique}")
+                
+                # Skip if no strong identifiers
+                if not campaign_identifiers:
+                    continue
+                
+                # Create a hash key for the campaign
+                campaign_key = hashlib.md5(
+                    "|".join(sorted(campaign_identifiers)).encode()
+                ).hexdigest()
+                
+                # Add to campaign group
+                if campaign_key not in analysis_groups:
+                    analysis_groups[campaign_key] = {
+                        "analyses": [],
+                        "iocs": [],
+                        "identifiers": campaign_identifiers,
+                        "threat_actor": threat_actor,
+                        "malware": malware,
+                        "techniques": techniques,
+                        "targets": targets,
+                        "timestamps": []
+                    }
+                
+                analysis_groups[campaign_key]["analyses"].append(row_dict["source_id"])
+                analysis_groups[campaign_key]["iocs"].extend(iocs)
+                
+                # Track timestamps for first/last seen
+                if "analysis_timestamp" in row_dict:
+                    timestamp = row_dict["analysis_timestamp"]
+                    if isinstance(timestamp, datetime):
+                        analysis_groups[campaign_key]["timestamps"].append(timestamp)
             
-            # Extract key campaign identifiers
-            threat_actor = vertex_analysis.get("threat_actor", "").lower()
-            malware = vertex_analysis.get("malware", "").lower()
-            techniques = vertex_analysis.get("techniques", "").lower()
-            targets = vertex_analysis.get("targets", "").lower()
-            
-            # Generate campaign identifiers
-            campaign_identifiers = []
-            
-            if threat_actor and len(threat_actor) > 3:
-                campaign_identifiers.append(f"actor:{threat_actor}")
-            
-            if malware and len(malware) > 3:
-                campaign_identifiers.append(f"malware:{malware}")
-            
-            # Skip if no strong identifiers
-            if not campaign_identifiers:
-                continue
-            
-            # Create a hash key for the campaign
-            campaign_key = hashlib.md5(
-                "|".join(sorted(campaign_identifiers)).encode()
-            ).hexdigest()
-            
-            # Add to campaign group
-            if campaign_key not in analysis_groups:
-                analysis_groups[campaign_key] = {
-                    "analyses": [],
-                    "iocs": [],
-                    "identifiers": campaign_identifiers,
-                    "threat_actor": threat_actor,
-                    "malware": malware,
-                    "techniques": techniques,
-                    "targets": targets
+            # Convert groups to campaigns
+            for key, group in analysis_groups.items():
+                # Skip small groups (likely false positives)
+                if len(group["analyses"]) < 2:
+                    continue
+                
+                # Unique IOCs
+                unique_iocs = {}
+                for ioc in group["iocs"]:
+                    ioc_key = f"{ioc.get('type')}:{ioc.get('value')}"
+                    unique_iocs[ioc_key] = ioc
+                
+                # Calculate first and last seen
+                timestamps = group["timestamps"]
+                first_seen = min(timestamps) if timestamps else datetime.utcnow()
+                last_seen = max(timestamps) if timestamps else datetime.utcnow()
+                
+                # Create campaign
+                campaign = {
+                    "campaign_id": key,
+                    "threat_actor": group["threat_actor"],
+                    "malware": group["malware"],
+                    "techniques": group["techniques"],
+                    "targets": group["targets"],
+                    "sources": group["analyses"],
+                    "iocs": list(unique_iocs.values()),
+                    "source_count": len(group["analyses"]),
+                    "ioc_count": len(unique_iocs),
+                    "first_seen": first_seen.isoformat() if isinstance(first_seen, datetime) else first_seen,
+                    "last_seen": last_seen.isoformat() if isinstance(last_seen, datetime) else last_seen,
+                    "campaign_name": self._generate_campaign_name(group)
                 }
+                
+                campaigns.append(campaign)
+                
+                # Store campaign in BigQuery
+                self._store_campaign(campaign)
             
-            analysis_groups[campaign_key]["analyses"].append(row_dict["source_id"])
-            analysis_groups[campaign_key]["iocs"].extend(iocs)
-        
-        # Convert groups to campaigns
-        for key, group in analysis_groups.items():
-            # Skip small groups (likely false positives)
-            if len(group["analyses"]) < 2:
-                continue
+            logger.info(f"Detected {len(campaigns)} threat campaigns")
+            return campaigns
             
-            # Unique IOCs
-            unique_iocs = {}
-            for ioc in group["iocs"]:
-                ioc_key = f"{ioc.get('type')}:{ioc.get('value')}"
-                unique_iocs[ioc_key] = ioc
-            
-            # Create campaign
-            campaign = {
-                "campaign_id": key,
-                "threat_actor": group["threat_actor"],
-                "malware": group["malware"],
-                "techniques": group["techniques"],
-                "targets": group["targets"],
-                "sources": group["analyses"],
-                "iocs": list(unique_iocs.values()),
-                "source_count": len(group["analyses"]),
-                "ioc_count": len(unique_iocs),
-                "first_seen": min([a["analysis_timestamp"] for a in group["analyses"] if "analysis_timestamp" in a]),
-                "last_seen": max([a["analysis_timestamp"] for a in group["analyses"] if "analysis_timestamp" in a]),
-                "campaign_name": self._generate_campaign_name(group)
-            }
-            
-            campaigns.append(campaign)
-            
-            # Store campaign in BigQuery
-            self._store_campaign(campaign)
-        
-        logger.info(f"Detected {len(campaigns)} threat campaigns")
-        return campaigns
+        except Exception as e:
+            logger.error(f"Error detecting campaigns: {str(e)}")
+            return []
     
     def _generate_campaign_name(self, group: Dict[str, Any]) -> str:
         """Generate a campaign name based on group attributes"""
@@ -552,6 +733,127 @@ class ThreatAnalyzer:
                 if errors:
                     logger.error(f"Errors inserting campaign after table creation: {errors}")
 
+    def generate_threat_report(self, campaign_id: str = None, days: int = 7) -> Dict[str, Any]:
+        """Generate a comprehensive threat report based on analyzed data"""
+        if not self.llm:
+            logger.warning("Vertex AI LLM not available for report generation")
+            return {"error": "LLM not available for report generation"}
+        
+        if campaign_id:
+            # Generate report for specific campaign
+            query = f"""
+            SELECT * 
+            FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+            WHERE campaign_id = '{campaign_id}'
+            """
+            
+            query_job = bq_client.query(query)
+            results = query_job.result()
+            
+            campaigns = [dict(row) for row in results]
+            if not campaigns:
+                return {"error": f"Campaign {campaign_id} not found"}
+            
+            campaign = campaigns[0]
+            
+            # Get related IOCs
+            iocs = json.loads(campaign.get("iocs", "[]"))
+            
+            # Generate report using Vertex AI
+            prompt = f"""
+            Generate a comprehensive threat intelligence report for the following campaign:
+            
+            Campaign Name: {campaign.get('campaign_name')}
+            Threat Actor: {campaign.get('threat_actor')}
+            Malware: {campaign.get('malware')}
+            Techniques: {campaign.get('techniques')}
+            Targets: {campaign.get('targets')}
+            First Seen: {campaign.get('first_seen')}
+            Last Seen: {campaign.get('last_seen')}
+            
+            Include the following sections:
+            1. Executive Summary
+            2. Threat Actor Profile
+            3. Technical Analysis
+            4. Indicators of Compromise
+            5. Mitigation Recommendations
+            
+            Format the report in Markdown.
+            """
+            
+            try:
+                response = self.llm.predict(prompt, temperature=0.2, max_output_tokens=2048)
+                return {
+                    "campaign_id": campaign_id,
+                    "campaign_name": campaign.get('campaign_name'),
+                    "report_content": response.text,
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "ioc_count": len(iocs)
+                }
+            except Exception as e:
+                logger.error(f"Error generating campaign report: {str(e)}")
+                return {"error": str(e)}
+        else:
+            # Generate summary report of recent activity
+            query = f"""
+            SELECT COUNT(*) as campaign_count,
+                   (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis` 
+                    WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) as analysis_count
+            FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+            WHERE detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+            """
+            
+            query_job = bq_client.query(query)
+            results = query_job.result()
+            stats = next(results)
+            
+            # Get top threats
+            top_threats_query = f"""
+            SELECT threat_actor, malware, COUNT(*) as count
+            FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+            WHERE detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+            GROUP BY threat_actor, malware
+            ORDER BY count DESC
+            LIMIT 5
+            """
+            
+            threats_job = bq_client.query(top_threats_query)
+            threats_results = threats_job.result()
+            top_threats = [dict(row) for row in threats_results]
+            
+            # Generate summary prompt
+            prompt = f"""
+            Generate a threat intelligence summary report for the past {days} days with the following statistics:
+            
+            - Total campaigns detected: {stats.campaign_count}
+            - Total threat analyses performed: {stats.analysis_count}
+            
+            Top threats observed:
+            {json.dumps(top_threats, indent=2)}
+            
+            Include the following sections:
+            1. Executive Summary
+            2. Key Findings
+            3. Emerging Threats
+            4. Recommendations
+            
+            Format the report in Markdown.
+            """
+            
+            try:
+                response = self.llm.predict(prompt, temperature=0.2, max_output_tokens=2048)
+                return {
+                    "report_type": "summary",
+                    "report_content": response.text,
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "period_days": days,
+                    "campaign_count": stats.campaign_count,
+                    "analysis_count": stats.analysis_count
+                }
+            except Exception as e:
+                logger.error(f"Error generating summary report: {str(e)}")
+                return {"error": str(e)}
+
 
 # Cloud Function entry point
 def analyze_threat_data(event, context):
@@ -561,22 +863,27 @@ def analyze_threat_data(event, context):
     # Parse message
     if 'data' in event:
         import base64
-        data = json.loads(base64.b64decode(event['data']).decode('utf-8'))
-        
-        feed_name = data.get("feed_name")
-        
-        if feed_name:
-            # Analyze feed data
-            result = analyzer.analyze_and_store_feed_data(feed_name)
+        try:
+            data = json.loads(base64.b64decode(event['data']).decode('utf-8'))
+            logger.info(f"Received analysis event: {str(data)}")
             
-            # Detect campaigns periodically (every 10th message)
-            if hash(feed_name) % 10 == 0:
-                campaigns = analyzer.detect_campaign()
+            feed_name = data.get("feed_name")
             
-            return result
+            if feed_name:
+                # Analyze feed data
+                result = analyzer.analyze_and_store_feed_data(feed_name)
+                
+                # Detect campaigns periodically (every 10th message)
+                if hash(feed_name) % 10 == 0:
+                    campaigns = analyzer.detect_campaign()
+                
+                return result
+        except Exception as e:
+            logger.error(f"Error processing event data: {str(e)}")
     
     # Fallback to analyzing all feeds
-    feeds = ["alienvault_pulses", "misp_events", "threatfox_iocs"]
+    feeds = ["alienvault_pulses", "misp_events", "threatfox_iocs", 
+             "phishtank_urls", "urlhaus_malware", "feodotracker_c2", "sslbl_certificates"]
     results = []
     
     for feed in feeds:
@@ -601,10 +908,15 @@ if __name__ == "__main__":
     analyzer = ThreatAnalyzer()
     
     # Analyze and detect campaigns
-    feeds = ["alienvault_pulses", "misp_events", "threatfox_iocs"]
+    feeds = ["alienvault_pulses", "misp_events", "threatfox_iocs", 
+             "phishtank_urls", "urlhaus_malware", "feodotracker_c2", "sslbl_certificates"]
+    
     for feed in feeds:
-        result = analyzer.analyze_and_store_feed_data(feed)
-        print(f"Analyzed {feed}: {result}")
+        try:
+            result = analyzer.analyze_and_store_feed_data(feed)
+            print(f"Analyzed {feed}: {result}")
+        except Exception as e:
+            print(f"Error analyzing {feed}: {str(e)}")
     
     campaigns = analyzer.detect_campaign()
     print(f"Detected {len(campaigns)} campaigns")
