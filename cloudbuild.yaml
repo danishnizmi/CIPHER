@@ -1,6 +1,6 @@
 steps:
 # Install dependencies
-- name: 'python:3.9'
+- name: 'python:3.10'
   id: 'install-dependencies'
   entrypoint: bash
   args:
@@ -10,7 +10,7 @@ steps:
       pip install -r requirements.txt --user
 
 # Setup functions directories and placeholder files
-- name: 'python:3.9'
+- name: 'python:3.10'
   id: 'prepare-functions'
   entrypoint: bash
   args:
@@ -39,13 +39,19 @@ steps:
       # Create BigQuery setup script
       echo 'import os' > scripts/setup_bigquery_tables.py
       echo 'from google.cloud import bigquery' >> scripts/setup_bigquery_tables.py
-      echo 'PROJECT_ID = os.environ.get("GCP_PROJECT", "your-project-id")' >> scripts/setup_bigquery_tables.py
+      echo 'PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")' >> scripts/setup_bigquery_tables.py
       echo 'DATASET_ID = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")' >> scripts/setup_bigquery_tables.py
       echo 'client = bigquery.Client(project=PROJECT_ID)' >> scripts/setup_bigquery_tables.py
-      echo 'print("BigQuery setup script initialized")' >> scripts/setup_bigquery_tables.py
+      echo 'try:' >> scripts/setup_bigquery_tables.py
+      echo '    dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")' >> scripts/setup_bigquery_tables.py
+      echo '    dataset.location = "US"' >> scripts/setup_bigquery_tables.py
+      echo '    client.create_dataset(dataset, exists_ok=True)' >> scripts/setup_bigquery_tables.py
+      echo '    print(f"Dataset {DATASET_ID} created or already exists")' >> scripts/setup_bigquery_tables.py
+      echo 'except Exception as e:' >> scripts/setup_bigquery_tables.py
+      echo '    print(f"Error creating dataset: {str(e)}")' >> scripts/setup_bigquery_tables.py
 
 # Skip actual tests but provide test coverage data
-- name: 'python:3.9'
+- name: 'python:3.10'
   id: 'run-tests'
   entrypoint: bash
   args:
@@ -206,7 +212,7 @@ steps:
       
       gcloud functions deploy ingest_threat_data \
         --region=us-central1 \
-        --runtime=python39 \
+        --runtime=python310 \
         --trigger-http \
         --allow-unauthenticated \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
@@ -225,7 +231,7 @@ steps:
       
       gcloud functions deploy analyze_threat_data \
         --region=us-central1 \
-        --runtime=python39 \
+        --runtime=python310 \
         --trigger-topic=threat-data-ingestion \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1 || echo "Warning: Analysis function deployment failed"
