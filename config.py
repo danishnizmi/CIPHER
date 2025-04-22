@@ -33,14 +33,26 @@ SECRET_NAMES = [
 # Configuration cache
 _config_cache = {}
 
-# Import Secret Manager
+# Detect build mode vs runtime mode
+# During container build, set CONTAINER_BUILD=true in Dockerfile
+IS_BUILD_MODE = os.environ.get("CONTAINER_BUILD", "false").lower() == "true"
+
+# Import Secret Manager with improved error handling
 try:
-    from google.cloud import secretmanager
-    SECRET_MANAGER_AVAILABLE = True
-    logger.info("Google Cloud Secret Manager is available")
-except ImportError:
+    # Skip authentication attempt during container build
+    if IS_BUILD_MODE:
+        logger.info("Container build mode detected, skipping Secret Manager authentication")
+        SECRET_MANAGER_AVAILABLE = False
+    else:
+        from google.cloud import secretmanager
+        
+        # Test authentication by creating a client (doesn't make any API calls yet)
+        client = secretmanager.SecretManagerServiceClient()
+        SECRET_MANAGER_AVAILABLE = True
+        logger.info("Google Cloud Secret Manager is available")
+except Exception as e:
     SECRET_MANAGER_AVAILABLE = False
-    logger.warning("Google Cloud Secret Manager is not available, using environment variables")
+    logger.warning(f"Google Cloud Secret Manager is not available, using environment variables: {str(e)}")
 
 
 def load_secret(secret_name: str) -> Optional[Dict[str, Any]]:
@@ -199,17 +211,21 @@ def init_app_config():
         if isinstance(value, str) and not os.environ.get(key):
             os.environ[key] = value
     
-    # Try to access the CIPHER GitHub OAuth token if it exists
-    if SECRET_MANAGER_AVAILABLE:
-        try:
-            client = secretmanager.SecretManagerServiceClient()
-            name = f"projects/{PROJECT_ID}/secrets/CIPHER-github-oauthtoken-a9e194/versions/latest"
-            response = client.access_secret_version(request={"name": name})
-            payload = response.payload.data.decode("UTF-8")
-            os.environ["GITHUB_TOKEN"] = payload
-            logger.info("Successfully loaded GitHub token from Secret Manager")
-        except Exception as e:
-            logger.warning(f"Could not load GitHub token from Secret Manager: {str(e)}")
+    # Skip trying to access additional secrets during build mode
+    if IS_BUILD_MODE:
+        logger.info("Build mode: skipping additional Secret Manager operations")
+    else:
+        # Try to access the CIPHER GitHub OAuth token if it exists
+        if SECRET_MANAGER_AVAILABLE:
+            try:
+                client = secretmanager.SecretManagerServiceClient()
+                name = f"projects/{PROJECT_ID}/secrets/CIPHER-github-oauthtoken-a9e194/versions/latest"
+                response = client.access_secret_version(request={"name": name})
+                payload = response.payload.data.decode("UTF-8")
+                os.environ["GITHUB_TOKEN"] = payload
+                logger.info("Successfully loaded GitHub token from Secret Manager")
+            except Exception as e:
+                logger.warning(f"Could not load GitHub token from Secret Manager: {str(e)}")
     
     # Create default API key if missing
     if not config.get("API_KEY"):
@@ -283,9 +299,12 @@ def init_app_config():
         }
         create_or_update_secret("database-credentials", db_credentials)
     
-    # Reload config after potentially creating secrets
-    global _config_cache
-    _config_cache = {}  # Clear cache to force reload
-    updated_config = get_config()
+    # Only reload config if we're not in build mode
+    if not IS_BUILD_MODE:
+        # Reload config after potentially creating secrets
+        global _config_cache
+        _config_cache = {}  # Clear cache to force reload
+        updated_config = get_config()
+        return updated_config
     
-    return updated_config
+    return config
