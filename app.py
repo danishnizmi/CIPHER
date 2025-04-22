@@ -5,16 +5,16 @@ import logging
 from config import load_configs, get_cached_config, create_or_update_secret
 import json
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Environment variables
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)
 
 def create_app():
     """Application factory function for gunicorn."""
@@ -32,6 +32,8 @@ try:
     session_secret = app.config['AUTH'].get('session_secret')
     if session_secret:
         app.secret_key = session_secret
+    else:
+        app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-change-in-production")
 except Exception as e:
     logger.error(f"Failed to load configurations: {e}")
     app.config['AUTH'] = {}
@@ -95,18 +97,42 @@ def index():
     """Main application route."""
     return render_template('dashboard.html')
 
-# Import routes from other modules
+# Register frontend routes
+from frontend import app as frontend_app
+# Import all routes from frontend
+for rule in frontend_app.url_map.iter_rules():
+    # Skip the static and health endpoints that might conflict
+    endpoint = rule.endpoint
+    if endpoint != 'static' and endpoint != 'health_check' and endpoint != 'index':
+        view_func = frontend_app.view_functions[endpoint]
+        app.add_url_rule(rule.rule, endpoint=endpoint, view_func=view_func, methods=rule.methods)
+
+# Register API routes
+from api import app as api_app
+# Import API routes with /api prefix
+for rule in api_app.url_map.iter_rules():
+    # Skip the health endpoint that might conflict
+    endpoint = rule.endpoint
+    if endpoint != 'health_check':
+        view_func = api_app.view_functions[endpoint]
+        # Add /api prefix to all routes except those that already have it
+        if not rule.rule.startswith('/api'):
+            rule_with_prefix = f'/api{rule.rule}'
+        else:
+            rule_with_prefix = rule.rule
+        app.add_url_rule(rule_with_prefix, endpoint=f'api_{endpoint}', view_func=view_func, methods=rule.methods)
+
+# Register ingestion routes
 try:
-    from frontend import frontend_routes
-    from api import api_routes
-    from ingestion import ingestion_routes
+    from ingestion import ingest_threat_data
     
-    # Register blueprints
-    app.register_blueprint(frontend_routes)
-    app.register_blueprint(api_routes, url_prefix='/api')
-    app.register_blueprint(ingestion_routes, url_prefix='/ingest')
+    @app.route('/ingest', methods=['POST'])
+    def ingest_route():
+        """Wrapper for the ingestion module."""
+        return ingest_threat_data(request)
+        
 except ImportError as e:
-    logger.warning(f"Could not import routes: {e}")
+    logger.warning(f"Could not import ingestion module: {e}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
