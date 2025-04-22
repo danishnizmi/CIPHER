@@ -1,0 +1,638 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page_title|default('Detail View') }} - Threat Intelligence Platform{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="page-header">
+    <div>
+        <div class="flex items-center mb-1">
+            <a href="{{ back_url|default(url_for(parent_endpoint)) }}" class="text-gray-500 hover:text-gray-700 mr-2">
+                <i class="fas fa-arrow-left"></i>
+            </a>
+            <h1 class="page-title">
+                <i class="fas fa-{{ page_icon|default('file-alt') }} page-icon"></i>
+                {{ page_title|default('Detail View') }}
+            </h1>
+        </div>
+        {% if page_subtitle %}
+        <p class="text-gray-600">{{ page_subtitle }}</p>
+        {% endif %}
+    </div>
+    
+    <div class="page-actions">
+        <!-- Entity-specific actions -->
+        {% if entity_type == 'feed' %}
+        <a href="{{ url_for('export_feed', feed_name=entity.feed_name, format='csv') }}" class="btn btn-success">
+            <i class="fas fa-download mr-2"></i>Export Data
+        </a>
+        {% elif entity_type == 'campaign' %}
+        <a href="{{ url_for('generate_report', campaign_id=entity.campaign_id) }}" class="btn btn-primary">
+            <i class="fas fa-file-export mr-2"></i>Generate Report
+        </a>
+        {% elif entity_type == 'ioc' %}
+        <a href="{{ url_for('export_iocs', type=entity.type, value=entity.value) }}" class="btn btn-success">
+            <i class="fas fa-download mr-2"></i>Export
+        </a>
+        {% endif %}
+        
+        <!-- Common actions -->
+        {% if action_buttons %}
+        {% for button in action_buttons %}
+        <a href="{{ button.url }}" class="btn btn-{{ button.type|default('primary') }}">
+            <i class="fas fa-{{ button.icon|default('plus') }} mr-2"></i>{{ button.text }}
+        </a>
+        {% endfor %}
+        {% endif %}
+    </div>
+</div>
+
+<!-- Entity Information -->
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-info-circle panel-icon"></i>
+            {{ entity_type|title }} Information
+        </h3>
+        {% if entity_actions %}
+        <div class="flex space-x-3">
+            {% for action in entity_actions %}
+            <a href="{{ action.url }}" class="text-sm text-blue-600 hover:underline">
+                <i class="fas fa-{{ action.icon }} mr-1"></i>{{ action.text }}
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    <div class="panel-body">
+        {% if entity_type == 'feed' %}
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
+            <div class="bg-gray-50 rounded-lg p-4">
+                <p class="text-sm text-gray-500 mb-1">Total Records</p>
+                <p class="text-xl font-semibold">{{ entity.total_records|default(0) }}</p>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-4">
+                <p class="text-sm text-gray-500 mb-1">Latest Update</p>
+                <p class="text-xl font-semibold">{{ entity.latest_record|default('N/A')|datetime }}</p>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-4">
+                <p class="text-sm text-gray-500 mb-1">Earliest Record</p>
+                <p class="text-xl font-semibold">{{ entity.earliest_record|default('N/A')|datetime }}</p>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-4">
+                <p class="text-sm text-gray-500 mb-1">Days with Data</p>
+                <p class="text-xl font-semibold">{{ entity.days_with_data|default(0) }}</p>
+            </div>
+        </div>
+        
+        {% elif entity_type == 'campaign' %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Threat Actor</p>
+                    <p class="font-medium">{{ entity.threat_actor|default('Unknown') }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Malware</p>
+                    <p class="font-medium">{{ entity.malware|default('Unknown') }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Techniques</p>
+                    <p class="font-medium">{{ entity.techniques|default('Unknown') }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Targets</p>
+                    <p class="font-medium">{{ entity.targets|default('Unknown') }}</p>
+                </div>
+            </div>
+            <div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">First Seen</p>
+                    <p class="font-medium">{{ entity.first_seen|default('Unknown')|datetime }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Last Seen</p>
+                    <p class="font-medium">{{ entity.last_seen|default('Unknown')|datetime }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Severity</p>
+                    <p class="font-medium">
+                        <span class="severity-badge {% if entity.severity == 'critical' %}critical
+                                {% elif entity.severity == 'high' %}high
+                                {% elif entity.severity == 'medium' %}medium
+                                {% else %}low{% endif %}">
+                            {{ entity.severity|default('Unknown')|title }}
+                        </span>
+                    </p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Confidence</p>
+                    <p class="font-medium">{{ entity.confidence|default('Unknown')|title }}</p>
+                </div>
+            </div>
+        </div>
+        
+        {% elif entity_type == 'ioc' %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Type</p>
+                    <p class="font-medium">
+                        <span class="badge-ioc badge-{{ entity.type }}">{{ entity.type|upper }}</span>
+                    </p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Value</p>
+                    <p class="font-medium break-all">{{ entity.value }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">First Seen</p>
+                    <p class="font-medium">{{ entity.first_seen|default(entity.timestamp)|datetime }}</p>
+                </div>
+            </div>
+            <div>
+                {% if entity.type == 'ip' and entity.geo %}
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Geographic Location</p>
+                    <p class="font-medium">{{ entity.geo.country }}, {{ entity.geo.city }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">ASN / Provider</p>
+                    <p class="font-medium">{{ entity.asn|default('Unknown') }}</p>
+                </div>
+                {% endif %}
+                
+                {% if entity.type == 'domain' %}
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Registrar</p>
+                    <p class="font-medium">{{ entity.registrar|default('Unknown') }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Creation Date</p>
+                    <p class="font-medium">{{ entity.creation_date|default('Unknown')|datetime }}</p>
+                </div>
+                {% endif %}
+                
+                {% if entity.type in ['md5', 'sha1', 'sha256'] %}
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Detection Ratio</p>
+                    <p class="font-medium">{{ entity.detection_ratio|default('Unknown') }}</p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">File Type</p>
+                    <p class="font-medium">{{ entity.file_type|default('Unknown') }}</p>
+                </div>
+                {% endif %}
+                
+                <div class="mb-4">
+                    <p class="text-sm text-gray-500 mb-1">Confidence</p>
+                    <p class="font-medium">{{ entity.confidence|default('Unknown')|title }}</p>
+                </div>
+            </div>
+        </div>
+        
+        {% elif entity_type == 'report' %}
+        <div class="mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <p class="text-sm text-gray-500 mb-1">Report Type</p>
+                    <p class="text-xl font-semibold">{{ entity.report_type|default('Summary')|title }}</p>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <p class="text-sm text-gray-500 mb-1">Generated At</p>
+                    <p class="text-xl font-semibold">{{ entity.generated_at|datetime }}</p>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                    <p class="text-sm text-gray-500 mb-1">Period</p>
+                    <p class="text-xl font-semibold">{{ entity.period_days }} Days</p>
+                </div>
+            </div>
+            
+            <div class="prose max-w-none">
+                {{ entity.report_content|markdown }}
+            </div>
+        </div>
+        {% else %}
+        <!-- Generic entity display -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {% for field in entity_fields %}
+            <div class="mb-4">
+                <p class="text-sm text-gray-500 mb-1">{{ field.label }}</p>
+                <p class="font-medium">{{ entity[field.key]|default('Unknown') }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Related Data Tabs -->
+{% if entity_tabs %}
+<div class="panel">
+    <div class="border-b border-gray-200">
+        <nav class="flex -mb-px space-x-8">
+            {% for tab in entity_tabs %}
+            <a href="#tab-{{ tab.id }}" data-tab="{{ tab.id }}" class="tab-link py-4 px-1 border-b-2 font-medium text-sm {% if loop.first %}border-blue-500 text-blue-600{% else %}border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300{% endif %}">
+                {% if tab.icon %}<i class="fas fa-{{ tab.icon }} mr-2"></i>{% endif %}
+                {{ tab.label }}
+                {% if tab.count %}<span class="ml-2 bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full text-xs">{{ tab.count }}</span>{% endif %}
+            </a>
+            {% endfor %}
+        </nav>
+    </div>
+    
+    <div class="tab-content-container">
+        {% for tab in entity_tabs %}
+        <div id="tab-{{ tab.id }}" class="tab-content p-6 {% if not loop.first %}hidden{% endif %}">
+            {% if tab.id == 'records' %}
+            <!-- Feed Records -->
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="table-header">
+                        <tr>
+                            {% for column in tab.columns %}
+                            <th>{{ column }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody class="table-body">
+                        {% for record in tab.data %}
+                        <tr>
+                            {% for column in tab.columns %}
+                            <td>
+                                {% if column|lower == 'id' or column|lower == 'identifier' %}
+                                <span class="text-blue-600">{{ record[column]|default(record[column|lower]) }}</span>
+                                {% elif column|lower == 'severity' or column|lower == 'threat_level' %}
+                                <span class="severity-badge {% if record[column] == 'critical' %}critical
+                                            {% elif record[column] == 'high' %}high
+                                            {% elif record[column] == 'medium' %}medium
+                                            {% else %}low{% endif %}">
+                                    {{ record[column]|default(record[column|lower]) }}
+                                </span>
+                                {% else %}
+                                {{ record[column]|default(record[column|lower]|default('N/A')) }}
+                                {% endif %}
+                            </td>
+                            {% endfor %}
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="{{ tab.columns|length }}" class="px-6 py-4 text-center text-gray-500">
+                                No records available.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if tab.pagination %}
+            <div class="table-pagination">
+                <div class="text-gray-600 text-sm">
+                    Showing {{ tab.pagination.offset + 1 }} to {{ tab.pagination.offset + tab.data|length }} of {{ tab.pagination.total }} records
+                </div>
+                <div class="flex space-x-2">
+                    {% if tab.pagination.offset > 0 %}
+                    <a href="{{ url_for(current_endpoint, id=entity_id, tab=tab.id, offset=max(0, tab.pagination.offset-tab.pagination.limit), limit=tab.pagination.limit) }}" 
+                       class="btn btn-light">
+                        <i class="fas fa-chevron-left mr-1"></i> Previous
+                    </a>
+                    {% else %}
+                    <button disabled class="btn btn-light opacity-50 cursor-not-allowed">
+                        <i class="fas fa-chevron-left mr-1"></i> Previous
+                    </button>
+                    {% endif %}
+                    
+                    {% if tab.pagination.offset + tab.data|length < tab.pagination.total %}
+                    <a href="{{ url_for(current_endpoint, id=entity_id, tab=tab.id, offset=tab.pagination.offset+tab.pagination.limit, limit=tab.pagination.limit) }}" 
+                       class="btn btn-light">
+                        Next <i class="fas fa-chevron-right ml-1"></i>
+                    </a>
+                    {% else %}
+                    <button disabled class="btn btn-light opacity-50 cursor-not-allowed">
+                        Next <i class="fas fa-chevron-right ml-1"></i>
+                    </button>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+            
+            {% elif tab.id == 'iocs' %}
+            <!-- IOCs List -->
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="table-header">
+                        <tr>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th>First Seen</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="table-body">
+                        {% for ioc in tab.data %}
+                        <tr>
+                            <td>
+                                <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
+                            </td>
+                            <td class="max-w-xs truncate">
+                                <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                                    {{ ioc.value }}
+                                </a>
+                            </td>
+                            <td>{{ ioc.first_seen|default(ioc.timestamp)|datetime }}</td>
+                            <td>
+                                <span class="severity-badge {% if ioc.confidence == 'high' %}high
+                                    {% elif ioc.confidence == 'medium' %}medium
+                                    {% else %}low{% endif %}">
+                                    {{ ioc.confidence|default('low')|title }}
+                                </span>
+                            </td>
+                            <td>
+                                <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                                    <i class="fas fa-eye mr-1"></i> View
+                                </a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="px-6 py-4 text-center text-gray-500">
+                                No indicators found.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            {% elif tab.id == 'sources' or tab.id == 'campaigns' %}
+            <!-- Related Sources or Campaigns -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {% for item in tab.data %}
+                <div class="border rounded-lg overflow-hidden hover:shadow-md transition-shadow">
+                    <div class="bg-gray-50 p-3 border-b">
+                        <h4 class="font-medium truncate">
+                            {% if tab.id == 'campaigns' %}
+                            <a href="{{ url_for('campaign_detail', campaign_id=item.campaign_id) }}" class="text-blue-600 hover:underline">
+                                {{ item.campaign_name }}
+                            </a>
+                            {% else %}
+                            <a href="#" class="text-blue-600 hover:underline">
+                                {{ item.source_id }}
+                            </a>
+                            {% endif %}
+                        </h4>
+                    </div>
+                    <div class="p-4">
+                        {% if tab.id == 'campaigns' %}
+                        <div class="mb-2">
+                            <p class="text-gray-600 text-sm mb-1">Threat Actor</p>
+                            <p class="font-medium">{{ item.threat_actor|default('Unknown') }}</p>
+                        </div>
+                        <div class="mb-2">
+                            <p class="text-gray-600 text-sm mb-1">Last Seen</p>
+                            <p class="font-medium">{{ item.last_seen|datetime }}</p>
+                        </div>
+                        <div class="mb-2">
+                            <p class="text-gray-600 text-sm mb-1">Severity</p>
+                            <p class="font-medium">
+                                <span class="severity-badge {{ item.severity|default('medium') }}">
+                                    {{ item.severity|default('Medium')|title }}
+                                </span>
+                            </p>
+                        </div>
+                        {% else %}
+                        <div class="mb-2">
+                            <p class="text-gray-600 text-sm mb-1">Source Type</p>
+                            <p class="font-medium">{{ item.source_type|default('Unknown') }}</p>
+                        </div>
+                        <div class="mb-2">
+                            <p class="text-gray-600 text-sm mb-1">Timestamp</p>
+                            <p class="font-medium">{{ item.timestamp|datetime }}</p>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% else %}
+                <div class="col-span-full text-center text-gray-500 py-8">
+                    No related {{ tab.id }} found.
+                </div>
+                {% endfor %}
+            </div>
+            
+            {% elif tab.id == 'analysis' %}
+            <!-- Analysis Results -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div class="bg-white border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 p-3 border-b font-medium">
+                        <i class="fas fa-brain text-purple-600 mr-2"></i>
+                        AI Analysis
+                    </div>
+                    <div class="p-4">
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Summary</p>
+                            <p class="font-medium">{{ tab.data.vertex_analysis.summary|default('No summary available') }}</p>
+                        </div>
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Threat Actor</p>
+                            <p class="font-medium">{{ tab.data.vertex_analysis.threat_actor|default('Unknown') }}</p>
+                        </div>
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Techniques</p>
+                            <p class="font-medium">{{ tab.data.vertex_analysis.techniques|default('Unknown') }}</p>
+                        </div>
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Severity</p>
+                            <p class="font-medium">
+                                <span class="severity-badge {{ tab.data.vertex_analysis.severity|default('medium')|lower }}">
+                                    {{ tab.data.vertex_analysis.severity|default('Medium') }}
+                                </span>
+                            </p>
+                        </div>
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Confidence</p>
+                            <p class="font-medium">{{ tab.data.vertex_analysis.confidence|default('Unknown') }}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 p-3 border-b font-medium">
+                        <i class="fas fa-chart-bar text-blue-600 mr-2"></i>
+                        NLP Analysis
+                    </div>
+                    <div class="p-4">
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Sentiment</p>
+                            <div class="w-full bg-gray-200 rounded-full h-2.5 mt-2">
+                                {% set sentiment = tab.data.nlp_analysis.sentiment.score|default(0) %}
+                                <div class="h-2.5 rounded-full 
+                                    {% if sentiment > 0.2 %}bg-green-500
+                                    {% elif sentiment < -0.2 %}bg-red-500
+                                    {% else %}bg-yellow-500{% endif %}"
+                                    style="width: {{ (sentiment + 1) * 50 }}%">
+                                </div>
+                            </div>
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>Negative</span>
+                                <span>Neutral</span>
+                                <span>Positive</span>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <p class="text-gray-600 text-sm mb-1">Key Entities</p>
+                            <div class="mt-2">
+                                {% for entity_type, entities in tab.data.nlp_analysis.entities.items() %}
+                                {% for entity in entities[:3] %}
+                                <span class="inline-block px-2 py-1 bg-gray-100 text-gray-800 rounded-full text-xs mr-2 mb-2">
+                                    {{ entity.name }} <span class="text-gray-500">({{ entity_type|lower }})</span>
+                                </span>
+                                {% endfor %}
+                                {% else %}
+                                <p class="text-gray-500">No entities detected</p>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            {% else %}
+            <!-- Generic Tab Content -->
+            {{ tab.content|safe }}
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Visualization Section (Optional) -->
+{% if show_visualization|default(false) %}
+<div class="panel mt-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-{{ viz_icon|default('chart-network') }} panel-icon"></i>
+            {{ viz_title|default('Visualization') }}
+        </h3>
+    </div>
+    <div class="p-0">
+        <div id="entityVisualization" class="h-96"></div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Additional Content Section -->
+{% if additional_content %}
+<div class="panel mt-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-{{ additional_icon|default('info-circle') }} panel-icon"></i>
+            {{ additional_title|default('Additional Information') }}
+        </h3>
+    </div>
+    <div class="panel-body">
+        {{ additional_content|safe }}
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Tab Navigation
+    const tabLinks = document.querySelectorAll('.tab-link');
+    const tabContents = document.querySelectorAll('.tab-content');
+    
+    tabLinks.forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            
+            // Remove active class from all tabs
+            tabLinks.forEach(tabLink => {
+                tabLink.classList.remove('border-blue-500', 'text-blue-600');
+                tabLink.classList.add('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+            });
+            
+            // Add active class to clicked tab
+            link.classList.add('border-blue-500', 'text-blue-600');
+            link.classList.remove('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+            
+            // Hide all tab content
+            tabContents.forEach(content => {
+                content.classList.add('hidden');
+            });
+            
+            // Show relevant tab content
+            const tabId = link.getAttribute('data-tab');
+            document.getElementById('tab-' + tabId).classList.remove('hidden');
+        });
+    });
+    
+    {% if entity_type == 'feed' and chart_data %}
+    // Feed Activity Chart
+    const chartData = {
+        dates: {{ chart_data.dates|tojson }},
+        counts: {{ chart_data.counts|tojson }}
+    };
+    
+    Plotly.newPlot('mainChart', [{
+        x: chartData.dates,
+        y: chartData.counts,
+        type: 'bar',
+        marker: {
+            color: '#3b82f6',
+            opacity: 0.8
+        }
+    }], {
+        margin: { t: 10, r: 10, l: 40, b: 40 },
+        xaxis: { title: 'Date' },
+        yaxis: { title: 'Records' }
+    });
+    {% endif %}
+    
+    {% if entity_type == 'campaign' and chart_data %}
+    // Campaign IOC Type Distribution
+    Plotly.newPlot('mainChart', [{
+        labels: {{ chart_data.labels|tojson }},
+        values: {{ chart_data.values|tojson }},
+        type: 'pie',
+        textinfo: 'label+percent',
+        insidetextorientation: 'radial',
+        marker: {
+            colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+        }
+    }], {
+        margin: { t: 0, b: 30, l: 30, r: 30 },
+        showlegend: true,
+        legend: { orientation: 'h', y: -0.2 }
+    });
+    {% endif %}
+    
+    {% if show_visualization|default(false) %}
+    // Entity Network Visualization
+    {% if entity_type == 'campaign' %}
+    // Campaign relationship visualization
+    const nodes = [
+        {id: 'campaign', label: '{{ entity.campaign_name }}', group: 'campaign'},
+        {id: 'actor', label: '{{ entity.threat_actor }}', group: 'actor'}
+    ];
+    
+    const edges = [
+        {from: 'campaign', to: 'actor'}
+    ];
+    
+    {% if entity.iocs %}
+    // Add IOCs to visualization
+    {% for ioc in entity.iocs[:10] %}
+    nodes.push({id: 'ioc_{{ loop.index }}', label: '{{ ioc.value }}', group: '{{ ioc.type }}'});
+    edges.push({from: 'campaign', to: 'ioc_{{ loop.index }}'});
+    {% endfor %}
+    {% endif %}
+    
+    // TODO: Create force-directed network visualization with Plotly or D3.js
+    {% endif %}
+    {% endif %}
+</script>
+{% endblock %}
