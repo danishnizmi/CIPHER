@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 # Environment variables
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 
+def create_app():
+    """Application factory function for gunicorn."""
+    return app
+
 # Load configuration
 try:
     configs = load_configs()
@@ -92,14 +96,17 @@ def index():
     return render_template('dashboard.html')
 
 # Import routes from other modules
-from frontend import frontend_routes
-from api import api_routes
-from ingestion import ingestion_routes
-
-# Register blueprints
-app.register_blueprint(frontend_routes)
-app.register_blueprint(api_routes, url_prefix='/api')
-app.register_blueprint(ingestion_routes, url_prefix='/ingest')
+try:
+    from frontend import frontend_routes
+    from api import api_routes
+    from ingestion import ingestion_routes
+    
+    # Register blueprints
+    app.register_blueprint(frontend_routes)
+    app.register_blueprint(api_routes, url_prefix='/api')
+    app.register_blueprint(ingestion_routes, url_prefix='/ingest')
+except ImportError as e:
+    logger.warning(f"Could not import routes: {e}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
