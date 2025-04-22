@@ -254,7 +254,7 @@ steps:
       gcloud scheduler jobs update http update-threat-feeds \
         --oauth-service-account-email=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com || echo "Warning: Failed to update scheduler job service account"
 
-# Run post-deployment check
+# Run post-deployment check - FIXED to avoid substitution error
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'post-deployment-check'
   entrypoint: 'bash'
@@ -266,17 +266,17 @@ steps:
       sleep 15
       
       # Get service URL
-      SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
-      echo "Service deployed at: $SERVICE_URL"
+      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
+      echo "Service deployed at: ${service_url}"
       
       # Check if the service is responding
       echo "Checking health endpoint..."
-      HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/health" || echo "failed")
+      response_code=$(curl -s -o /dev/null -w "%{http_code}" "${service_url}/api/health" || echo "failed")
       
-      if [ "$HEALTH_RESPONSE" = "200" ]; then
+      if [ "${response_code}" = "200" ]; then
         echo "✅ Health check successful!"
       else
-        echo "⚠️ Health check returned: $HEALTH_RESPONSE"
+        echo "⚠️ Health check returned: ${response_code}"
         echo "This is not a failure - the service may take longer to initialize."
       fi
 
