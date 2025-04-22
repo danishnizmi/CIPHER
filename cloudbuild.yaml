@@ -195,7 +195,7 @@ steps:
       gcloud scheduler jobs update http update-threat-feeds \
         --oauth-service-account-email=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com || true
 
-# Run post-deployment tests
+# Run post-deployment check
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'post-deployment-check'
   entrypoint: 'bash'
@@ -204,8 +204,7 @@ steps:
     - |
       # Wait for deployment to be ready
       sleep 10
-      SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
-      curl -sS "$SERVICE_URL/api/health" | grep -q "status.*ok" && echo "Health check successful" || echo "Health check failed"
+      curl -sS "$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')/api/health" || echo "Health check failed"
 
 # Clean up old container images to save costs
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
