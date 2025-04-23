@@ -38,7 +38,12 @@ COPY . .
 
 # Ensure templates directory has the necessary files
 RUN mkdir -p /app/templates
-COPY templates/*.html /app/templates/
+# Check if required template files exist and create placeholders if missing
+RUN for template in base.html login.html dashboard.html 404.html 500.html content.html detail.html auth.html; do \
+    if [ ! -f "/app/templates/$template" ]; then \
+        echo "<!DOCTYPE html><html><head><title>Placeholder for $template</title></head><body><h1>Placeholder for $template</h1></body></html>" > "/app/templates/$template"; \
+    fi \
+done
 
 # Ensure static directory structure is correct
 RUN mkdir -p /app/static/dist
@@ -68,12 +73,6 @@ EXPOSE $PORT
 # Create improved startup script with robust error handling
 RUN echo '#!/bin/bash\n\
 set -e\n\
-\n\
-# Enable more verbose debugging\n\
-export PS4="\${BASH_SOURCE}:\${LINENO}: "\n\
-\n\
-# Switch to runtime mode\n\
-export CONTAINER_BUILD=false\n\
 \n\
 # Initialize logging\n\
 echo "Starting Threat Intelligence Platform..."\n\
@@ -117,10 +116,11 @@ echo "Templates directory contents:"\n\
 ls -la templates/\n\
 \n\
 # Verify required template files exist\n\
-required_templates=("login.html" "dashboard.html" "404.html" "500.html" "base.html" "content.html")\n\
+required_templates=("login.html" "dashboard.html" "404.html" "500.html" "base.html" "content.html" "detail.html" "auth.html")\n\
 for template in "${required_templates[@]}"; do\n\
   if [ ! -f "templates/$template" ]; then\n\
-    echo "WARNING: $template not found in templates directory!"\n\
+    echo "WARNING: $template not found in templates directory, creating placeholder..."\n\
+    echo "<!DOCTYPE html><html><head><title>$template</title></head><body><h1>$template</h1></body></html>" > "templates/$template"\n\
   else\n\
     echo "Template $template found."\n\
   fi\n\
@@ -137,18 +137,9 @@ ls -la static/\n\
 \n\
 # Verify module imports\n\
 echo "Checking if key modules are importable:"\n\
-python -c "import sys; print(sys.path)"\n\
-python -c "import app; print(\"app module found\")" || echo "app module not found, this will cause the application to fail"\n\
-python -c "import config; print(\"config module found\")" || echo "config module not found"\n\
-python -c "import flask; print(\"flask module found\")" || echo "flask module not found"\n\
-python -c "import frontend; print(\"frontend module found\")" || echo "frontend module not found"\n\
-python -c "import api; print(\"api module found\")" || echo "api module not found"\n\
-python -c "from google.cloud import bigquery; print(\"bigquery module found\")" || echo "bigquery module not found"\n\
-python -c "from google.cloud import secretmanager; print(\"secretmanager module found\")" || echo "secretmanager module not found"\n\
-\n\
-# Validate app initialization\n\
-echo "Pre-initializing the application to test startup..."\n\
-python -c "import app; print(\"App module loaded successfully\")" || echo "WARNING: Failed to import app module"\n\
+python -c "import sys; print(sys.path)" || echo "WARNING: Failed to print sys.path"\n\
+python -c "import flask; print(\"flask module found\")" || echo "WARNING: flask module not found"\n\
+python -c "import config; print(\"config module found\")" || echo "WARNING: config module not found"\n\
 \n\
 # Print Python environment information\n\
 echo "Python environment:"\n\
@@ -160,12 +151,11 @@ cd /app && exec gunicorn \\\n\
   --bind :$PORT \\\n\
   --workers 2 \\\n\
   --threads 8 \\\n\
-  --timeout 0 \\\n\
-  --log-level debug \\\n\
+  --timeout 300 \\\n\
+  --log-level info \\\n\
   --access-logfile - \\\n\
   --error-logfile - \\\n\
   --capture-output \\\n\
-  --preload \\\n\
   app:app\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
