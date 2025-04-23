@@ -9,8 +9,8 @@ import logging
 import time
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Tuple
-import random  # Used for graceful degradation when DB is unavailable
+from typing import Dict, List, Any, Optional, Union, Tuple, Callable
+import functools
 
 from flask import Flask, Blueprint, request, jsonify, Response, current_app, send_file, abort
 from flask_cors import CORS
@@ -50,7 +50,6 @@ else:
 # API Configuration
 MAX_RESULTS = 1000  # Maximum results to return in a single query
 CACHE_TIMEOUT = 300  # 5 minutes cache for certain endpoints
-SAMPLE_FEEDS = ["alienvault_pulses", "misp_events", "threatfox_iocs", "phishtank_urls", "urlhaus_malware", "feodotracker_c2", "sslbl_certificates"]
 
 # Create Blueprint instead of app for better modular integration
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -66,33 +65,35 @@ limiter = Limiter(
 bq_client = None
 storage_client = None
 
-# Initialize BigQuery client with better error handling
-def get_bigquery_client():
-    """Get BigQuery client with robust error handling"""
-    global bq_client
-    
-    try:
-        if 'bq_client' not in globals() or bq_client is None:
-            logger.info(f"Initializing BigQuery client for project {PROJECT_ID}")
-            bq_client = bigquery.Client(project=PROJECT_ID)
-        return bq_client
-    except Exception as e:
-        logger.error(f"Failed to initialize BigQuery client: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
+# ======== Core Utilities ========
 
-# Initialize Storage client
-def get_storage_client():
-    """Get Storage client with robust error handling"""
-    global storage_client
+def get_client(client_type: str):
+    """Get or initialize a Google Cloud client
+    
+    Args:
+        client_type: Type of client ('bigquery' or 'storage')
+        
+    Returns:
+        Initialized client or None if initialization fails
+    """
+    global bq_client, storage_client
     
     try:
-        if 'storage_client' not in globals() or storage_client is None:
-            logger.info(f"Initializing Storage client for project {PROJECT_ID}")
-            storage_client = storage.Client(project=PROJECT_ID)
-        return storage_client
+        if client_type == 'bigquery':
+            if bq_client is None:
+                bq_client = bigquery.Client(project=PROJECT_ID)
+                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            return bq_client
+        elif client_type == 'storage':
+            if storage_client is None:
+                storage_client = storage.Client(project=PROJECT_ID)
+                logger.info(f"Storage client initialized for project {PROJECT_ID}")
+            return storage_client
+        else:
+            logger.error(f"Unknown client type: {client_type}")
+            return None
     except Exception as e:
-        logger.error(f"Failed to initialize Storage client: {str(e)}")
+        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -102,7 +103,6 @@ def require_api_key(f):
     def decorated_function(*args, **kwargs):
         if not API_KEY:
             # No API key configured, allow all requests
-            logger.debug("No API key configured, allowing request")
             return f(*args, **kwargs)
         
         # Check for API key in header or query parameter
@@ -112,7 +112,7 @@ def require_api_key(f):
             return f(*args, **kwargs)
         else:
             logger.warning(f"Invalid API key provided from {request.remote_addr}")
-            return jsonify({"error": "Unauthorized - Invalid API key"}), 401
+            return api_error("Unauthorized - Invalid API key", status=401)
     
     return decorated_function
 
@@ -125,20 +125,58 @@ def handle_exceptions(f):
         except Exception as e:
             logger.error(f"Error in {f.__name__}: {str(e)}")
             logger.error(traceback.format_exc())
-            return jsonify({
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat(),
-                "path": request.path
-            }), 500
+            return api_error(str(e))
     
     return decorated_function
+
+def validate_params(*param_names, types=None):
+    """Decorator to validate request parameters"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            params = {}
+            for i, name in enumerate(param_names):
+                try:
+                    value = request.args.get(name)
+                    if not value:
+                        continue
+                    
+                    # Convert to specified type
+                    if types and i < len(types) and types[i]:
+                        value = types[i](value)
+                    
+                    params[name] = value
+                except ValueError:
+                    return api_error(f"Invalid parameter: {name}", status=400)
+            
+            # Add validated params to kwargs
+            kwargs.update(params)
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def validate_table_name(table_name: str) -> bool:
     """Validate table name to prevent SQL injection"""
     # Only allow alphanumeric characters and underscores
     return bool(table_name and table_name.replace("_", "").isalnum())
 
-# Query execution with built-in caching for frequently used queries
+def api_response(data, status=200):
+    """Standardized API response"""
+    return jsonify(data), status
+
+def api_error(message, status=500, extra=None):
+    """Standardized API error response"""
+    response = {
+        "error": message,
+        "timestamp": datetime.utcnow().isoformat(),
+        "path": request.path
+    }
+    if extra:
+        response.update(extra)
+    return jsonify(response), status
+
+# ======== Query Cache ========
+
 class QueryCache:
     """Cache for BigQuery queries with timeout"""
     def __init__(self, cache_time=CACHE_TIMEOUT):
@@ -168,7 +206,7 @@ query_cache = QueryCache()
 
 def execute_bigquery(query: str, params: Optional[Dict] = None, use_cache: bool = False) -> Tuple[List[Dict], Optional[Exception]]:
     """Execute a BigQuery query and return results"""
-    client = get_bigquery_client()
+    client = get_client('bigquery')
     if not client:
         return [], Exception("BigQuery client not available")
     
@@ -213,76 +251,35 @@ def execute_bigquery(query: str, params: Optional[Dict] = None, use_cache: bool 
         logger.error(traceback.format_exc())
         return [], e
 
-def generate_sample_data(feed_name: str, days: int = 30, count: int = 50) -> List[Dict]:
-    """Generate sample data for a feed when real data isn't available
-    
-    This provides graceful degradation when DB access fails
-    """
-    samples = []
-    end_date = datetime.utcnow()
-    
-    for i in range(count):
-        # Random date within the requested range
-        days_ago = random.randint(0, days)
-        timestamp = (end_date - timedelta(days=days_ago, 
-                                          hours=random.randint(0, 23), 
-                                          minutes=random.randint(0, 59))).isoformat()
-        
-        # Base sample structure
-        sample = {
-            "id": f"{feed_name}_{i}",
-            "_ingestion_timestamp": timestamp
-        }
-        
-        # Add feed-specific fields
-        if feed_name == "alienvault_pulses":
-            sample.update({
-                "name": f"Threat Intel Pulse {i}",
-                "author": f"Researcher{random.randint(1, 10)}",
-                "description": f"Sample threat intelligence data for testing purposes #{i}",
-                "threat_score": random.randint(1, 10),
-                "malware_families": random.sample(["Emotet", "Trickbot", "Ryuk", "Maze", "Revil"], random.randint(1, 3)),
-                "references": [f"https://example.com/reference{i}"]
-            })
-        elif feed_name == "misp_events":
-            sample.update({
-                "info": f"MISP Event #{i}",
-                "threat_level_id": random.randint(1, 4),
-                "analysis": random.randint(0, 2),
-                "org_name": f"Security Org {random.randint(1, 5)}",
-                "timestamp": int((datetime.utcnow() - timedelta(days=random.randint(0, days))).timestamp())
-            })
-        elif feed_name == "threatfox_iocs":
-            sample.update({
-                "ioc": f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}",
-                "ioc_type": "ip",
-                "threat_type": random.randint(1, 10),
-                "threat_type_desc": f"Malware C2 Server #{i}",
-                "malware": f"Malware Family {random.randint(1, 10)}",
-                "confidence_level": random.randint(50, 100)
-            })
-        elif feed_name == "phishtank_urls":
-            sample.update({
-                "url": f"https://fake-phishing-{i}.example.com",
-                "phish_id": f"PT{random.randint(10000, 99999)}",
-                "verified": "yes" if random.random() > 0.2 else "no",
-                "target": random.choice(["PayPal", "Microsoft", "Google", "Amazon", "Bank"]),
-                "details": f"Phishing attempt targeting {random.choice(['credentials', 'payment info', 'personal data'])}"
-            })
-        else:
-            # Generic fields for other feeds
-            sample.update({
-                "name": f"Sample {feed_name} item {i}",
-                "description": f"Generic sample data for {feed_name}",
-                "severity": random.choice(["low", "medium", "high", "critical"]),
-                "tags": random.sample(["malware", "phishing", "ransomware", "apt", "trojan"], random.randint(1, 3))
-            })
-        
-        samples.append(sample)
-    
-    return samples
+def with_cached_result(cache_key_fn):
+    """Decorator to implement caching for endpoint results"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Check if cache should be skipped
+            force_refresh = request.args.get('refresh', 'false').lower() == 'true'
+            if not force_refresh:
+                cache_key = cache_key_fn(*args, **kwargs)
+                cached_result = query_cache.get(cache_key)
+                if cached_result:
+                    return jsonify(cached_result)
+            
+            # Execute function and cache result
+            result = f(*args, **kwargs)
+            
+            # If result is a tuple (likely response, status_code), use just the response
+            data = result[0] if isinstance(result, tuple) else result
+            
+            # Cache the result
+            if not force_refresh and isinstance(data, (dict, list)):
+                cache_key = cache_key_fn(*args, **kwargs)
+                query_cache.set(cache_key, data)
+            
+            return result
+        return decorated_function
+    return decorator
 
-# Endpoint Handlers - Enhanced with smart caching and optimized queries
+# ======== Endpoint Handlers ========
 
 @api_bp.route('/health', methods=['GET'])
 @handle_exceptions
@@ -292,10 +289,10 @@ def health_check():
     version = os.environ.get("VERSION", "1.0.0")
     
     # Check BigQuery connectivity for deep health check
-    client = get_bigquery_client()
+    client = get_client('bigquery')
     db_status = "ok" if client else "error"
     
-    return jsonify({
+    return api_response({
         "status": "ok",
         "database": db_status,
         "timestamp": datetime.utcnow().isoformat(),
@@ -307,20 +304,11 @@ def health_check():
 @api_bp.route('/stats', methods=['GET'])
 @require_api_key
 @handle_exceptions
-def get_stats():
+@validate_params('days', types=[int])
+@with_cached_result(lambda days=30, **kwargs: f"stats_{days}")
+def get_stats(days=30):
     """Get platform statistics with intelligent caching"""
-    days = int(request.args.get('days', '30'))
-    force_refresh = request.args.get('refresh', 'false').lower() == 'true'
-    
-    # Check cache first unless refresh requested
-    cache_key = f"stats_{days}"
-    if not force_refresh:
-        cached_stats = query_cache.get(cache_key)
-        if cached_stats:
-            return jsonify(cached_stats)
-    
-    # Try to query stats from database
-    client = get_bigquery_client()
+    # Default stats structure
     stats = {
         "feeds": {
             "total_sources": 0,
@@ -344,136 +332,109 @@ def get_stats():
         "days": days
     }
     
+    client = get_client('bigquery')
+    if not client:
+        return api_response(stats)
+    
     try:
-        if client:
-            # Get feed stats - use a more efficient query
-            feed_query = f"""
-            SELECT
-              COUNT(DISTINCT table_id) AS total_sources,
-              COUNT(DISTINCT IF(record_count > 0, table_id, NULL)) AS active_feeds,
-              SUM(record_count) AS total_records
-            FROM (
-              SELECT
-                table_id,
-                (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id 
-                 WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS record_count
-              FROM
-                `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-              WHERE 
-                table_id NOT LIKE 'threat%'
-            )
-            """
-            
-            feed_results, feed_error = execute_bigquery(feed_query, use_cache=True)
-            if not feed_error and feed_results:
-                stats["feeds"]["total_sources"] = feed_results[0].get("total_sources", 0)
-                stats["feeds"]["active_feeds"] = feed_results[0].get("active_feeds", 0)
-                stats["feeds"]["total_records"] = feed_results[0].get("total_records", 0)
-            
-            # Get campaign stats
-            campaign_query = f"""
-            SELECT
-              COUNT(*) AS total_campaigns,
-              COUNT(DISTINCT threat_actor) AS unique_actors,
-              COUNT(IF(last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days//2} DAY), 1, NULL)) AS active_campaigns
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-            WHERE
-              detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-            """
-            
-            campaign_results, campaign_error = execute_bigquery(campaign_query, use_cache=True)
-            if not campaign_error and campaign_results:
-                stats["campaigns"]["total_campaigns"] = campaign_results[0].get("total_campaigns", 0)
-                stats["campaigns"]["active_campaigns"] = campaign_results[0].get("active_campaigns", 0)
-                stats["campaigns"]["unique_actors"] = campaign_results[0].get("unique_actors", 0)
-            
-            # Get IOC stats with a more efficient query
-            ioc_query = f"""
-            WITH ioc_stats AS (
-              SELECT
-                JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
-                COUNT(*) AS count
-              FROM
-                `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-                UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-              WHERE
-                analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-              GROUP BY 
-                ioc_type
-            )
-            SELECT
-              (SELECT SUM(count) FROM ioc_stats) AS total_iocs,
-              ARRAY_AGG(STRUCT(ioc_type, count)) AS ioc_types
-            FROM ioc_stats
-            """
-            
-            ioc_results, ioc_error = execute_bigquery(ioc_query, use_cache=True)
-            if not ioc_error and ioc_results:
-                stats["iocs"]["total"] = ioc_results[0].get("total_iocs", 0)
-                # Process ioc_types array from BigQuery
-                if "ioc_types" in ioc_results[0]:
-                    types_data = ioc_results[0]["ioc_types"]
-                    stats["iocs"]["types"] = [
-                        {"type": t.get("ioc_type", "unknown").strip('"'), "count": t.get("count", 0)}
-                        for t in types_data
-                    ]
-            
-            # Get analysis stats
-            analysis_query = f"""
-            SELECT
-              COUNT(*) AS total_analyses,
-              MAX(analysis_timestamp) AS last_analysis
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-            WHERE
-              analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-            """
-            
-            analysis_results, analysis_error = execute_bigquery(analysis_query, use_cache=True)
-            if not analysis_error and analysis_results:
-                stats["analyses"]["total_analyses"] = analysis_results[0].get("total_analyses", 0)
-                last_analysis = analysis_results[0].get("last_analysis")
-                if last_analysis:
-                    if isinstance(last_analysis, datetime):
-                        stats["analyses"]["last_analysis"] = last_analysis.isoformat()
-                    else:
-                        stats["analyses"]["last_analysis"] = str(last_analysis)
+        # Get feed stats - use a more efficient query
+        feed_query = f"""
+        SELECT
+          COUNT(DISTINCT table_id) AS total_sources,
+          COUNT(DISTINCT IF(record_count > 0, table_id, NULL)) AS active_feeds,
+          SUM(record_count) AS total_records
+        FROM (
+          SELECT
+            table_id,
+            (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id 
+             WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS record_count
+          FROM
+            `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+          WHERE 
+            table_id NOT LIKE 'threat%'
+        )
+        """
+        
+        feed_results, feed_error = execute_bigquery(feed_query, use_cache=True)
+        if not feed_error and feed_results:
+            stats["feeds"]["total_sources"] = feed_results[0].get("total_sources", 0)
+            stats["feeds"]["active_feeds"] = feed_results[0].get("active_feeds", 0)
+            stats["feeds"]["total_records"] = feed_results[0].get("total_records", 0)
+        
+        # Get campaign stats
+        campaign_query = f"""
+        SELECT
+          COUNT(*) AS total_campaigns,
+          COUNT(DISTINCT threat_actor) AS unique_actors,
+          COUNT(IF(last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days//2} DAY), 1, NULL)) AS active_campaigns
+        FROM
+          `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+        WHERE
+          detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        campaign_results, campaign_error = execute_bigquery(campaign_query, use_cache=True)
+        if not campaign_error and campaign_results:
+            stats["campaigns"]["total_campaigns"] = campaign_results[0].get("total_campaigns", 0)
+            stats["campaigns"]["active_campaigns"] = campaign_results[0].get("active_campaigns", 0)
+            stats["campaigns"]["unique_actors"] = campaign_results[0].get("unique_actors", 0)
+        
+        # Get IOC stats
+        ioc_query = f"""
+        WITH ioc_stats AS (
+          SELECT
+            JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
+            COUNT(*) AS count
+          FROM
+            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+          WHERE
+            analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+          GROUP BY 
+            ioc_type
+        )
+        SELECT
+          (SELECT SUM(count) FROM ioc_stats) AS total_iocs,
+          ARRAY_AGG(STRUCT(ioc_type, count)) AS ioc_types
+        FROM ioc_stats
+        """
+        
+        ioc_results, ioc_error = execute_bigquery(ioc_query, use_cache=True)
+        if not ioc_error and ioc_results:
+            stats["iocs"]["total"] = ioc_results[0].get("total_iocs", 0)
+            # Process ioc_types array from BigQuery
+            if "ioc_types" in ioc_results[0]:
+                types_data = ioc_results[0]["ioc_types"]
+                stats["iocs"]["types"] = [
+                    {"type": t.get("ioc_type", "unknown").strip('"'), "count": t.get("count", 0)}
+                    for t in types_data
+                ]
+        
+        # Get analysis stats
+        analysis_query = f"""
+        SELECT
+          COUNT(*) AS total_analyses,
+          MAX(analysis_timestamp) AS last_analysis
+        FROM
+          `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
+        WHERE
+          analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        analysis_results, analysis_error = execute_bigquery(analysis_query, use_cache=True)
+        if not analysis_error and analysis_results:
+            stats["analyses"]["total_analyses"] = analysis_results[0].get("total_analyses", 0)
+            last_analysis = analysis_results[0].get("last_analysis")
+            if last_analysis:
+                if isinstance(last_analysis, datetime):
+                    stats["analyses"]["last_analysis"] = last_analysis.isoformat()
+                else:
+                    stats["analyses"]["last_analysis"] = str(last_analysis)
+                
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}")
-        # Continue with default stats
     
-    # If no data, generate sample data
-    if stats["feeds"]["total_sources"] == 0:
-        stats["feeds"]["total_sources"] = len(SAMPLE_FEEDS)
-        stats["feeds"]["active_feeds"] = len(SAMPLE_FEEDS)
-        stats["feeds"]["total_records"] = random.randint(100, 1000)
-    
-    if stats["campaigns"]["total_campaigns"] == 0:
-        stats["campaigns"]["total_campaigns"] = random.randint(10, 50)
-        stats["campaigns"]["active_campaigns"] = random.randint(5, 20)
-        stats["campaigns"]["unique_actors"] = random.randint(3, 15)
-    
-    if stats["iocs"]["total"] == 0:
-        stats["iocs"]["total"] = random.randint(200, 2000)
-        if not stats["iocs"]["types"]:
-            # Add sample IOC type distribution
-            ioc_types = ["ip", "domain", "url", "md5", "sha256", "email"]
-            stats["iocs"]["types"] = [
-                {"type": itype, "count": random.randint(30, 300)}
-                for itype in ioc_types
-            ]
-    
-    if stats["analyses"]["total_analyses"] == 0:
-        stats["analyses"]["total_analyses"] = random.randint(50, 500)
-        if not stats["analyses"]["last_analysis"]:
-            stats["analyses"]["last_analysis"] = datetime.utcnow().isoformat()
-    
-    # Cache the results
-    query_cache.set(cache_key, stats)
-    
-    # Return the stats
-    return jsonify(stats)
+    return api_response(stats)
 
 @api_bp.route('/config', methods=['GET'])
 @require_api_key
@@ -491,7 +452,7 @@ def get_public_config():
         "ai_insights_enabled": config.get("AI_INSIGHTS_ENABLED", "true").lower() == "true"
     }
     
-    return jsonify({
+    return api_response({
         "project_id": PROJECT_ID,
         "region": config.region,
         "environment": config.environment,
@@ -504,16 +465,10 @@ def get_public_config():
 @api_bp.route('/feeds', methods=['GET'])
 @require_api_key
 @handle_exceptions
+@with_cached_result(lambda **kwargs: "feeds_list")
 def list_feeds():
     """List available threat feeds"""
     logger.info("Listing available threat feeds")
-    refresh = request.args.get('refresh', 'false').lower() == 'true'
-    
-    # Try cache first
-    if not refresh:
-        cached_feeds = query_cache.get("feeds_list")
-        if cached_feeds:
-            return jsonify(cached_feeds)
     
     query = f"""
     SELECT table_id, 
@@ -527,15 +482,7 @@ def list_feeds():
     rows, error = execute_bigquery(query)
     
     if error or not rows:
-        # Return sample feeds if query fails or returns no results
-        logger.info("Using sample feeds list")
-        result = {
-            "feeds": SAMPLE_FEEDS,
-            "count": len(SAMPLE_FEEDS),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        query_cache.set("feeds_list", result)
-        return jsonify(result)
+        return api_error("Failed to retrieve feed data", extra={"feeds": [], "count": 0})
     
     feeds = []
     for row in rows:
@@ -559,10 +506,7 @@ def list_feeds():
         "timestamp": datetime.utcnow().isoformat()
     }
     
-    # Cache the results
-    query_cache.set("feeds_list", result)
-    
-    return jsonify(result)
+    return api_response(result)
 
 @api_bp.route('/feeds/<feed_name>/stats', methods=['GET'])
 @require_api_key
@@ -572,37 +516,32 @@ def feed_stats(feed_name: str):
     logger.info(f"Getting stats for feed: {feed_name}")
     # Validate feed name (prevent SQL injection)
     if not validate_table_name(feed_name):
-        return jsonify({"error": "Invalid feed name"}), 400
+        return api_error("Invalid feed name", status=400)
     
     time_range = request.args.get('days', '30')
     try:
         days = int(time_range)
     except ValueError:
-        return jsonify({"error": "Invalid days parameter"}), 400
+        return api_error("Invalid days parameter", status=400)
     
     # Try to get stats from cache
     cache_key = f"feed_stats_{feed_name}_{days}"
     cached_stats = query_cache.get(cache_key)
     if cached_stats:
-        return jsonify(cached_stats)
+        return api_response(cached_stats)
     
     # Check if table exists
-    client = get_bigquery_client()
-    table_exists = False
+    client = get_client('bigquery')
     
-    if client:
-        try:
-            table_ref = client.dataset(DATASET_ID).table(feed_name)
-            client.get_table(table_ref)
-            table_exists = True
-        except Exception as e:
-            logger.warning(f"Table {feed_name} not found: {str(e)}")
+    if not client:
+        return api_error("Database connection failed")
     
-    # If table doesn't exist or client isn't available, return sample stats
-    if not client or not table_exists:
-        stats = generate_sample_feed_stats(feed_name, days)
-        query_cache.set(cache_key, stats)
-        return jsonify(stats)
+    try:
+        table_ref = client.dataset(DATASET_ID).table(feed_name)
+        client.get_table(table_ref)
+    except Exception as e:
+        logger.warning(f"Table {feed_name} not found: {str(e)}")
+        return api_error(f"Feed not found: {feed_name}", status=404)
     
     # Query real stats from BigQuery with a more efficient query
     query = f"""
@@ -627,9 +566,7 @@ def feed_stats(feed_name: str):
     rows, error = execute_bigquery(query)
     
     if error:
-        stats = generate_sample_feed_stats(feed_name, days)
-        query_cache.set(cache_key, stats)
-        return jsonify(stats)
+        return api_error(f"Error retrieving feed statistics: {str(error)}")
     
     stats = rows[0] if rows else {}
     
@@ -650,41 +587,12 @@ def feed_stats(feed_name: str):
                 "count": day_data["record_count"]
             })
     
-    # If no daily data, generate sample data
-    if not daily_counts:
-        current_date = datetime.utcnow().date()
-        for i in range(min(days, 30)):
-            day_date = (current_date - timedelta(days=i)).isoformat()
-            count = max(1, int(stats.get("total_records", 100) / 30 + random.randint(-5, 10)))
-            daily_counts.append({"date": day_date, "count": count})
-    
     stats["daily_counts"] = daily_counts
     
     # Cache the results
     query_cache.set(cache_key, stats)
     
-    return jsonify(stats)
-
-def generate_sample_feed_stats(feed_name: str, days: int) -> Dict:
-    """Generate sample feed statistics"""
-    current_date = datetime.utcnow().date()
-    daily_counts = []
-    
-    # Generate sample daily data for the last 'days' days
-    for i in range(days):
-        day_date = (current_date - timedelta(days=i)).isoformat()
-        # Create a slightly random but trending pattern
-        count = max(1, int(30 * (0.9 ** i) + random.randint(-5, 10)))
-        daily_counts.append({"date": day_date, "count": count})
-        
-    total_records = sum(day["count"] for day in daily_counts)
-    return {
-        "total_records": total_records,
-        "earliest_record": (current_date - timedelta(days=days-1)).isoformat(),
-        "latest_record": current_date.isoformat(),
-        "days_with_data": min(days, 30),  # Assume data on most days
-        "daily_counts": daily_counts
-    }
+    return api_response(stats)
 
 @api_bp.route('/feeds/<feed_name>/data', methods=['GET'])
 @require_api_key
@@ -695,7 +603,7 @@ def feed_data(feed_name: str):
     logger.info(f"Getting data for feed: {feed_name}")
     # Validate feed name (prevent SQL injection)
     if not validate_table_name(feed_name):
-        return jsonify({"error": "Invalid feed name"}), 400
+        return api_error("Invalid feed name", status=400)
     
     # Parse query parameters
     try:
@@ -703,7 +611,7 @@ def feed_data(feed_name: str):
         offset = int(request.args.get('offset', '0'))
         days = int(request.args.get('days', '7'))
     except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
+        return api_error("Invalid numeric parameter", status=400)
     
     search = request.args.get('search', '')
     field_filter = request.args.get('field', '')
@@ -716,32 +624,18 @@ def feed_data(feed_name: str):
     if use_cache:
         cached_data = query_cache.get(cache_key)
         if cached_data:
-            return jsonify(cached_data)
+            return api_response(cached_data)
+    
+    client = get_client('bigquery')
+    if not client:
+        return api_error("Database connection failed")
     
     # Check if table exists
-    client = get_bigquery_client()
-    table_exists = False
-    
-    if client:
-        try:
-            table_ref = client.dataset(DATASET_ID).table(feed_name)
-            client.get_table(table_ref)
-            table_exists = True
-        except Exception:
-            logger.warning(f"Table {feed_name} not found")
-    
-    # If table doesn't exist or client isn't available, return sample data
-    if not client or not table_exists:
-        sample_data = generate_sample_data(feed_name, days, limit)
-        result = {
-            "records": sample_data,
-            "total": len(sample_data) + offset,  # Simulate there are more records
-            "limit": limit,
-            "offset": offset
-        }
-        if use_cache:
-            query_cache.set(cache_key, result)
-        return jsonify(result)
+    try:
+        table_ref = client.dataset(DATASET_ID).table(feed_name)
+        client.get_table(table_ref)
+    except Exception:
+        return api_error(f"Feed not found: {feed_name}", status=404)
     
     # Build query with dynamic filters
     conditions = [f"_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
@@ -756,7 +650,7 @@ def feed_data(feed_name: str):
     if field_filter and value_filter:
         # Validate field name to prevent SQL injection
         if not validate_table_name(field_filter):
-            return jsonify({"error": f"Invalid field name: {field_filter}"}), 400
+            return api_error(f"Invalid field name: {field_filter}", status=400)
         
         # Escape quotes in value
         value_filter = value_filter.replace("'", "''")
@@ -774,7 +668,7 @@ def feed_data(feed_name: str):
     rows, error = execute_bigquery(query)
     
     if error:
-        return jsonify({"error": str(error)}), 500
+        return api_error(str(error), status=500)
     
     # Count total matching records
     count_query = f"""
@@ -810,7 +704,7 @@ def feed_data(feed_name: str):
     if use_cache:
         query_cache.set(cache_key, result)
     
-    return jsonify(result)
+    return api_response(result)
 
 @api_bp.route('/campaigns', methods=['GET'])
 @require_api_key
@@ -825,7 +719,7 @@ def list_campaigns():
         min_sources = int(request.args.get('min_sources', '2'))
         severity = request.args.get('severity', '').lower()
     except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
+        return api_error("Invalid numeric parameter", status=400)
     
     search = request.args.get('search', '')
     actor_filter = request.args.get('actor', '')
@@ -837,104 +731,84 @@ def list_campaigns():
     if use_cache:
         cached_data = query_cache.get(cache_key)
         if cached_data:
-            return jsonify(cached_data)
+            return api_response(cached_data)
     
-    # Attempt to query campaigns from database
-    client = get_bigquery_client()
+    # Build query conditions
+    conditions = [
+        f"detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)",
+        f"source_count >= {min_sources}"
+    ]
     
-    if client:
-        try:
-            # Build query conditions
-            conditions = [
-                f"detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)",
-                f"source_count >= {min_sources}"
-            ]
-            
-            # Add filters if provided
-            if severity:
-                conditions.append(f"LOWER(severity) = '{severity}'")
-            
-            if actor_filter:
-                actor_filter = actor_filter.replace("'", "''")  # Prevent SQL injection
-                conditions.append(f"LOWER(threat_actor) LIKE '%{actor_filter.lower()}%'")
-                
-            if search:
-                search = search.replace("'", "''")  # Prevent SQL injection
-                conditions.append(f"""(
-                    LOWER(campaign_name) LIKE '%{search.lower()}%' OR
-                    LOWER(threat_actor) LIKE '%{search.lower()}%' OR
-                    LOWER(malware) LIKE '%{search.lower()}%' OR
-                    LOWER(targets) LIKE '%{search.lower()}%' OR
-                    LOWER(techniques) LIKE '%{search.lower()}%'
-                )""")
-            
-            # Build query
-            query = f"""
-            SELECT
-              campaign_id,
-              campaign_name,
-              threat_actor,
-              malware,
-              techniques,
-              targets,
-              source_count,
-              ioc_count,
-              first_seen,
-              last_seen,
-              severity,
-              detection_timestamp
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-            WHERE
-              {" AND ".join(conditions)}
-            ORDER BY
-              last_seen DESC
-            LIMIT {limit} OFFSET {offset}
-            """
-            
-            rows, error = execute_bigquery(query)
-            
-            if not error and rows:
-                # Convert datetime objects to strings
-                campaigns = []
-                for row in rows:
-                    campaign = dict(row)
-                    for key, value in campaign.items():
-                        if isinstance(value, datetime):
-                            campaign[key] = value.isoformat()
-                    campaigns.append(campaign)
-                
-                # Get total count
-                count_query = f"""
-                SELECT COUNT(*) as count
-                FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-                WHERE {" AND ".join(conditions)}
-                """
-                
-                count_rows, count_error = execute_bigquery(count_query)
-                total = count_rows[0]["count"] if not count_error and count_rows else len(campaigns)
-                
-                result = {
-                    "campaigns": campaigns,
-                    "count": total,
-                    "has_more": offset + limit < total,
-                    "days": days
-                }
-                
-                # Cache results
-                if use_cache:
-                    query_cache.set(cache_key, result)
-                    
-                return jsonify(result)
-        except Exception as e:
-            logger.error(f"Error querying campaigns: {str(e)}")
+    # Add filters if provided
+    if severity:
+        conditions.append(f"LOWER(severity) = '{severity}'")
     
-    # If database query fails or no data is found, generate sample data
-    sample_campaigns = generate_sample_campaigns(limit, min_sources, severity, actor_filter, search)
+    if actor_filter:
+        actor_filter = actor_filter.replace("'", "''")  # Prevent SQL injection
+        conditions.append(f"LOWER(threat_actor) LIKE '%{actor_filter.lower()}%'")
+        
+    if search:
+        search = search.replace("'", "''")  # Prevent SQL injection
+        conditions.append(f"""(
+            LOWER(campaign_name) LIKE '%{search.lower()}%' OR
+            LOWER(threat_actor) LIKE '%{search.lower()}%' OR
+            LOWER(malware) LIKE '%{search.lower()}%' OR
+            LOWER(targets) LIKE '%{search.lower()}%' OR
+            LOWER(techniques) LIKE '%{search.lower()}%'
+        )""")
+    
+    # Build query
+    query = f"""
+    SELECT
+      campaign_id,
+      campaign_name,
+      threat_actor,
+      malware,
+      techniques,
+      targets,
+      source_count,
+      ioc_count,
+      first_seen,
+      last_seen,
+      severity,
+      detection_timestamp
+    FROM
+      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE
+      {" AND ".join(conditions)}
+    ORDER BY
+      last_seen DESC
+    LIMIT {limit} OFFSET {offset}
+    """
+    
+    rows, error = execute_bigquery(query)
+    
+    if error:
+        return api_error(f"Error retrieving campaigns: {str(error)}")
+    
+    # Convert datetime objects to strings
+    campaigns = []
+    for row in rows:
+        campaign = dict(row)
+        for key, value in campaign.items():
+            if isinstance(value, datetime):
+                campaign[key] = value.isoformat()
+        campaigns.append(campaign)
+    
+    # Get total count
+    count_query = f"""
+    SELECT COUNT(*) as count
+    FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE {" AND ".join(conditions)}
+    """
+    
+    count_rows, count_error = execute_bigquery(count_query)
+    total = count_rows[0]["count"] if not count_error and count_rows else len(campaigns)
     
     result = {
-        "campaigns": sample_campaigns,
-        "count": 25,  # Simulate there are more campaigns
+        "campaigns": campaigns,
+        "count": total,
+        "has_more": offset + limit < total,
         "days": days
     }
     
@@ -942,74 +816,7 @@ def list_campaigns():
     if use_cache:
         query_cache.set(cache_key, result)
         
-    return jsonify(result)
-
-def generate_sample_campaigns(limit: int, min_sources: int = 2, severity: str = '', 
-                              actor_filter: str = '', search: str = '') -> List[Dict]:
-    """Generate sample campaign data with filtering"""
-    actor_names = ["APT28", "Lazarus Group", "Sandworm", "Cozy Bear", "Fancy Bear", "Equation Group", "BlackMatter"]
-    malware_families = ["Emotet", "Trickbot", "Ryuk", "Conti", "BlackCat", "LockBit", "Cobalt Strike"]
-    target_sectors = ["Financial", "Government", "Healthcare", "Energy", "Technology", "Manufacturing", "Retail"]
-    techniques = ["Phishing", "Exploitation", "Password Spraying", "Supply Chain", "Zero-day", "Ransomware", "Data Exfiltration"]
-    severities = ["low", "medium", "high", "critical"]
-    
-    # Apply filters
-    if actor_filter:
-        actor_names = [a for a in actor_names if actor_filter.lower() in a.lower()]
-        if not actor_names:
-            actor_names = ["APT28"]  # Fallback
-    
-    if severity:
-        severities = [s for s in severities if s == severity.lower()]
-        if not severities:
-            severities = ["medium"]  # Fallback
-    
-    # Generate random campaign names
-    campaign_prefixes = ["Operation", "Campaign", "Group", "Activity"]
-    campaign_modifiers = ["Cyber", "Digital", "Ghost", "Shadow", "Dark", "Silent", "Hidden"]
-    campaign_targets = ["Storm", "Viper", "Dragon", "Eagle", "Phoenix", "Wolf", "Tiger"]
-    
-    sample_campaigns = []
-    for i in range(min(10, limit)):
-        actor = random.choice(actor_names)
-        malware = random.choice(malware_families)
-        campaign_severity = random.choice(severities)
-        
-        # Generate a semi-realistic campaign name
-        campaign_name = f"{random.choice(campaign_prefixes)} {random.choice(campaign_modifiers)} {random.choice(campaign_targets)}"
-        
-        # Apply search filter if provided
-        if search and search.lower() not in campaign_name.lower() and search.lower() not in actor.lower() and search.lower() not in malware.lower():
-            continue
-        
-        # Generate dates within the requested range
-        end_date = datetime.utcnow()
-        start_days_ago = random.randint(15, 60)
-        end_days_ago = random.randint(0, start_days_ago-1)
-        first_seen = (end_date - timedelta(days=start_days_ago)).isoformat()
-        last_seen = (end_date - timedelta(days=end_days_ago)).isoformat()
-        
-        source_count = random.randint(max(2, min_sources), 15)
-        ioc_count = random.randint(5, 50)
-        
-        campaign = {
-            "campaign_id": f"campaign_{i}",
-            "campaign_name": campaign_name,
-            "threat_actor": actor,
-            "malware": malware,
-            "techniques": random.choice(techniques),
-            "targets": random.choice(target_sectors),
-            "source_count": source_count,
-            "ioc_count": ioc_count,
-            "first_seen": first_seen,
-            "last_seen": last_seen,
-            "severity": campaign_severity,
-            "detection_timestamp": (end_date - timedelta(days=random.randint(0, 7))).isoformat()
-        }
-        
-        sample_campaigns.append(campaign)
-    
-    return sample_campaigns
+    return api_response(result)
 
 @api_bp.route('/campaigns/<campaign_id>', methods=['GET'])
 @require_api_key
@@ -1020,138 +827,44 @@ def get_campaign(campaign_id: str):
     cache_key = f"campaign_detail_{campaign_id}"
     cached_data = query_cache.get(cache_key)
     if cached_data:
-        return jsonify(cached_data)
+        return api_response(cached_data)
     
-    # Try to get campaign from database
-    client = get_bigquery_client()
+    # Sanitize input to prevent SQL injection
+    safe_campaign_id = campaign_id.replace("'", "''")
+    query = f"""
+    SELECT *
+    FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE campaign_id = '{safe_campaign_id}'
+    """
     
-    if client:
-        try:
-            # Query campaign data - sanitize input to prevent SQL injection
-            safe_campaign_id = campaign_id.replace("'", "''")
-            query = f"""
-            SELECT *
-            FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-            WHERE campaign_id = '{safe_campaign_id}'
-            """
-            
-            rows, error = execute_bigquery(query)
-            
-            if not error and rows:
-                campaign = dict(rows[0])
-                
-                # Convert datetime objects to strings
-                for key, value in campaign.items():
-                    if isinstance(value, datetime):
-                        campaign[key] = value.isoformat()
-                
-                # Parse complex JSON fields with proper error handling
-                for field in ["iocs", "sources"]:
-                    if field in campaign and campaign[field]:
-                        try:
-                            if isinstance(campaign[field], str):
-                                campaign[field] = json.loads(campaign[field])
-                        except (json.JSONDecodeError, TypeError):
-                            campaign[field] = []
-                
-                # Cache the result
-                query_cache.set(cache_key, campaign)
-                
-                return jsonify(campaign)
-        except Exception as e:
-            logger.error(f"Error querying campaign {campaign_id}: {str(e)}")
+    rows, error = execute_bigquery(query)
     
-    # Generate sample data
-    sample_campaign = generate_sample_campaign_detail(campaign_id)
+    if error:
+        return api_error(f"Error retrieving campaign: {str(error)}")
+    
+    if not rows:
+        return api_error(f"Campaign not found: {campaign_id}", status=404)
+    
+    campaign = dict(rows[0])
+    
+    # Convert datetime objects to strings
+    for key, value in campaign.items():
+        if isinstance(value, datetime):
+            campaign[key] = value.isoformat()
+    
+    # Parse complex JSON fields with proper error handling
+    for field in ["iocs", "sources"]:
+        if field in campaign and campaign[field]:
+            try:
+                if isinstance(campaign[field], str):
+                    campaign[field] = json.loads(campaign[field])
+            except (json.JSONDecodeError, TypeError):
+                campaign[field] = []
     
     # Cache the result
-    query_cache.set(cache_key, sample_campaign)
+    query_cache.set(cache_key, campaign)
     
-    return jsonify(sample_campaign)
-
-def generate_sample_campaign_detail(campaign_id: str) -> Dict:
-    """Generate detailed sample campaign data"""
-    # Generate a deterministic campaign based on the ID
-    random.seed(hash(campaign_id))  # Make randomization deterministic
-    
-    actor_names = ["APT28", "Lazarus Group", "Sandworm", "Cozy Bear", "Fancy Bear", "Equation Group", "BlackMatter"]
-    malware_families = ["Emotet", "Trickbot", "Ryuk", "Conti", "BlackCat", "LockBit", "Cobalt Strike"]
-    target_sectors = ["Financial", "Government", "Healthcare", "Energy", "Technology", "Manufacturing", "Retail"]
-    techniques = ["Phishing", "Exploitation", "Password Spraying", "Supply Chain", "Zero-day", "Ransomware", "Data Exfiltration"]
-    
-    # Generate a semi-realistic campaign name
-    campaign_prefixes = ["Operation", "Campaign", "Group", "Activity"]
-    campaign_modifiers = ["Cyber", "Digital", "Ghost", "Shadow", "Dark", "Silent", "Hidden"]
-    campaign_targets = ["Storm", "Viper", "Dragon", "Eagle", "Phoenix", "Wolf", "Tiger"]
-    campaign_name = f"{random.choice(campaign_prefixes)} {random.choice(campaign_modifiers)} {random.choice(campaign_targets)}"
-    
-    # Generate dates
-    end_date = datetime.utcnow()
-    start_days_ago = random.randint(10, 30)
-    end_days_ago = random.randint(0, start_days_ago-1)
-    first_seen = (end_date - timedelta(days=start_days_ago)).isoformat()
-    last_seen = (end_date - timedelta(days=end_days_ago)).isoformat()
-    
-    threat_actor = random.choice(actor_names)
-    malware = random.choice(malware_families)
-    technique = random.choice(techniques)
-    targets = random.choice(target_sectors)
-    severity = random.choice(["low", "medium", "high", "critical"])
-    confidence = random.choice(["low", "medium", "high"])
-    
-    # Generate sources
-    sources = [f"source_{i}" for i in range(random.randint(3, 10))]
-    
-    # Generate IOCs
-    ioc_types = ["ip", "domain", "url", "md5", "sha256", "email"]
-    ioc_count = random.randint(5, 20)
-    iocs = []
-    
-    for i in range(ioc_count):
-        ioc_type = random.choice(ioc_types)
-        
-        if ioc_type == "ip":
-            value = f"192.168.{random.randint(0, 255)}.{random.randint(0, 255)}"
-        elif ioc_type == "domain":
-            value = f"malicious-{i}.example.com"
-        elif ioc_type == "url":
-            value = f"https://malicious-{i}.example.com/path"
-        elif ioc_type == "md5":
-            value = ''.join(random.choices("0123456789abcdef", k=32))
-        elif ioc_type == "sha256":
-            value = ''.join(random.choices("0123456789abcdef", k=64))
-        elif ioc_type == "email":
-            value = f"phishing-{i}@example.com"
-        else:
-            value = f"sample-ioc-{i}"
-            
-        iocs.append({
-            "type": ioc_type,
-            "value": value,
-            "confidence": random.choice(["low", "medium", "high"]),
-            "first_seen": (end_date - timedelta(days=random.randint(end_days_ago, start_days_ago))).isoformat()
-        })
-    
-    # Reset random seed
-    random.seed()
-    
-    return {
-        "campaign_id": campaign_id,
-        "campaign_name": campaign_name,
-        "threat_actor": threat_actor,
-        "malware": malware,
-        "techniques": technique,
-        "targets": targets,
-        "source_count": len(sources),
-        "ioc_count": len(iocs),
-        "first_seen": first_seen,
-        "last_seen": last_seen,
-        "detection_timestamp": (end_date - timedelta(days=random.randint(0, 7))).isoformat(),
-        "sources": sources,
-        "iocs": iocs,
-        "confidence": confidence,
-        "severity": severity,
-    }
+    return api_response(campaign)
 
 @api_bp.route('/iocs', methods=['GET'])
 @require_api_key
@@ -1168,333 +881,233 @@ def search_iocs():
     source = request.args.get('source')
     
     if not (ioc_value or ioc_type or source):
-        return jsonify({"error": "At least one search parameter (value, type, or source) is required"}), 400
+        return api_error("At least one search parameter (value, type, or source) is required", status=400)
     
-    # Try to query IOCs from database
-    client = get_bigquery_client()
+    # Build query conditions
+    conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
     
-    if client:
-        try:
-            # Build query conditions
-            conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-            
-            # Escape parameters to prevent SQL injection
-            if ioc_value:
-                ioc_value = ioc_value.replace("'", "''")
-                conditions.append(f"iocs LIKE '%\"value\":\"{ioc_value}\"%'")
-            
-            if ioc_type:
-                ioc_type = ioc_type.replace("'", "''")
-                conditions.append(f"iocs LIKE '%\"type\":\"{ioc_type}\"%'")
-                
-            if source:
-                source = source.replace("'", "''")
-                conditions.append(f"source_type = '{source}'")
-                
-            if confidence:
-                confidence = confidence.replace("'", "''")
-                conditions.append(f"iocs LIKE '%\"confidence\":\"{confidence}\"%'")
-            
-            # Efficient query with pagination
-            query = f"""
-            SELECT
-              source_id,
-              source_type,
-              iocs,
-              analysis_timestamp
-            FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-            WHERE {" AND ".join(conditions)}
-            ORDER BY analysis_timestamp DESC
-            LIMIT {limit} OFFSET {offset}
-            """
-            
-            rows, error = execute_bigquery(query)
-            
-            if not error and rows:
-                records = []
-                for row in rows:
-                    # Convert to dict
-                    item = dict(row)
-                    
-                    # Convert datetime objects to strings
-                    for key, value in item.items():
-                        if isinstance(value, datetime):
-                            item[key] = value.isoformat()
-                    
-                    # Parse JSON fields
-                    try:
-                        if "iocs" in item:
-                            if isinstance(item["iocs"], str):
-                                item["iocs"] = json.loads(item["iocs"])
-                            
-                            # Filter IOCs based on criteria
-                            if ioc_value or ioc_type or confidence:
-                                filtered_iocs = []
-                                for ioc in item["iocs"]:
-                                    if ((not ioc_value or ioc.get("value") == ioc_value) and
-                                        (not ioc_type or ioc.get("type") == ioc_type) and
-                                        (not confidence or ioc.get("confidence") == confidence)):
-                                        filtered_iocs.append(ioc)
-                                
-                                item["iocs"] = filtered_iocs
-                                
-                            # Only include records that have matching IOCs after filtering
-                            if item["iocs"]:
-                                records.append(item)
-                    except json.JSONDecodeError:
-                        # Skip records with invalid JSON
-                        logger.warning(f"Invalid JSON in IOC data for source_id: {item.get('source_id')}")
-                        continue
-                
-                result = {
-                    "records": records,
-                    "count": len(records),
-                    "total_available": offset + len(records) + (10 if len(records) == limit else 0),  # Estimate more if full limit returned
-                    "filters": {
-                        "type": ioc_type,
-                        "value": ioc_value,
-                        "source": source,
-                        "confidence": confidence,
-                        "days": days
-                    }
-                }
-                
-                return jsonify(result)
-        except Exception as e:
-            logger.error(f"Error querying IOCs: {str(e)}")
+    # Escape parameters to prevent SQL injection
+    if ioc_value:
+        ioc_value = ioc_value.replace("'", "''")
+        conditions.append(f"iocs LIKE '%\"value\":\"{ioc_value}\"%'")
     
-    # Generate sample data
-    sample_records = generate_sample_ioc_records(limit, ioc_type, ioc_value, confidence, source, days)
-    
-    return jsonify({
-        "records": sample_records,
-        "count": len(sample_records),
-        "note": "Sample data generated as database query failed"
-    })
-
-def generate_sample_ioc_records(limit: int, ioc_type: str = None, ioc_value: str = None, 
-                               confidence: str = None, source: str = None, days: int = 30) -> List[Dict]:
-    """Generate sample IOC records with filtering"""
-    ioc_types = ["ip", "domain", "url", "md5", "sha256", "email"]
-    sources = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware", "feodotracker_c2"]
-    
-    # Apply filters
-    if ioc_type and ioc_type in ioc_types:
-        types_to_generate = [ioc_type]
-    else:
-        types_to_generate = ioc_types
+    if ioc_type:
+        ioc_type = ioc_type.replace("'", "''")
+        conditions.append(f"iocs LIKE '%\"type\":\"{ioc_type}\"%'")
         
-    if source and source in sources:
-        sources_to_use = [source]
-    else:
-        sources_to_use = sources
+    if source:
+        source = source.replace("'", "''")
+        conditions.append(f"source_type = '{source}'")
         
     if confidence:
-        confidences = [confidence]
-    else:
-        confidences = ["low", "medium", "high"]
+        confidence = confidence.replace("'", "''")
+        conditions.append(f"iocs LIKE '%\"confidence\":\"{confidence}\"%'")
     
-    sample_records = []
-    for i in range(min(5, limit)):
-        # Build a collection of IOCs
-        record_iocs = []
-        for ioc_type in types_to_generate:
-            # Generate 1-3 IOCs of each type
-            for j in range(random.randint(1, 3)):
-                if ioc_type == "ip":
-                    value = f"192.168.{random.randint(0, 255)}.{random.randint(0, 255)}"
-                elif ioc_type == "domain":
-                    value = f"malicious-{j}.example.com"
-                elif ioc_type == "url":
-                    value = f"https://malicious-{j}.example.com/path"
-                elif ioc_type == "md5":
-                    value = ''.join(random.choices("0123456789abcdef", k=32))
-                elif ioc_type == "sha256":
-                    value = ''.join(random.choices("0123456789abcdef", k=64))
-                elif ioc_type == "email":
-                    value = f"phishing-{j}@example.com"
-                else:
-                    value = f"sample-ioc-{j}"
+    # Efficient query with pagination
+    query = f"""
+    SELECT
+      source_id,
+      source_type,
+      iocs,
+      analysis_timestamp
+    FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
+    WHERE {" AND ".join(conditions)}
+    ORDER BY analysis_timestamp DESC
+    LIMIT {limit} OFFSET {offset}
+    """
+    
+    rows, error = execute_bigquery(query)
+    
+    if error:
+        return api_error(f"Error searching IOCs: {str(error)}")
+    
+    records = []
+    for row in rows:
+        # Convert to dict
+        item = dict(row)
+        
+        # Convert datetime objects to strings
+        for key, value in item.items():
+            if isinstance(value, datetime):
+                item[key] = value.isoformat()
+        
+        # Parse JSON fields
+        try:
+            if "iocs" in item:
+                if isinstance(item["iocs"], str):
+                    item["iocs"] = json.loads(item["iocs"])
                 
-                # Skip if specific value was requested but doesn't match
-                if ioc_value and value != ioc_value:
-                    continue
+                # Filter IOCs based on criteria
+                if ioc_value or ioc_type or confidence:
+                    filtered_iocs = []
+                    for ioc in item["iocs"]:
+                        if ((not ioc_value or ioc.get("value") == ioc_value) and
+                            (not ioc_type or ioc.get("type") == ioc_type) and
+                            (not confidence or ioc.get("confidence") == confidence)):
+                            filtered_iocs.append(ioc)
                     
-                record_iocs.append({
-                    "type": ioc_type,
-                    "value": value,
-                    "confidence": random.choice(confidences),
-                    "first_seen": (datetime.utcnow() - timedelta(days=random.randint(1, days))).isoformat()
-                })
-        
-        # Skip if no IOCs match the filters
-        if not record_iocs:
+                    item["iocs"] = filtered_iocs
+                    
+                # Only include records that have matching IOCs after filtering
+                if item["iocs"]:
+                    records.append(item)
+        except json.JSONDecodeError:
+            # Skip records with invalid JSON
+            logger.warning(f"Invalid JSON in IOC data for source_id: {item.get('source_id')}")
             continue
-            
-        # Create record
-        record = {
-            "source_id": f"source_{i}",
-            "source_type": random.choice(sources_to_use),
-            "iocs": record_iocs,
-            "analysis_timestamp": (datetime.utcnow() - timedelta(days=random.randint(0, days))).isoformat()
-        }
-        
-        sample_records.append(record)
     
-    return sample_records
+    result = {
+        "records": records,
+        "count": len(records),
+        "total_available": offset + len(records) + (10 if len(records) == limit else 0),  # Estimate more if full limit returned
+        "filters": {
+            "type": ioc_type,
+            "value": ioc_value,
+            "source": source,
+            "confidence": confidence,
+            "days": days
+        }
+    }
+    
+    return api_response(result)
 
 @api_bp.route('/search', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def search():
-    """Intelligent search across all data types
-    
-    This endpoint uses a more efficient approach to search that minimizes AI usage
-    """
+    """Intelligent search across all data types"""
     query = request.args.get('q')
     
     if not query:
-        return jsonify({"error": "Query parameter 'q' is required"}), 400
+        return api_error("Query parameter 'q' is required", status=400)
     
     try:
         days = int(request.args.get('days', '30'))
     except ValueError:
-        return jsonify({"error": "Invalid days parameter"}), 400
+        return api_error("Invalid days parameter", status=400)
     
     # Check cache for common searches
     cache_key = f"search_{query}_{days}"
     cached_result = query_cache.get(cache_key)
     if cached_result:
-        return jsonify(cached_result)
+        return api_response(cached_result)
     
-    # Try to search database
-    client = get_bigquery_client()
     results = {
         "campaigns": [],
         "iocs": [],
         "analyses": []
     }
     
-    if client:
-        try:
-            # Sanitize query for SQL
-            safe_query = query.replace("'", "''")
-            
-            # Execute searches in parallel for better performance
-            campaign_query = f"""
-            SELECT
-              campaign_id,
-              campaign_name,
-              threat_actor,
-              malware,
-              targets,
-              source_count,
-              severity
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-            WHERE
-              detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-              AND (
-                campaign_name LIKE '%{safe_query}%'
-                OR threat_actor LIKE '%{safe_query}%'
-                OR malware LIKE '%{safe_query}%'
-                OR targets LIKE '%{safe_query}%'
-                OR techniques LIKE '%{safe_query}%'
-              )
-            LIMIT 10
-            """
-            
-            # Search for IOCs - using a more efficient query
-            ioc_query = f"""
-            WITH matched_iocs AS (
-              SELECT
-                source_id,
-                JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
-                JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS value,
-                analysis_timestamp
-              FROM
-                `{PROJECT_ID}.{DATASET_ID}.threat_analysis` AS t,
-                UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-              WHERE
-                analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-                AND JSON_EXTRACT_SCALAR(ioc_item, '$.value') LIKE '%{safe_query}%'
-            )
-            SELECT * FROM matched_iocs
-            LIMIT 20
-            """
-            
-            # Search analyses for the query term
-            analysis_query = f"""
-            SELECT
-              source_id,
-              source_type,
-              analysis_timestamp,
-              JSON_EXTRACT(vertex_analysis, '$.summary') AS summary
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-            WHERE
-              analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-              AND (
-                vertex_analysis LIKE '%{safe_query}%'
-                OR iocs LIKE '%{safe_query}%'
-              )
-            LIMIT 10
-            """
-            
-            # Execute all three searches
-            campaign_rows, _ = execute_bigquery(campaign_query)
-            ioc_rows, _ = execute_bigquery(ioc_query)
-            analysis_rows, _ = execute_bigquery(analysis_query)
-            
-            # Process campaign results
-            if campaign_rows:
-                results["campaigns"] = [dict(row) for row in campaign_rows]
-            
-            # Process IOC results
-            if ioc_rows:
-                # Clean up IOC data
-                ioc_results = []
-                for row in ioc_rows:
-                    item = dict(row)
-                    # Clean up string values (remove quotes)
-                    for key in ['type', 'value']:
-                        if key in item and item[key]:
-                            if item[key].startswith('"') and item[key].endswith('"'):
-                                item[key] = item[key][1:-1]
-                    
-                    # Convert datetime objects
-                    if "analysis_timestamp" in item and isinstance(item["analysis_timestamp"], datetime):
-                        item["analysis_timestamp"] = item["analysis_timestamp"].isoformat()
-                        
-                    ioc_results.append(item)
-                    
-                results["iocs"] = ioc_results
-            
-            # Process analysis results
-            if analysis_rows:
-                analysis_results = []
-                for row in analysis_rows:
-                    item = dict(row)
-                    # Clean up summary (remove quotes)
-                    if "summary" in item and item["summary"]:
-                        if item["summary"].startswith('"') and item["summary"].endswith('"'):
-                            item["summary"] = item["summary"][1:-1]
-                    
-                    # Convert datetime objects
-                    if "analysis_timestamp" in item and isinstance(item["analysis_timestamp"], datetime):
-                        item["analysis_timestamp"] = item["analysis_timestamp"].isoformat()
-                        
-                    analysis_results.append(item)
-                    
-                results["analyses"] = analysis_results
-        except Exception as e:
-            logger.error(f"Error performing search: {str(e)}")
+    # Sanitize query for SQL
+    safe_query = query.replace("'", "''")
     
-    # Generate sample results if needed (fallback)
-    has_results = bool(results["campaigns"] or results["iocs"] or results["analyses"])
+    # Campaign search query
+    campaign_query = f"""
+    SELECT
+      campaign_id,
+      campaign_name,
+      threat_actor,
+      malware,
+      targets,
+      source_count,
+      severity
+    FROM
+      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE
+      detection_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      AND (
+        campaign_name LIKE '%{safe_query}%'
+        OR threat_actor LIKE '%{safe_query}%'
+        OR malware LIKE '%{safe_query}%'
+        OR targets LIKE '%{safe_query}%'
+        OR techniques LIKE '%{safe_query}%'
+      )
+    LIMIT 10
+    """
     
-    if not has_results:
-        results = generate_sample_search_results(query, days)
+    # IOC search query
+    ioc_query = f"""
+    WITH matched_iocs AS (
+      SELECT
+        source_id,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS value,
+        analysis_timestamp
+      FROM
+        `{PROJECT_ID}.{DATASET_ID}.threat_analysis` AS t,
+        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+      WHERE
+        analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND JSON_EXTRACT_SCALAR(ioc_item, '$.value') LIKE '%{safe_query}%'
+    )
+    SELECT * FROM matched_iocs
+    LIMIT 20
+    """
+    
+    # Analysis search query
+    analysis_query = f"""
+    SELECT
+      source_id,
+      source_type,
+      analysis_timestamp,
+      JSON_EXTRACT(vertex_analysis, '$.summary') AS summary
+    FROM
+      `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
+    WHERE
+      analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      AND (
+        vertex_analysis LIKE '%{safe_query}%'
+        OR iocs LIKE '%{safe_query}%'
+      )
+    LIMIT 10
+    """
+    
+    # Execute all three searches
+    campaign_rows, _ = execute_bigquery(campaign_query)
+    ioc_rows, _ = execute_bigquery(ioc_query)
+    analysis_rows, _ = execute_bigquery(analysis_query)
+    
+    # Process campaign results
+    if campaign_rows:
+        results["campaigns"] = [dict(row) for row in campaign_rows]
+    
+    # Process IOC results
+    if ioc_rows:
+        # Clean up IOC data
+        ioc_results = []
+        for row in ioc_rows:
+            item = dict(row)
+            # Clean up string values (remove quotes)
+            for key in ['type', 'value']:
+                if key in item and item[key]:
+                    if item[key].startswith('"') and item[key].endswith('"'):
+                        item[key] = item[key][1:-1]
+            
+            # Convert datetime objects
+            if "analysis_timestamp" in item and isinstance(item["analysis_timestamp"], datetime):
+                item["analysis_timestamp"] = item["analysis_timestamp"].isoformat()
+                
+            ioc_results.append(item)
+            
+        results["iocs"] = ioc_results
+    
+    # Process analysis results
+    if analysis_rows:
+        analysis_results = []
+        for row in analysis_rows:
+            item = dict(row)
+            # Clean up summary (remove quotes)
+            if "summary" in item and item["summary"]:
+                if item["summary"].startswith('"') and item["summary"].endswith('"'):
+                    item["summary"] = item["summary"][1:-1]
+            
+            # Convert datetime objects
+            if "analysis_timestamp" in item and isinstance(item["analysis_timestamp"], datetime):
+                item["analysis_timestamp"] = item["analysis_timestamp"].isoformat()
+                
+            analysis_results.append(item)
+            
+        results["analyses"] = analysis_results
     
     # Add query metadata
     search_result = {
@@ -1507,79 +1120,13 @@ def search():
     # Cache results
     query_cache.set(cache_key, search_result)
     
-    return jsonify(search_result)
-
-def generate_sample_search_results(query: str, days: int) -> Dict:
-    """Generate sample search results when database is unavailable"""
-    results = {
-        "campaigns": [],
-        "iocs": [],
-        "analyses": []
-    }
-    
-    # Generate sample campaigns that match the query
-    actor_names = ["APT28", "Lazarus Group", "Sandworm", "Cozy Bear"]
-    malware_families = ["Emotet", "Trickbot", "Ryuk", "Conti"]
-    
-    if any(query.lower() in name.lower() for name in actor_names):
-        matching_actors = [name for name in actor_names if query.lower() in name.lower()]
-        for i, actor in enumerate(matching_actors[:3]):
-            results["campaigns"].append({
-                "campaign_id": f"campaign_{i}",
-                "campaign_name": f"Operation {actor.split()[0]}",
-                "threat_actor": actor,
-                "malware": random.choice(malware_families),
-                "targets": random.choice(["Financial", "Government", "Healthcare"]),
-                "source_count": random.randint(3, 10),
-                "severity": random.choice(["low", "medium", "high", "critical"])
-            })
-    
-    if any(query.lower() in malware.lower() for malware in malware_families):
-        matching_malware = [name for name in malware_families if query.lower() in name.lower()]
-        for i, malware in enumerate(matching_malware[:3]):
-            results["campaigns"].append({
-                "campaign_id": f"campaign_m{i}",
-                "campaign_name": f"Operation {malware}",
-                "threat_actor": random.choice(actor_names),
-                "malware": malware,
-                "targets": random.choice(["Financial", "Government", "Healthcare"]),
-                "source_count": random.randint(3, 10),
-                "severity": random.choice(["low", "medium", "high", "critical"])
-            })
-    
-    # Generate sample IOCs that match the query
-    ioc_types = ["ip", "domain", "url", "md5", "sha256", "email"]
-    
-    for i in range(3):
-        ioc_type = random.choice(ioc_types)
-        value = f"{query}-sample-{i}.example.com" if ioc_type == "domain" else f"{query}-sample-{i}"
-        
-        results["iocs"].append({
-            "source_id": f"source_{i}",
-            "type": ioc_type,
-            "value": value,
-            "analysis_timestamp": (datetime.utcnow() - timedelta(days=random.randint(0, days))).isoformat()
-        })
-    
-    # Generate sample analyses that match the query
-    for i in range(3):
-        results["analyses"].append({
-            "source_id": f"analysis_{i}",
-            "source_type": random.choice(SAMPLE_FEEDS),
-            "summary": f"This analysis found {query} related activities targeting multiple sectors.",
-            "analysis_timestamp": (datetime.utcnow() - timedelta(days=random.randint(0, days))).isoformat()
-        })
-    
-    return results
+    return api_response(search_result)
 
 @api_bp.route('/reports/<report_type>', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def get_report(report_type: str):
-    """Get or generate a report
-    
-    This endpoint limits AI usage to when explicitly generating new reports
-    """
+    """Get or generate a report"""
     generate = request.args.get('generate', 'false').lower() == 'true'
     days = int(request.args.get('days', '30'))
     campaign_id = request.args.get('campaign_id')
@@ -1589,63 +1136,72 @@ def get_report(report_type: str):
         cache_key = f"report_{report_type}_{days}"
         cached_report = query_cache.get(cache_key)
         if cached_report:
-            return jsonify(cached_report)
+            return api_response(cached_report)
     
     # Check if report type is valid
     valid_report_types = ["feed_summary", "campaign_analysis", "ioc_trend"]
     if report_type not in valid_report_types:
-        return jsonify({"error": f"Invalid report type. Valid types are: {', '.join(valid_report_types)}"}), 400
+        return api_error(f"Invalid report type. Valid types are: {', '.join(valid_report_types)}", status=400)
     
-    # In a real implementation, we would check if the report exists and return it
-    # or generate a new one if requested using an AI-assisted approach
+    # Query the reports table for existing report
+    if not generate and not campaign_id:
+        query = f"""
+        SELECT *
+        FROM `{PROJECT_ID}.{DATASET_ID}.reports`
+        WHERE report_type = '{report_type}'
+        AND period_days = {days}
+        ORDER BY generated_at DESC
+        LIMIT 1
+        """
+        
+        rows, _ = execute_bigquery(query)
+        if rows:
+            report = dict(rows[0])
+            # Convert datetime objects to strings
+            for key, value in report.items():
+                if isinstance(value, datetime):
+                    report[key] = value.isoformat()
+            
+            # Cache the report
+            query_cache.set(f"report_{report_type}_{days}", report)
+            return api_response(report)
     
-    # For this sample, we'll generate a new report with template-based content
-    report_content = ""
-    
-    try:
-        # If this is a specific campaign report, query the campaign data
-        campaign_data = None
-        if campaign_id:
-            campaign_query = f"""
-            SELECT *
-            FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-            WHERE campaign_id = '{campaign_id.replace("'", "''")}'
-            """
-            campaign_rows, _ = execute_bigquery(campaign_query)
-            if campaign_rows:
-                campaign_data = dict(campaign_rows[0])
-                
-                # Convert datetime objects and JSON strings
-                for key, value in campaign_data.items():
-                    if isinstance(value, datetime):
-                        campaign_data[key] = value.isoformat()
-                    elif key in ["iocs", "sources"] and isinstance(value, str):
-                        try:
-                            campaign_data[key] = json.loads(value)
-                        except (json.JSONDecodeError, TypeError):
-                            campaign_data[key] = []
-    except Exception as e:
-        logger.error(f"Error fetching campaign data for report: {str(e)}")
-        # Continue with generic report
-    
-    if report_type == "feed_summary":
-        report_content = generate_feed_summary_report(days)
-    elif report_type == "campaign_analysis":
-        if campaign_data:
-            report_content = generate_campaign_analysis_report(campaign_data)
+    # Campaign-specific report
+    if campaign_id:
+        campaign_query = f"""
+        SELECT *
+        FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+        WHERE campaign_id = '{campaign_id.replace("'", "''")}'
+        """
+        campaign_rows, _ = execute_bigquery(campaign_query)
+        if campaign_rows:
+            campaign_data = dict(campaign_rows[0])
+            
+            # Convert datetime objects and JSON strings
+            for key, value in campaign_data.items():
+                if isinstance(value, datetime):
+                    campaign_data[key] = value.isoformat()
+                elif key in ["iocs", "sources"] and isinstance(value, str):
+                    try:
+                        campaign_data[key] = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        campaign_data[key] = []
         else:
-            actor = random.choice(["APT28", "Lazarus Group", "Sandworm Team"])
-            target = random.choice(["financial institutions", "government agencies", "healthcare organizations"])
-            report_content = generate_generic_campaign_report(actor, target, days)
-    elif report_type == "ioc_trend":
-        report_content = generate_ioc_trend_report(days)
+            return api_error(f"Campaign not found: {campaign_id}", status=404)
     
+    # For this implementation, we'll return a minimal report structure
+    # In a production system, this would invoke AI or use a template engine
     report_id = f"{report_type}_{datetime.utcnow().strftime('%Y%m%d')}"
-    report_name = f"{report_type.replace('_', ' ').title()} Report"
+    report_content = f"# {report_type.replace('_', ' ').title()} Report\n\nAnalysis period: {days} days"
+    
+    if campaign_id and 'campaign_data' in locals():
+        report_content += f"\n\nCampaign: {campaign_data.get('campaign_name')}"
+        report_content += f"\nThreat Actor: {campaign_data.get('threat_actor', 'Unknown')}"
+        report_content += f"\nSeverity: {campaign_data.get('severity', 'Unknown')}"
     
     report = {
         "report_id": report_id,
-        "report_name": report_name,
+        "report_name": f"{report_type.replace('_', ' ').title()} Report",
         "report_type": report_type,
         "period_days": days,
         "generated_at": datetime.utcnow().isoformat(),
@@ -1653,249 +1209,108 @@ def get_report(report_type: str):
         "is_new": generate
     }
     
-    # Cache the report
+    # Cache the report (except for campaign-specific ones)
     if not campaign_id:
         query_cache.set(f"report_{report_type}_{days}", report)
     
-    return jsonify(report)
-
-def generate_feed_summary_report(days: int) -> str:
-    """Generate a feed summary report"""
-    return f"""
-# Threat Feed Summary Report
-
-## Executive Summary
-
-This report summarizes the threat intelligence data collected over the past {days} days from our integrated feeds. During this period, we observed a total of {random.randint(100, 1000)} indicators from {len(SAMPLE_FEEDS)} active feeds.
-
-## Key Findings
-
-* **Feed Activity**: AlienVault OTX contributed the most indicators ({random.randint(50, 200)}), followed by ThreatFox ({random.randint(30, 150)}).
-* **Indicator Types**: IP addresses were the most common indicator type ({random.randint(30, 60)}%), followed by domains ({random.randint(20, 40)}%).
-* **Malware Families**: The most prevalent malware families were Emotet, TrickBot, and Ryuk.
-
-## Emerging Threats
-
-Our analysis indicates an increase in {random.choice(["ransomware", "supply chain", "phishing"])} campaigns targeting the {random.choice(["financial", "healthcare", "government"])} sector. Organizations should prioritize patching systems and implementing proper email filtering controls.
-
-## Recommendations
-
-1. Ensure all systems are updated with the latest security patches
-2. Review and update email security configurations
-3. Implement network monitoring for suspicious connections to known malicious IPs and domains
-4. Enable multi-factor authentication for all remote access points
-"""
-
-def generate_campaign_analysis_report(campaign_data: Dict) -> str:
-    """Generate a campaign analysis report from real data"""
-    # Extract campaign information
-    campaign_name = campaign_data.get("campaign_name", "Unknown Campaign")
-    threat_actor = campaign_data.get("threat_actor", "Unknown Actor")
-    malware = campaign_data.get("malware", "Unknown Malware")
-    techniques = campaign_data.get("techniques", "Unknown Techniques")
-    targets = campaign_data.get("targets", "Unknown Targets")
-    severity = campaign_data.get("severity", "medium").title()
-    first_seen = campaign_data.get("first_seen", "Unknown")
-    last_seen = campaign_data.get("last_seen", "Unknown")
-    iocs = campaign_data.get("iocs", [])
-    
-    # Group IOCs by type
-    ioc_by_type = {}
-    for ioc in iocs:
-        ioc_type = ioc.get("type", "unknown")
-        if ioc_type not in ioc_by_type:
-            ioc_by_type[ioc_type] = []
-        ioc_by_type[ioc_type].append(ioc.get("value", ""))
-    
-    # Format IOCs section
-    iocs_section = ""
-    for ioc_type, values in ioc_by_type.items():
-        iocs_section += f"* **{ioc_type.upper()}**: \n"
-        for value in values[:10]:  # Limit to 10 of each type
-            iocs_section += f"  * `{value}`\n"
-        if len(values) > 10:
-            iocs_section += f"  * ... ({len(values) - 10} more)\n"
-    
-    if not iocs_section:
-        iocs_section = "No indicators of compromise available."
-    
-    return f"""
-# Campaign Analysis: {campaign_name}
-
-## Executive Summary
-
-This report analyzes a significant threat campaign attributed to **{threat_actor}** that has been active from {first_seen} to {last_seen}. The campaign primarily targets **{targets}** using sophisticated techniques including {techniques}.
-
-Severity Assessment: **{severity}**
-
-## Threat Actor Profile
-
-{threat_actor} is a threat group known for targeting {targets}. Their tactics typically include {techniques} and deployment of {malware} malware.
-
-## Technical Analysis
-
-The campaign begins with initial access through {techniques.split(',')[0] if ',' in techniques else techniques}. This access is then used to deploy {malware} for persistence and lateral movement within victim networks.
-
-## Indicators of Compromise
-
-{iocs_section}
-
-## Mitigation Recommendations
-
-1. Implement email filtering to detect and block suspicious attachments
-2. Apply security patches for all systems promptly
-3. Monitor for suspicious activities related to {malware}
-4. Block known C2 domains and IP addresses
-5. Implement network segmentation to limit lateral movement
-"""
-
-def generate_generic_campaign_report(actor: str, target: str, days: int) -> str:
-    """Generate a campaign report with sample data"""
-    return f"""
-# Threat Campaign Analysis
-
-## Executive Summary
-
-This report analyzes a significant campaign attributed to {actor} that has been active over the past {days} days. The campaign primarily targets {target} using sophisticated social engineering techniques and exploits of known vulnerabilities.
-
-## Threat Actor Profile
-
-{actor} is a state-sponsored group known for targeting {target} to gather intelligence and disrupt operations. Their tactics typically include spear-phishing emails with malicious attachments, exploitation of vulnerabilities in internet-facing applications, and deployment of custom malware.
-
-## Technical Analysis
-
-The campaign begins with spear-phishing emails containing malicious Microsoft Office documents. When opened, these documents exploit CVE-2021-40444 to download and execute the first-stage payload. This initial access is then used to deploy custom malware for persistence and lateral movement.
-
-## Indicators of Compromise
-
-* **Email Subjects**: "Important Security Update", "Meeting Notes", "Financial Report"
-* **File Hashes**: 
-  * MD5: `d41d8cd98f00b204e9800998ecf8427e`
-  * SHA256: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
-* **C2 Domains**:
-  * `malicious-command.example.com`
-  * `update-server.example.net`
-  * `secure-cdn.example.org`
-
-## Mitigation Recommendations
-
-1. Implement email filtering to detect and block suspicious attachments
-2. Apply security patches for CVE-2021-40444
-3. Monitor for suspicious PowerShell commands and processes
-4. Block known C2 domains and IP addresses
-5. Implement network segmentation to limit lateral movement
-"""
-
-def generate_ioc_trend_report(days: int) -> str:
-    """Generate an IOC trend report"""
-    return f"""
-# IOC Trend Analysis Report
-
-## Executive Summary
-
-This report analyzes trends in Indicators of Compromise (IOCs) observed over the past {days} days. During this period, we identified {random.randint(500, 2000)} unique IOCs across multiple types, with significant patterns emerging in distribution and lifespan.
-
-## IOC Distribution
-
-* **IP Addresses**: {random.randint(25, 40)}% of all indicators
-* **Domains**: {random.randint(20, 35)}%
-* **URLs**: {random.randint(15, 30)}%
-* **File Hashes**: {random.randint(10, 25)}%
-* **Other types**: {random.randint(5, 15)}%
-
-## Geographic Distribution
-
-Top 5 countries hosting malicious infrastructure:
-
-1. Russia ({random.randint(15, 30)}%)
-2. China ({random.randint(10, 25)}%)
-3. United States ({random.randint(8, 20)}%)
-4. Netherlands ({random.randint(5, 15)}%)
-5. Germany ({random.randint(3, 10)}%)
-
-## IOC Lifespan Analysis
-
-* Average lifespan of malicious domains: {random.randint(5, 15)} days
-* Average lifespan of malicious IPs: {random.randint(2, 10)} days
-* File hashes typically remain active for {random.randint(20, 60)} days
-
-## Recommendations
-
-1. Implement automated IOC updating in security tools to account for short lifespan
-2. Focus on behavior-based detection alongside indicator matching
-3. Prioritize blocking infrastructure that hosts multiple malicious indicators
-4. Implement a tiered approach to IOC management based on confidence levels
-"""
+    return api_response(report)
 
 @api_bp.route('/alerts', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def get_alerts():
     """Get active alerts with intelligent caching"""
-    # Check cache
+    # Parse parameters
     severity_filter = request.args.get('severity')
-    cache_key = f"alerts_{severity_filter or 'all'}"
+    days = int(request.args.get('days', '7'))
+    
+    # Check cache
+    cache_key = f"alerts_{severity_filter or 'all'}_{days}"
     cached_alerts = query_cache.get(cache_key)
     if cached_alerts:
-        return jsonify(cached_alerts)
+        return api_response(cached_alerts)
     
-    # Try to query real alerts (in a complete implementation)
-    # For this sample, we'll generate sample alerts
+    # Query alerts from the alerts table
+    conditions = [f"timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
+    
+    if severity_filter:
+        conditions.append(f"severity = '{severity_filter.replace('', '')}'")
+    
+    query = f"""
+    SELECT *
+    FROM `{PROJECT_ID}.{DATASET_ID}.alerts`
+    WHERE {" AND ".join(conditions)}
+    ORDER BY timestamp DESC
+    """
+    
+    rows, error = execute_bigquery(query)
+    
     alerts = []
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     
-    # Generate 0-3 critical alerts
-    severity_counts = {
-        "critical": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-    }
-    
-    # Generate alerts with different severities
-    for i in range(random.randint(5, 10)):
-        if i < 2:  # First 2 have higher chance of being critical
-            sev = "critical" if random.random() < 0.7 else "high"
-        else:
-            sev = random.choice(["critical", "high", "medium", "low"])
-        
-        # Skip if filtering and doesn't match
-        if severity_filter and sev != severity_filter:
-            continue
+    if not error and rows:
+        for row in rows:
+            alert = dict(row)
+            # Convert datetime objects to strings
+            for key, value in alert.items():
+                if isinstance(value, datetime):
+                    alert[key] = value.isoformat()
             
-        severity_counts[sev] += 1
-        
-        alert = {
-            "id": f"alert_{sev}_{i}",
-            "title": random.choice([
-                "Critical Vulnerability Exploitation Detected",
-                "Ransomware Activity Observed",
-                "Data Exfiltration in Progress",
-                "Backdoor Detected on Critical System",
-                "Suspicious Authentication Activity",
-                "Malware Detection",
-                "Unusual Network Traffic",
-                "Policy Violation",
-                "Phishing Campaign Detected",
-                "Command and Control Traffic"
-            ]),
-            "severity": sev,
-            "timestamp": (datetime.utcnow() - timedelta(hours=random.randint(1, 48))).isoformat(),
-            "description": "Multiple indicators of compromise related to known threat actor activity detected in your environment.",
-            "affected_systems": random.randint(1, 5),
-            "status": random.choice(["new", "investigating", "mitigated"]),
-            "recommendations": [
-                "Isolate affected systems immediately",
-                "Initiate incident response procedures",
-                "Scan all systems for IOCs"
-            ]
-        }
-        alerts.append(alert)
+            # Parse JSON fields
+            for field in ["recommendations", "context"]:
+                if field in alert and isinstance(alert[field], str):
+                    try:
+                        alert[field] = json.loads(alert[field])
+                    except json.JSONDecodeError:
+                        alert[field] = []
+            
+            alerts.append(alert)
+            severity = alert.get("severity", "medium").lower()
+            if severity in severity_counts:
+                severity_counts[severity] += 1
     
-    # Sort alerts by severity and time
-    alerts.sort(key=lambda x: (
-        {"critical": 0, "high": 1, "medium": 2, "low": 3}[x["severity"]], 
-        x["timestamp"]
-    ))
+    # If no results from BigQuery, query threat_analysis for high severity findings
+    if not alerts:
+        query = f"""
+        SELECT
+          source_id,
+          source_type,
+          analysis_timestamp,
+          JSON_EXTRACT(vertex_analysis, '$.severity') AS severity,
+          JSON_EXTRACT(vertex_analysis, '$.summary') AS summary
+        FROM
+          `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
+        WHERE
+          analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+          AND JSON_EXTRACT(vertex_analysis, '$.severity') IN ('"critical"', '"high"')
+        LIMIT 10
+        """
+        
+        analysis_rows, _ = execute_bigquery(query)
+        
+        if analysis_rows:
+            for row in analysis_rows:
+                severity = row.get("severity", '"medium"').strip('"').lower()
+                if severity_filter and severity != severity_filter.lower():
+                    continue
+                    
+                alert = {
+                    "id": f"alert_{row['source_id']}",
+                    "title": f"High severity threat detected: {row['source_type']}",
+                    "severity": severity,
+                    "timestamp": row["analysis_timestamp"].isoformat() if isinstance(row["analysis_timestamp"], datetime) else str(row["analysis_timestamp"]),
+                    "description": row.get("summary", "").strip('"'),
+                    "affected_systems": 1,
+                    "status": "new",
+                    "recommendations": [
+                        "Investigate this threat immediately",
+                        "Check for indicators of compromise",
+                        "Review security logs"
+                    ]
+                }
+                alerts.append(alert)
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
     
     result = {
         "alerts": alerts,
@@ -1910,7 +1325,7 @@ def get_alerts():
     # Cache results
     query_cache.set(cache_key, result)
     
-    return jsonify(result)
+    return api_response(result)
 
 @api_bp.route('/export/feeds/<feed_name>', methods=['GET'])
 @require_api_key
@@ -1919,91 +1334,81 @@ def export_feed(feed_name: str):
     """Export feed data in various formats with memory-efficient streaming"""
     # Validate feed name
     if not validate_table_name(feed_name):
-        return jsonify({"error": "Invalid feed name"}), 400
+        return api_error("Invalid feed name", status=400)
     
     # Get export format
     format_type = request.args.get('format', 'csv').lower()
     if format_type not in ['csv', 'json']:
-        return jsonify({"error": "Invalid format. Supported formats: csv, json"}), 400
+        return api_error("Invalid format. Supported formats: csv, json", status=400)
     
     # Parse query parameters
     try:
         days = int(request.args.get('days', '7'))
         limit = min(int(request.args.get('limit', '1000')), 10000)  # Allow higher limit for exports
     except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
+        return api_error("Invalid numeric parameter", status=400)
     
-    # Get feed data (either from database or generate sample data)
+    # Check if table exists
+    client = get_client('bigquery')
+    if not client:
+        return api_error("Database connection failed")
+    
+    try:
+        table_ref = client.dataset(DATASET_ID).table(feed_name)
+        client.get_table(table_ref)
+    except Exception:
+        return api_error(f"Feed not found: {feed_name}", status=404)
+    
+    # Build query
+    query = f"""
+    SELECT *
+    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
+    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+    ORDER BY _ingestion_timestamp DESC
+    LIMIT {limit}
+    """
+    
+    rows, error = execute_bigquery(query)
+    
+    if error:
+        return api_error(f"Error retrieving feed data: {str(error)}")
+    
+    if not rows:
+        return api_error("No data to export", status=404)
+    
+    # Process rows to convert datetime objects to strings
     data = []
+    for row in rows:
+        processed_row = {}
+        for key, value in row.items():
+            if isinstance(value, datetime):
+                processed_row[key] = value.isoformat()
+            else:
+                processed_row[key] = value
+        data.append(processed_row)
     
-    # Try to query from database first
-    client = get_bigquery_client()
-    if client:
-        try:
-            query = f"""
-            SELECT *
-            FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-            WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-            ORDER BY _ingestion_timestamp DESC
-            LIMIT {limit}
-            """
-            
-            rows, error = execute_bigquery(query)
-            
-            if not error and rows:
-                # Process rows to convert datetime objects to strings
-                for row in rows:
-                    processed_row = {}
-                    for key, value in row.items():
-                        if isinstance(value, datetime):
-                            processed_row[key] = value.isoformat()
-                        else:
-                            processed_row[key] = value
-                    data.append(processed_row)
-        except Exception as e:
-            logger.error(f"Error querying feed data for export: {str(e)}")
-    
-    # If no data from database, generate sample data
-    if not data:
-        data = generate_sample_data(feed_name, days, min(limit, 100))
-    
-    # Export based on requested format
-    if format_type == 'csv':
-        # Create a temporary file for CSV
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as temp_file:
-                if data:
-                    # Get fieldnames from the first record
-                    fieldnames = list(data[0].keys())
-                    
-                    # Write CSV data
-                    with open(temp_file.name, 'w', newline='') as csvfile:
-                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                        writer.writeheader()
-                        for row in data:
-                            writer.writerow(row)
-                    
-                    # Send file
-                    return send_file(
-                        temp_file.name,
-                        as_attachment=True,
-                        download_name=f"{feed_name}_export.csv",
-                        mimetype='text/csv'
-                    )
-                else:
-                    return jsonify({"error": "No data to export"}), 404
-        finally:
-            # Ensure we clean up the temp file regardless of outcome
-            try:
-                if 'temp_file' in locals():
-                    os.unlink(temp_file.name)
-            except:
-                pass
-    
-    elif format_type == 'json':
-        # Create a temporary file for JSON
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+    # Create a temporary file for the export
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{format_type}') as temp_file:
+            if format_type == 'csv':
+                # Get fieldnames from the first record
+                fieldnames = list(data[0].keys())
+                
+                # Write CSV data
+                with open(temp_file.name, 'w', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    for row in data:
+                        writer.writerow(row)
+                
+                # Send file
+                return send_file(
+                    temp_file.name,
+                    as_attachment=True,
+                    download_name=f"{feed_name}_export.csv",
+                    mimetype='text/csv'
+                )
+            elif format_type == 'json':
                 # Write JSON data
                 with open(temp_file.name, 'w') as jsonfile:
                     json.dump(data, jsonfile, indent=2)
@@ -2015,148 +1420,129 @@ def export_feed(feed_name: str):
                     download_name=f"{feed_name}_export.json",
                     mimetype='application/json'
                 )
-        finally:
-            # Ensure we clean up the temp file regardless of outcome
-            try:
-                if 'temp_file' in locals():
-                    os.unlink(temp_file.name)
-            except:
-                pass
+    finally:
+        # Ensure we clean up the temp file regardless of outcome
+        try:
+            if 'temp_file' in locals():
+                os.unlink(temp_file.name)
+        except:
+            pass
     
     # This shouldn't happen given the validation above
-    return jsonify({"error": "Unsupported export format"}), 400
+    return api_error("Unsupported export format", status=400)
 
 @api_bp.route('/export/iocs', methods=['GET'])
 @require_api_key
 @handle_exceptions
 def export_iocs():
-    """Export IOCs in various formats with memory-efficient streaming"""
+    """Export IOCs data in various formats with memory-efficient streaming"""
     # Get export format
     format_type = request.args.get('format', 'csv').lower()
     if format_type not in ['csv', 'json', 'stix']:
-        return jsonify({"error": "Invalid format. Supported formats: csv, json, stix"}), 400
+        return api_error("Invalid format. Supported formats: csv, json, stix", status=400)
     
     # Parse query parameters
     try:
         days = int(request.args.get('days', '30'))
         limit = min(int(request.args.get('limit', '1000')), 5000)  # Higher limit for exports
     except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
+        return api_error("Invalid numeric parameter", status=400)
     
     ioc_type = request.args.get('type')
     
-    # Get IOC data with efficient streaming
+    # Build query conditions
+    conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
+    
+    if ioc_type:
+        ioc_type = ioc_type.replace("'", "''")  # Sanitize input
+        conditions.append(f"JSON_EXTRACT_SCALAR(ioc_item, '$.type') = '{ioc_type}'")
+    
+    # Efficient query for IOC extraction
+    query = f"""
+    WITH ip_iocs AS (
+      SELECT
+        JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS value,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.confidence') AS confidence,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.country') AS country,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.city') AS city,
+        JSON_EXTRACT_SCALAR(ioc_item, '$.first_seen') AS first_seen,
+        source_id,
+        source_type,
+        analysis_timestamp
+      FROM
+        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+      WHERE
+        {" AND ".join(conditions)}
+    )
+    SELECT *
+    FROM ip_iocs
+    ORDER BY analysis_timestamp DESC
+    LIMIT {limit}
+    """
+    
+    rows, error = execute_bigquery(query)
+    
+    if error:
+        return api_error(f"Error exporting IOCs: {str(error)}")
+    
+    # Process rows to clean up and standardize IOC data
     iocs = []
-    
-    # Query BigQuery for IOCs
-    client = get_bigquery_client()
-    if client:
-        try:
-            # Build an optimized query for IOC extraction
-            conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-            
-            if ioc_type:
-                ioc_type = ioc_type.replace("'", "''")  # Sanitize input
-                conditions.append(f"JSON_EXTRACT_SCALAR(ioc_item, '$.type') = '{ioc_type}'")
-            
-            query = f"""
-            SELECT
-              source_id,
-              source_type,
-              JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
-              JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ioc_value,
-              JSON_EXTRACT_SCALAR(ioc_item, '$.confidence') AS confidence,
-              JSON_EXTRACT_SCALAR(ioc_item, '$.first_seen') AS first_seen,
-              analysis_timestamp
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-              UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-            WHERE
-              {" AND ".join(conditions)}
-            ORDER BY analysis_timestamp DESC
-            LIMIT {limit}
-            """
-            
-            rows, error = execute_bigquery(query)
-            
-            if not error and rows:
-                # Process rows to convert to IOC objects
-                for row in rows:
-                    ioc = {
-                        "type": row.get("ioc_type", "").strip('"'),
-                        "value": row.get("ioc_value", "").strip('"'),
-                        "confidence": row.get("confidence", "medium").strip('"'),
-                        "source_id": row.get("source_id"),
-                        "source_type": row.get("source_type")
-                    }
-                    
-                    # Add first_seen if available
-                    if row.get("first_seen"):
-                        ioc["first_seen"] = row.get("first_seen").strip('"')
-                    
-                    # Add analysis_timestamp
-                    if isinstance(row.get("analysis_timestamp"), datetime):
-                        ioc["analysis_timestamp"] = row.get("analysis_timestamp").isoformat()
-                    else:
-                        ioc["analysis_timestamp"] = str(row.get("analysis_timestamp"))
-                    
-                    iocs.append(ioc)
-        except Exception as e:
-            logger.error(f"Error exporting IOCs: {str(e)}")
-    
-    # If no data from database, generate sample IOCs
-    if not iocs:
-        # Generate sample IOCs
-        ioc_types = ["ip", "domain", "url", "md5", "sha256", "email"]
-        types_to_use = [ioc_type] if ioc_type else ioc_types
+    for row in rows:
+        ioc = {
+            "type": row.get("type", "").strip('"'),
+            "value": row.get("value", "").strip('"'),
+            "confidence": row.get("confidence", "").strip('"') or "medium",
+            "source_id": row.get("source_id"),
+            "source_type": row.get("source_type")
+        }
         
-        for i in range(min(limit, 100)):
-            sample_type = random.choice(types_to_use)
+        # Process first_seen
+        if row.get("first_seen"):
+            ioc["first_seen"] = row.get("first_seen").strip('"')
             
-            if sample_type == "ip":
-                value = f"192.168.{random.randint(0, 255)}.{random.randint(0, 255)}"
-            elif sample_type == "domain":
-                value = f"malicious-{i}.example.com"
-            elif sample_type == "url":
-                value = f"https://malicious-{i}.example.com/path"
-            elif sample_type == "md5":
-                value = ''.join(random.choices("0123456789abcdef", k=32))
-            elif sample_type == "sha256":
-                value = ''.join(random.choices("0123456789abcdef", k=64))
-            elif sample_type == "email":
-                value = f"phishing-{i}@example.com"
-            else:
-                value = f"sample-{sample_type}-{i}"
-            
-            ioc = {
-                "type": sample_type,
-                "value": value,
-                "confidence": random.choice(["low", "medium", "high"]),
-                "source_id": f"sample_source_{i % 5}",
-                "source_type": random.choice(SAMPLE_FEEDS),
-                "first_seen": (datetime.utcnow() - timedelta(days=random.randint(1, days))).isoformat(),
-                "analysis_timestamp": (datetime.utcnow() - timedelta(days=random.randint(0, days//2))).isoformat()
+        # Process geo data for IPs
+        if ioc["type"] == "ip" and row.get("country"):
+            ioc["geo"] = {
+                "country": row.get("country", "").strip('"'),
+                "city": row.get("city", "").strip('"')
             }
-            
-            iocs.append(ioc)
+        
+        # Add timestamp
+        if "analysis_timestamp" in row:
+            if isinstance(row["analysis_timestamp"], datetime):
+                ioc["timestamp"] = row["analysis_timestamp"].isoformat()
+            else:
+                ioc["timestamp"] = str(row["analysis_timestamp"])
+                
+        iocs.append(ioc)
     
-    # Export based on requested format using a streaming approach
     if not iocs:
-        return jsonify({"error": "No IOCs found matching your criteria"}), 404
+        return api_error("No IOCs found matching your criteria", status=404)
     
-    if format_type == 'csv':
-        # Create a temporary file for CSV
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as temp_file:
-                # Get fieldnames from the first record
-                fieldnames = list(iocs[0].keys())
+    # Export based on requested format
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{format_type}') as temp_file:
+            if format_type == 'csv':
+                # Get all possible fields from IOCs
+                fields = set()
+                for ioc in iocs:
+                    fields.update(ioc.keys())
+                fieldnames = sorted(list(fields))
                 
                 # Write CSV data
                 with open(temp_file.name, 'w', newline='') as csvfile:
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                     writer.writeheader()
                     for ioc in iocs:
-                        writer.writerow(ioc)
+                        # Flatten geo data
+                        flat_ioc = ioc.copy()
+                        if 'geo' in flat_ioc and isinstance(flat_ioc['geo'], dict):
+                            for key, value in flat_ioc['geo'].items():
+                                flat_ioc[f'geo_{key}'] = value
+                            del flat_ioc['geo']
+                        writer.writerow(flat_ioc)
                 
                 # Send file
                 return send_file(
@@ -2165,18 +1551,8 @@ def export_iocs():
                     download_name="iocs_export.csv",
                     mimetype='text/csv'
                 )
-        finally:
-            # Ensure we clean up the temp file
-            try:
-                if 'temp_file' in locals():
-                    os.unlink(temp_file.name)
-            except:
-                pass
-    
-    elif format_type == 'json':
-        # Create a temporary file for JSON
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            
+            elif format_type == 'json':
                 # Write JSON data
                 with open(temp_file.name, 'w') as jsonfile:
                     json.dump(iocs, jsonfile, indent=2)
@@ -2188,18 +1564,8 @@ def export_iocs():
                     download_name="iocs_export.json",
                     mimetype='application/json'
                 )
-        finally:
-            # Ensure we clean up the temp file
-            try:
-                if 'temp_file' in locals():
-                    os.unlink(temp_file.name)
-            except:
-                pass
-    
-    elif format_type == 'stix':
-        # For STIX format, efficiently convert IOCs to STIX format
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            
+            elif format_type == 'stix':
                 # Create STIX bundle
                 stix_data = {
                     "type": "bundle",
@@ -2208,77 +1574,39 @@ def export_iocs():
                     "objects": []
                 }
                 
-                # Add STIX objects
+                # Convert IOCs to STIX format
                 for ioc in iocs:
                     ioc_type = ioc.get('type')
                     ioc_value = ioc.get('value')
                     first_seen = ioc.get('first_seen', datetime.utcnow().isoformat())
                     
+                    # Create STIX object based on IOC type
+                    stix_object = {
+                        "type": "indicator",
+                        "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
+                        "created": first_seen,
+                        "modified": datetime.utcnow().isoformat(),
+                        "name": f"{ioc_type.upper()} Indicator: {ioc_value}",
+                        "valid_from": first_seen,
+                        "labels": ["malicious-activity"],
+                        "pattern_type": "stix"
+                    }
+                    
+                    # Set pattern based on IOC type
                     if ioc_type == 'ip':
-                        stix_object = {
-                            "type": "indicator",
-                            "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
-                            "created": first_seen,
-                            "modified": datetime.utcnow().isoformat(),
-                            "name": f"IP Indicator: {ioc_value}",
-                            "pattern": f"[ipv4-addr:value = '{ioc_value}']",
-                            "valid_from": first_seen,
-                            "labels": ["malicious-activity"],
-                            "pattern_type": "stix"
-                        }
-                        stix_data["objects"].append(stix_object)
+                        stix_object["pattern"] = f"[ipv4-addr:value = '{ioc_value}']"
                     elif ioc_type == 'domain':
-                        stix_object = {
-                            "type": "indicator",
-                            "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
-                            "created": first_seen,
-                            "modified": datetime.utcnow().isoformat(),
-                            "name": f"Domain Indicator: {ioc_value}",
-                            "pattern": f"[domain-name:value = '{ioc_value}']",
-                            "valid_from": first_seen,
-                            "labels": ["malicious-activity"],
-                            "pattern_type": "stix"
-                        }
-                        stix_data["objects"].append(stix_object)
+                        stix_object["pattern"] = f"[domain-name:value = '{ioc_value}']"
                     elif ioc_type in ['md5', 'sha1', 'sha256']:
-                        stix_object = {
-                            "type": "indicator",
-                            "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
-                            "created": first_seen,
-                            "modified": datetime.utcnow().isoformat(),
-                            "name": f"File Hash Indicator: {ioc_value}",
-                            "pattern": f"[file:hashes.'{ioc_type.upper()}' = '{ioc_value}']",
-                            "valid_from": first_seen,
-                            "labels": ["malicious-activity"],
-                            "pattern_type": "stix"
-                        }
-                        stix_data["objects"].append(stix_object)
+                        stix_object["pattern"] = f"[file:hashes.'{ioc_type.upper()}' = '{ioc_value}']"
                     elif ioc_type == 'url':
-                        stix_object = {
-                            "type": "indicator",
-                            "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
-                            "created": first_seen,
-                            "modified": datetime.utcnow().isoformat(),
-                            "name": f"URL Indicator: {ioc_value}",
-                            "pattern": f"[url:value = '{ioc_value}']",
-                            "valid_from": first_seen,
-                            "labels": ["malicious-activity"],
-                            "pattern_type": "stix"
-                        }
-                        stix_data["objects"].append(stix_object)
+                        stix_object["pattern"] = f"[url:value = '{ioc_value}']"
                     elif ioc_type == 'email':
-                        stix_object = {
-                            "type": "indicator",
-                            "id": f"indicator--{hash(ioc_value) & 0xffffffff:08x}",
-                            "created": first_seen,
-                            "modified": datetime.utcnow().isoformat(),
-                            "name": f"Email Indicator: {ioc_value}",
-                            "pattern": f"[email-addr:value = '{ioc_value}']",
-                            "valid_from": first_seen,
-                            "labels": ["malicious-activity"],
-                            "pattern_type": "stix"
-                        }
-                        stix_data["objects"].append(stix_object)
+                        stix_object["pattern"] = f"[email-addr:value = '{ioc_value}']"
+                    else:
+                        continue  # Skip IOCs that don't map to STIX
+                    
+                    stix_data["objects"].append(stix_object)
                 
                 # Write STIX data to temp file
                 with open(temp_file.name, 'w') as jsonfile:
@@ -2291,55 +1619,83 @@ def export_iocs():
                     download_name="iocs_export.stix.json",
                     mimetype='application/json'
                 )
-        finally:
-            # Ensure we clean up the temp file
-            try:
-                if 'temp_file' in locals():
-                    os.unlink(temp_file.name)
-            except:
-                pass
+    finally:
+        # Ensure we clean up the temp file
+        try:
+            if 'temp_file' in locals():
+                os.unlink(temp_file.name)
+        except:
+            pass
     
     # This shouldn't happen given the validation above
-    return jsonify({"error": "Unsupported export format"}), 400
+    return api_error("Unsupported export format", status=400)
 
-# AI smart usage endpoints
 @api_bp.route('/analyze/ioc', methods=['POST'])
 @require_api_key
 @handle_exceptions
 def analyze_ioc():
-    """Analyze an IOC with Vertex AI when explicitly requested
-    
-    This endpoint uses AI judiciously only when explicitly requested for analysis
-    """
+    """Analyze an IOC with Vertex AI when explicitly requested"""
     # Get request data
     request_json = request.get_json()
     if not request_json:
-        return jsonify({"error": "No data provided"}), 400
+        return api_error("No data provided", status=400)
     
     ioc_value = request_json.get('value')
     ioc_type = request_json.get('type')
     
     if not ioc_value or not ioc_type:
-        return jsonify({"error": "IOC value and type are required"}), 400
+        return api_error("IOC value and type are required", status=400)
     
     # Check if AI insights are enabled
     ai_enabled = config.get("AI_INSIGHTS_ENABLED", "true").lower() == "true"
     if not ai_enabled:
-        return jsonify({
-            "error": "AI insights are disabled in this environment",
-            "basic_analysis": generate_basic_ioc_analysis(ioc_type, ioc_value)
-        }), 403
+        return api_error("AI insights are disabled in this environment", status=403)
     
-    # Initialize Vertex AI - only when needed
+    # Check for existing analysis in the database
+    query = f"""
+    WITH matched_iocs AS (
+      SELECT
+        source_id,
+        vertex_analysis
+      FROM
+        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+      WHERE
+        JSON_EXTRACT_SCALAR(ioc_item, '$.type') = '{ioc_type.replace("'", "''")}'
+        AND JSON_EXTRACT_SCALAR(ioc_item, '$.value') = '{ioc_value.replace("'", "''")}'
+      ORDER BY analysis_timestamp DESC
+      LIMIT 1
+    )
+    SELECT * FROM matched_iocs
+    """
+    
+    rows, _ = execute_bigquery(query)
+    
+    if rows and rows[0].get("vertex_analysis"):
+        # Use existing analysis if available
+        try:
+            analysis = json.loads(rows[0]["vertex_analysis"])
+            analysis["ioc_value"] = ioc_value
+            analysis["ioc_type"] = ioc_type
+            analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
+            return api_response({
+                "analysis": analysis,
+                "ai_powered": True,
+                "source": "cached"
+            })
+        except json.JSONDecodeError:
+            pass  # Continue to generate new analysis
+    
+    # Initialize Vertex AI
     try:
+        from google.cloud import aiplatform
+        from vertexai.language_models import TextGenerationModel
+        
         vertexai.init(project=PROJECT_ID, location=config.region)
         model = TextGenerationModel.from_pretrained("text-bison")
     except Exception as e:
         logger.error(f"Error initializing Vertex AI: {str(e)}")
-        return jsonify({
-            "error": f"AI analysis unavailable: {str(e)}",
-            "basic_analysis": generate_basic_ioc_analysis(ioc_type, ioc_value)
-        }), 500
+        return api_error(f"AI analysis unavailable: {str(e)}", status=500)
     
     # Create prompt for analysis
     prompt = f"""
@@ -2374,67 +1730,19 @@ def analyze_ioc():
                 analysis["ioc_type"] = ioc_type
                 analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
                 
-                return jsonify({
+                return api_response({
                     "analysis": analysis,
                     "ai_powered": True
                 })
             else:
                 logger.warning(f"Could not extract JSON from AI response for IOC {ioc_value}")
-                return jsonify({
-                    "error": "Could not parse AI response",
-                    "basic_analysis": generate_basic_ioc_analysis(ioc_type, ioc_value)
-                })
+                return api_error("Could not parse AI response", status=500)
         except json.JSONDecodeError as e:
             logger.warning(f"JSON decode error for IOC analysis: {str(e)}")
-            return jsonify({
-                "error": f"JSON parse error: {str(e)}",
-                "basic_analysis": generate_basic_ioc_analysis(ioc_type, ioc_value)
-            })
+            return api_error(f"JSON parse error: {str(e)}", status=500)
     except Exception as e:
         logger.error(f"Error analyzing IOC with AI: {str(e)}")
-        return jsonify({
-            "error": f"AI analysis failed: {str(e)}",
-            "basic_analysis": generate_basic_ioc_analysis(ioc_type, ioc_value)
-        }), 500
-
-def generate_basic_ioc_analysis(ioc_type: str, ioc_value: str) -> Dict:
-    """Generate basic IOC analysis without AI"""
-    analysis = {
-        "ioc_value": ioc_value,
-        "ioc_type": ioc_type,
-        "analysis_timestamp": datetime.utcnow().isoformat()
-    }
-    
-    # Add type-specific information
-    if ioc_type == "ip":
-        analysis["overview"] = "IP addresses are used as command and control servers or for data exfiltration."
-        analysis["potential_threats"] = ["Botnet C2", "Phishing infrastructure", "Malware distribution"]
-    elif ioc_type == "domain":
-        analysis["overview"] = "Domains are used for command and control communication or phishing."
-        analysis["potential_threats"] = ["Phishing campaigns", "Malware distribution", "Command and control"]
-    elif ioc_type == "url":
-        analysis["overview"] = "URLs are often used in phishing emails or to host malicious content."
-        analysis["potential_threats"] = ["Phishing", "Drive-by downloads", "Malware hosting"]
-    elif ioc_type in ["md5", "sha1", "sha256"]:
-        analysis["overview"] = "File hashes identify malicious executables, documents, or scripts."
-        analysis["potential_threats"] = ["Malware", "Ransomware", "Trojan"]
-    elif ioc_type == "email":
-        analysis["overview"] = "Email addresses can be used by threat actors for phishing or as accounts for services."
-        analysis["potential_threats"] = ["Phishing campaigns", "Business Email Compromise", "Account takeover"]
-    else:
-        analysis["overview"] = f"This is a {ioc_type} indicator that may be associated with malicious activity."
-        analysis["potential_threats"] = ["Unknown"]
-    
-    # Add standard recommendations
-    analysis["recommendations"] = [
-        "Add to block lists or monitoring systems",
-        "Check for historical activity involving this indicator",
-        "Share with security community if confirmed malicious"
-    ]
-    
-    analysis["confidence_level"] = "Low (automated analysis)"
-    
-    return analysis
+        return api_error(f"AI analysis failed: {str(e)}", status=500)
 
 # Initialize the app with the api Blueprint
 def init_app(app):
@@ -2445,16 +1753,13 @@ def init_app(app):
     # Register blueprint with URL prefix
     app.register_blueprint(api_bp)
     
-    # Also register routes directly under /
-    # This provides fallback endpoints for compatibility
-    # Especially important for the health check endpoint
-    
+    # Register root health check endpoint for compatibility
     @app.route('/health', methods=['GET'])
     @handle_exceptions
     def root_health_check():
         """Root health check endpoint"""
         logger.info("Root health check called")
-        return api_health()
+        return health_check()
         
     logger.info("API routes initialized successfully")
     
