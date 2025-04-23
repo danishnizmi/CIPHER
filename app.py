@@ -45,8 +45,13 @@ try:
     
     # Step 4: Import ingestion module for threat data collection
     logger.info("Importing ingestion module...")
-    import ingestion
-    logger.info("Ingestion module imported successfully")
+    try:
+        import ingestion
+        logger.info("Ingestion module imported successfully")
+        has_ingestion = True
+    except ImportError as e:
+        logger.warning(f"Ingestion module import failed (will run in minimal mode): {e}")
+        has_ingestion = False
     
     # Step 5: Import analysis module for threat data processing
     logger.info("Importing analysis module...")
@@ -70,21 +75,28 @@ try:
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Step 8: Add ingestion endpoints
+    # Step 8: Add ingestion endpoints - with better error handling
     @app.route('/api/ingest_threat_data', methods=['POST'])
     def api_ingest_threat_data():
         """API endpoint for ingesting threat data"""
         try:
-            # Initialize ingestion engine
-            ingestor = ingestion.ThreatDataIngestion()
-            
-            # Process request
-            result = ingestion.ingest_threat_data(request)
-            
-            # Return response (handle both dict and tuple responses)
-            if isinstance(result, tuple):
-                return result
-            return jsonify(result)
+            if has_ingestion:
+                # Initialize ingestion engine
+                ingestor = ingestion.ThreatDataIngestion()
+                
+                # Process request
+                result = ingestion.ingest_threat_data(request)
+                
+                # Return response (handle both dict and tuple responses)
+                if isinstance(result, tuple):
+                    return result
+                return jsonify(result)
+            else:
+                return jsonify({
+                    "error": "Ingestion module not available",
+                    "status": "degraded",
+                    "timestamp": datetime.utcnow().isoformat()
+                }), 503
         except Exception as e:
             logger.error(f"Error in ingestion endpoint: {str(e)}")
             logger.error(traceback.format_exc())
@@ -100,12 +112,14 @@ try:
         def api_analyze_threat_data():
             """API endpoint for analyzing threat data"""
             try:
+                # Create a request-like object for analyze_threat_data
+                event = {"data": request.get_data()}
+                context = {}
+                
                 # Call analysis function
-                result = analysis.analyze_threat_data(request)
+                result = analysis.analyze_threat_data(event, context)
                 
                 # Return response
-                if isinstance(result, tuple):
-                    return result
                 return jsonify(result)
             except Exception as e:
                 logger.error(f"Error in analysis endpoint: {str(e)}")
@@ -122,21 +136,28 @@ try:
         """Endpoint to refresh all threat data"""
         try:
             # Run ingestion process for all feeds
-            ingestor = ingestion.ThreatDataIngestion()
-            results = ingestor.process_all_feeds()
-            
-            # Generate response with stats
-            success_count = len([r for r in results if r.get('status') == 'success'])
-            total_records = sum(r.get('record_count', 0) for r in results)
-            
-            return jsonify({
-                "status": "success",
-                "feeds_processed": len(results),
-                "feeds_succeeded": success_count,
-                "total_records": total_records,
-                "details": results,
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            if has_ingestion:
+                ingestor = ingestion.ThreatDataIngestion()
+                results = ingestor.process_all_feeds()
+                
+                # Generate response with stats
+                success_count = len([r for r in results if r.get('status') == 'success'])
+                total_records = sum(r.get('record_count', 0) for r in results)
+                
+                return jsonify({
+                    "status": "success",
+                    "feeds_processed": len(results),
+                    "feeds_succeeded": success_count,
+                    "total_records": total_records,
+                    "details": results,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                return jsonify({
+                    "status": "degraded",
+                    "message": "Ingestion module not available",
+                    "timestamp": datetime.utcnow().isoformat()
+                }), 503
         except Exception as e:
             logger.error(f"Error refreshing data: {str(e)}")
             logger.error(traceback.format_exc())
@@ -156,19 +177,25 @@ try:
                 "config": True,
                 "frontend": True,
                 "api": True,
-                "ingestion": True,
+                "ingestion": has_ingestion,
                 "analysis": has_analysis
             }
             
             # Check database connectivity
             try:
                 # Get BigQuery status using ingestion module's feed statistics
-                ingestor = ingestion.ThreatDataIngestion()
-                stats = ingestor.get_feed_statistics()
-                database_ok = True
-                feed_count = len(stats.get("feeds", []))
-                active_feeds = stats.get("active_feeds", 0)
-                total_records = stats.get("total_records", 0)
+                if has_ingestion:
+                    ingestor = ingestion.ThreatDataIngestion()
+                    stats = ingestor.get_feed_statistics()
+                    database_ok = True
+                    feed_count = len(stats.get("feeds", []))
+                    active_feeds = stats.get("active_feeds", 0)
+                    total_records = stats.get("total_records", 0)
+                else:
+                    database_ok = False
+                    feed_count = 0
+                    active_feeds = 0
+                    total_records = 0
             except Exception as db_e:
                 logger.error(f"Database connectivity issue: {str(db_e)}")
                 database_ok = False
