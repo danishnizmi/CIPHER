@@ -80,31 +80,13 @@ except Exception as e:
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
 
-# Generate a secure admin password
-def generate_random_password():
-    """Generate a secure random password with good complexity"""
-    # 12 characters with mix of letters, numbers, and special chars
-    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
-    password = ''.join(secrets.choice(chars) for _ in range(12))
-    
-    # Ensure at least one of each type of character for complexity
-    if not any(c.isupper() for c in password):
-        password = password[:-1] + secrets.choice(string.ascii_uppercase)
-    if not any(c.islower() for c in password):
-        password = password[:-1] + secrets.choice(string.ascii_lowercase)
-    if not any(c.isdigit() for c in password):
-        password = password[:-1] + secrets.choice(string.digits)
-    if not any(c in "!@#$%^&*()" for c in password):
-        password = password[:-1] + secrets.choice("!@#$%^&*()")
-    
-    return password
-
-# Admin credentials - create a single admin account
+# Admin credentials - create a single admin account with FIXED PASSWORD
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = generate_random_password()
+# Using a fixed admin password to avoid inconsistencies
+ADMIN_PASSWORD = "Admin123!"
 ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
-# Log the temporary password in multiple ways for visibility
+# Log the admin credentials in multiple ways for visibility
 password_banner = f"""
 ======== INITIAL ADMIN CREDENTIALS ========
 Username: {ADMIN_USERNAME}
@@ -120,7 +102,7 @@ print(password_banner, file=sys.stderr)
 # Also log through the logging system at multiple levels
 logger.info(password_banner)
 logger.warning(password_banner)  # Use warning level for more visibility
-logger.error(f"SECURITY NOTICE: Initial admin password set to {ADMIN_PASSWORD}")
+logger.error(f"SECURITY NOTICE: Admin credentials - Username: {ADMIN_USERNAME}, Password: {ADMIN_PASSWORD}")
 
 # Write to a specific file that might be captured in logs
 try:
