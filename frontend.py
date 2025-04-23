@@ -10,6 +10,7 @@ import hashlib
 import secrets
 import string
 import time
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from functools import wraps
@@ -24,12 +25,20 @@ from werkzeug.local import LocalProxy
 # Import config module for centralized configuration
 import config
 
-# Configure logging
+# Configure enhanced logging for more visibility
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Explicitly log to stdout for Docker/GCP logs
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Also log to stderr for critical messages to ensure visibility
+error_handler = logging.StreamHandler(sys.stderr)
+error_handler.setLevel(logging.ERROR)
+logger.addHandler(error_handler)
 
 # GCP Configuration
 PROJECT_ID = config.project_id
@@ -73,19 +82,52 @@ REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true")
 
 # Generate a secure admin password
 def generate_random_password():
-    return ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(12))
+    """Generate a secure random password with good complexity"""
+    # 12 characters with mix of letters, numbers, and special chars
+    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
+    password = ''.join(secrets.choice(chars) for _ in range(12))
+    
+    # Ensure at least one of each type of character for complexity
+    if not any(c.isupper() for c in password):
+        password = password[:-1] + secrets.choice(string.ascii_uppercase)
+    if not any(c.islower() for c in password):
+        password = password[:-1] + secrets.choice(string.ascii_lowercase)
+    if not any(c.isdigit() for c in password):
+        password = password[:-1] + secrets.choice(string.digits)
+    if not any(c in "!@#$%^&*()" for c in password):
+        password = password[:-1] + secrets.choice("!@#$%^&*()")
+    
+    return password
 
 # Admin credentials - create a single admin account
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = generate_random_password()
 ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
-# Log the temporary password so it can be used for first login
-logger.info(f"======== INITIAL ADMIN CREDENTIALS ========")
-logger.info(f"Username: {ADMIN_USERNAME}")
-logger.info(f"Password: {ADMIN_PASSWORD}")
-logger.info(f"===========================================")
-logger.info(f"PLEASE CHANGE THIS PASSWORD AFTER FIRST LOGIN")
+# Log the temporary password in multiple ways for visibility
+password_banner = f"""
+======== INITIAL ADMIN CREDENTIALS ========
+Username: {ADMIN_USERNAME}
+Password: {ADMIN_PASSWORD}
+===========================================
+PLEASE CHANGE THIS PASSWORD AFTER FIRST LOGIN
+"""
+
+# Print to both stdout and stderr to ensure visibility in logs
+print(password_banner, file=sys.stdout)
+print(password_banner, file=sys.stderr)
+
+# Also log through the logging system at multiple levels
+logger.info(password_banner)
+logger.warning(password_banner)  # Use warning level for more visibility
+logger.error(f"SECURITY NOTICE: Initial admin password set to {ADMIN_PASSWORD}")
+
+# Write to a specific file that might be captured in logs
+try:
+    with open('/tmp/admin_credentials.txt', 'w') as f:
+        f.write(password_banner)
+except Exception as e:
+    logger.warning(f"Could not write admin credentials to file: {e}")
 
 # Utility Functions
 def hash_password(password):
@@ -245,11 +287,16 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
+        # Log authentication attempts (without password)
+        logger.info(f"Login attempt for user: {username}")
+        
         # Check admin credentials directly first
         if username == ADMIN_USERNAME and verify_password(ADMIN_HASH, password):
             session['logged_in'] = True
             session['username'] = username
             session['role'] = "admin"
+            
+            logger.info(f"Admin user {username} logged in successfully")
             
             # Update last login time
             try:
@@ -274,6 +321,8 @@ def login():
                 session['username'] = username
                 session['role'] = user_data.get('role', 'readonly')
                 
+                logger.info(f"User {username} logged in successfully")
+                
                 # Check if user is using a temporary password
                 if user_data.get('temp_password', False):
                     flash("Please change your temporary password", "warning")
@@ -291,14 +340,20 @@ def login():
                 return redirect(url_for('dashboard'))
             else:
                 error = "Invalid username or password"
+                logger.warning(f"Failed login attempt for user: {username} - invalid password")
         else:
             error = "Invalid username or password"
+            logger.warning(f"Failed login attempt for user: {username} - user not found")
     
     return render_template('auth.html', page_type='login', error=error)
 
 @app.route('/logout')
 def logout():
     """Logout user"""
+    username = session.get('username')
+    if username:
+        logger.info(f"User {username} logged out")
+    
     session.pop('logged_in', None)
     session.pop('username', None)
     session.pop('role', None)
@@ -1818,7 +1873,147 @@ def health():
     """Root health check endpoint"""
     return api_health()
 
+# Users endpoints (for admin functionality)
+@app.route('/users')
+@login_required
+@role_required('admin')
+def users():
+    """User management page for admins"""
+    # Get all users from config
+    all_users = get_users()
+    
+    return render_template(
+        'content.html',
+        page_title='User Management',
+        page_icon='users-cog',
+        page_subtitle='Manage platform user accounts',
+        content_type='users',
+        content_items=all_users,
+        action_buttons=[{
+            'text': 'Add User',
+            'url': url_for('add_user_route'),
+            'icon': 'user-plus',
+            'type': 'primary'
+        }]
+    )
+
+@app.route('/users/add', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def add_user_route():
+    """Add user page for admins"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        role = request.form.get('role', 'readonly')
+        
+        # Validate input
+        if not username or not password:
+            flash("Username and password are required", "danger")
+            return redirect(url_for('add_user_route'))
+        
+        if password != confirm_password:
+            flash("Passwords do not match", "danger")
+            return redirect(url_for('add_user_route'))
+        
+        # Check if username already exists
+        all_users = get_users()
+        if username in all_users:
+            flash(f"User '{username}' already exists", "danger")
+            return redirect(url_for('add_user_route'))
+        
+        # Add the user
+        result = config.add_user(username, password, role)
+        
+        if result:
+            flash(f"User '{username}' added successfully", "success")
+            return redirect(url_for('users'))
+        else:
+            flash("Failed to add user", "danger")
+            return redirect(url_for('add_user_route'))
+    
+    return render_template('auth.html', page_type='user_add')
+
+@app.route('/users/edit/<username>', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def edit_user(username: str):
+    """Edit user page for admins"""
+    # Get all users from config
+    all_users = get_users()
+    
+    # Check if user exists
+    if username not in all_users:
+        flash(f"User '{username}' not found", "danger")
+        return redirect(url_for('users'))
+    
+    # Get user data
+    user = all_users[username]
+    
+    if request.method == 'POST':
+        # Update user
+        password = request.form.get('password')
+        role = request.form.get('role', 'readonly')
+        
+        updates = {"role": role}
+        
+        # Update password if provided
+        if password:
+            updates["password"] = password
+        
+        # Update the user
+        result = config.update_user(username, updates)
+        
+        if result:
+            flash(f"User '{username}' updated successfully", "success")
+            return redirect(url_for('users'))
+        else:
+            flash("Failed to update user", "danger")
+    
+    return render_template('auth.html', page_type='user_edit', username=username, user=user)
+
+@app.route('/users/delete/<username>', methods=['POST'])
+@login_required
+@role_required('admin')
+def delete_user(username: str):
+    """Delete user route for admins"""
+    # Check if trying to delete admin user
+    if username == ADMIN_USERNAME:
+        flash("Cannot delete admin user", "danger")
+        return redirect(url_for('users'))
+    
+    # Get auth config
+    auth_config = config.get_cached_config('auth-config', force_refresh=True)
+    
+    if not auth_config or 'users' not in auth_config:
+        flash("User configuration not found", "danger")
+        return redirect(url_for('users'))
+    
+    # Check if user exists
+    if username not in auth_config['users']:
+        flash(f"User '{username}' not found", "danger")
+        return redirect(url_for('users'))
+    
+    # Delete the user
+    del auth_config['users'][username]
+    
+    # Save updated config
+    result = config.create_or_update_secret('auth-config', json.dumps(auth_config))
+    
+    if result:
+        # Update cache
+        config._config_cache['auth-config'] = auth_config
+        flash(f"User '{username}' deleted successfully", "success")
+    else:
+        flash("Failed to delete user", "danger")
+    
+    return redirect(url_for('users'))
+
 # Main entry point
 if __name__ == "__main__":
+    # Print admin credentials for visibility
+    print(f"\n\n{password_banner}\n\n")
+    
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=config.environment != "production")
