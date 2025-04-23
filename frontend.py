@@ -1574,9 +1574,9 @@ def search():
                 </h3>
             </div>
             <div class="p-6">
-                {% if results.campaigns %}
+                {{% if results.campaigns %}}
                 <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                    {% for campaign in results.campaigns %}
+                    {{% for campaign in results.campaigns %}}
                     <div class="border rounded-lg overflow-hidden hover:shadow-md transition-shadow">
                         <div class="bg-gray-50 p-3 border-b">
                             <h4 class="font-medium">
@@ -1597,11 +1597,11 @@ def search():
                             </p>
                         </div>
                     </div>
-                    {% endfor %}
+                    {{% endfor %}}
                 </div>
-                {% else %}
+                {{% else %}}
                 <p class="text-center text-gray-500">No campaigns found matching your search.</p>
-                {% endif %}
+                {{% endif %}}
             </div>
         </div>
         
@@ -1613,7 +1613,7 @@ def search():
                 </h3>
             </div>
             <div class="p-6">
-                {% if results.iocs %}
+                {{% if results.iocs %}}
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200">
                         <thead class="bg-gray-50">
@@ -1625,7 +1625,7 @@ def search():
                             </tr>
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
-                            {% for ioc in results.iocs %}
+                            {{% for ioc in results.iocs %}}
                             <tr>
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
@@ -1642,13 +1642,13 @@ def search():
                                     </a>
                                 </td>
                             </tr>
-                            {% endfor %}
+                            {{% endfor %}}
                         </tbody>
                     </table>
                 </div>
-                {% else %}
+                {{% else %}}
                 <p class="text-center text-gray-500">No indicators found matching your search.</p>
-                {% endif %}
+                {{% endif %}}
             </div>
         </div>
         
@@ -1660,19 +1660,19 @@ def search():
                 </h3>
             </div>
             <div class="p-6">
-                {% if results.analyses %}
+                {{% if results.analyses %}}
                 <div class="space-y-4">
-                    {% for analysis in results.analyses %}
+                    {{% for analysis in results.analyses %}}
                     <div class="border rounded-lg p-4">
                         <p class="font-medium mb-2">{{ analysis.source_id }}</p>
                         <p class="text-sm text-gray-600 mb-2">{{ analysis.summary }}</p>
                         <div class="text-xs text-gray-500">{{ analysis.analysis_timestamp|datetime }}</div>
                     </div>
-                    {% endfor %}
+                    {{% endfor %}}
                 </div>
-                {% else %}
+                {{% else %}}
                 <p class="text-center text-gray-500">No analysis results found matching your search.</p>
-                {% endif %}
+                {{% endif %}}
             </div>
         </div>
         """,
