@@ -71,9 +71,13 @@ except Exception as e:
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
 
+# Generate a secure admin password
+def generate_random_password():
+    return ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(12))
+
 # Admin credentials - create a single admin account
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = generate_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(12))
+ADMIN_PASSWORD = generate_random_password()
 ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 # Log the temporary password so it can be used for first login
@@ -319,6 +323,7 @@ def profile():
 @login_required
 def change_password():
     """Change user's own password"""
+    global ADMIN_HASH
     username = session.get('username')
     current_password = request.form.get('current_password')
     new_password = request.form.get('new_password')
@@ -362,7 +367,6 @@ def change_password():
     
     # Update admin password globally if this is admin
     if is_admin:
-        global ADMIN_HASH
         ADMIN_HASH = hash_password(new_password)
         logger.info("Admin password updated successfully")
     
