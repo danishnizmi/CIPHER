@@ -1,64 +1,144 @@
+"""
+Threat Intelligence Platform - Configuration Module
+Centralized configuration management with cost-efficient secret handling.
+"""
+
 import os
 import json
 import logging
 import hashlib
 from datetime import datetime
-from google.cloud import secretmanager
+from functools import lru_cache
+from typing import Dict, Any, Optional
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Environment variables
+# Environment variables - read once at module load time
 PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 REGION = os.environ.get("GCP_REGION", "us-central1")
 API_URL = os.environ.get("API_URL", "")
-
-# API key initialization with default
+GCS_BUCKET = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
+BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_key = os.environ.get("API_KEY", "")
 
-# Secret Manager client
-secret_client = None
+# Lazy-loaded Secret Manager client
+_secret_client = None
+# Config cache with 30-minute TTL
+_config_cache = {}
+_cache_timestamp = {}
+CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 def get_secret_client():
-    """Get or initialize Secret Manager client."""
-    global secret_client
-    if secret_client is None:
+    """Get Secret Manager client (lazy initialization to save costs)"""
+    global _secret_client
+    if _secret_client is None:
         try:
-            secret_client = secretmanager.SecretManagerServiceClient()
+            from google.cloud import secretmanager
+            _secret_client = secretmanager.SecretManagerServiceClient()
+            logger.debug("Secret Manager client initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Secret Manager client: {e}")
-            raise
-    return secret_client
+            # Don't raise - allow operation in degraded mode without secrets
+    return _secret_client
 
-def access_secret(secret_id, version_id="latest"):
-    """Access the secret with the given name and version."""
+@lru_cache(maxsize=10)
+def access_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
+    """Access secret with efficient caching to reduce API costs
+    
+    Args:
+        secret_id: ID of the secret to access
+        version_id: Version of the secret (default: latest)
+        
+    Returns:
+        Secret payload or None if not available
+    """
     client = get_secret_client()
-    name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version_id}"
+    if not client:
+        return None
+        
     try:
+        name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version_id}"
         response = client.access_secret_version(request={"name": name})
-        payload = response.payload.data.decode("UTF-8")
-        return payload
+        return response.payload.data.decode("UTF-8")
     except Exception as e:
-        logger.error(f"Failed to access secret {secret_id}: {e}")
+        logger.warning(f"Could not access secret {secret_id}: {e}")
         return None
 
-def create_or_update_secret(secret_id, secret_value):
-    """Create or update a secret in Secret Manager."""
+def get_config(config_name: str) -> Dict[str, Any]:
+    """Get configuration from Secret Manager with caching
+    
+    Args:
+        config_name: Name of the config secret
+        
+    Returns:
+        Configuration dict
+    """
+    # Check cache first
+    now = datetime.now().timestamp()
+    if config_name in _config_cache:
+        # Return cached value if it's not expired
+        if now - _cache_timestamp.get(config_name, 0) < CACHE_TTL_SECONDS:
+            return _config_cache[config_name]
+    
+    # Load from Secret Manager
+    config_json = access_secret(config_name)
+    if config_json:
+        try:
+            config_data = json.loads(config_json)
+            # Update cache
+            _config_cache[config_name] = config_data
+            _cache_timestamp[config_name] = now
+            return config_data
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON in {config_name} config")
+    
+    # Return empty dict if config not found or invalid
+    return {}
+
+def get_cached_config(config_name: str, force_refresh: bool = False) -> Dict[str, Any]:
+    """Get cached configuration
+    
+    Args:
+        config_name: Configuration name
+        force_refresh: Force refresh from source
+        
+    Returns:
+        Configuration dict
+    """
+    if force_refresh or config_name not in _config_cache:
+        return get_config(config_name)
+    return _config_cache.get(config_name, {})
+
+def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
+    """Create or update a secret - used sparingly to reduce API costs
+    
+    Args:
+        secret_id: Secret identifier
+        secret_value: Secret value to store
+        
+    Returns:
+        Success status
+    """
     client = get_secret_client()
+    if not client:
+        return False
+    
     parent = f"projects/{PROJECT_ID}"
     
-    # Check if secret exists
     try:
-        client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
-        secret_exists = True
-    except Exception:
-        secret_exists = False
-    
-    # Create secret if it doesn't exist
-    if not secret_exists:
+        # Check if secret exists to avoid unnecessary API calls
         try:
+            client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
+            secret_exists = True
+        except Exception:
+            secret_exists = False
+        
+        # Create secret if needed
+        if not secret_exists:
             client.create_secret(
                 request={
                     "parent": parent,
@@ -66,99 +146,99 @@ def create_or_update_secret(secret_id, secret_value):
                     "secret": {"replication": {"automatic": {}}},
                 }
             )
-        except Exception as e:
-            logger.error(f"Failed to create secret {secret_id}: {e}")
-            return False
-    
-    # Add new version
-    try:
+        
+        # Add new version
         client.add_secret_version(
             request={
                 "parent": f"{parent}/secrets/{secret_id}",
                 "payload": {"data": secret_value.encode("UTF-8")},
             }
         )
+        
+        # Clear cache for this config
+        if secret_id in _config_cache:
+            del _config_cache[secret_id]
+            if secret_id in _cache_timestamp:
+                del _cache_timestamp[secret_id]
+                
         return True
     except Exception as e:
-        logger.error(f"Failed to add version to secret {secret_id}: {e}")
+        logger.error(f"Failed to update secret {secret_id}: {e}")
         return False
 
-def get_config(config_name):
-    """Get configuration from Secret Manager."""
-    config_json = access_secret(config_name)
-    if config_json:
-        try:
-            return json.loads(config_json)
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON in {config_name} config")
-            return {}
-    return {}
-
-# Cache for configurations
-_config_cache = {}
-
-def get_cached_config(config_name, force_refresh=False):
-    """Get cached configuration or refresh from Secret Manager."""
-    global _config_cache
-    if force_refresh or config_name not in _config_cache:
-        _config_cache[config_name] = get_config(config_name)
-    return _config_cache[config_name]
-
-# Load configurations
-def load_configs(force_refresh=False):
-    """Load all configurations from Secret Manager."""
+def load_configs(force_refresh: bool = False) -> Dict[str, Dict]:
+    """Load all configurations (minimized for cost efficiency)
+    
+    Args:
+        force_refresh: Force refresh from source
+        
+    Returns:
+        Dict of configurations
+    """
+    global api_key
+    
     configs = {
         'api_keys': get_cached_config('api-keys', force_refresh),
-        'database': get_cached_config('database-credentials', force_refresh),
-        'feeds': get_cached_config('feed-config', force_refresh),
         'auth': get_cached_config('auth-config', force_refresh)
     }
     
-    # Update global API key if available in api_keys config
-    global api_key
+    # Only load additional configs when needed
+    if ENVIRONMENT == 'production':
+        configs['database'] = get_cached_config('database-credentials', force_refresh)
+        configs['feeds'] = get_cached_config('feed-config', force_refresh)
+    
+    # Update global API key if available in config
     if configs['api_keys'] and 'platform_api_key' in configs['api_keys']:
         api_key = configs['api_keys']['platform_api_key']
     
     return configs
 
-def init_app_config():
-    """Initialize application configuration from secrets."""
+def init_app_config() -> Dict[str, Any]:
+    """Initialize application configuration
+    
+    Returns:
+        Configuration dict or error dict
+    """
     try:
         return load_configs()
     except Exception as e:
         logger.error(f"Error initializing app config: {e}")
         return {'error': str(e)}
 
-def get(key, default=None):
-    """Get configuration value from environment or secrets."""
+def get(key: str, default: Any = None) -> Any:
+    """Get configuration value from environment or secrets
+    
+    Args:
+        key: Configuration key
+        default: Default value if not found
+        
+    Returns:
+        Configuration value
+    """
+    # Check environment first (no API cost)
     if key in os.environ:
         return os.environ[key]
     
-    # Try to get from auth config in Secret Manager
+    # Try auth config (using cache when possible)
     try:
         auth_config = get_cached_config('auth-config')
         if auth_config and key in auth_config:
             return auth_config[key]
-    except Exception as e:
-        logger.warning(f"Could not get config from Secret Manager: {e}")
+    except Exception:
+        pass
     
     return default
 
-def add_user(username, password, role="readonly"):
-    """Add a new user"""
-    # Hash the password
-    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+def update_user(username: str, updates: Dict[str, Any]) -> bool:
+    """Update user in auth config
     
-    user_data = {
-        "password": hashed_password,
-        "role": role,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    
-    return update_user(username, user_data)
-
-def update_user(username, updates):
-    """Update user information in the auth config."""
+    Args:
+        username: Username to update
+        updates: User data updates
+        
+    Returns:
+        Success status
+    """
     auth_config = get_cached_config('auth-config', force_refresh=True)
     
     if 'users' not in auth_config:
@@ -173,37 +253,60 @@ def update_user(username, updates):
             # Hash the password if not already hashed
             if len(value) != 64:  # SHA-256 produces 64 character hex string
                 value = hashlib.sha256(value.encode()).hexdigest()
-            auth_config['users'][username]['password'] = value
-        else:
-            auth_config['users'][username][key] = value
+        auth_config['users'][username][key] = value
     
-    # Save updated config
-    result = create_or_update_secret('auth-config', json.dumps(auth_config))
-    
-    # Update cache
-    if result:
-        _config_cache['auth-config'] = auth_config
-    
-    return result
+    # Save updated config (API call - used judiciously)
+    return create_or_update_secret('auth-config', json.dumps(auth_config))
 
-def update_api_key(service, api_key):
-    """Update API key for a service."""
+def add_user(username: str, password: str, role: str = "readonly") -> bool:
+    """Add a new user
+    
+    Args:
+        username: Username
+        password: Password
+        role: User role
+        
+    Returns:
+        Success status
+    """
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
+    user_data = {
+        "password": hashed_password,
+        "role": role,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    return update_user(username, user_data)
+
+def update_api_key(service: str, api_key: str) -> bool:
+    """Update API key with minimal API calls
+    
+    Args:
+        service: Service name
+        api_key: API key
+        
+    Returns:
+        Success status
+    """
     api_keys = get_cached_config('api-keys', force_refresh=True)
     
-    # Update API key
+    # Update key
     api_keys[service] = api_key
     
     # Save updated config
-    result = create_or_update_secret('api-keys', json.dumps(api_keys))
-    
-    # Update cache
-    if result:
-        _config_cache['api-keys'] = api_keys
-    
-    return result
+    return create_or_update_secret('api-keys', json.dumps(api_keys))
 
-def update_feed_config(feed_name, updates):
-    """Update feed configuration."""
+def update_feed_config(feed_name: str, updates: Dict[str, Any]) -> bool:
+    """Update feed configuration
+    
+    Args:
+        feed_name: Feed name
+        updates: Configuration updates
+        
+    Returns:
+        Success status
+    """
     feed_config = get_cached_config('feed-config', force_refresh=True)
     
     if 'feeds' not in feed_config:
@@ -225,18 +328,11 @@ def update_feed_config(feed_name, updates):
         feed_config['feeds'].append(updates)
     
     # Save updated config
-    result = create_or_update_secret('feed-config', json.dumps(feed_config))
-    
-    # Update cache
-    if result:
-        _config_cache['feed-config'] = feed_config
-    
-    return result
+    return create_or_update_secret('feed-config', json.dumps(feed_config))
 
-# Properties used by other modules
+# Exported properties for other modules
 project_id = PROJECT_ID
 region = REGION
-gcs_bucket = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
-bigquery_dataset = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
-api_url = API_URL
-environment = ENVIRONMENT  # Add this line to expose environment to other modules
+gcs_bucket = GCS_BUCKET
+bigquery_dataset = BIGQUERY_DATASET
+environment = ENVIRONMENT
