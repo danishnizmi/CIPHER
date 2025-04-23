@@ -3,6 +3,7 @@ import sys
 import logging
 import traceback
 import json
+import base64
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, redirect, url_for, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -17,6 +18,15 @@ logger = logging.getLogger(__name__)
 # Create a fallback Flask app for graceful degradation
 fallback_app = Flask(__name__)
 
+# Modules that might be available
+available_modules = {
+    'config': False,
+    'api': False,
+    'frontend': False,
+    'ingestion': False,
+    'analysis': False
+}
+
 # Main application initialization with robust error handling
 try:
     logger.info("Beginning application initialization...")
@@ -26,6 +36,7 @@ try:
     import config
     logger.info("Initializing application configuration...")
     config_result = config.init_app_config()
+    available_modules['config'] = True
     
     if isinstance(config_result, dict) and config_result.get('error'):
         logger.error(f"Configuration initialization failed: {config_result.get('error')}")
@@ -37,31 +48,31 @@ try:
     logger.info("Importing API module...")
     import api
     logger.info("API module imported successfully")
+    available_modules['api'] = True
     
     # Step 3: Import frontend module which has the fully configured Flask app
     logger.info("Importing frontend module...")
     import frontend
     logger.info("Frontend module imported successfully")
+    available_modules['frontend'] = True
     
     # Step 4: Import ingestion module for threat data collection
     logger.info("Importing ingestion module...")
     try:
         import ingestion
         logger.info("Ingestion module imported successfully")
-        has_ingestion = True
+        available_modules['ingestion'] = True
     except ImportError as e:
         logger.warning(f"Ingestion module import failed (will run in minimal mode): {e}")
-        has_ingestion = False
     
     # Step 5: Import analysis module for threat data processing
     logger.info("Importing analysis module...")
     try:
         import analysis
         logger.info("Analysis module imported successfully")
-        has_analysis = True
+        available_modules['analysis'] = True
     except ImportError as e:
         logger.warning(f"Analysis module import failed (will run in minimal mode): {e}")
-        has_analysis = False
     
     # Step 6: Use the frontend's Flask app as our main app
     logger.info("Using frontend.app as the main application")
@@ -79,24 +90,21 @@ try:
     @app.route('/api/ingest_threat_data', methods=['POST'])
     def api_ingest_threat_data():
         """API endpoint for ingesting threat data"""
+        if not available_modules['ingestion']:
+            return jsonify({
+                "error": "Ingestion module not available",
+                "status": "degraded",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 503
+            
         try:
-            if has_ingestion:
-                # Initialize ingestion engine
-                ingestor = ingestion.ThreatDataIngestion()
-                
-                # Process request
-                result = ingestion.ingest_threat_data(request)
-                
-                # Return response (handle both dict and tuple responses)
-                if isinstance(result, tuple):
-                    return result
-                return jsonify(result)
-            else:
-                return jsonify({
-                    "error": "Ingestion module not available",
-                    "status": "degraded",
-                    "timestamp": datetime.utcnow().isoformat()
-                }), 503
+            # Process request
+            result = ingestion.ingest_threat_data(request)
+            
+            # Return response (handle both dict and tuple responses)
+            if isinstance(result, tuple):
+                return result
+            return jsonify(result)
         except Exception as e:
             logger.error(f"Error in ingestion endpoint: {str(e)}")
             logger.error(traceback.format_exc())
@@ -106,26 +114,40 @@ try:
                 "timestamp": datetime.utcnow().isoformat()
             }), 500
     
-    # Step 9: Add analysis endpoints if available
-    if has_analysis:
+    # Step 9: Add analysis endpoints with improved error handling
+    if available_modules['analysis']:
         @app.route('/api/analyze_threat_data', methods=['POST'])
         def api_analyze_threat_data():
             """API endpoint for analyzing threat data"""
             try:
-                # Create a request-like object for analyze_threat_data
-                event = {"data": request.get_data()}
-                context = {}
+                # Handle both JSON and raw data formats
+                if request.is_json:
+                    data = request.get_json()
+                    
+                    # Check if we need to encode as base64 for analyze_threat_data
+                    event = {
+                        "data": base64.b64encode(json.dumps(data).encode()).decode('utf-8')
+                    }
+                else:
+                    # Raw data - encode as base64 for analyze_threat_data
+                    raw_data = request.get_data()
+                    event = {
+                        "data": base64.b64encode(raw_data).decode('utf-8') 
+                    }
                 
-                # Call analysis function
+                # Call analysis function with common empty context
+                context = {}
                 result = analysis.analyze_threat_data(event, context)
                 
                 # Return response
                 return jsonify(result)
             except Exception as e:
+                error_details = traceback.format_exc()
                 logger.error(f"Error in analysis endpoint: {str(e)}")
-                logger.error(traceback.format_exc())
+                logger.error(error_details)
                 return jsonify({
                     "error": str(e),
+                    "details": error_details.split("\n"),
                     "status": "error",
                     "timestamp": datetime.utcnow().isoformat()
                 }), 500
@@ -134,30 +156,30 @@ try:
     @app.route('/api/refresh_data', methods=['GET', 'POST'])
     def api_refresh_data():
         """Endpoint to refresh all threat data"""
+        if not available_modules['ingestion']:
+            return jsonify({
+                "status": "degraded",
+                "message": "Ingestion module not available",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 503
+            
         try:
             # Run ingestion process for all feeds
-            if has_ingestion:
-                ingestor = ingestion.ThreatDataIngestion()
-                results = ingestor.process_all_feeds()
-                
-                # Generate response with stats
-                success_count = len([r for r in results if r.get('status') == 'success'])
-                total_records = sum(r.get('record_count', 0) for r in results)
-                
-                return jsonify({
-                    "status": "success",
-                    "feeds_processed": len(results),
-                    "feeds_succeeded": success_count,
-                    "total_records": total_records,
-                    "details": results,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
-            else:
-                return jsonify({
-                    "status": "degraded",
-                    "message": "Ingestion module not available",
-                    "timestamp": datetime.utcnow().isoformat()
-                }), 503
+            ingestor = ingestion.ThreatDataIngestion()
+            results = ingestor.process_all_feeds()
+            
+            # Generate response with stats
+            success_count = len([r for r in results if r.get('status') == 'success'])
+            total_records = sum(r.get('record_count', 0) for r in results)
+            
+            return jsonify({
+                "status": "success",
+                "feeds_processed": len(results),
+                "feeds_succeeded": success_count,
+                "total_records": total_records,
+                "details": results,
+                "timestamp": datetime.utcnow().isoformat()
+            })
         except Exception as e:
             logger.error(f"Error refreshing data: {str(e)}")
             logger.error(traceback.format_exc())
@@ -167,60 +189,45 @@ try:
                 "timestamp": datetime.utcnow().isoformat()
             }), 500
     
-    # Step 11: Add system status endpoint
+    # Step 11: Add system status endpoint with improved module reporting
     @app.route('/api/system_status', methods=['GET'])
     def api_system_status():
         """API endpoint to check overall system status"""
         try:
-            # Check various components
-            components = {
-                "config": True,
-                "frontend": True,
-                "api": True,
-                "ingestion": has_ingestion,
-                "analysis": has_analysis
+            # Check database connectivity through ingestion if available
+            database_stats = {
+                "connected": False,
+                "feed_count": 0,
+                "active_feeds": 0,
+                "total_records": 0
             }
             
-            # Check database connectivity
-            try:
-                # Get BigQuery status using ingestion module's feed statistics
-                if has_ingestion:
+            if available_modules['ingestion']:
+                try:
                     ingestor = ingestion.ThreatDataIngestion()
                     stats = ingestor.get_feed_statistics()
-                    database_ok = True
-                    feed_count = len(stats.get("feeds", []))
-                    active_feeds = stats.get("active_feeds", 0)
-                    total_records = stats.get("total_records", 0)
-                else:
-                    database_ok = False
-                    feed_count = 0
-                    active_feeds = 0
-                    total_records = 0
-            except Exception as db_e:
-                logger.error(f"Database connectivity issue: {str(db_e)}")
-                database_ok = False
-                feed_count = 0
-                active_feeds = 0
-                total_records = 0
-                components["database"] = False
-            else:
-                components["database"] = True
+                    
+                    if not stats.get('error'):
+                        database_stats.update({
+                            "connected": True,
+                            "feed_count": len(stats.get("feeds", [])),
+                            "active_feeds": stats.get("active_feeds", 0),
+                            "total_records": stats.get("total_records", 0)
+                        })
+                except Exception as db_e:
+                    logger.error(f"Database connectivity issue: {str(db_e)}")
+                    logger.error(traceback.format_exc())
             
             # Overall status
-            all_ok = all(components.values())
-            status = "healthy" if all_ok else "degraded"
+            modules_ok = all(available_modules.values())
+            status = "healthy" if modules_ok and database_stats["connected"] else "degraded"
             
             return jsonify({
                 "status": status,
                 "environment": config.environment,
                 "version": os.environ.get("VERSION", "1.0.0"),
-                "components": components,
-                "database": {
-                    "connected": database_ok,
-                    "feed_count": feed_count,
-                    "active_feeds": active_feeds,
-                    "total_records": total_records
-                },
+                "components": available_modules,
+                "database": database_stats,
                 "timestamp": datetime.utcnow().isoformat()
             })
         except Exception as e:
@@ -256,6 +263,7 @@ try:
     @app.errorhandler(500)
     def handle_server_error(e):
         logger.error(f"500 error: {str(e)}")
+        logger.error(traceback.format_exc())
         if request.path.startswith('/api/'):
             return jsonify({
                 "error": "Internal server error", 
@@ -555,18 +563,19 @@ if __name__ == '__main__':
         logger.info(f"SSL enabled with certificate: {cert_path}")
     
     # Try to trigger initial data ingestion if in development mode
-    if debug_mode:
+    if debug_mode and available_modules['ingestion']:
         try:
             logger.info("Triggering initial data ingestion for development mode...")
-            import ingestion
             ingestor = ingestion.ThreatDataIngestion()
             results = ingestor.process_all_feeds()
             logger.info(f"Initial ingestion completed with {len(results)} feeds processed")
         except Exception as e:
             logger.warning(f"Initial ingestion failed: {e}")
+            logger.warning(traceback.format_exc())
     
     try:
         app.run(host=host, port=port, debug=debug_mode, ssl_context=ssl_context)
     except Exception as e:
         logger.error(f"Failed to start application: {str(e)}")
+        logger.error(traceback.format_exc())
         sys.exit(1)
