@@ -1,6 +1,7 @@
 """
 Threat Intelligence Platform - Data Ingestion Module
 Handles collection of threat data from various sources and loads it into GCP.
+Includes direct integration with open source threat intelligence feeds.
 """
 
 import os
@@ -10,7 +11,8 @@ import hashlib
 import csv
 import time
 import traceback
-from io import StringIO
+from io import StringIO, BytesIO
+import zipfile
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Union, Tuple
 
@@ -93,9 +95,10 @@ def get_feed_config():
             logger.info(f"Loaded {len(feed_dict)} feeds from config")
             return feed_dict
     
-    # Fallback configuration if not in config module
-    logger.info("Using fallback feed configuration")
+    # Fallback configuration including both original and opensource feeds
+    logger.info("Using fallback feed configuration with open source feeds")
     return {
+        # Original feeds requiring API keys
         "alienvault": {
             "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
             "auth_header": "X-OTX-API-KEY",
@@ -110,29 +113,78 @@ def get_feed_config():
             "table_id": "misp_events",
             "active": False
         },
+        
+        # Open source feeds (no API key required)
         "threatfox": {
             "url": "https://threatfox-api.abuse.ch/api/v1/",
             "table_id": "threatfox_iocs",
+            "format": "json",
+            "opensrc": True,
+            "opensrc_url": "https://threatfox.abuse.ch/export/json/recent/",
             "active": True
         },
         "phishtank": {
             "url": "https://data.phishtank.com/data/online-valid.json",
             "table_id": "phishtank_urls",
+            "format": "json",
+            "opensrc": True,
             "active": True
         },
         "urlhaus": {
             "url": "https://urlhaus-api.abuse.ch/v1/urls/recent/",
             "table_id": "urlhaus_malware",
+            "format": "csv",
+            "opensrc": True,
+            "opensrc_url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
             "active": True
         },
         "feodotracker": {
             "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
             "table_id": "feodotracker_c2",
+            "format": "json",
+            "opensrc": True,
             "active": True
         },
         "sslbl": {
             "url": "https://sslbl.abuse.ch/blacklist/sslblacklist.json",
             "table_id": "sslbl_certificates",
+            "format": "json",
+            "opensrc": True,
+            "active": True
+        },
+        "cisa_vuln": {
+            "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+            "table_id": "cisa_vulnerabilities",
+            "format": "json",
+            "opensrc": True,
+            "active": True
+        },
+        "malware_bazaar": {
+            "url": "https://bazaar.abuse.ch/export/csv/recent/",
+            "table_id": "malware_bazaar",
+            "format": "csv",
+            "opensrc": True,
+            "active": True
+        },
+        "openphish": {
+            "url": "https://openphish.com/feed.txt",
+            "table_id": "openphish_urls",
+            "format": "text",
+            "opensrc": True,
+            "active": True
+        },
+        "tor_exit_nodes": {
+            "url": "https://check.torproject.org/torbulkexitlist",
+            "table_id": "tor_exit_nodes",
+            "format": "text",
+            "opensrc": True,
+            "active": True
+        },
+        "blocklist_de": {
+            "url": "https://lists.blocklist.de/lists/all.txt",
+            "table_id": "blocklist_attackers",
+            "format": "text",
+            "opensrc": True,
             "active": True
         }
     }
@@ -373,6 +425,44 @@ class ThreatDataIngestion:
                 }
                 processed_data.append(processed_entry)
         
+        elif feed_name == "cisa_vuln":
+            # CISA vulnerabilities feed
+            if isinstance(data, dict) and "vulnerabilities" in data:
+                feed_items = data["vulnerabilities"]
+            else:
+                feed_items = []
+            
+            # Process each vulnerability
+            for entry in feed_items:
+                processed_entry = {
+                    "cve_id": entry.get("cveID"),
+                    "vendor_project": entry.get("vendorProject"),
+                    "product": entry.get("product"),
+                    "vulnerability_name": entry.get("vulnerabilityName"),
+                    "date_added": entry.get("dateAdded"),
+                    "short_description": entry.get("shortDescription"),
+                    "required_action": entry.get("requiredAction"),
+                    "due_date": entry.get("dueDate"),
+                    "_ingestion_timestamp": datetime.utcnow().isoformat()
+                }
+                processed_data.append(processed_entry)
+                
+        elif feed_name == "malware_bazaar":
+            # Already processed in fetch_malware_bazaar_data
+            processed_data = data
+            
+        elif feed_name == "openphish":
+            # Already processed in fetch_openphish_data
+            processed_data = data
+            
+        elif feed_name == "tor_exit_nodes":
+            # Already processed in fetch_tor_exit_nodes
+            processed_data = data
+            
+        elif feed_name == "blocklist_de":
+            # Already processed in fetch_blocklist_de_data
+            processed_data = data
+            
         else:
             # Generic fallback for unknown feeds - just add timestamp
             if isinstance(data, list):
@@ -385,6 +475,168 @@ class ThreatDataIngestion:
         
         return processed_data
     
+    def fetch_urlhaus_data(self, feed_config):
+        """Fetch and process URLhaus malicious URLs data"""
+        try:
+            response = requests.get(feed_config.get("opensrc_url", feed_config["url"]), timeout=30)
+            response.raise_for_status()
+            
+            # URLhaus CSV is ZIP compressed
+            with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
+                # There should be only one file in the ZIP
+                csv_filename = zip_file.namelist()[0]
+                with zip_file.open(csv_filename) as csv_file:
+                    # Skip the first 8 lines (comments)
+                    content = csv_file.read().decode('utf-8')
+                    lines = content.split('\n')
+                    csv_data = '\n'.join(lines[8:])
+                    
+                    # Parse CSV data
+                    reader = csv.DictReader(StringIO(csv_data))
+                    records = []
+                    
+                    for row in reader:
+                        record = {
+                            "id": row.get("# id", ""),
+                            "date_added": row.get("dateadded", ""),
+                            "url": row.get("url", ""),
+                            "url_status": row.get("url_status", ""),
+                            "threat": row.get("threat", ""),
+                            "tags": row.get("tags", "").split(",") if row.get("tags") else [],
+                            "urlhaus_link": row.get("urlhaus_reference", ""),
+                            "reporter": row.get("reporter", ""),
+                            "_ingestion_timestamp": datetime.utcnow().isoformat()
+                        }
+                        records.append(record)
+                    
+                    logger.info(f"Processed {len(records)} records from URLhaus")
+                    return records
+        except Exception as e:
+            logger.error(f"Error fetching URLhaus data: {str(e)}")
+            return []
+    
+    def fetch_cisa_vulnerabilities(self, feed_config):
+        """Fetch and process CISA Known Exploited Vulnerabilities data"""
+        try:
+            response = requests.get(feed_config["url"], timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            # Return the raw data for processing in process_feed_data
+            return data
+        except Exception as e:
+            logger.error(f"Error fetching CISA Vulnerabilities data: {str(e)}")
+            return {}
+    
+    def fetch_malware_bazaar(self, feed_config):
+        """Fetch and process Malware Bazaar recent samples"""
+        try:
+            response = requests.get(feed_config["url"], timeout=30)
+            response.raise_for_status()
+            
+            # Skip the first line (comment)
+            csv_data = response.text.split('\n', 1)[1]
+            
+            # Parse CSV data
+            reader = csv.DictReader(StringIO(csv_data))
+            records = []
+            
+            for row in reader:
+                record = {
+                    "sha256_hash": row.get("sha256_hash", ""),
+                    "sha1_hash": row.get("sha1_hash", ""),
+                    "md5_hash": row.get("md5_hash", ""),
+                    "first_seen": row.get("first_seen", ""),
+                    "last_seen": row.get("last_seen", ""),
+                    "file_name": row.get("file_name", ""),
+                    "file_type": row.get("file_type_mime", ""),
+                    "file_size": int(row.get("file_size", "0")) if row.get("file_size", "").isdigit() else 0,
+                    "signature": row.get("signature", ""),
+                    "tags": row.get("tags", "").split(",") if row.get("tags") else [],
+                    "reporter": row.get("reporter", ""),
+                    "_ingestion_timestamp": datetime.utcnow().isoformat()
+                }
+                records.append(record)
+            
+            logger.info(f"Processed {len(records)} records from Malware Bazaar")
+            return records
+        except Exception as e:
+            logger.error(f"Error fetching Malware Bazaar data: {str(e)}")
+            return []
+    
+    def fetch_openphish_data(self, feed_config):
+        """Fetch and process OpenPhish feed"""
+        try:
+            response = requests.get(feed_config["url"], timeout=30)
+            response.raise_for_status()
+            
+            urls = response.text.strip().split('\n')
+            records = []
+            
+            for url in urls:
+                if url.strip():
+                    record = {
+                        "url": url.strip(),
+                        "source": "openphish",
+                        "_ingestion_timestamp": datetime.utcnow().isoformat()
+                    }
+                    records.append(record)
+            
+            logger.info(f"Processed {len(records)} records from OpenPhish")
+            return records
+        except Exception as e:
+            logger.error(f"Error fetching OpenPhish data: {str(e)}")
+            return []
+    
+    def fetch_tor_exit_nodes(self, feed_config):
+        """Fetch and process Tor Exit Nodes list"""
+        try:
+            response = requests.get(feed_config["url"], timeout=30)
+            response.raise_for_status()
+            
+            ips = response.text.strip().split('\n')
+            records = []
+            
+            for ip in ips:
+                if ip.strip() and not ip.startswith('#'):
+                    record = {
+                        "ip_address": ip.strip(),
+                        "type": "tor_exit_node",
+                        "_ingestion_timestamp": datetime.utcnow().isoformat()
+                    }
+                    records.append(record)
+            
+            logger.info(f"Processed {len(records)} records from Tor Exit Nodes")
+            return records
+        except Exception as e:
+            logger.error(f"Error fetching Tor Exit Nodes data: {str(e)}")
+            return []
+    
+    def fetch_blocklist_de_data(self, feed_config):
+        """Fetch and process Blocklist.de attackers list"""
+        try:
+            response = requests.get(feed_config["url"], timeout=30)
+            response.raise_for_status()
+            
+            ips = response.text.strip().split('\n')
+            records = []
+            
+            for ip in ips:
+                if ip.strip() and not ip.startswith('#'):
+                    record = {
+                        "ip_address": ip.strip(),
+                        "type": "attacker",
+                        "source": "blocklist_de",
+                        "_ingestion_timestamp": datetime.utcnow().isoformat()
+                    }
+                    records.append(record)
+            
+            logger.info(f"Processed {len(records)} records from Blocklist.de")
+            return records
+        except Exception as e:
+            logger.error(f"Error fetching Blocklist.de data: {str(e)}")
+            return []
+    
     def collect_feed_data(self, feed_name: str) -> List[Dict[str, Any]]:
         """Collect data from a specific feed"""
         # Get feed configuration
@@ -394,6 +646,23 @@ class ThreatDataIngestion:
             logger.error(f"Feed configuration error: {str(e)}")
             return []
             
+        # Check if this is an open source feed that needs special handling
+        if feed_config.get("opensrc", False):
+            # Special handling for different open source feeds
+            if feed_name == "urlhaus":
+                return self.fetch_urlhaus_data(feed_config)
+            elif feed_name == "cisa_vuln":
+                return self.process_feed_data(feed_name, self.fetch_cisa_vulnerabilities(feed_config))
+            elif feed_name == "malware_bazaar":
+                return self.fetch_malware_bazaar(feed_config)
+            elif feed_name == "openphish":
+                return self.fetch_openphish_data(feed_config)
+            elif feed_name == "tor_exit_nodes":
+                return self.fetch_tor_exit_nodes(feed_config)
+            elif feed_name == "blocklist_de":
+                return self.fetch_blocklist_de_data(feed_config)
+        
+        # Standard API-based feed processing
         headers = {}
         
         # Set authentication headers if configured
@@ -411,6 +680,17 @@ class ThreatDataIngestion:
         if feed_name == "threatfox":
             request_method = "POST"
             request_data = {"query": "get_iocs", "days": 7}
+            
+            # For opensource version
+            if feed_config.get("opensrc", False):
+                try:
+                    # Use direct URL for recent IOCs
+                    response = requests.get(feed_config.get("opensrc_url", feed_config["url"]), timeout=30)
+                    response.raise_for_status()
+                    return self.process_feed_data(feed_name, response.json())
+                except Exception as e:
+                    logger.error(f"Error fetching ThreatFox data: {str(e)}")
+                    return []
         
         try:
             logger.info(f"Collecting data from {feed_name} feed at {feed_config['url']}")
