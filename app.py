@@ -2,8 +2,9 @@ import os
 import sys
 import logging
 import traceback
+import json
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask import Flask, request, jsonify, render_template, redirect, url_for, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Set up enhanced logging with more detailed format
@@ -42,11 +43,26 @@ try:
     import frontend
     logger.info("Frontend module imported successfully")
     
-    # Step 4: Use the frontend's Flask app as our main app
+    # Step 4: Import ingestion module for threat data collection
+    logger.info("Importing ingestion module...")
+    import ingestion
+    logger.info("Ingestion module imported successfully")
+    
+    # Step 5: Import analysis module for threat data processing
+    logger.info("Importing analysis module...")
+    try:
+        import analysis
+        logger.info("Analysis module imported successfully")
+        has_analysis = True
+    except ImportError as e:
+        logger.warning(f"Analysis module import failed (will run in minimal mode): {e}")
+        has_analysis = False
+    
+    # Step 6: Use the frontend's Flask app as our main app
     logger.info("Using frontend.app as the main application")
     app = frontend.app
     
-    # Step 5: Initialize API with the app
+    # Step 7: Initialize API with the app
     logger.info("Initializing API routes...")
     api.init_app(app)
     logger.info("API routes initialized successfully")
@@ -54,7 +70,142 @@ try:
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Step 6: Verify critical routes exist
+    # Step 8: Add ingestion endpoints
+    @app.route('/api/ingest_threat_data', methods=['POST'])
+    def api_ingest_threat_data():
+        """API endpoint for ingesting threat data"""
+        try:
+            # Initialize ingestion engine
+            ingestor = ingestion.ThreatDataIngestion()
+            
+            # Process request
+            result = ingestion.ingest_threat_data(request)
+            
+            # Return response (handle both dict and tuple responses)
+            if isinstance(result, tuple):
+                return result
+            return jsonify(result)
+        except Exception as e:
+            logger.error(f"Error in ingestion endpoint: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                "error": str(e),
+                "status": "error",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 500
+    
+    # Step 9: Add analysis endpoints if available
+    if has_analysis:
+        @app.route('/api/analyze_threat_data', methods=['POST'])
+        def api_analyze_threat_data():
+            """API endpoint for analyzing threat data"""
+            try:
+                # Call analysis function
+                result = analysis.analyze_threat_data(request)
+                
+                # Return response
+                if isinstance(result, tuple):
+                    return result
+                return jsonify(result)
+            except Exception as e:
+                logger.error(f"Error in analysis endpoint: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({
+                    "error": str(e),
+                    "status": "error",
+                    "timestamp": datetime.utcnow().isoformat()
+                }), 500
+    
+    # Step 10: Add data refreshing endpoint for system health
+    @app.route('/api/refresh_data', methods=['GET', 'POST'])
+    def api_refresh_data():
+        """Endpoint to refresh all threat data"""
+        try:
+            # Run ingestion process for all feeds
+            ingestor = ingestion.ThreatDataIngestion()
+            results = ingestor.process_all_feeds()
+            
+            # Generate response with stats
+            success_count = len([r for r in results if r.get('status') == 'success'])
+            total_records = sum(r.get('record_count', 0) for r in results)
+            
+            return jsonify({
+                "status": "success",
+                "feeds_processed": len(results),
+                "feeds_succeeded": success_count,
+                "total_records": total_records,
+                "details": results,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"Error refreshing data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                "error": str(e),
+                "status": "error",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 500
+    
+    # Step 11: Add system status endpoint
+    @app.route('/api/system_status', methods=['GET'])
+    def api_system_status():
+        """API endpoint to check overall system status"""
+        try:
+            # Check various components
+            components = {
+                "config": True,
+                "frontend": True,
+                "api": True,
+                "ingestion": True,
+                "analysis": has_analysis
+            }
+            
+            # Check database connectivity
+            try:
+                # Get BigQuery status using ingestion module's feed statistics
+                ingestor = ingestion.ThreatDataIngestion()
+                stats = ingestor.get_feed_statistics()
+                database_ok = True
+                feed_count = len(stats.get("feeds", []))
+                active_feeds = stats.get("active_feeds", 0)
+                total_records = stats.get("total_records", 0)
+            except Exception as db_e:
+                logger.error(f"Database connectivity issue: {str(db_e)}")
+                database_ok = False
+                feed_count = 0
+                active_feeds = 0
+                total_records = 0
+                components["database"] = False
+            else:
+                components["database"] = True
+            
+            # Overall status
+            all_ok = all(components.values())
+            status = "healthy" if all_ok else "degraded"
+            
+            return jsonify({
+                "status": status,
+                "environment": config.environment,
+                "version": os.environ.get("VERSION", "1.0.0"),
+                "components": components,
+                "database": {
+                    "connected": database_ok,
+                    "feed_count": feed_count,
+                    "active_feeds": active_feeds,
+                    "total_records": total_records
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"Error checking system status: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({
+                "status": "error",
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }), 500
+    
+    # Step 12: Verify critical routes exist
     if not hasattr(app, 'url_map') or not app.url_map:
         logger.error("Application URL map is empty, no routes defined!")
         raise RuntimeError("Application failed to initialize routes properly")
@@ -62,7 +213,7 @@ try:
     route_count = len(list(app.url_map.iter_rules()))
     logger.info(f"Application initialized with {route_count} routes")
     
-    # Step 7: Register global error handlers for consistent error handling
+    # Step 13: Register global error handlers for consistent error handling
     @app.errorhandler(404)
     def handle_not_found(e):
         logger.info(f"404 error: {request.path}")
@@ -125,6 +276,17 @@ except Exception as e:
     def root_health_check():
         """Root health check endpoint (for k8s/cloud run probes)"""
         return health_check()
+    
+    @app.route('/api/ingest_threat_data', methods=['POST'])
+    def fallback_ingest():
+        """Fallback ingestion endpoint that reports error"""
+        logger.info("Ingest endpoint called (degraded mode)")
+        return jsonify({
+            "status": "error",
+            "message": "Application running in degraded mode, ingestion unavailable",
+            "error": init_error,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 503
 
     @app.route('/', methods=['GET'])
     def index():
@@ -184,11 +346,44 @@ except Exception as e:
                     </div>
                 </div>
                 
+                <div class="bg-green-50 border border-green-300 rounded-lg p-6 mb-6">
+                    <div class="flex items-start">
+                        <div class="text-green-500 text-2xl mr-4">
+                            <i class="fas fa-sync-alt"></i>
+                        </div>
+                        <div>
+                            <h2 class="text-xl font-semibold text-green-700 mb-2">Recovery Actions</h2>
+                            <p class="text-green-700 mb-4">You can try the following actions to recover:</p>
+                            <div class="grid grid-cols-1 gap-4">
+                                <button onclick="location.reload()" class="bg-white p-4 rounded border border-gray-200 hover:border-green-300 hover:shadow transition">
+                                    <i class="fas fa-redo text-green-500 mr-2"></i>
+                                    Reload Page
+                                </button>
+                                <button onclick="clearCookiesAndReload()" class="bg-white p-4 rounded border border-gray-200 hover:border-green-300 hover:shadow transition">
+                                    <i class="fas fa-cookie-bite text-green-500 mr-2"></i>
+                                    Clear Cookies and Reload
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="text-center text-gray-500 text-sm">
                     <p>Environment: {environment} | Version: {version}</p>
                     <p>&copy; {datetime.utcnow().year} Threat Intelligence Platform</p>
                 </div>
             </div>
+            
+            <script>
+                function clearCookiesAndReload() {
+                    document.cookie.split(";").forEach(function(c) {
+                        document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+                    });
+                    localStorage.clear();
+                    sessionStorage.clear();
+                    location.reload();
+                }
+            </script>
         </body>
         </html>
         """
@@ -239,6 +434,15 @@ except Exception as e:
             except ImportError as e:
                 module_results[module_name] = f"import failed: {str(e)}"
         
+        # Try checking for ingestion module
+        try:
+            import ingestion
+            ingestion_available = True
+            ingestion_version = getattr(ingestion, "__version__", "unknown")
+        except:
+            ingestion_available = False
+            ingestion_version = "unavailable"
+            
         # Prepare debug information
         debug_info = {
             "environment": environment,
@@ -252,6 +456,10 @@ except Exception as e:
             "initialization_error": init_error,
             "traceback": init_traceback,
             "module_test_results": module_results,
+            "ingestion": {
+                "available": ingestion_available,
+                "version": ingestion_version
+            },
             "templates": {
                 "exists": templates_exist,
                 "path": templates_path,
@@ -284,6 +492,14 @@ def cleanup():
             logger.info("Closing PubSub publisher")
             publisher.close()
             
+        # Try to clean up ingestion resources
+        try:
+            import ingestion
+            if hasattr(ingestion, 'cleanup_resources') and callable(ingestion.cleanup_resources):
+                ingestion.cleanup_resources()
+        except:
+            pass
+            
         logger.info("Cleanup completed successfully")
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -306,6 +522,17 @@ if __name__ == '__main__':
     if cert_path and key_path and os.path.exists(cert_path) and os.path.exists(key_path):
         ssl_context = (cert_path, key_path)
         logger.info(f"SSL enabled with certificate: {cert_path}")
+    
+    # Try to trigger initial data ingestion if in development mode
+    if debug_mode:
+        try:
+            logger.info("Triggering initial data ingestion for development mode...")
+            import ingestion
+            ingestor = ingestion.ThreatDataIngestion()
+            results = ingestor.process_all_feeds()
+            logger.info(f"Initial ingestion completed with {len(results)} feeds processed")
+        except Exception as e:
+            logger.warning(f"Initial ingestion failed: {e}")
     
     try:
         app.run(host=host, port=port, debug=debug_mode, ssl_context=ssl_context)
