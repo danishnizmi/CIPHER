@@ -92,11 +92,12 @@ def get_users():
     users = auth_config.get("users", {}) if auth_config else {}
     
     if not users:
-        # Create admin user with temporary password if no users found
-        temp_password = generate_temp_password()
+        # Create admin user with default password if no users found
+        temp_password = "changeme"  # Use a known default instead of random
+        hashed_password = hash_password(temp_password)
         users = {
             "admin": {
-                "password": hash_password(temp_password),
+                "password": hashed_password,
                 "role": "admin",
                 "temp_password": True,
                 "created_at": datetime.utcnow().isoformat()
@@ -110,9 +111,36 @@ def get_users():
             auth_config["users"] = users
             config.create_or_update_secret("auth-config", json.dumps(auth_config))
             logger.info("Created default admin user in auth-config")
-            logger.info(f"TEMPORARY ADMIN PASSWORD: {temp_password} - Please login and change immediately!")
+            logger.info(f"Default admin credentials: username=admin, password={temp_password}")
         except Exception as e:
             logger.warning(f"Failed to save default admin user: {e}")
+    else:
+        # Verify each user has the required fields
+        for username, user_data in list(users.items()):
+            if 'password' not in user_data:
+                logger.warning(f"User {username} is missing password field")
+                # Add default password for admin, or random for others
+                if username == 'admin':
+                    pwd = 'changeme'
+                else:
+                    pwd = generate_temp_password()
+                
+                # Update the user with a proper password
+                try:
+                    config.update_user(username, {
+                        "password": hash_password(pwd),
+                        "temp_password": True
+                    })
+                    logger.info(f"Added missing password field for user {username}")
+                    # The next get_cached_config will have the updated data
+                    users[username]['password'] = hash_password(pwd)
+                    users[username]['temp_password'] = True
+                except Exception as e:
+                    logger.error(f"Failed to update user {username} with missing password: {e}")
+            
+            # Ensure role is set
+            if 'role' not in user_data:
+                users[username]['role'] = 'readonly'  # Default role
     
     return users
 
@@ -227,6 +255,26 @@ def login():
         
         if username in current_users:
             user_data = current_users[username]
+            
+            # Check if password key exists in user_data
+            if 'password' not in user_data:
+                logger.error(f"User {username} found but 'password' field is missing in user data")
+                # Create a proper password field with the default password 'changeme'
+                default_pwd = 'changeme'
+                update_result = config.update_user(username, {
+                    "password": hash_password(default_pwd),
+                    "temp_password": True
+                })
+                if update_result:
+                    logger.info(f"Created missing password field for user {username}")
+                    # Reload the user data
+                    current_users = get_users()
+                    user_data = current_users[username]
+                else:
+                    error = "Account configuration error. Please contact administrator."
+                    return render_template('auth.html', page_type='login', error=error)
+            
+            # Now verify the password
             if verify_password(user_data['password'], password):
                 session['logged_in'] = True
                 session['username'] = username
@@ -250,7 +298,20 @@ def login():
             else:
                 error = "Invalid username or password"
         else:
-            error = "Invalid username or password"
+            # If this is a fresh system, create default admin user if it doesn't exist
+            if username == 'admin' and password == 'changeme' and not current_users:
+                logger.info("Creating default admin user with standard credentials")
+                result = config.add_user('admin', 'changeme', 'admin')
+                if result:
+                    session['logged_in'] = True
+                    session['username'] = 'admin'
+                    session['role'] = 'admin'
+                    flash("Welcome! This is a new system with default credentials. Please change your password.", "warning")
+                    return redirect(url_for('profile'))
+                else:
+                    error = "Failed to create default admin account. Please check system configuration."
+            else:
+                error = "Invalid username or password"
     
     return render_template('auth.html', page_type='login', error=error)
 
@@ -1580,20 +1641,20 @@ def search():
                     <div class="border rounded-lg overflow-hidden hover:shadow-md transition-shadow">
                         <div class="bg-gray-50 p-3 border-b">
                             <h4 class="font-medium">
-                                <a href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
-                                    {{ campaign.campaign_name }}
+                                <a href="{{{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}}}" class="text-blue-600 hover:underline">
+                                    {{{{ campaign.campaign_name }}}}
                                 </a>
                             </h4>
                         </div>
                         <div class="p-4">
                             <p class="text-sm text-gray-600 mb-2">
-                                <span class="font-medium">Threat Actor:</span> {{ campaign.threat_actor|default('Unknown') }}
+                                <span class="font-medium">Threat Actor:</span> {{{{ campaign.threat_actor|default('Unknown') }}}}
                             </p>
                             <p class="text-sm text-gray-600 mb-2">
-                                <span class="font-medium">Malware:</span> {{ campaign.malware|default('Unknown') }}
+                                <span class="font-medium">Malware:</span> {{{{ campaign.malware|default('Unknown') }}}}
                             </p>
                             <p class="text-sm text-gray-600">
-                                <span class="font-medium">Sources:</span> {{ campaign.source_count }}
+                                <span class="font-medium">Sources:</span> {{{{ campaign.source_count }}}}
                             </p>
                         </div>
                     </div>
@@ -1628,16 +1689,16 @@ def search():
                             {{% for ioc in results.iocs %}}
                             <tr>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
+                                    <span class="badge-ioc badge-{{{{ ioc.type }}}}">{{{{ ioc.type }}}}</span>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
-                                        {{ ioc.value }}
+                                    <a href="{{{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}}}" class="text-blue-600 hover:underline">
+                                        {{{{ ioc.value }}}}
                                     </a>
                                 </td>
-                                <td class="px-6 py-4 whitespace-nowrap">{{ ioc.source_id }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap">{{{{ ioc.source_id }}}}</td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                                    <a href="{{{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}}}" class="text-blue-600 hover:underline">
                                         <i class="fas fa-eye mr-1"></i> View
                                     </a>
                                 </td>
@@ -1664,9 +1725,9 @@ def search():
                 <div class="space-y-4">
                     {{% for analysis in results.analyses %}}
                     <div class="border rounded-lg p-4">
-                        <p class="font-medium mb-2">{{ analysis.source_id }}</p>
-                        <p class="text-sm text-gray-600 mb-2">{{ analysis.summary }}</p>
-                        <div class="text-xs text-gray-500">{{ analysis.analysis_timestamp|datetime }}</div>
+                        <p class="font-medium mb-2">{{{{ analysis.source_id }}}}</p>
+                        <p class="text-sm text-gray-600 mb-2">{{{{ analysis.summary }}}}</p>
+                        <div class="text-xs text-gray-500">{{{{ analysis.analysis_timestamp|datetime }}}}</div>
                     </div>
                     {{% endfor %}}
                 </div>
@@ -1807,17 +1868,17 @@ def get_gcp_metrics() -> Dict:
     
     return metrics
 
-# Error Handlers
+# Create 500.html template in memory if it doesn't exist
 @app.errorhandler(404)
 def page_not_found(e):
     """404 Page not found"""
-    return render_template('base.html', content='<h1>404 - Page Not Found</h1><p>The page you requested could not be found.</p>'), 404
+    return render_template('auth.html', page_type='login', error="Page not found. Please log in."), 404
 
 @app.errorhandler(500)
 def server_error(e):
     """500 Server error"""
     logger.error(f"Server error: {str(e)}")
-    return render_template('base.html', content='<h1>500 - Server Error</h1><p>The server encountered an error. Please try again later.</p>'), 500
+    return render_template('auth.html', page_type='login', error="Server error occurred. Please try again."), 500
 
 # API health check for Cloud Run
 @app.route('/api/health', methods=['GET'])
