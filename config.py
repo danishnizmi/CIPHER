@@ -336,3 +336,4 @@ region = REGION
 gcs_bucket = GCS_BUCKET
 bigquery_dataset = BIGQUERY_DATASET
 environment = ENVIRONMENT
+api_url = API_URL
