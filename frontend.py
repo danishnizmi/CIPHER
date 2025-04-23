@@ -9,6 +9,7 @@ import logging
 import hashlib
 import secrets
 import string
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from functools import wraps
@@ -48,7 +49,7 @@ else:
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates')
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", "dev-key-change-in-production"))
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", secrets.token_hex(32)))
 CORS(app)
 
 # Initialize GCP clients
@@ -70,13 +71,19 @@ except Exception as e:
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
 
-# Utility Functions
-def generate_temp_password(length=12):
-    """Generate a secure temporary password"""
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
-    password = ''.join(secrets.choice(alphabet) for _ in range(length))
-    return password
+# Admin credentials - create a single admin account
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = generate_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(12))
+ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
+# Log the temporary password so it can be used for first login
+logger.info(f"======== INITIAL ADMIN CREDENTIALS ========")
+logger.info(f"Username: {ADMIN_USERNAME}")
+logger.info(f"Password: {ADMIN_PASSWORD}")
+logger.info(f"===========================================")
+logger.info(f"PLEASE CHANGE THIS PASSWORD AFTER FIRST LOGIN")
+
+# Utility Functions
 def hash_password(password):
     """Create a secure hash of the password"""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -85,62 +92,37 @@ def verify_password(stored_hash, password):
     """Verify a password against a stored hash"""
     return stored_hash == hash_password(password)
 
-# Load user data from config
+# Load user data (just the admin user)
 def get_users():
-    """Get user data from config with fallback to default users"""
+    """Get user data with admin account"""
+    # Try to get from config first
     auth_config = config.get_cached_config('auth-config')
     users = auth_config.get("users", {}) if auth_config else {}
     
-    if not users:
-        # Create admin user with default password if no users found
-        temp_password = "changeme"  # Use a known default instead of random
-        hashed_password = hash_password(temp_password)
+    # If no users in config or no admin user, create/update admin
+    if not users or ADMIN_USERNAME not in users:
         users = {
-            "admin": {
-                "password": hashed_password,
+            ADMIN_USERNAME: {
+                "password": ADMIN_HASH,
                 "role": "admin",
                 "temp_password": True,
                 "created_at": datetime.utcnow().isoformat()
             }
         }
         
-        # Try to save default admin user to config
+        # Try to save admin user to config
         try:
             if auth_config is None:
                 auth_config = {}
             auth_config["users"] = users
             config.create_or_update_secret("auth-config", json.dumps(auth_config))
             logger.info("Created default admin user in auth-config")
-            logger.info(f"Default admin credentials: username=admin, password={temp_password}")
         except Exception as e:
-            logger.warning(f"Failed to save default admin user: {e}")
-    else:
-        # Verify each user has the required fields
-        for username, user_data in list(users.items()):
-            if 'password' not in user_data:
-                logger.warning(f"User {username} is missing password field")
-                # Add default password for admin, or random for others
-                if username == 'admin':
-                    pwd = 'changeme'
-                else:
-                    pwd = generate_temp_password()
-                
-                # Update the user with a proper password
-                try:
-                    config.update_user(username, {
-                        "password": hash_password(pwd),
-                        "temp_password": True
-                    })
-                    logger.info(f"Added missing password field for user {username}")
-                    # The next get_cached_config will have the updated data
-                    users[username]['password'] = hash_password(pwd)
-                    users[username]['temp_password'] = True
-                except Exception as e:
-                    logger.error(f"Failed to update user {username} with missing password: {e}")
-            
-            # Ensure role is set
-            if 'role' not in user_data:
-                users[username]['role'] = 'readonly'  # Default role
+            logger.warning(f"Failed to save default admin user to secret: {e}")
+    
+    # Ensure admin user always exists with correct role
+    if ADMIN_USERNAME in users:
+        users[ADMIN_USERNAME]["role"] = "admin"
     
     return users
 
@@ -153,7 +135,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Role-based access control
+# Role-based access control - simplified for admin-only mode
 def role_required(required_role):
     def decorator(f):
         @wraps(f)
@@ -161,14 +143,8 @@ def role_required(required_role):
             if not session.get("logged_in"):
                 return redirect(url_for("login", next=request.url))
             
-            user_role = session.get("role", "readonly")
-            
-            # Simple role hierarchy: admin > analyst > readonly
-            if required_role == "admin" and user_role != "admin":
-                flash("You don't have permission to access this page", "danger")
-                return render_template('auth.html', page_type='not_authorized')
-            
-            if required_role == "analyst" and user_role not in ["admin", "analyst"]:
+            # Only admin role exists in this version
+            if required_role == "admin" and session.get("username") != ADMIN_USERNAME:
                 flash("You don't have permission to access this page", "danger")
                 return render_template('auth.html', page_type='not_authorized')
             
@@ -188,7 +164,22 @@ def api_request(endpoint: str, params: Dict = None) -> Dict:
         "analyses": {"total_analyses": 0}
     }
     
-    # Build the URL properly - ensure we have a valid absolute URL
+    # Try direct API call first (no proxying through API_URL)
+    try:
+        # Import api module and try to call function directly
+        import api
+        
+        if hasattr(api, endpoint) and callable(getattr(api, endpoint)):
+            # Call API function directly
+            direct_function = getattr(api, endpoint)
+            result = direct_function(params)
+            if result:
+                return result
+    except (ImportError, AttributeError):
+        # If api module not available or function doesn't exist, continue with HTTP request
+        pass
+        
+    # Build the URL properly - handle both external API_URL and local
     if API_URL:
         # Make sure API_URL doesn't end with / to avoid double slashes
         base_url = API_URL.rstrip('/')
@@ -250,31 +241,30 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        # Get latest users from config
+        # Check admin credentials directly first
+        if username == ADMIN_USERNAME and verify_password(ADMIN_HASH, password):
+            session['logged_in'] = True
+            session['username'] = username
+            session['role'] = "admin"
+            
+            # Update last login time
+            try:
+                config.update_user(username, {"last_login": datetime.utcnow().isoformat()})
+            except Exception as e:
+                logger.warning(f"Could not update last login: {str(e)}")
+            
+            next_page = request.args.get('next')
+            if next_page:
+                return redirect(next_page)
+            return redirect(url_for('dashboard'))
+        
+        # If not direct admin match, check config
         current_users = get_users()
         
         if username in current_users:
             user_data = current_users[username]
             
-            # Check if password key exists in user_data
-            if 'password' not in user_data:
-                logger.error(f"User {username} found but 'password' field is missing in user data")
-                # Create a proper password field with the default password 'changeme'
-                default_pwd = 'changeme'
-                update_result = config.update_user(username, {
-                    "password": hash_password(default_pwd),
-                    "temp_password": True
-                })
-                if update_result:
-                    logger.info(f"Created missing password field for user {username}")
-                    # Reload the user data
-                    current_users = get_users()
-                    user_data = current_users[username]
-                else:
-                    error = "Account configuration error. Please contact administrator."
-                    return render_template('auth.html', page_type='login', error=error)
-            
-            # Now verify the password
+            # Check if password matches
             if verify_password(user_data['password'], password):
                 session['logged_in'] = True
                 session['username'] = username
@@ -298,20 +288,7 @@ def login():
             else:
                 error = "Invalid username or password"
         else:
-            # If this is a fresh system, create default admin user if it doesn't exist
-            if username == 'admin' and password == 'changeme' and not current_users:
-                logger.info("Creating default admin user with standard credentials")
-                result = config.add_user('admin', 'changeme', 'admin')
-                if result:
-                    session['logged_in'] = True
-                    session['username'] = 'admin'
-                    session['role'] = 'admin'
-                    flash("Welcome! This is a new system with default credentials. Please change your password.", "warning")
-                    return redirect(url_for('profile'))
-                else:
-                    error = "Failed to create default admin account. Please check system configuration."
-            else:
-                error = "Invalid username or password"
+            error = "Invalid username or password"
     
     return render_template('auth.html', page_type='login', error=error)
 
@@ -347,175 +324,58 @@ def change_password():
     new_password = request.form.get('new_password')
     confirm_password = request.form.get('confirm_password')
     
-    # Get latest users from config
-    current_users = get_users()
+    # Check if this is admin user
+    is_admin = (username == ADMIN_USERNAME)
     
-    if not username or username not in current_users:
-        flash("User not found", "danger")
-        return redirect(url_for('profile'))
+    # Verify current admin password
+    if is_admin:
+        if not verify_password(ADMIN_HASH, current_password):
+            flash("Current password is incorrect", "danger")
+            return redirect(url_for('profile'))
+    else:
+        # Get users from config
+        current_users = get_users()
+        
+        if not username or username not in current_users:
+            flash("User not found", "danger")
+            return redirect(url_for('profile'))
+        
+        # Check current password
+        if not verify_password(current_users[username]['password'], current_password):
+            flash("Current password is incorrect", "danger")
+            return redirect(url_for('profile'))
     
-    if not current_password or not new_password or not confirm_password:
-        flash("All fields are required", "danger")
+    # Validate new password
+    if not new_password or not confirm_password:
+        flash("New password is required", "danger")
         return redirect(url_for('profile'))
     
     if new_password != confirm_password:
         flash("New passwords do not match", "danger")
         return redirect(url_for('profile'))
     
-    # Check current password
-    if not verify_password(current_users[username]['password'], current_password):
-        flash("Current password is incorrect", "danger")
-        return redirect(url_for('profile'))
-    
     # Update password
     updates = {
         "password": new_password,
-        "temp_password": False,  # Clear the temp password flag if it was set
+        "temp_password": False,  # Clear the temp password flag
     }
     
+    # Update admin password globally if this is admin
+    if is_admin:
+        global ADMIN_HASH
+        ADMIN_HASH = hash_password(new_password)
+        logger.info("Admin password updated successfully")
+    
+    # Also update in config
     result = config.update_user(username, updates)
     if result:
         flash("Password changed successfully", "success")
     else:
-        flash("Failed to change password", "danger")
+        flash("Password changed in session but failed to update in config", "warning")
     
     return redirect(url_for('profile'))
 
-@app.route('/users')
-@login_required
-@role_required('admin')
-def users():
-    """User Management page"""
-    # Get latest users from config
-    current_users = get_users()
-    
-    return render_template(
-        'content.html',
-        page_title='User Management',
-        page_icon='users',
-        page_subtitle='Manage platform users and access',
-        content_type='users',
-        content_items=current_users,
-        action_buttons=[{
-            'text': 'Add User',
-            'url': url_for('add_user_route'),
-            'icon': 'user-plus',
-            'type': 'primary'
-        }]
-    )
-
-@app.route('/users/add', methods=['GET', 'POST'])
-@login_required
-@role_required('admin')
-def add_user_route():
-    """Add a new user"""
-    error = None
-    
-    if request.method == 'POST':
-        username = request.form.get('username')
-        role = request.form.get('role', 'readonly')
-        
-        if username:
-            # Generate a temporary password
-            temp_password = generate_temp_password()
-            
-            # Add user with temporary password
-            result = config.add_user(username, temp_password, role)
-            if result:
-                # Update to set temp_password flag
-                config.update_user(username, {"temp_password": True})
-                # Log the temporary password - this allows the admin to share it
-                logger.info(f"Created user {username} with role {role}")
-                logger.info(f"TEMPORARY PASSWORD FOR {username}: {temp_password}")
-                flash(f"User {username} added successfully. Check logs for temporary password.", "success")
-                return redirect(url_for('users'))
-            else:
-                error = f"Failed to add user {username}"
-        else:
-            error = "Username is required"
-    
-    return render_template('auth.html', page_type='user_add', error=error)
-
-@app.route('/users/edit/<username>', methods=['GET', 'POST'])
-@login_required
-@role_required('admin')
-def edit_user(username):
-    """Edit an existing user"""
-    # Get latest users from config
-    current_users = get_users()
-    error = None
-    
-    if username not in current_users:
-        flash(f"User {username} not found", "danger")
-        return redirect(url_for('users'))
-    
-    if request.method == 'POST':
-        new_role = request.form.get('role')
-        new_password = request.form.get('password')
-        
-        updates = {}
-        if new_role:
-            updates["role"] = new_role
-        
-        if new_password:
-            updates["password"] = new_password
-            updates["temp_password"] = True  # Set temp password flag
-            
-            # Log that a temporary password was set
-            logger.info(f"Reset password for {username}")
-            logger.info(f"TEMPORARY PASSWORD FOR {username}: {new_password}")
-            
-        if updates:
-            result = config.update_user(username, updates)
-            if result:
-                msg = "User updated successfully"
-                if new_password:
-                    msg += ". Temporary password set - check logs."
-                flash(msg, "success")
-            else:
-                error = f"Failed to update user {username}"
-        
-        if not error:
-            return redirect(url_for('users'))
-    
-    return render_template('auth.html', 
-                          page_type='user_edit', 
-                          username=username, 
-                          user=current_users[username],
-                          error=error)
-
-@app.route('/users/delete/<username>', methods=['POST'])
-@login_required
-@role_required('admin')
-def delete_user(username):
-    """Delete a user"""
-    # Get latest users from config
-    current_users = get_users()
-    
-    if username not in current_users:
-        flash(f"User {username} not found", "danger")
-        return redirect(url_for('users'))
-    
-    # Cannot delete yourself
-    if username == session.get('username'):
-        flash("You cannot delete your own account", "danger")
-        return redirect(url_for('users'))
-    
-    # Remove user from config
-    auth_config = config.get_cached_config('auth-config', force_refresh=True)
-    if 'users' in auth_config and username in auth_config['users']:
-        del auth_config['users'][username]
-        result = config.create_or_update_secret('auth-config', json.dumps(auth_config))
-        if result:
-            flash(f"User {username} deleted successfully", "success")
-        else:
-            flash(f"Failed to delete user {username}", "danger")
-    else:
-        flash(f"User {username} not found", "danger")
-    
-    return redirect(url_for('users'))
-
-# Dashboard Routes
+# Dashboard Route
 @app.route('/')
 @login_required
 def dashboard():
@@ -638,6 +498,17 @@ def feeds():
         total_records += feed_stats.get('total_records', 0)
         days_with_updates += feed_stats.get('days_with_data', 0)
     
+    # Ensure we have some data for display
+    if not feeds and feed_list:
+        # Add placeholder stats for feeds if we have feed names but no stats
+        for feed_name in feed_list:
+            feeds.append({
+                'feed_name': feed_name,
+                'record_count': 0,
+                'latest_record': None,
+                'earliest_record': None
+            })
+    
     # Prepare feed activity data
     feed_activity_data = {}
     for feed_name in feed_list[:5]:  # Limit to 5 feeds
@@ -684,26 +555,14 @@ def feeds():
 
 @app.route('/ingest_threat_data')
 @login_required
-@role_required('analyst')
 def ingest_threat_data():
     """Trigger the ingestion process"""
     try:
-        # Determine the API URL
-        if API_URL:
-            base_url = API_URL.rstrip('/')
-            url = f"{base_url}/api/ingest_threat_data"
-        else:
-            url = f"http://localhost:{os.environ.get('PORT', '8080')}/api/ingest_threat_data"
-        
-        headers = {}
-        if API_KEY:
-            headers["X-API-Key"] = API_KEY
-        
-        # Make the request to trigger ingestion
+        # Call the ingestion endpoint
         response = requests.post(
-            url,
-            headers=headers,
+            f"{request.url_root.rstrip('/')}/api/ingest_threat_data",
             json={"process_all": True},
+            headers={"X-API-Key": API_KEY} if API_KEY else {},
             timeout=30
         )
         
@@ -786,6 +645,11 @@ def feed_detail(feed_name: str):
                 'text': 'Run Ingestion',
                 'url': url_for('ingest_threat_data'),
                 'icon': 'sync'
+            },
+            {
+                'text': 'Export Data',
+                'url': url_for('export_feed', feed_name=feed_name, format='csv'),
+                'icon': 'download'
             }
         ]
     )
@@ -833,7 +697,6 @@ def campaigns():
     
     # Count by actor and target for charts
     actor_data = {}
-    target_data = {}
     
     for campaign in campaigns:
         # Count by actor
@@ -841,18 +704,6 @@ def campaigns():
         if actor not in actor_data:
             actor_data[actor] = 0
         actor_data[actor] += 1
-        
-        # Target may be a single string or a list
-        target = campaign.get('targets', 'Unknown')
-        if isinstance(target, list):
-            for t in target:
-                if t not in target_data:
-                    target_data[t] = 0
-                target_data[t] += 1
-        else:
-            if target not in target_data:
-                target_data[target] = 0
-            target_data[target] += 1
     
     # Convert to chart data
     chart_data = {
@@ -1027,7 +878,13 @@ def iocs():
         selected_type=search_type,
         search=search_value,
         limit=limit,
-        pagination=pagination
+        pagination=pagination,
+        action_buttons=[{
+            'text': 'Export IOCs',
+            'url': url_for('export_iocs'),
+            'icon': 'download',
+            'type': 'success'
+        }]
     )
 
 @app.route('/iocs/<type>/<value>')
@@ -1160,7 +1017,6 @@ def reports():
 
 @app.route('/generate_report')
 @login_required
-@role_required('analyst')
 def generate_report():
     """Generate a report"""
     report_type = request.args.get('report_type', 'feed_summary')
@@ -1315,7 +1171,6 @@ def explore():
 # Settings Routes
 @app.route('/settings')
 @login_required
-@role_required('admin')
 def settings():
     """Settings page"""
     return render_template(
@@ -1345,52 +1200,21 @@ def settings():
                 <p class="text-gray-600">Configure feed sources and ingestion options</p>
             </a>
             
-            <a href="{{ url_for('users') }}" class="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow">
+            <a href="{{ url_for('system_status') }}" class="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow">
                 <div class="flex items-center mb-4">
                     <div class="rounded-full bg-green-100 p-3 mr-4">
-                        <i class="fas fa-users-cog text-green-600 text-xl"></i>
+                        <i class="fas fa-heartbeat text-green-600 text-xl"></i>
                     </div>
-                    <h3 class="text-lg font-semibold">User Management</h3>
+                    <h3 class="text-lg font-semibold">System Status</h3>
                 </div>
-                <p class="text-gray-600">Manage platform users and access controls</p>
+                <p class="text-gray-600">Check platform health and performance</p>
             </a>
-            
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex items-center mb-4">
-                    <div class="rounded-full bg-red-100 p-3 mr-4">
-                        <i class="fas fa-bell text-red-600 text-xl"></i>
-                    </div>
-                    <h3 class="text-lg font-semibold">Alert Settings</h3>
-                </div>
-                <p class="text-gray-600">Configure alert thresholds and notifications</p>
-            </div>
-            
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex items-center mb-4">
-                    <div class="rounded-full bg-purple-100 p-3 mr-4">
-                        <i class="fas fa-cloud text-purple-600 text-xl"></i>
-                    </div>
-                    <h3 class="text-lg font-semibold">GCP Settings</h3>
-                </div>
-                <p class="text-gray-600">Configure Google Cloud Platform resources</p>
-            </div>
-            
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex items-center mb-4">
-                    <div class="rounded-full bg-yellow-100 p-3 mr-4">
-                        <i class="fas fa-database text-yellow-600 text-xl"></i>
-                    </div>
-                    <h3 class="text-lg font-semibold">Data Retention</h3>
-                </div>
-                <p class="text-gray-600">Configure data retention policies and cleanup</p>
-            </div>
         </div>
         """
     )
 
 @app.route('/settings/api_keys', methods=['GET', 'POST'])
 @login_required
-@role_required('admin')
 def api_keys_settings():
     """API Keys Settings page"""
     # Get current API keys
@@ -1470,9 +1294,8 @@ def api_keys_settings():
         api_keys=api_keys
     )
 
-@app.route('/settings/feeds', methods=['GET', 'POST'])
+@app.route('/settings/feed_settings', methods=['GET', 'POST'])
 @login_required
-@role_required('admin')
 def feed_settings():
     """Feed Settings page"""
     # Get current feed configurations
@@ -1606,6 +1429,118 @@ def feed_settings():
         </script>
         """,
         feed_config_dict=feed_config_dict
+    )
+
+@app.route('/system_status')
+@login_required
+def system_status():
+    """System Status page"""
+    # Get system status from API
+    status_data = api_request('system_status')
+    
+    # Ensure proper structure for template rendering
+    if 'components' not in status_data:
+        status_data['components'] = {}
+    
+    if 'database' not in status_data:
+        status_data['database'] = {
+            'connected': False,
+            'feed_count': 0,
+            'active_feeds': 0,
+            'total_records': 0
+        }
+    
+    return render_template(
+        'content.html',
+        page_title='System Status',
+        page_icon='heartbeat',
+        page_subtitle='System health and diagnostics',
+        content_html="""
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-server text-blue-600 mr-2"></i>
+                    System Overview
+                </h3>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Status</span>
+                        <span class="px-3 py-1 rounded-full text-sm 
+                            {% if status_data.status == 'healthy' %}bg-green-100 text-green-800
+                            {% elif status_data.status == 'degraded' %}bg-yellow-100 text-yellow-800
+                            {% else %}bg-red-100 text-red-800{% endif %}">
+                            {{ status_data.status|title }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Environment</span>
+                        <span>{{ status_data.environment|title }}</span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Version</span>
+                        <span>{{ status_data.version }}</span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Last Check</span>
+                        <span>{{ status_data.timestamp|datetime }}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-database text-green-600 mr-2"></i>
+                    Database Status
+                </h3>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Connection</span>
+                        <span class="px-3 py-1 rounded-full text-sm 
+                            {% if status_data.database.connected %}bg-green-100 text-green-800
+                            {% else %}bg-red-100 text-red-800{% endif %}">
+                            {{ 'Connected' if status_data.database.connected else 'Disconnected' }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Feed Count</span>
+                        <span>{{ status_data.database.feed_count }}</span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Active Feeds</span>
+                        <span>{{ status_data.database.active_feeds }}</span>
+                    </div>
+                    <div class="flex justify-between items-center pb-2 border-b border-gray-200">
+                        <span class="font-medium">Total Records</span>
+                        <span>{{ status_data.database.total_records }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h3 class="text-lg font-semibold mb-4 flex items-center">
+                <i class="fas fa-puzzle-piece text-purple-600 mr-2"></i>
+                Component Status
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {% for name, status in status_data.components.items() %}
+                <div class="border rounded-lg p-4 {% if status %}bg-green-50{% else %}bg-red-50{% endif %}">
+                    <div class="flex items-center justify-between">
+                        <span class="font-medium">{{ name|title }}</span>
+                        <span class="w-3 h-3 rounded-full {% if status %}bg-green-500{% else %}bg-red-500{% endif %}"></span>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div class="flex justify-end">
+            <button onclick="location.reload()" class="btn btn-primary">
+                <i class="fas fa-sync-alt mr-2"></i>Refresh Status
+            </button>
+        </div>
+        """,
+        status_data=status_data
     )
 
 # Search Route
@@ -1750,13 +1685,9 @@ def export_feed():
     
     # Call API to export data
     try:
-        if API_URL:
-            # Make sure API_URL doesn't end with / to avoid double slashes
-            base_url = API_URL.rstrip('/')
-            export_url = f"{base_url}/api/export/feeds/{feed_name}?format={format_type}"
-        else:
-            export_url = f"http://localhost:{os.environ.get('PORT', '8080')}/api/export/feeds/{feed_name}?format={format_type}"
-            
+        # Construct export URL
+        export_url = f"{request.url_root.rstrip('/')}/api/export/feeds/{feed_name}?format={format_type}"
+        
         headers = {}
         if API_KEY:
             headers["X-API-Key"] = API_KEY
@@ -1792,13 +1723,9 @@ def export_iocs():
     
     # Call API to export data
     try:
-        if API_URL:
-            # Make sure API_URL doesn't end with / to avoid double slashes
-            base_url = API_URL.rstrip('/')
-            export_url = f"{base_url}/api/export/iocs?format={format_type}"
-        else:
-            export_url = f"http://localhost:{os.environ.get('PORT', '8080')}/api/export/iocs?format={format_type}"
-            
+        # Construct export URL
+        export_url = f"{request.url_root.rstrip('/')}/api/export/iocs?format={format_type}"
+        
         if ioc_type:
             export_url += f"&type={ioc_type}"
             
@@ -1867,18 +1794,6 @@ def get_gcp_metrics() -> Dict:
         logger.error(f"Error getting GCP metrics: {str(e)}")
     
     return metrics
-
-# Create 500.html template in memory if it doesn't exist
-@app.errorhandler(404)
-def page_not_found(e):
-    """404 Page not found"""
-    return render_template('auth.html', page_type='login', error="Page not found. Please log in."), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    """500 Server error"""
-    logger.error(f"Server error: {str(e)}")
-    return render_template('auth.html', page_type='login', error="Server error occurred. Please try again."), 500
 
 # API health check for Cloud Run
 @app.route('/api/health', methods=['GET'])
