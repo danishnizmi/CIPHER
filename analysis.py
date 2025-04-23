@@ -10,8 +10,12 @@ import json
 import logging
 import csv
 import io
+import traceback
+import itertools
+import hashlib
 from typing import Dict, List, Any, Set, Optional, Tuple, Union
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 from google.cloud import bigquery
 from google.cloud import pubsub_v1
@@ -32,7 +36,7 @@ REGION = config.region
 DATASET_ID = config.bigquery_dataset
 PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-analysis-events")
 
-# Global clients
+# Global clients - initialized on demand
 bq_client = None
 publisher = None
 llm = None
@@ -49,73 +53,104 @@ IOC_PATTERNS = {
     "cve": r'CVE-\d{4}-\d{4,7}',
 }
 
-def initialize_clients():
-    """Initialize GCP clients"""
+# ======== Client Management ========
+
+def get_client(client_type: str):
+    """Get or initialize a Google Cloud client (lazy initialization)"""
     global bq_client, publisher, llm
     
     try:
-        # Initialize BigQuery
-        if not bq_client:
-            bq_client = bigquery.Client(project=PROJECT_ID)
-            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
-        
-        # Initialize Pub/Sub
-        if not publisher:
-            publisher = pubsub_v1.PublisherClient()
-            logger.info("Pub/Sub publisher initialized")
-        
-        # Initialize Vertex AI
-        try:
-            vertexai.init(project=PROJECT_ID, location=REGION)
-            llm = TextGenerationModel.from_pretrained("text-bison")
-            logger.info("Vertex AI initialized successfully")
-        except Exception as e:
-            logger.warning(f"Vertex AI initialization failed: {str(e)}")
-        
+        if client_type == 'bigquery':
+            if bq_client is None:
+                bq_client = bigquery.Client(project=PROJECT_ID)
+                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            return bq_client
+            
+        elif client_type == 'pubsub':
+            if publisher is None:
+                publisher = pubsub_v1.PublisherClient()
+                logger.info("Pub/Sub publisher initialized")
+            return publisher
+            
+        elif client_type == 'vertexai':
+            if llm is None:
+                try:
+                    vertexai.init(project=PROJECT_ID, location=REGION)
+                    llm = TextGenerationModel.from_pretrained("text-bison")
+                    logger.info("Vertex AI initialized successfully")
+                except Exception as e:
+                    logger.warning(f"Vertex AI initialization failed: {str(e)}")
+            return llm
+            
+        else:
+            logger.error(f"Unknown client type: {client_type}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+# ======== Utility Functions ========
+
+def extract_json_from_text(text: str) -> Optional[str]:
+    """Extract JSON object from text response"""
+    text = text.strip()
+    start_idx = text.find('{')
+    end_idx = text.rfind('}') + 1
+    
+    if start_idx >= 0 and end_idx > start_idx:
+        return text[start_idx:end_idx]
+    return None
+
+def publish_event(topic: str, data: Dict[str, Any]) -> bool:
+    """Publish event to Pub/Sub"""
+    client = get_client('pubsub')
+    if not client:
+        return False
+    
+    try:
+        topic_path = client.topic_path(PROJECT_ID, topic)
+        json_data = json.dumps(data).encode("utf-8")
+        future = client.publish(topic_path, data=json_data)
+        message_id = future.result(timeout=30)
+        logger.info(f"Published event {message_id} to {topic}")
         return True
     except Exception as e:
-        logger.error(f"Failed to initialize clients: {str(e)}")
+        logger.error(f"Error publishing message: {str(e)}")
+        logger.error(traceback.format_exc())
         return False
+
+# ======== CSV Analysis ========
 
 class CSVAnalyzer:
     """AI-powered CSV structure analyzer"""
     
     def analyze_csv_structure(self, csv_content: str, feed_name: str = "unknown") -> Dict[str, Any]:
-        """Analyze CSV structure using AI to identify IOC columns and data types
-        
-        Args:
-            csv_content: CSV data as string
-            feed_name: Name of the feed for context
-            
-        Returns:
-            Dictionary with CSV structure analysis
-        """
-        if not llm:
+        """Analyze CSV structure using AI to identify IOC columns and data types"""
+        # Try AI-powered analysis first
+        ai_client = get_client('vertexai')
+        if not ai_client:
             logger.warning("Vertex AI not initialized, using basic CSV analysis")
             return self._basic_csv_analysis(csv_content)
         
         try:
-            # Parse the first few rows of the CSV
+            # Parse the first few rows
             csv_reader = csv.reader(io.StringIO(csv_content))
-            rows = []
-            for i, row in enumerate(csv_reader):
-                rows.append(row)
-                if i >= 5:  # Header + 5 rows
-                    break
-                    
+            rows = list(itertools.islice(csv_reader, 6))  # Header + 5 rows
+                
             if not rows:
                 return {"error": "Empty CSV"}
                 
             headers = rows[0]
             samples = rows[1:] if len(rows) > 1 else []
             
-            # Create sample data for the AI prompt
+            # Create sample data for AI prompt
             csv_sample = "\n".join([
                 f"Column {i+1} '{header}': {', '.join([row[i] if i < len(row) else '' for row in samples[:3]])}"
                 for i, header in enumerate(headers)
             ])
             
-            # Create the AI prompt
+            # Create AI prompt for analysis
             prompt = f"""
             You are analyzing a CSV file from a threat intelligence feed named "{feed_name}".
             Below are the column headers and sample values:
@@ -142,33 +177,24 @@ class CSVAnalyzer:
             """
             
             # Get AI analysis
-            response = llm.predict(prompt, temperature=0.1, max_output_tokens=1024)
+            response = ai_client.predict(prompt, temperature=0.1, max_output_tokens=1024)
             
             # Extract JSON from response
-            try:
-                response_text = response.text.strip()
-                start_idx = response_text.find('{')
-                end_idx = response_text.rfind('}') + 1
-                
-                if start_idx >= 0 and end_idx > start_idx:
-                    json_str = response_text[start_idx:end_idx]
-                    analysis = json.loads(json_str)
-                    
-                    # Add header mapping for easier access
-                    analysis["header_map"] = {header: i for i, header in enumerate(headers)}
-                    analysis["headers"] = headers
-                    
-                    logger.info(f"Successfully analyzed CSV structure for {feed_name}")
-                    return analysis
-                else:
-                    logger.warning("Could not find JSON in AI response")
-                    return self._basic_csv_analysis(csv_content)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.warning(f"Failed to parse JSON from AI response: {e}")
+            json_str = extract_json_from_text(response.text)
+            if json_str:
+                analysis = json.loads(json_str)
+                # Add header mapping for easier access
+                analysis["header_map"] = {header: i for i, header in enumerate(headers)}
+                analysis["headers"] = headers
+                logger.info(f"Successfully analyzed CSV structure for {feed_name}")
+                return analysis
+            else:
+                logger.warning("Could not find JSON in AI response")
                 return self._basic_csv_analysis(csv_content)
                 
         except Exception as e:
             logger.error(f"Error analyzing CSV structure: {e}")
+            logger.error(traceback.format_exc())
             return self._basic_csv_analysis(csv_content)
     
     def _basic_csv_analysis(self, csv_content: str) -> Dict[str, Any]:
@@ -182,190 +208,217 @@ class CSVAnalyzer:
                 return {"error": "No CSV headers found"}
             
             # Sample some rows
-            samples = []
-            for _ in range(5):
-                row = next(csv_reader, None)
-                if row:
-                    samples.append(row)
+            samples = list(itertools.islice(csv_reader, 5))
             
             # Basic column analysis
             columns = {}
             for i, header in enumerate(headers):
-                column_name = header.strip()
-                if not column_name:
-                    column_name = f"column_{i+1}"
+                column_name = header.strip() or f"column_{i+1}"
                 
                 # Detect if this might be an IOC column based on header name
-                ioc_type = "none"
-                lower_header = column_name.lower()
-                if any(term in lower_header for term in ["ip", "addr", "address"]):
-                    ioc_type = "ip"
-                elif any(term in lower_header for term in ["domain", "host", "hostname"]):
-                    ioc_type = "domain"
-                elif any(term in lower_header for term in ["url", "link", "uri"]):
-                    ioc_type = "url"
-                elif any(term in lower_header for term in ["hash", "md5", "sha", "sha1", "sha256"]):
-                    ioc_type = "hash"
-                elif any(term in lower_header for term in ["email", "mail"]):
-                    ioc_type = "email"
-                elif any(term in lower_header for term in ["cve", "vulnerability", "vuln"]):
-                    ioc_type = "cve"
-                
-                # Check samples if available
-                if samples and ioc_type == "none":
-                    sample_values = [row[i] if i < len(row) else "" for row in samples]
-                    for value in sample_values:
-                        if re.match(IOC_PATTERNS["ip"], value):
-                            ioc_type = "ip"
-                            break
-                        elif re.match(IOC_PATTERNS["domain"], value):
-                            ioc_type = "domain"
-                            break
-                        elif re.match(IOC_PATTERNS["url"], value):
-                            ioc_type = "url"
-                            break
-                        elif re.match(IOC_PATTERNS["md5"], value) or re.match(IOC_PATTERNS["sha1"], value) or re.match(IOC_PATTERNS["sha256"], value):
-                            ioc_type = "hash"
-                            break
-                        elif re.match(IOC_PATTERNS["email"], value):
-                            ioc_type = "email"
-                            break
-                        elif re.match(IOC_PATTERNS["cve"], value):
-                            ioc_type = "cve"
-                            break
-                
+                ioc_type = self._detect_ioc_type(column_name, samples, i)
                 columns[column_name] = {
                     "ioc_type": ioc_type,
                     "data_type": "string"  # Default to string
                 }
             
             # Add header mapping
-            header_map = {header: i for i, header in enumerate(headers)}
-            
             return {
                 "columns": columns,
                 "headers": headers,
-                "header_map": header_map,
+                "header_map": {header: i for i, header in enumerate(headers)},
                 "feed_type": "Unknown threat feed",
                 "key_columns": [header for header, info in columns.items() if info["ioc_type"] != "none"]
             }
         except Exception as e:
             logger.error(f"Error in basic CSV analysis: {e}")
+            logger.error(traceback.format_exc())
             return {"error": f"CSV analysis failed: {e}"}
+            
+    def _detect_ioc_type(self, column_name: str, samples: List[List[str]], col_index: int) -> str:
+        """Detect IOC type based on column name and sample values"""
+        lower_header = column_name.lower()
+        
+        # Check header name first
+        ioc_terms = {
+            "ip": ["ip", "addr", "address"],
+            "domain": ["domain", "host", "hostname"],
+            "url": ["url", "link", "uri"],
+            "hash": ["hash", "md5", "sha", "sha1", "sha256"],
+            "email": ["email", "mail"],
+            "cve": ["cve", "vulnerability", "vuln"]
+        }
+        
+        for ioc_type, terms in ioc_terms.items():
+            if any(term in lower_header for term in terms):
+                return ioc_type
+                
+        # Check sample values
+        for row in samples:
+            if col_index >= len(row):
+                continue
+                
+            value = row[col_index]
+            for ioc_type, pattern in IOC_PATTERNS.items():
+                if re.match(pattern, value):
+                    return ioc_type
+        
+        return "none"
+
+# ======== Threat Analyzer Class ========
 
 class ThreatAnalyzer:
     """Main class for threat data analysis"""
     
     def __init__(self):
         """Initialize the analyzer"""
-        self.ready = initialize_clients()
-        self.csv_analyzer = CSVAnalyzer()
+        self._csv_analyzer = CSVAnalyzer()
         self._csv_analysis_cache = {}  # Cache for CSV analysis results
     
-    def extract_iocs(self, text: str) -> Dict[str, List[str]]:
-        """Extract IOCs from text using regex patterns"""
-        if not text:
-            return {}
-            
-        results = {}
-        for ioc_type, pattern in IOC_PATTERNS.items():
-            matches = re.findall(pattern, text)
-            if matches:
-                # Remove duplicates while preserving order
-                unique_matches = list(dict.fromkeys(matches))
-                results[ioc_type] = unique_matches
-                logger.info(f"Extracted {len(unique_matches)} {ioc_type} indicators")
-        
-        return results
-    
-    def extract_iocs_from_csv(self, csv_content: str, feed_name: str) -> List[Dict[str, Any]]:
-        """Extract IOCs from CSV with intelligent column detection
+    def extract_iocs(self, content: Union[str, Dict], content_type: str = "text") -> List[Dict]:
+        """Unified IOC extraction from different content types
         
         Args:
-            csv_content: CSV data as string
-            feed_name: Feed name for context and caching
+            content: Content to extract IOCs from (text, JSON object, or CSV)
+            content_type: Type of content ('text', 'json', 'csv')
             
         Returns:
             List of extracted IOCs with metadata
         """
-        # Get or perform CSV analysis
-        if feed_name in self._csv_analysis_cache:
-            analysis = self._csv_analysis_cache[feed_name]
-        else:
-            analysis = self.csv_analyzer.analyze_csv_structure(csv_content, feed_name)
-            self._csv_analysis_cache[feed_name] = analysis
-        
-        if "error" in analysis:
-            logger.warning(f"Cannot extract IOCs: {analysis['error']}")
+        if not content:
             return []
+            
+        results = []
+        timestamp = datetime.utcnow().isoformat()
         
-        try:
-            # Parse CSV
-            csv_reader = csv.reader(io.StringIO(csv_content))
-            headers = next(csv_reader, [])
+        # Extract from text/plain content
+        if content_type == "text":
+            for ioc_type, pattern in IOC_PATTERNS.items():
+                matches = re.findall(pattern, content)
+                for value in matches:
+                    results.append({
+                        "value": value,
+                        "type": ioc_type,
+                        "timestamp": timestamp
+                    })
+        
+        # Extract from CSV content
+        elif content_type == "csv":
+            csv_data = content
+            feed_name = "csv_source"
             
-            if not headers:
+            # Get or perform CSV analysis if needed
+            if feed_name in self._csv_analysis_cache:
+                analysis = self._csv_analysis_cache[feed_name]
+            else:
+                analysis = self._csv_analyzer.analyze_csv_structure(csv_data, feed_name)
+                self._csv_analysis_cache[feed_name] = analysis
+            
+            if "error" in analysis:
+                logger.warning(f"Cannot extract IOCs: {analysis['error']}")
                 return []
             
-            # Map headers to their indices
-            header_map = {header: i for i, header in enumerate(headers)}
-            
-            # Find IOC columns from analysis
-            ioc_columns = []
-            for header, info in analysis.get("columns", {}).items():
-                if info.get("ioc_type") != "none" and header in header_map:
-                    ioc_columns.append((header, info.get("ioc_type"), header_map[header]))
-            
-            if not ioc_columns:
-                logger.warning(f"No IOC columns found in {feed_name}")
-                return []
-            
-            # Extract IOCs from each row
-            iocs = []
-            for row_idx, row in enumerate(csv_reader, start=2):  # Start from 2 for 1-based row indexing with header
-                if not row:
-                    continue
-                    
-                for header, ioc_type, col_idx in ioc_columns:
-                    if col_idx < len(row) and row[col_idx].strip():
-                        value = row[col_idx].strip()
+            try:
+                # Parse CSV
+                csv_reader = csv.reader(io.StringIO(csv_data))
+                headers = next(csv_reader, [])
+                
+                if not headers:
+                    return []
+                
+                # Map headers to indices
+                header_map = {header: i for i, header in enumerate(headers)}
+                
+                # Find IOC columns from analysis
+                ioc_columns = []
+                for header, info in analysis.get("columns", {}).items():
+                    if info.get("ioc_type") != "none" and header in header_map:
+                        ioc_columns.append((header, info.get("ioc_type"), header_map[header]))
+                
+                # Extract IOCs from each row
+                for row_idx, row in enumerate(csv_reader, start=2):
+                    if not row or len(row) == 0:
+                        continue
                         
-                        # Skip if doesn't match expected pattern
-                        if ioc_type in IOC_PATTERNS and not re.match(IOC_PATTERNS[ioc_type], value):
-                            continue
-                        
-                        # Create IOC with context
-                        ioc = {
-                            "value": value,
-                            "type": ioc_type,
-                            "source": feed_name,
-                            "source_row": row_idx,
-                            "source_column": header,
-                            "timestamp": datetime.utcnow().isoformat()
-                        }
-                        
-                        # Add relevant context from other columns
-                        context = {}
-                        for ctx_header in analysis.get("key_columns", []):
-                            if ctx_header != header and ctx_header in header_map:
-                                ctx_idx = header_map[ctx_header]
-                                if ctx_idx < len(row):
-                                    context[ctx_header] = row[ctx_idx]
-                        
-                        if context:
-                            ioc["context"] = context
+                    for header, ioc_type, col_idx in ioc_columns:
+                        if col_idx < len(row) and row[col_idx].strip():
+                            value = row[col_idx].strip()
                             
-                        iocs.append(ioc)
-            
-            logger.info(f"Extracted {len(iocs)} IOCs from CSV for {feed_name}")
-            return iocs
-        except Exception as e:
-            logger.error(f"Error extracting IOCs from CSV: {e}")
-            return []
+                            # Skip if doesn't match expected pattern
+                            if ioc_type in IOC_PATTERNS and not re.match(IOC_PATTERNS[ioc_type], value):
+                                continue
+                            
+                            # Create IOC with context
+                            ioc = {
+                                "value": value,
+                                "type": ioc_type,
+                                "source": feed_name,
+                                "source_row": row_idx,
+                                "source_column": header,
+                                "timestamp": timestamp
+                            }
+                            
+                            # Add relevant context from other columns
+                            context = {}
+                            for ctx_header in analysis.get("key_columns", []):
+                                if ctx_header != header and ctx_header in header_map:
+                                    ctx_idx = header_map[ctx_header]
+                                    if ctx_idx < len(row):
+                                        context[ctx_header] = row[ctx_idx]
+                            
+                            if context:
+                                ioc["context"] = context
+                                
+                            results.append(ioc)
+            except Exception as e:
+                logger.error(f"Error extracting IOCs from CSV: {e}")
+                logger.error(traceback.format_exc())
+        
+        # Extract from JSON content
+        elif content_type == "json":
+            # Recursive function to process nested JSON structures
+            def process_json_item(item, path=""):
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        current_path = f"{path}.{key}" if path else key
+                        if isinstance(value, (dict, list)):
+                            process_json_item(value, current_path)
+                        elif isinstance(value, str):
+                            # Check for IOCs in string values
+                            for ioc_type, pattern in IOC_PATTERNS.items():
+                                if re.match(pattern, value):
+                                    results.append({
+                                        "value": value,
+                                        "type": ioc_type,
+                                        "path": current_path,
+                                        "timestamp": timestamp
+                                    })
+                elif isinstance(item, list):
+                    for i, value in enumerate(item):
+                        current_path = f"{path}[{i}]"
+                        process_json_item(value, current_path)
+                    
+            process_json_item(content)
+        
+        # Remove duplicates while preserving order
+        unique_results = []
+        seen = set()
+        for ioc in results:
+            key = (ioc["type"], ioc["value"])
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(ioc)
+        
+        return unique_results
+    
+    def extract_iocs_from_csv(self, csv_content: str, feed_name: str) -> List[Dict[str, Any]]:
+        """Extract IOCs from CSV with intelligent column detection (Legacy method for compatibility)"""
+        return self.extract_iocs(csv_content, "csv")
     
     def analyze_with_vertex_ai(self, content: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze threat data using Vertex AI LLM"""
-        if not content or not llm:
+        ai_client = get_client('vertexai')
+        if not content or not ai_client:
             return {}
         
         # Truncate content if it's too long (Vertex AI has context limits)
@@ -393,32 +446,27 @@ class ThreatAnalyzer:
         
         try:
             logger.info("Sending content to Vertex AI for analysis")
-            response = llm.predict(prompt, temperature=0.1, max_output_tokens=1024)
+            response = ai_client.predict(prompt, temperature=0.1, max_output_tokens=1024)
             
-            # Try to parse JSON from response
-            try:
-                start_index = response.text.find('{')
-                end_index = response.text.rfind('}') + 1
+            # Extract JSON from response
+            json_str = extract_json_from_text(response.text)
+            
+            if json_str:
+                analysis = json.loads(json_str)
                 
-                if start_index >= 0 and end_index > start_index:
-                    json_str = response.text[start_index:end_index]
-                    analysis = json.loads(json_str)
-                    
-                    # Add metadata
-                    analysis["source_id"] = metadata.get("id", "unknown")
-                    analysis["source_type"] = metadata.get("type", "unknown")
-                    analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
-                    
-                    logger.info(f"Successfully extracted structured analysis from Vertex AI")
-                    return analysis
-                else:
-                    logger.warning("Could not find JSON in Vertex AI response")
-                    return {}
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse JSON from Vertex AI response: {str(e)}")
+                # Add metadata
+                analysis["source_id"] = metadata.get("id", "unknown")
+                analysis["source_type"] = metadata.get("type", "unknown")
+                analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
+                
+                logger.info(f"Successfully extracted structured analysis from Vertex AI")
+                return analysis
+            else:
+                logger.warning("Could not find JSON in Vertex AI response")
                 return {}
         except Exception as e:
             logger.error(f"Error analyzing with Vertex AI: {str(e)}")
+            logger.error(traceback.format_exc())
             return {}
     
     def enrich_ioc(self, ioc_value: str, ioc_type: str) -> Dict[str, Any]:
@@ -449,21 +497,89 @@ class ThreatAnalyzer:
             except Exception as e:
                 logger.warning(f"Error enriching IP {ioc_value}: {str(e)}")
         
-        # Enrich domains with WHOIS data (simplified)
-        elif ioc_type == "domain":
-            # In a production environment, you could integrate with WHOIS APIs
-            pass
-        
-        # Enrich hashes with file info (simplified)
-        elif ioc_type in ["md5", "sha1", "sha256"]:
-            # In a production environment, you could integrate with VirusTotal or similar
-            pass
+        # Additional enrichment for other IOC types could be added here
         
         return enrichment
     
+    def _store_analysis_result(self, analysis_result: Dict[str, Any]) -> None:
+        """Store analysis result in BigQuery with improved error handling"""
+        client = get_client('bigquery')
+        if not client:
+            logger.error("BigQuery client not initialized")
+            return
+            
+        table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
+        
+        # Convert complex types to JSON strings
+        result_copy = analysis_result.copy()
+        
+        for key in ["iocs", "vertex_analysis"]:
+            if key in result_copy and result_copy[key]:
+                result_copy[key] = json.dumps(result_copy[key])
+        
+        try:
+            # Check if table exists first
+            try:
+                client.get_table(table_id)
+                table_exists = True
+            except Exception:
+                table_exists = False
+                
+            # Create table if it doesn't exist
+            if not table_exists:
+                schema = [
+                    bigquery.SchemaField("source_id", "STRING"),
+                    bigquery.SchemaField("source_type", "STRING"),
+                    bigquery.SchemaField("iocs", "STRING"),
+                    bigquery.SchemaField("vertex_analysis", "STRING"),
+                    bigquery.SchemaField("analysis_timestamp", "TIMESTAMP")
+                ]
+                
+                table = bigquery.Table(table_id, schema=schema)
+                client.create_table(table, exists_ok=True)
+                logger.info(f"Created table {table_id}")
+            
+            # Try to insert the row
+            errors = client.insert_rows_json(table_id, [result_copy])
+            
+            if errors:
+                # Handle schema mismatch errors
+                error_msg = str(errors)
+                if "no such field" in error_msg or "required field" in error_msg:
+                    logger.error(f"Schema mismatch error: {errors}")
+                    # Get current schema and extend it if possible
+                    table = client.get_table(table_id)
+                    current_fields = [field.name for field in table.schema]
+                    
+                    # Add missing fields to the schema
+                    missing_fields = []
+                    for key in result_copy:
+                        if key not in current_fields:
+                            missing_fields.append(
+                                bigquery.SchemaField(key, "STRING")
+                            )
+                    
+                    if missing_fields:
+                        # Update schema
+                        new_schema = list(table.schema) + missing_fields
+                        table.schema = new_schema
+                        client.update_table(table, ["schema"])
+                        logger.info(f"Updated table schema with fields: {[f.name for f in missing_fields]}")
+                        
+                        # Try insert again
+                        errors = client.insert_rows_json(table_id, [result_copy])
+                        if errors:
+                            logger.error(f"Still getting errors after schema update: {errors}")
+                else:
+                    logger.error(f"Error inserting data: {errors}")
+        except Exception as e:
+            logger.error(f"Error storing analysis result: {str(e)}")
+            logger.error(traceback.format_exc())
+    
     def analyze_feed_data(self, feed_name: str, days_back: int = 7) -> Dict[str, Any]:
         """Analyze threat data from a specific feed"""
-        if not bq_client:
+        client = get_client('bigquery')
+        if not client:
             logger.error("BigQuery client not initialized")
             return {"error": "BigQuery client not initialized"}
         
@@ -475,7 +591,7 @@ class ThreatAnalyzer:
             WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             """
             
-            query_job = bq_client.query(query)
+            query_job = client.query(query)
             results = query_job.result()
             
             processed_count = 0
@@ -498,16 +614,12 @@ class ThreatAnalyzer:
                 if not content:
                     continue
                 
-                # Extract IOCs - with CSV-specific handling if applicable
+                # Extract IOCs based on content type
                 if is_csv_data and "csv_content" in row_dict:
-                    iocs = self.extract_iocs_from_csv(row_dict["csv_content"], feed_name)
+                    iocs = self.extract_iocs(row_dict["csv_content"], "csv")
                 else:
-                    # Use regex-based extraction
-                    extracted_iocs = self.extract_iocs(content)
-                    iocs = []
-                    for ioc_type, values in extracted_iocs.items():
-                        for value in values:
-                            iocs.append({"type": ioc_type, "value": value})
+                    # Use text-based extraction
+                    iocs = self.extract_iocs(content, "text")
                 
                 # Enrich IOCs
                 all_iocs = []
@@ -524,9 +636,7 @@ class ThreatAnalyzer:
                 
                 # Analyze with Vertex AI
                 metadata = {"id": row_dict.get("id", str(hash(str(row_dict)))), "type": feed_name}
-                vertex_analysis = {}
-                if llm:
-                    vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
+                vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
                 
                 # Combine results
                 analysis_result = {
@@ -550,7 +660,14 @@ class ThreatAnalyzer:
             logger.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
             
             # Publish event
-            self._publish_analysis_event(feed_name, processed_count, ioc_count)
+            event_data = {
+                "feed_name": feed_name,
+                "processed_count": processed_count,
+                "ioc_count": ioc_count,
+                "timestamp": datetime.utcnow().isoformat(),
+                "event_type": "analysis_complete"
+            }
+            publish_event(PUBSUB_TOPIC, event_data)
             
             return {
                 "feed_name": feed_name,
@@ -559,6 +676,7 @@ class ThreatAnalyzer:
             }
         except Exception as e:
             logger.error(f"Error analyzing feed {feed_name}: {str(e)}")
+            logger.error(traceback.format_exc())
             return {
                 "feed_name": feed_name,
                 "error": str(e),
@@ -566,76 +684,10 @@ class ThreatAnalyzer:
                 "ioc_count": 0
             }
     
-    def _store_analysis_result(self, analysis_result: Dict[str, Any]) -> None:
-        """Store analysis result in BigQuery"""
-        if not bq_client:
-            logger.error("BigQuery client not initialized")
-            return
-            
-        table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
-        
-        # Convert complex types to JSON strings
-        result_copy = analysis_result.copy()
-        
-        for key in ["iocs", "vertex_analysis"]:
-            if key in result_copy and result_copy[key]:
-                result_copy[key] = json.dumps(result_copy[key])
-        
-        try:
-            # Try to insert the row
-            errors = bq_client.insert_rows_json(table_id, [result_copy])
-            
-            if errors:
-                logger.error(f"Errors inserting analysis result: {errors}")
-                
-                # Table might not exist, try to create it
-                schema = [
-                    bigquery.SchemaField("source_id", "STRING"),
-                    bigquery.SchemaField("source_type", "STRING"),
-                    bigquery.SchemaField("iocs", "STRING"),
-                    bigquery.SchemaField("vertex_analysis", "STRING"),
-                    bigquery.SchemaField("analysis_timestamp", "TIMESTAMP")
-                ]
-                
-                table = bigquery.Table(table_id, schema=schema)
-                bq_client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
-                
-                # Try again
-                errors = bq_client.insert_rows_json(table_id, [result_copy])
-                if errors:
-                    logger.error(f"Still getting errors after table creation: {errors}")
-        except Exception as e:
-            logger.error(f"Error storing analysis result: {str(e)}")
-    
-    def _publish_analysis_event(self, feed_name: str, processed_count: int, ioc_count: int) -> None:
-        """Publish event to Pub/Sub about analysis completion"""
-        if not publisher:
-            logger.error("Pub/Sub publisher not initialized")
-            return
-            
-        try:
-            topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
-            
-            message = {
-                "feed_name": feed_name,
-                "processed_count": processed_count,
-                "ioc_count": ioc_count,
-                "timestamp": datetime.utcnow().isoformat(),
-                "event_type": "analysis_complete"
-            }
-            
-            data = json.dumps(message).encode("utf-8")
-            future = publisher.publish(topic_path, data=data)
-            message_id = future.result()
-            
-            logger.info(f"Published analysis event with ID {message_id}")
-        except Exception as e:
-            logger.error(f"Error publishing analysis event: {str(e)}")
-    
     def detect_campaigns(self, days_back: int = 30) -> List[Dict[str, Any]]:
         """Detect threat campaigns by clustering related IOCs and analyses"""
-        if not bq_client:
+        client = get_client('bigquery')
+        if not client:
             logger.error("BigQuery client not initialized")
             return []
             
@@ -647,7 +699,7 @@ class ThreatAnalyzer:
             WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             """
             
-            query_job = bq_client.query(query)
+            query_job = client.query(query)
             results = query_job.result()
             
             # Group analyses
@@ -687,7 +739,6 @@ class ThreatAnalyzer:
                     continue
                 
                 # Create a hash key for the campaign
-                import hashlib
                 campaign_key = hashlib.md5(
                     "|".join(sorted(campaign_identifiers)).encode()
                 ).hexdigest()
@@ -769,11 +820,13 @@ class ThreatAnalyzer:
             return campaigns
         except Exception as e:
             logger.error(f"Error detecting campaigns: {str(e)}")
+            logger.error(traceback.format_exc())
             return []
     
     def _store_campaign(self, campaign: Dict[str, Any]) -> None:
         """Store campaign data in BigQuery"""
-        if not bq_client:
+        client = get_client('bigquery')
+        if not client:
             logger.error("BigQuery client not initialized")
             return
             
@@ -786,13 +839,15 @@ class ThreatAnalyzer:
         campaign_copy["detection_timestamp"] = datetime.utcnow().isoformat()
         
         try:
-            # Try to insert the row
-            errors = bq_client.insert_rows_json(table_id, [campaign_copy])
+            # Check if table exists
+            try:
+                client.get_table(table_id)
+                table_exists = True
+            except Exception:
+                table_exists = False
             
-            if errors:
-                logger.error(f"Errors inserting campaign: {errors}")
-                
-                # Table might not exist, try to create it
+            # Create table if it doesn't exist
+            if not table_exists:
                 schema = [
                     bigquery.SchemaField("campaign_id", "STRING"),
                     bigquery.SchemaField("campaign_name", "STRING"),
@@ -811,19 +866,22 @@ class ThreatAnalyzer:
                 ]
                 
                 table = bigquery.Table(table_id, schema=schema)
-                bq_client.create_table(table, exists_ok=True)
+                client.create_table(table, exists_ok=True)
                 logger.info(f"Created table {table_id}")
-                
-                # Try again
-                errors = bq_client.insert_rows_json(table_id, [campaign_copy])
-                if errors:
-                    logger.error(f"Still getting errors after table creation: {errors}")
+            
+            # Try to insert the row
+            errors = client.insert_rows_json(table_id, [campaign_copy])
+            
+            if errors:
+                logger.error(f"Errors inserting campaign: {errors}")
         except Exception as e:
             logger.error(f"Error storing campaign: {str(e)}")
+            logger.error(traceback.format_exc())
     
     def get_ioc_geo_stats(self, days_back: int = 30) -> Dict[str, Any]:
         """Get geographic distribution of IP-based IOCs"""
-        if not bq_client:
+        client = get_client('bigquery')
+        if not client:
             logger.error("BigQuery client not initialized")
             return {}
             
@@ -857,7 +915,7 @@ class ThreatAnalyzer:
             LIMIT 50
             """
             
-            query_job = bq_client.query(query)
+            query_job = client.query(query)
             results = query_job.result()
             
             countries = []
@@ -879,30 +937,23 @@ class ThreatAnalyzer:
             }
         except Exception as e:
             logger.error(f"Error getting IOC geo stats: {str(e)}")
+            logger.error(traceback.format_exc())
             return {"error": str(e)}
 
     def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
-        """Analyze an uploaded CSV file to extract threat intelligence
-        
-        Args:
-            csv_content: CSV data as string
-            feed_name: Name to associate with this data
-            
-        Returns:
-            Dictionary with analysis results
-        """
+        """Analyze an uploaded CSV file to extract threat intelligence"""
         if not csv_content:
             return {"error": "Empty CSV data"}
             
         try:
             # Analyze CSV structure
-            analysis = self.csv_analyzer.analyze_csv_structure(csv_content, feed_name)
+            analysis = self._csv_analyzer.analyze_csv_structure(csv_content, feed_name)
             
             if "error" in analysis:
                 return {"error": f"CSV analysis failed: {analysis['error']}"}
             
             # Extract IOCs
-            iocs = self.extract_iocs_from_csv(csv_content, feed_name)
+            iocs = self.extract_iocs(csv_content, "csv")
             
             # Enrich IOCs
             enriched_iocs = []
@@ -917,15 +968,10 @@ class ThreatAnalyzer:
                     enriched_iocs.append(enriched_ioc)
             
             # Get sample rows for AI analysis
-            sample_rows = []
             csv_reader = csv.reader(io.StringIO(csv_content))
             headers = next(csv_reader, [])
             
-            for i, row in enumerate(csv_reader):
-                if i < 5:  # Get 5 sample rows
-                    sample_rows.append(row)
-                else:
-                    break
+            sample_rows = list(itertools.islice(csv_reader, 5))
             
             # Create content for Vertex AI analysis
             content = f"CSV File Analysis: {feed_name}\n\nHeaders: {headers}\n\n"
@@ -940,9 +986,7 @@ class ThreatAnalyzer:
             
             # Analyze with Vertex AI
             metadata = {"id": f"csv_{datetime.now().strftime('%Y%m%d%H%M%S')}", "type": feed_name}
-            vertex_analysis = {}
-            if llm:
-                vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
+            vertex_analysis = self.analyze_with_vertex_ai(content, metadata)
             
             # Combine results
             result = {
@@ -970,9 +1014,11 @@ class ThreatAnalyzer:
             
         except Exception as e:
             logger.error(f"Error analyzing CSV file: {e}")
+            logger.error(traceback.format_exc())
             return {"error": f"Analysis failed: {e}"}
 
-# Cloud Function entry point
+# ======== Main Functions ========
+
 def analyze_threat_data(event, context):
     """Pub/Sub triggered function for threat data analysis"""
     analyzer = ThreatAnalyzer()
@@ -995,11 +1041,12 @@ def analyze_threat_data(event, context):
                 
                 # Detect campaigns periodically (every 10th message)
                 if hash(feed_name) % 10 == 0:
-                    campaigns = analyzer.detect_campaigns()
+                    analyzer.detect_campaigns()
                 
                 return result
         except Exception as e:
             logger.error(f"Error processing event data: {str(e)}")
+            logger.error(traceback.format_exc())
     
     # Fallback to analyzing all feeds
     feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware", 
