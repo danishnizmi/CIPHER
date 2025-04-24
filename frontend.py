@@ -261,7 +261,7 @@ def generate_ai_insights():
                 "description": f"Detected {campaign_count} active campaigns in the last 7 days.",
                 "type": "campaign",
                 "severity": "medium" if campaign_count > 3 else "low",
-                "actions": [{"text": "View Campaigns", "url": url_for('campaigns')}]
+                "actions": [{"text": "View Campaigns", "url": url_for('dynamic_content_list', content_type='campaign')}]
             })
             
             if top_campaigns:
@@ -271,7 +271,7 @@ def generate_ai_insights():
                     "description": f"Attributed to {latest_campaign.get('threat_actor', 'Unknown Actor')} targeting {latest_campaign.get('targets', 'Unknown Targets')}.",
                     "type": "campaign",
                     "severity": "high",
-                    "actions": [{"text": "View Details", "url": url_for('campaign_detail', campaign_id=latest_campaign.get('campaign_id'))}]
+                    "actions": [{"text": "View Details", "url": url_for('dynamic_content_detail', content_type='campaign', identifier=latest_campaign.get('campaign_id'))}]
                 })
         
         # IOC insights
@@ -283,7 +283,7 @@ def generate_ai_insights():
                 "description": f"Most common indicator type: {most_common_type.get('type', 'Unknown')} ({most_common_type.get('count', 0)} instances).",
                 "type": "ioc",
                 "severity": "info",
-                "actions": [{"text": "View IOCs", "url": url_for('iocs')}]
+                "actions": [{"text": "View IOCs", "url": url_for('dynamic_content_list', content_type='ioc')}]
             })
         
         # Add a learning recommendation
@@ -292,7 +292,7 @@ def generate_ai_insights():
             "description": "Based on current threat patterns, we recommend reviewing your defenses against phishing and ransomware attacks.",
             "type": "recommendation",
             "severity": "info",
-            "actions": [{"text": "View Reports", "url": url_for('reports')}]
+            "actions": [{"text": "View Reports", "url": url_for('dynamic_content_list', content_type='report')}]
         })
         
         # Generate threat predictions
@@ -805,7 +805,7 @@ def ai_insights():
         current_endpoint='ai_insights'
     )
 
-# Unified routes for other content types (simplified to maintain compatibility)
+# Unified routes for other content types
 @app.route('/<content_type>s')
 @login_required
 def dynamic_content_list(content_type):
@@ -861,11 +861,21 @@ def dynamic_content_list(content_type):
             'subtitle': 'Active security alerts requiring attention',
             'endpoint': 'alerts',
             'detail_endpoint': None
+        },
+        'user': {
+            'singular': 'user',
+            'plural': 'users',
+            'icon': 'users',
+            'title': 'User Management',
+            'subtitle': 'Manage platform users and permissions',
+            'endpoint': 'users', 
+            'detail_endpoint': 'edit_user'
         }
     }
     
     # Check if content type is supported
     if content_type not in content_settings:
+        logger.warning(f"Unsupported content type requested: {content_type}")
         abort(404)
         
     settings = content_settings[content_type]
@@ -888,6 +898,25 @@ def dynamic_content_list(content_type):
         items = []
         for record in records:
             items.extend(record.get('iocs', []))
+    elif content_type == 'alert':
+        # Handle alerts specially since they might come from a different endpoint
+        items = content_data.get('alerts', [])
+        if not items:
+            try:
+                # Try to get from API directly
+                import api
+                if hasattr(api, 'get_alerts'):
+                    alerts_data = api.get_alerts()
+                    if isinstance(alerts_data, tuple):
+                        alerts_data = alerts_data[0]
+                    if isinstance(alerts_data, dict) and 'alerts' in alerts_data:
+                        items = alerts_data.get('alerts', [])
+            except Exception as e:
+                logger.error(f"Error fetching alerts directly: {str(e)}")
+    elif content_type == 'user':
+        # Handle users specially
+        current_users = get_users()
+        items = current_users  # This is already a dict of username -> user_data
     else:
         items = content_data.get(settings['plural'], [])
         
@@ -975,6 +1004,57 @@ def dynamic_content_list(content_type):
         },
         action_buttons=action_buttons
     )
+
+# Route aliases for backward compatibility
+@app.route('/feeds')
+@login_required
+def feeds():
+    """Alias for feed content list"""
+    return dynamic_content_list('feed')
+
+@app.route('/campaigns')
+@login_required
+def campaigns():
+    """Alias for campaign content list"""
+    return dynamic_content_list('campaign')
+
+@app.route('/iocs')
+@login_required
+def iocs():
+    """Alias for IOC content list"""
+    return dynamic_content_list('ioc')
+
+@app.route('/reports')
+@login_required
+def reports():
+    """Alias for report content list"""
+    return dynamic_content_list('report')
+
+@app.route('/alerts')
+@login_required
+def alerts():
+    """Alias for alert content list"""
+    return dynamic_content_list('alert')
+
+@app.route('/users')
+@login_required
+@role_required('admin')
+def users():
+    """Alias for user management"""
+    return dynamic_content_list('user')
+
+@app.route('/settings')
+@login_required
+def settings():
+    """Alias for settings page"""
+    return profile()
+
+@app.route('/explore')
+@login_required
+def explore():
+    """Data explorer page"""
+    # This route just redirects to search for now
+    return redirect(url_for('search'))
 
 # Feed ingestion trigger
 @app.route('/ingest_threat_data')
