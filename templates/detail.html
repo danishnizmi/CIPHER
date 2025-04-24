@@ -336,7 +336,7 @@
                                 <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
                             </td>
                             <td class="max-w-xs truncate">
-                                <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                                <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
                                     {{ ioc.value }}
                                 </a>
                             </td>
@@ -349,7 +349,7 @@
                                 </span>
                             </td>
                             <td>
-                                <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                                <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
                                     <i class="fas fa-eye mr-1"></i> View
                                 </a>
                             </td>
@@ -373,7 +373,7 @@
                     <div class="bg-gray-50 p-3 border-b">
                         <h4 class="font-medium truncate">
                             {% if tab.id == 'campaigns' %}
-                            <a href="{{ url_for('campaign_detail', campaign_id=item.campaign_id) }}" class="text-blue-600 hover:underline">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=item.campaign_id) }}" class="text-blue-600 hover:underline">
                                 {{ item.campaign_name }}
                             </a>
                             {% else %}
