@@ -301,22 +301,30 @@
                     {% for campaign in campaigns %}
                     <tr>
                         <td>
+                            {% if campaign is mapping and campaign.campaign_id is defined and campaign.campaign_name is defined %}
                             <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
                                 {{ campaign.campaign_name }}
                             </a>
-                        </td>
-                        <td>{{ campaign.threat_actor|default('Unknown') }}</td>
-                        <td>{{ campaign.source_count }}</td>
-                        <td>{{ campaign.last_seen|default('N/A') }}</td>
-                        <td>
-                            {% if campaign.source_count > 8 %}
-                            <span class="severity-badge critical">Critical</span>
-                            {% elif campaign.source_count > 5 %}
-                            <span class="severity-badge high">High</span>
-                            {% elif campaign.source_count > 3 %}
-                            <span class="severity-badge medium">Medium</span>
                             {% else %}
-                            <span class="severity-badge low">Low</span>
+                            <span class="text-gray-500">Unknown Campaign</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ campaign.threat_actor|default('Unknown') if campaign is mapping else 'Unknown' }}</td>
+                        <td>{{ campaign.source_count|default(0) if campaign is mapping else 0 }}</td>
+                        <td>{{ campaign.last_seen|default('N/A') if campaign is mapping else 'N/A' }}</td>
+                        <td>
+                            {% if campaign is mapping and campaign.source_count is defined %}
+                                {% if campaign.source_count > 8 %}
+                                <span class="severity-badge critical">Critical</span>
+                                {% elif campaign.source_count > 5 %}
+                                <span class="severity-badge high">High</span>
+                                {% elif campaign.source_count > 3 %}
+                                <span class="severity-badge medium">Medium</span>
+                                {% else %}
+                                <span class="severity-badge low">Low</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="severity-badge medium">Medium</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -352,31 +360,46 @@
                     {% for ioc in top_iocs %}
                     <tr>
                         <td>
+                            {% if ioc is mapping and ioc.type is defined %}
                             <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
+                            {% else %}
+                            <span class="badge-ioc badge-unknown">Unknown</span>
+                            {% endif %}
                         </td>
                         <td>
+                            {% if ioc is mapping and ioc.type is defined and ioc.value is defined %}
                             <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
                                 {{ ioc.value }}
                             </a>
-                        </td>
-                        <td>{{ ioc.sources|default(ioc.count) }}</td>
-                        <td>
-                            {% set confidence = namespace(value=ioc.count|default(1)) %}
-                            {% if confidence.value > 8 %}
-                            <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-green-500 h-1.5 rounded-full" style="width: 95%"></div>
-                            </div>
-                            <span class="text-xs text-gray-500">High</span>
-                            {% elif confidence.value > 4 %}
-                            <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-yellow-500 h-1.5 rounded-full" style="width: 70%"></div>
-                            </div>
-                            <span class="text-xs text-gray-500">Medium</span>
                             {% else %}
-                            <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
-                            </div>
-                            <span class="text-xs text-gray-500">Low</span>
+                            <span class="text-gray-500">Unknown Value</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ ioc.sources|default(ioc.count)|default(0) if ioc is mapping else 0 }}</td>
+                        <td>
+                            {% if ioc is mapping %}
+                                {% set confidence = namespace(value=ioc.count|default(1)) %}
+                                {% if confidence.value > 8 %}
+                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                    <div class="bg-green-500 h-1.5 rounded-full" style="width: 95%"></div>
+                                </div>
+                                <span class="text-xs text-gray-500">High</span>
+                                {% elif confidence.value > 4 %}
+                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                    <div class="bg-yellow-500 h-1.5 rounded-full" style="width: 70%"></div>
+                                </div>
+                                <span class="text-xs text-gray-500">Medium</span>
+                                {% else %}
+                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                    <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                </div>
+                                <span class="text-xs text-gray-500">Low</span>
+                                {% endif %}
+                            {% else %}
+                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                    <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                </div>
+                                <span class="text-xs text-gray-500">Low</span>
                             {% endif %}
                         </td>
                     </tr>
