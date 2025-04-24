@@ -23,11 +23,11 @@
     <div class="page-actions">
         <!-- Entity-specific actions -->
         {% if entity_type == 'feed' %}
-        <a href="{{ url_for('export_feed', feed_name=entity.feed_name, format='csv') }}" class="btn btn-success">
+        <a href="{{ url_for('export_feed', feed_name=entity_id, format='csv') }}" class="btn btn-success">
             <i class="fas fa-download mr-2"></i>Export Data
         </a>
         {% elif entity_type == 'campaign' %}
-        <a href="{{ url_for('generate_report', campaign_id=entity.campaign_id) }}" class="btn btn-primary">
+        <a href="{{ url_for('generate_report', campaign_id=entity_id) }}" class="btn btn-primary">
             <i class="fas fa-file-export mr-2"></i>Generate Report
         </a>
         {% elif entity_type == 'ioc' %}
@@ -37,8 +37,8 @@
         {% endif %}
         
         <!-- Common actions -->
-        {% if action_buttons %}
-        {% for button in action_buttons %}
+        {% if entity_actions %}
+        {% for button in entity_actions %}
         <a href="{{ button.url }}" class="btn btn-{{ button.type|default('primary') }}">
             <i class="fas fa-{{ button.icon|default('plus') }} mr-2"></i>{{ button.text }}
         </a>
@@ -541,21 +541,41 @@
 
 {% block scripts %}
 <script>
-    // Tab Navigation
+document.addEventListener('DOMContentLoaded', function() {
+    console.log("Detail page loaded - initializing components");
+    
+    // Authentication state check for debugging
+    console.log("Auth state check: ", {
+        "isLoggedIn": {{ session.get('logged_in', False)|tojson }}, 
+        "currentUser": "{{ session.get('username', '') }}"
+    });
+    
+    // Improved Tab Navigation
     const tabLinks = document.querySelectorAll('.tab-link');
     const tabContents = document.querySelectorAll('.tab-content');
     
+    console.log(`Found ${tabLinks.length} tab links and ${tabContents.length} tab contents`);
+    
+    // Initialize tab tracking
+    let activeTabs = {};
+    
     tabLinks.forEach(link => {
-        link.addEventListener('click', (e) => {
+        const tabId = link.getAttribute('data-tab');
+        console.log(`Registering event handler for tab: ${tabId}`);
+        
+        link.addEventListener('click', function(e) {
             e.preventDefault();
             
-            // Remove active class from all tabs
+            console.log(`Tab clicked: ${tabId}`);
+            activeTabs[tabId] = true;
+            
+            // Reset all tabs (remove active state)
             tabLinks.forEach(tabLink => {
                 tabLink.classList.remove('border-blue-500', 'text-blue-600');
                 tabLink.classList.add('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
             });
             
-            // Add active class to clicked tab
+            // Set active tab (add active state)
             link.classList.add('border-blue-500', 'text-blue-600');
             link.classList.remove('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
             
@@ -564,11 +584,35 @@
                 content.classList.add('hidden');
             });
             
-            // Show relevant tab content
-            const tabId = link.getAttribute('data-tab');
-            document.getElementById('tab-' + tabId).classList.remove('hidden');
+            // Show the selected tab content
+            const tabContent = document.getElementById('tab-' + tabId);
+            if (tabContent) {
+                tabContent.classList.remove('hidden');
+                console.log(`Showing tab content for: ${tabId}`);
+            } else {
+                console.error(`Tab content element not found for tab: ${tabId}`);
+            }
         });
     });
+    
+    // Check URL hash for tab navigation
+    function checkUrlHash() {
+        const hash = window.location.hash;
+        if (hash && hash.startsWith('#tab-')) {
+            const tabId = hash.substring(5); // Remove '#tab-' prefix
+            const tabLink = document.querySelector(`.tab-link[data-tab="${tabId}"]`);
+            if (tabLink) {
+                tabLink.click();
+                console.log(`Activated tab from URL hash: ${tabId}`);
+            }
+        }
+    }
+    
+    // Initial hash check
+    checkUrlHash();
+    
+    // Listen for hash changes
+    window.addEventListener('hashchange', checkUrlHash);
     
     {% if entity_type == 'feed' and chart_data %}
     // Feed Activity Chart
@@ -577,42 +621,53 @@
         counts: {{ chart_data.counts|tojson }}
     };
     
-    Plotly.newPlot('mainChart', [{
-        x: chartData.dates,
-        y: chartData.counts,
-        type: 'bar',
-        marker: {
-            color: '#3b82f6',
-            opacity: 0.8
-        }
-    }], {
-        margin: { t: 10, r: 10, l: 40, b: 40 },
-        xaxis: { title: 'Date' },
-        yaxis: { title: 'Records' }
-    });
+    console.log("Rendering feed activity chart", chartData);
+    
+    try {
+        Plotly.newPlot('mainChart', [{
+            x: chartData.dates,
+            y: chartData.counts,
+            type: 'bar',
+            marker: {
+                color: '#3b82f6',
+                opacity: 0.8
+            }
+        }], {
+            margin: { t: 10, r: 10, l: 40, b: 40 },
+            xaxis: { title: 'Date' },
+            yaxis: { title: 'Records' }
+        });
+    } catch (e) {
+        console.error("Error rendering chart:", e);
+    }
     {% endif %}
     
     {% if entity_type == 'campaign' and chart_data %}
     // Campaign IOC Type Distribution
-    Plotly.newPlot('mainChart', [{
-        labels: {{ chart_data.labels|tojson }},
-        values: {{ chart_data.values|tojson }},
-        type: 'pie',
-        textinfo: 'label+percent',
-        insidetextorientation: 'radial',
-        marker: {
-            colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
-        }
-    }], {
-        margin: { t: 0, b: 30, l: 30, r: 30 },
-        showlegend: true,
-        legend: { orientation: 'h', y: -0.2 }
-    });
+    try {
+        Plotly.newPlot('mainChart', [{
+            labels: {{ chart_data.labels|tojson }},
+            values: {{ chart_data.values|tojson }},
+            type: 'pie',
+            textinfo: 'label+percent',
+            insidetextorientation: 'radial',
+            marker: {
+                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+            }
+        }], {
+            margin: { t: 0, b: 30, l: 30, r: 30 },
+            showlegend: true,
+            legend: { orientation: 'h', y: -0.2 }
+        });
+    } catch (e) {
+        console.error("Error rendering campaign chart:", e);
+    }
     {% endif %}
     
     {% if show_visualization|default(false) %}
     // Entity Network Visualization
     {% if entity_type == 'campaign' %}
+    console.log("Initializing campaign visualization");
     // Campaign relationship visualization
     const nodes = [
         {id: 'campaign', label: '{{ entity.campaign_name }}', group: 'campaign'},
@@ -631,8 +686,25 @@
     {% endfor %}
     {% endif %}
     
-    // TODO: Create force-directed network visualization with Plotly or D3.js
+    // Create visualization with Plotly or D3.js
     {% endif %}
     {% endif %}
+    
+    // Error reporting function
+    function reportError(message, details) {
+        console.error(message, details);
+        // You could add code here to send errors to your backend
+    }
+    
+    // Handle AJAX errors
+    window.addEventListener('error', function(e) {
+        reportError('JavaScript error', {
+            message: e.message,
+            source: e.filename,
+            lineno: e.lineno,
+            colno: e.colno
+        });
+    });
+});
 </script>
 {% endblock %}
