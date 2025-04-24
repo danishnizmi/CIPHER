@@ -301,7 +301,7 @@
                     {% for campaign in campaigns %}
                     <tr>
                         <td>
-                            <a href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
                                 {{ campaign.campaign_name }}
                             </a>
                         </td>
@@ -355,7 +355,7 @@
                             <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
                         </td>
                         <td>
-                            <a href="{{ url_for('ioc_detail', type=ioc.type, value=ioc.value) }}" class="text-blue-600 hover:underline">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
                                 {{ ioc.value }}
                             </a>
                         </td>
