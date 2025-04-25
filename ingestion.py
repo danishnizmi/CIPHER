@@ -12,6 +12,8 @@ from io import StringIO, BytesIO
 import zipfile
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Union, Tuple
+from collections import defaultdict
+from functools import wraps
 
 import requests
 from google.cloud import bigquery
@@ -36,7 +38,16 @@ bq_client = None
 storage_client = None
 publisher = None
 
-# Basic Open Source Feed Definitions - simplified to include just a few key feeds
+# Rate limiting management
+_last_request_time = defaultdict(float)
+_rate_limit_delays = {
+    "phishtank.com": 300,  # 5 minutes between requests - PhishTank has strict limits
+    "urlhaus.abuse.ch": 60,  # 1 minute
+    "threatfox.abuse.ch": 60,  # 1 minute
+    "default": 10  # Default 10 seconds for any other domain
+}
+
+# Basic Open Source Feed Definitions
 FEED_SOURCES = {
     "threatfox": {
         "url": "https://threatfox-api.abuse.ch/api/v1/",
@@ -51,14 +62,14 @@ FEED_SOURCES = {
         "table_id": "phishtank_urls",
         "format": "json",
         "auth_required": False,
+        "rate_limit": 300,  # 5 minutes
         "description": "PhishTank - Community-verified phishing URLs"
     },
     "urlhaus": {
         "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
         "table_id": "urlhaus_malware",
         "format": "csv",
-        "zip_compressed": True,
-        "skip_lines": 8,  # Skip first 8 lines (comments)
+        "skip_lines": 8,  # Skip header info/comments
         "description": "URLhaus - Database of malicious URLs"
     }
 }
@@ -89,6 +100,55 @@ def get_client(client_type: str):
     except Exception as e:
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
         return None
+
+def _rate_limited_request(url, timeout=30, max_retries=3):
+    """Make a rate-limited request with respect to API limits"""
+    domain = url.split('/')[2]
+    
+    # Determine delay based on domain
+    delay = _rate_limit_delays.get(domain, _rate_limit_delays['default'])
+    
+    for retry in range(max_retries):
+        # Check if we need to wait
+        time_since_last = time.time() - _last_request_time.get(domain, 0)
+        if time_since_last < delay:
+            wait_time = delay - time_since_last
+            logger.info(f"Rate limiting: waiting {wait_time:.1f}s before requesting from {domain}")
+            time.sleep(wait_time)
+        
+        # Make request and record time
+        try:
+            response = requests.get(url, timeout=timeout)
+            _last_request_time[domain] = time.time()
+            
+            # Handle rate limit responses
+            if response.status_code == 429:
+                logger.warning(f"Rate limit hit for {domain}. Response: {response.text}")
+                # Increase delay for this domain for future requests
+                _rate_limit_delays[domain] = min(_rate_limit_delays[domain] * 2, 3600)  # Max 1 hour
+                
+                # Apply backoff
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry) * 60  # Exponential backoff
+                    logger.info(f"Backing off for {wait_time}s before retry")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise requests.RequestException(f"Rate limit exceeded for {domain} after {max_retries} retries")
+            
+            return response
+            
+        except requests.RequestException as e:
+            # Apply backoff for network errors
+            if retry < max_retries - 1:
+                wait_time = (2 ** retry) * 10  # Exponential backoff
+                logger.info(f"Request error: {str(e)}. Backing off for {wait_time}s before retry")
+                time.sleep(wait_time)
+            else:
+                raise
+    
+    # Should not reach here, but just in case
+    raise requests.RequestException(f"Failed to make request to {url} after {max_retries} retries")
 
 def ensure_resources() -> bool:
     """Ensure BigQuery datasets and tables exist"""
@@ -135,6 +195,7 @@ class ThreatDataIngestion:
     def __init__(self):
         """Initialize the ingestion engine"""
         self.ready = ensure_resources()
+        self.feed_stats = {}
     
     def process_all_feeds(self) -> List[Dict]:
         """Process all configured feeds"""
@@ -146,17 +207,31 @@ class ThreatDataIngestion:
         logger.info(f"Processing {len(FEED_SOURCES)} feeds")
         
         for feed_name in FEED_SOURCES:
-            result = self.process_feed(feed_name)
-            results.append(result)
-            
-            # Add a small delay between feeds to avoid rate limits
-            time.sleep(2)
+            try:
+                result = self.process_feed(feed_name)
+                results.append(result)
+                
+                # Add a small delay between feeds to avoid overwhelming systems
+                time.sleep(2)
+            except Exception as e:
+                logger.error(f"Unexpected error processing feed {feed_name}: {str(e)}")
+                results.append(self._error_result(feed_name, f"Unexpected error: {str(e)}"))
         
         # Log a summary
         success_count = sum(1 for r in results if r.get("status") == "success")
         total_records = sum(r.get("record_count", 0) for r in results)
         
         logger.info(f"Completed processing {len(results)} feeds: {success_count} successful, {total_records} total records")
+        
+        # Save the latest feed statistics
+        self.feed_stats = {
+            "last_run": datetime.utcnow().isoformat(),
+            "feeds_processed": len(results),
+            "successful_feeds": success_count,
+            "total_records": total_records,
+            "details": results
+        }
+        
         return results
     
     def process_feed(self, feed_name: str) -> Dict[str, Any]:
@@ -254,7 +329,7 @@ class ThreatDataIngestion:
                     url = feed_config.get("opensrc_url", feed_config["url"])
                     
                     logger.info(f"Fetching ThreatFox data from {url}")
-                    response = requests.get(url, timeout=30)
+                    response = _rate_limited_request(url, timeout=30)
                     response.raise_for_status()
                     
                     return response.json(), None
@@ -266,7 +341,7 @@ class ThreatDataIngestion:
             if feed_config.get("zip_compressed"):
                 try:
                     logger.info(f"Fetching compressed data from {url}")
-                    response = requests.get(url, timeout=30)
+                    response = _rate_limited_request(url, timeout=30)
                     response.raise_for_status()
                     
                     with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
@@ -283,7 +358,7 @@ class ThreatDataIngestion:
                     return None, f"Error: {str(e)}"
             
             # Make the standard request
-            response = requests.get(url, timeout=30)
+            response = _rate_limited_request(url, timeout=30)
             response.raise_for_status()
             
             # Return data based on format
@@ -342,6 +417,20 @@ class ThreatDataIngestion:
             # Special handling for some feeds like PhishTank 
             if feed_name == "phishtank" and isinstance(data, dict):
                 data = list(data.values())[0] if data else []
+            # Handle ThreatFox format with multiple key-value pairs
+            elif feed_name == "threatfox" and isinstance(data, dict):
+                # ThreatFox format may have IOCs at the top level or in a field
+                iocs = data.get("data", {}).get("iocs", [])
+                if iocs:
+                    data = iocs
+                else:
+                    # For the export format, data might be directly at the top level
+                    # Format looks like {"1511419": [{"ioc_value": "..."}, ...]} with multiple IDs
+                    flattened_data = []
+                    for ioc_list in data.values():
+                        if isinstance(ioc_list, list):
+                            flattened_data.extend(ioc_list)
+                    data = flattened_data
             else:
                 data = [data]
         
@@ -360,26 +449,81 @@ class ThreatDataIngestion:
         return records
     
     def _process_csv_data(self, data: str, feed_name: str, feed_config: Dict) -> List[Dict]:
-        """Process CSV feed data"""
+        """Process CSV feed data with better handling of headers and comments"""
         try:
             # Handle skip lines if specified
             skip_lines = feed_config.get("skip_lines", 0)
+            comment_char = feed_config.get("comment_char", "#")
+            
+            # Split into lines for preprocessing
+            lines = data.split('\n')
+            
+            # Filter out comment lines and find header
+            content_lines = []
+            header_found = False
+            
+            # Different strategies for finding header and content
             if skip_lines > 0:
-                lines = data.split('\n')
-                if len(lines) <= skip_lines:
+                # Skip a specific number of lines from the top
+                if skip_lines >= len(lines):
                     logger.warning(f"CSV has fewer lines ({len(lines)}) than skip_lines ({skip_lines})")
                     return []
                 
-                data = '\n'.join(lines[skip_lines:])
+                # Find the first non-empty line after skip_lines as the header
+                for i in range(skip_lines, len(lines)):
+                    line = lines[i].strip()
+                    if line and not line.startswith(comment_char):
+                        content_lines = lines[i:]
+                        break
+            else:
+                # Dynamically find the header by skipping comment lines
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    if line.startswith(comment_char):
+                        continue
+                    
+                    if not header_found:
+                        # First non-comment line is assumed to be the header
+                        header_found = True
+                    
+                    content_lines.append(line)
             
-            # Parse CSV
-            reader = csv.DictReader(StringIO(data))
+            if not content_lines:
+                logger.warning(f"No content found in CSV data for {feed_name}")
+                return []
+            
+            # Rejoin the content lines for CSV parsing
+            filtered_data = '\n'.join(content_lines)
+            
+            # Check for quoted content (common in URLhaus CSV)
+            has_quotes = '"' in filtered_data
+            
+            # Parse CSV with appropriate dialect
+            if has_quotes:
+                # Use csv.Sniffer to detect the dialect if needed
+                dialect = csv.excel
+                reader = csv.DictReader(StringIO(filtered_data), dialect=dialect)
+            else:
+                reader = csv.DictReader(StringIO(filtered_data))
+            
             records = []
             timestamp = datetime.utcnow().isoformat()
             
             for row in reader:
-                # Create a record, retaining all columns
-                record = {key: value for key, value in row.items() if key}
+                # Skip empty rows
+                if not any(value.strip() for value in row.values() if value):
+                    continue
+                
+                # Clean up the record
+                record = {}
+                for key, value in row.items():
+                    if key:  # Skip None keys
+                        # Handle None values
+                        clean_value = value.strip() if value else value
+                        record[key] = clean_value
                 
                 # Add ingestion timestamp
                 record["_ingestion_timestamp"] = timestamp
@@ -390,7 +534,10 @@ class ThreatDataIngestion:
             return records
             
         except Exception as e:
-            logger.error(f"Error parsing CSV data: {str(e)}")
+            logger.error(f"Error parsing CSV data for {feed_name}: {str(e)}")
+            # Log sample of the data to assist with debugging
+            if data:
+                logger.error(f"First 200 chars of data: {data[:200]}")
             return []
     
     def _process_text_data(self, data: str, feed_name: str, feed_config: Dict) -> List[Dict]:
@@ -400,15 +547,21 @@ class ThreatDataIngestion:
             records = []
             timestamp = datetime.utcnow().isoformat()
             
+            # Get comment character from config or default to #
+            comment_char = feed_config.get("comment_char", "#")
+            
             # Generic text processing
             for i, line in enumerate(lines):
-                if line and not line.startswith('#'):
-                    record = {
-                        "line_number": i + 1,
-                        "content": line.strip(),
-                        "_ingestion_timestamp": timestamp
-                    }
-                    records.append(record)
+                # Skip empty lines or comments
+                if not line or line.strip().startswith(comment_char):
+                    continue
+                
+                record = {
+                    "line_number": i + 1,
+                    "content": line.strip(),
+                    "_ingestion_timestamp": timestamp
+                }
+                records.append(record)
             
             logger.info(f"Processed {len(records)} records from {feed_name} text data")
             return records
@@ -417,7 +570,7 @@ class ThreatDataIngestion:
             return []
     
     def _upload_to_bigquery(self, records: List[Dict], feed_name: str, feed_config: Dict) -> int:
-        """Upload records to BigQuery"""
+        """Upload records to BigQuery with automatic table creation and retry logic"""
         if not records:
             logger.warning(f"No records to upload for {feed_name}")
             return 0
@@ -532,7 +685,8 @@ class ThreatDataIngestion:
                 "feeds": [],
                 "total_records": 0,
                 "active_feeds": 0,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                "last_ingestion_run": self.feed_stats.get("last_run", "Never")
             }
             
             # Query for all tables in the dataset
@@ -568,7 +722,8 @@ class ThreatDataIngestion:
                     SELECT 
                         COUNT(*) as record_count,
                         MIN(_ingestion_timestamp) as earliest_record,
-                        MAX(_ingestion_timestamp) as latest_record
+                        MAX(_ingestion_timestamp) as latest_record,
+                        COUNT(DISTINCT CAST(_ingestion_timestamp AS DATE)) as update_days
                     FROM `{PROJECT_ID}.{DATASET_ID}.{table_id}`
                     """
                     
@@ -578,6 +733,12 @@ class ThreatDataIngestion:
                     record_count = result.record_count
                     earliest = result.earliest_record.isoformat() if result.earliest_record else None
                     latest = result.latest_record.isoformat() if result.latest_record else None
+                    update_days = result.update_days
+                    
+                    # Calculate growth rate (records per day)
+                    growth_rate = 0
+                    if update_days > 0:
+                        growth_rate = record_count / update_days
                     
                     feed_stats = {
                         "feed_name": feed_name,
@@ -585,6 +746,8 @@ class ThreatDataIngestion:
                         "record_count": record_count,
                         "earliest_record": earliest,
                         "latest_record": latest,
+                        "update_days": update_days,
+                        "growth_rate": growth_rate,
                         "description": feed_config.get("description") if feed_config else "Custom feed"
                     }
                     
@@ -604,6 +767,21 @@ class ThreatDataIngestion:
                         "error": str(e),
                         "record_count": 0
                     })
+            
+            # Add detail from last ingestion run if available
+            if self.feed_stats and "details" in self.feed_stats:
+                for feed_stat in stats["feeds"]:
+                    feed_name = feed_stat["feed_name"]
+                    # Find matching details from last run
+                    for detail in self.feed_stats["details"]:
+                        if detail.get("feed_name") == feed_name:
+                            feed_stat["last_ingestion"] = {
+                                "status": detail.get("status"),
+                                "record_count": detail.get("record_count", 0),
+                                "timestamp": detail.get("timestamp"),
+                                "duration_seconds": detail.get("duration_seconds", 0)
+                            }
+                            break
             
             return stats
         except Exception as e:
