@@ -55,44 +55,55 @@ CORS(app)
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
 SESSION_TIMEOUT = int(config.get("SESSION_TIMEOUT", "28800"))  # 8 hours in seconds
 
-# Admin credentials - securely retrieved
+# Admin credentials - securely retrieved and initialized at module scope
+ADMIN_USERNAME = 'admin'
+ADMIN_HASH = None  # Will be populated by get_admin_credentials
+
 def get_admin_credentials():
-    """Get admin credentials from Secret Manager or use fallback if not available"""
+    """Get admin credentials from Secret Manager or create a secure fallback"""
+    global ADMIN_HASH
+
     try:
+        # Try to get credentials from Secret Manager
         auth_config = config.get_cached_config('auth-config', force_refresh=True)
         if auth_config and 'users' in auth_config and 'admin' in auth_config['users']:
             admin_user = auth_config['users']['admin']
+            ADMIN_HASH = admin_user.get('password')
+            logger.info("Admin credentials loaded from Secret Manager")
             return {
                 'username': 'admin',
-                'password_hash': admin_user.get('password'),
+                'password_hash': ADMIN_HASH,
                 'role': admin_user.get('role', 'admin')
             }
     except Exception as e:
         logger.warning(f"Failed to retrieve admin credentials from Secret Manager: {e}")
     
-    # Fallback to environment variables
-    admin_password = os.environ.get('ADMIN_PASSWORD', 'Admin123!')
-    admin_hash = hashlib.sha256(admin_password.encode()).hexdigest()
+    # If we couldn't get credentials from Secret Manager, generate a secure random password
+    secure_password = secrets.token_urlsafe(12)  # 16 character secure random password
+    ADMIN_HASH = hashlib.sha256(secure_password.encode()).hexdigest()
     
-    # Create admin user in Secret Manager if possible
+    # Create admin user in Secret Manager
     try:
         if hasattr(config, 'add_user'):
-            config.add_user('admin', admin_password, 'admin')
-            logger.info("Admin user created in Secret Manager")
+            config.add_user('admin', secure_password, 'admin')
+            logger.info("Admin user created in Secret Manager with secure random password")
     except Exception as e:
         logger.warning(f"Failed to store admin credentials in Secret Manager: {e}")
     
-    logger.info("Using fallback admin credentials (PLEASE CHANGE AFTER FIRST LOGIN)")
+    logger.warning(f"Using generated secure password for admin. Please check logs for password or change after first login.")
     return {
         'username': 'admin',
-        'password_hash': admin_hash,
-        'role': 'admin'
+        'password_hash': ADMIN_HASH,
+        'role': 'admin',
+        'generated_password': secure_password  # Include this in case it's needed for logging
     }
 
 # Initialize admin credentials
 admin_creds = get_admin_credentials()
-ADMIN_USERNAME = admin_creds['username']
-ADMIN_HASH = admin_creds['password_hash']
+# If admin credentials are newly generated, log the password for initial access
+if admin_creds.get('generated_password'):
+    logger.warning(f"IMPORTANT: Generated admin password: {admin_creds.get('generated_password')}")
+    # Update auth.html with the correct password
 
 # Utility Functions
 def hash_password(password): 
@@ -281,6 +292,13 @@ def login():
             user_role = 'admin'
         
         if is_valid:
+            # Update last login time
+            try:
+                if hasattr(config, 'update_user'):
+                    config.update_user(username, {'last_login': datetime.utcnow().isoformat()})
+            except Exception as e:
+                logger.warning(f"Failed to update last login time: {e}")
+                
             # Set session data
             session.clear()
             session['logged_in'] = True
@@ -314,16 +332,29 @@ def logout():
 @login_required
 def profile():
     """User Profile page"""
+    username = session.get('username')
+    user_data = {}
+    
+    try:
+        # Get actual user data from auth config
+        auth_config = config.get_cached_config('auth-config')
+        if auth_config and 'users' in auth_config and username in auth_config['users']:
+            user_data = auth_config['users'][username]
+    except Exception as e:
+        logger.warning(f"Error retrieving user data: {e}")
+    
     return render_template('auth.html', 
                           page_type='profile', 
-                          username=session.get('username'),
-                          user={"role": session.get('role', 'user'), 
-                                "last_login": datetime.now().isoformat()})
+                          username=username,
+                          user={"role": user_data.get('role', session.get('role', 'user')), 
+                                "last_login": user_data.get('last_login', datetime.now().isoformat())})
 
 @app.route('/profile/change_password', methods=['POST'])
 @login_required
 def change_password():
     """Change user's own password"""
+    global ADMIN_HASH  # Proper global declaration at the beginning of the function
+    
     username = session.get('username')
     current_password = request.form.get('current_password')
     new_password = request.form.get('new_password')
@@ -348,16 +379,18 @@ def change_password():
     
     # Check if admin user
     if username == ADMIN_USERNAME:
-        # Update admin in local variable and Secret Manager
+        # Update admin in Secret Manager
         if verify_password(ADMIN_HASH, current_password):
             is_valid = True
-            global ADMIN_HASH
             ADMIN_HASH = hash_password(new_password)
             
             # Update in Secret Manager if available
             try:
                 if hasattr(config, 'update_user'):
-                    config.update_user(username, {'password': ADMIN_HASH})
+                    config.update_user(username, {
+                        'password': ADMIN_HASH,
+                        'password_changed': datetime.utcnow().isoformat()
+                    })
                     logger.info("Admin password updated in Secret Manager")
             except Exception as e:
                 logger.warning(f"Failed to update admin in Secret Manager: {e}")
@@ -371,7 +404,10 @@ def change_password():
                     is_valid = True
                     # Update in Secret Manager
                     if hasattr(config, 'update_user'):
-                        config.update_user(username, {'password': hash_password(new_password)})
+                        config.update_user(username, {
+                            'password': hash_password(new_password),
+                            'password_changed': datetime.utcnow().isoformat()
+                        })
                         logger.info(f"Password updated for user {username}")
         except Exception as e:
             logger.error(f"Error updating password: {e}")
@@ -424,24 +460,41 @@ def dashboard():
         iocs_data = api_request('iocs', {'days': days, 'limit': 5})
         gcp_metrics = get_gcp_metrics()
         
-        # Get chart data
-        ioc_type_labels = ["ip", "url", "domain", "hash", "email", "cve"]
-        ioc_type_values = [42, 36, 28, 19, 12, 7]
+        # Get chart data from real metrics if available
+        ioc_type_labels = []
+        ioc_type_values = []
         
-        # Try to use real data if available
+        # Use real data for IOC type distribution
         if 'iocs' in stats and 'types' in stats['iocs'] and stats['iocs']['types']:
             types_data = stats['iocs']['types']
             if isinstance(types_data, list) and len(types_data) > 0:
-                ioc_type_labels = []
-                ioc_type_values = []
                 for item in types_data:
                     if isinstance(item, dict):
                         ioc_type_labels.append(item.get('type', 'unknown'))
                         ioc_type_values.append(item.get('count', 0))
         
-        # Activity data
-        activity_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(30)]
-        activity_counts = [10 + i % 20 for i in range(30)]
+        # If no real data available, don't show any data rather than dummy data
+        if not ioc_type_labels:
+            ioc_type_labels = []
+            ioc_type_values = []
+        
+        # Activity data - try to get real data
+        activity_dates = []
+        activity_counts = []
+        
+        # Try to use real activity data if available
+        if 'daily_activity' in stats:
+            daily_activity = stats.get('daily_activity', [])
+            for item in daily_activity:
+                if isinstance(item, dict):
+                    activity_dates.append(item.get('date'))
+                    activity_counts.append(item.get('count', 0))
+        
+        # Calculate trends based on real data if available
+        feed_trend = stats.get('feeds', {}).get('growth_rate', 0)
+        ioc_trend = stats.get('iocs', {}).get('growth_rate', 0) 
+        campaign_trend = stats.get('campaigns', {}).get('growth_rate', 0)
+        analysis_trend = stats.get('analyses', {}).get('growth_rate', 0)
         
         # Update data for dashboard view
         common_data.update({
@@ -452,10 +505,10 @@ def dashboard():
             'ioc_type_values': json.dumps(ioc_type_values),
             'activity_dates': json.dumps(activity_dates),
             'activity_counts': json.dumps(activity_counts),
-            'feed_trend': 5,
-            'ioc_trend': 12,
-            'campaign_trend': 8,
-            'analysis_trend': 15
+            'feed_trend': feed_trend,
+            'ioc_trend': ioc_trend,
+            'campaign_trend': campaign_trend,
+            'analysis_trend': analysis_trend
         })
     
     # Feeds view
@@ -503,19 +556,20 @@ def iocs():
 @app.route('/campaigns')
 @login_required
 def campaigns():
-    """Campaigns view - placeholder for campaigns detail page"""
-    return redirect(url_for('dashboard', view='dashboard'))
+    """Campaigns view - redirects to dashboard with view parameter"""
+    days = request.args.get('days', '30')
+    return redirect(url_for('dashboard', view='campaigns', days=days))
 
 @app.route('/explore')
 @login_required
 def explore():
-    """Data exploration view - placeholder for data browser"""
+    """Data exploration view - redirects to dashboard"""
     return redirect(url_for('dashboard'))
 
 @app.route('/alerts')
 @login_required
 def alerts():
-    """Alerts view - placeholder for alerts page"""
+    """Alerts view - redirects to dashboard"""
     return redirect(url_for('dashboard'))
 
 # Dynamic content detail
@@ -523,11 +577,34 @@ def alerts():
 @login_required
 def dynamic_content_detail(content_type, identifier):
     """Generic handler for content details"""
+    # Get actual content data from API
+    content_data = {}
+    try:
+        if content_type == 'feed':
+            feed_data = api_request(f'feeds/{identifier}/stats')
+            content_data = feed_data
+        elif content_type == 'campaign':
+            campaign_data = api_request(f'campaigns/{identifier}')
+            content_data = campaign_data
+        elif content_type == 'ioc':
+            ioc_parts = identifier.split('/')
+            if len(ioc_parts) >= 2:
+                ioc_type = ioc_parts[0]
+                ioc_value = '/'.join(ioc_parts[1:])  # Handle URLs with slashes
+                ioc_data = api_request(f'iocs/detail', {'type': ioc_type, 'value': ioc_value})
+                content_data = ioc_data
+    except Exception as e:
+        logger.warning(f"Error retrieving content data for {content_type}/{identifier}: {e}")
+    
+    # Fallback to basic info if API request failed
+    if not content_data:
+        content_data = {"type": content_type, "id": identifier}
+    
     return render_template('detail.html', 
                           content_type=content_type, 
                           identifier=identifier,
                           title=f"{content_type.title()} Details: {identifier}",
-                          content={"type": content_type, "id": identifier})
+                          content=content_data)
 
 # Ingest data route
 @app.route('/ingest_threat_data')
@@ -562,13 +639,6 @@ def ingest_threat_data():
         flash(f"Error starting ingestion: {str(e)}", "danger")
     
     return redirect(url_for('dashboard', view='feeds'))
-
-# Catch-all route for any other paths
-@app.route('/<path:path>')
-@login_required
-def catch_all(path):
-    """Redirect all other routes to dashboard"""
-    return redirect(url_for('dashboard'))
 
 # API health check for Cloud Run
 @app.route('/api/health', methods=['GET'])
@@ -665,6 +735,11 @@ def add_user_route():
         if password != confirm_password:
             flash("Passwords do not match", "danger")
             return render_template('auth.html', page_type='user_add', error="Passwords do not match")
+        
+        # Check password complexity
+        if len(password) < 8:
+            flash("Password must be at least 8 characters long", "danger")
+            return render_template('auth.html', page_type='user_add', error="Password must be at least 8 characters")
         
         # Check if user already exists
         try:
