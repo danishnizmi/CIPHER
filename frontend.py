@@ -1,6 +1,6 @@
 """
 Threat Intelligence Platform - Simplified Frontend Module
-Provides web interface for the threat intelligence platform using consolidated templates.
+Provides web interface for the threat intelligence platform using only auth.html, base.html and dashboard.html.
 """
 
 import os
@@ -105,6 +105,21 @@ def api_request(endpoint: str, params: Dict = None) -> Dict:
         "analyses": {"total_analyses": 0}
     }
     
+    # Try direct API call first (no proxying through API_URL)
+    try:
+        # Import api module and try to call function directly
+        import api
+        
+        if hasattr(api, endpoint) and callable(getattr(api, endpoint)):
+            # Call API function directly
+            direct_function = getattr(api, endpoint)
+            result = direct_function(params)
+            if result:
+                return result
+    except (ImportError, AttributeError):
+        # If api module not available or function doesn't exist, continue with HTTP request
+        pass
+    
     # Build the URL properly - handle both external API_URL and local
     if API_URL:
         # Make sure API_URL doesn't end with / to avoid double slashes
@@ -199,162 +214,229 @@ def logout():
     session.pop('role', None)
     return redirect(url_for('login'))
 
+@app.route('/profile', methods=['GET'])
+@login_required
+def profile():
+    """User Profile page"""
+    username = session.get('username')
+    
+    # Simple user data
+    user_data = {
+        "role": session.get('role', 'user'),
+        "last_login": datetime.now().isoformat()
+    }
+    
+    return render_template('auth.html', 
+                           page_type='profile', 
+                           username=username, 
+                           user=user_data)
+
+@app.route('/profile/change_password', methods=['POST'])
+@login_required
+def change_password():
+    """Change user's own password"""
+    global ADMIN_HASH
+    username = session.get('username')
+    current_password = request.form.get('current_password')
+    new_password = request.form.get('new_password')
+    confirm_password = request.form.get('confirm_password')
+    
+    # Verify current admin password
+    if username == ADMIN_USERNAME:
+        if not verify_password(ADMIN_HASH, current_password):
+            flash("Current password is incorrect", "danger")
+            return redirect(url_for('profile'))
+    else:
+        flash("Only admin user can change password", "danger")
+        return redirect(url_for('profile'))
+    
+    # Validate new password
+    if not new_password or not confirm_password:
+        flash("New password is required", "danger")
+        return redirect(url_for('profile'))
+    
+    if new_password != confirm_password:
+        flash("New passwords do not match", "danger")
+        return redirect(url_for('profile'))
+    
+    # Update admin password globally
+    ADMIN_HASH = hash_password(new_password)
+    logger.info("Admin password updated successfully")
+    
+    flash("Password changed successfully", "success")
+    return redirect(url_for('profile'))
+
 # Main Routes
 @app.route('/')
 @login_required
 def dashboard():
-    """Dashboard page"""
+    """Main dashboard page"""
     days = request.args.get('days', '30')
+    view_type = request.args.get('view', 'dashboard')
     
-    # Get platform stats
-    stats = api_request('stats', {'days': days})
+    # Common data for all views
+    common_data = {
+        'days': days,
+        'current_view': view_type,
+    }
     
-    # If stats is empty or missing expected structure, populate with defaults
-    if not stats or not isinstance(stats, dict):
-        stats = {
-            "feeds": {"total_sources": 0},
-            "campaigns": {"total_campaigns": 0},
-            "iocs": {"total": 0, "types": []},
-            "analyses": {"total_analyses": 0}
-        }
+    # Dashboard view (default)
+    if view_type == 'dashboard':
+        # Get platform stats
+        stats = api_request('stats', {'days': days})
+        
+        # If stats is empty or missing expected structure, populate with defaults
+        if not stats or not isinstance(stats, dict):
+            stats = {
+                "feeds": {"total_sources": 0},
+                "campaigns": {"total_campaigns": 0},
+                "iocs": {"total": 0, "types": []},
+                "analyses": {"total_analyses": 0}
+            }
+        
+        # Ensure all required keys exist
+        if "feeds" not in stats:
+            stats["feeds"] = {"total_sources": 0}
+        if "campaigns" not in stats:
+            stats["campaigns"] = {"total_campaigns": 0}
+        if "iocs" not in stats:
+            stats["iocs"] = {"total": 0, "types": []}
+        if "analyses" not in stats:
+            stats["analyses"] = {"total_analyses": 0}
+        
+        # Get recent campaigns
+        campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
+        campaigns = campaigns_data.get('campaigns', [])
+        
+        # Get top IOCs
+        iocs_data = api_request('iocs', {'days': days, 'limit': 5})
+        top_iocs = iocs_data.get('records', [])
+        
+        # Get GCP metrics
+        gcp_metrics = get_gcp_metrics()
+        
+        # Generate chart data
+        ioc_type_labels = []
+        ioc_type_values = []
+        
+        # Try to get real chart data
+        if 'iocs' in stats and 'types' in stats['iocs']:
+            ioc_types = stats['iocs']['types']
+            labels = [item.get('type', 'unknown') for item in ioc_types]
+            values = [item.get('count', 0) for item in ioc_types]
+            if labels and values:
+                ioc_type_labels = labels
+                ioc_type_values = values
+        
+        # Generate activity data
+        activity_data = api_request('feeds/alienvault_pulses/stats', {'days': days})
+        
+        # Default activity data if API fails
+        default_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+        default_counts = [int(5 + i * 2.5) for i in range(7)]
+        
+        activity_dates = default_dates
+        activity_counts = default_counts
+        
+        # Try to use real activity data if available
+        if activity_data and "daily_counts" in activity_data:
+            dates = [item.get("date") for item in activity_data.get("daily_counts", [])]
+            counts = [item.get("count", 0) for item in activity_data.get("daily_counts", [])]
+            if dates and counts:
+                activity_dates = dates
+                activity_counts = counts
+        
+        # Provide trend data
+        feed_trend = 5
+        ioc_trend = 12
+        campaign_trend = 8
+        analysis_trend = 15
+        
+        # Add all data to common_data
+        common_data.update({
+            'page_title': 'Threat Intelligence Dashboard',
+            'page_subtitle': 'Real-time overview of threat intelligence with actionable insights',
+            'stats': stats,
+            'campaigns': campaigns,
+            'top_iocs': top_iocs,
+            'gcp_metrics': gcp_metrics,
+            'ioc_type_labels': json.dumps(ioc_type_labels),
+            'ioc_type_values': json.dumps(ioc_type_values),
+            'activity_dates': json.dumps(activity_dates),
+            'activity_counts': json.dumps(activity_counts),
+            'feed_trend': feed_trend,
+            'ioc_trend': ioc_trend,
+            'campaign_trend': campaign_trend,
+            'analysis_trend': analysis_trend
+        })
     
-    # Ensure all required keys exist
-    if "feeds" not in stats:
-        stats["feeds"] = {"total_sources": 0}
-    if "campaigns" not in stats:
-        stats["campaigns"] = {"total_campaigns": 0}
-    if "iocs" not in stats:
-        stats["iocs"] = {"total": 0, "types": []}
-    if "analyses" not in stats:
-        stats["analyses"] = {"total_analyses": 0}
+    # Feeds view
+    elif view_type == 'feeds':
+        # Get feed data from API
+        feeds_data = api_request('feeds')
+        feed_items = feeds_data.get('feed_details', [])
+        
+        common_data.update({
+            'page_title': 'Threat Intelligence Feeds',
+            'page_icon': 'rss',
+            'page_subtitle': 'Collection of threat data from various sources',
+            'feed_items': feed_items
+        })
     
-    # Get recent campaigns
-    campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
-    campaigns = campaigns_data.get('campaigns', [])
+    # Campaigns view
+    elif view_type == 'campaigns':
+        # Get campaign data from API
+        campaigns_data = api_request('campaigns', {'days': days})
+        campaign_items = campaigns_data.get('campaigns', [])
+        
+        common_data.update({
+            'page_title': 'Threat Campaigns',
+            'page_icon': 'project-diagram',
+            'page_subtitle': 'Active and historical threat campaigns',
+            'campaign_items': campaign_items
+        })
     
-    # Get top IOCs
-    iocs_data = api_request('iocs', {'days': days, 'limit': 5})
-    top_iocs = iocs_data.get('records', [])
+    # IOCs view
+    elif view_type == 'iocs':
+        # Get IOC data from API
+        iocs_data = api_request('iocs', {'days': days})
+        ioc_records = iocs_data.get('records', [])
+        
+        # Extract IOCs from records
+        ioc_items = []
+        for record in ioc_records:
+            ioc_items.extend(record.get('iocs', []))
+        
+        common_data.update({
+            'page_title': 'Indicators of Compromise',
+            'page_icon': 'fingerprint',
+            'page_subtitle': 'Collected IOCs from all sources',
+            'ioc_items': ioc_items
+        })
     
-    # Get GCP metrics
-    gcp_metrics = get_gcp_metrics()
-    
-    # Generate chart data
-    ioc_type_labels = []
-    ioc_type_values = []
-    
-    # Try to get real chart data
-    if 'iocs' in stats and 'types' in stats['iocs']:
-        ioc_types = stats['iocs']['types']
-        labels = [item.get('type', 'unknown') for item in ioc_types]
-        values = [item.get('count', 0) for item in ioc_types]
-        if labels and values:
-            ioc_type_labels = labels
-            ioc_type_values = values
-    
-    # Generate activity data
-    activity_data = api_request('feeds/alienvault_pulses/stats', {'days': days})
-    
-    # Default activity data if API fails
-    default_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    default_counts = [int(5 + i * 2.5) for i in range(7)]
-    
-    activity_dates = default_dates
-    activity_counts = default_counts
-    
-    # Try to use real activity data if available
-    if activity_data and "daily_counts" in activity_data:
-        dates = [item.get("date") for item in activity_data.get("daily_counts", [])]
-        counts = [item.get("count", 0) for item in activity_data.get("daily_counts", [])]
-        if dates and counts:
-            activity_dates = dates
-            activity_counts = counts
-    
-    # Provide trend data
-    feed_trend = 5
-    ioc_trend = 12
-    campaign_trend = 8
-    analysis_trend = 15
-    
-    return render_template(
-        'dashboard.html',
-        days=days,
-        stats=stats,
-        campaigns=campaigns,
-        top_iocs=top_iocs,
-        gcp_metrics=gcp_metrics,
-        ioc_type_labels=json.dumps(ioc_type_labels),
-        ioc_type_values=json.dumps(ioc_type_values),
-        activity_dates=json.dumps(activity_dates),
-        activity_counts=json.dumps(activity_counts),
-        feed_trend=feed_trend,
-        ioc_trend=ioc_trend,
-        campaign_trend=campaign_trend,
-        analysis_trend=analysis_trend
-    )
+    return render_template('dashboard.html', **common_data)
 
+# Route aliases that redirect to dashboard with appropriate view parameter
 @app.route('/feeds')
 @login_required
 def feeds():
-    """Feed list page"""
-    # Get feed data from API
-    feeds_data = api_request('feeds')
-    feed_items = feeds_data.get('feed_details', [])
-    
-    return render_template(
-        'content.html',
-        page_title='Threat Intelligence Feeds',
-        page_icon='rss',
-        page_subtitle='Collection of threat data from various sources',
-        current_endpoint='feeds',
-        content_type='feeds',
-        content_items=feed_items
-    )
+    """Feed list page - redirects to dashboard with feeds view"""
+    days = request.args.get('days', '30')
+    return redirect(url_for('dashboard', view='feeds', days=days))
 
 @app.route('/campaigns')
 @login_required
 def campaigns():
-    """Campaign list page"""
-    # Get campaign data from API
+    """Campaign list page - redirects to dashboard with campaigns view"""
     days = request.args.get('days', '30')
-    campaigns_data = api_request('campaigns', {'days': days})
-    campaign_items = campaigns_data.get('campaigns', [])
-    
-    return render_template(
-        'content.html',
-        page_title='Threat Campaigns',
-        page_icon='project-diagram',
-        page_subtitle='Active and historical threat campaigns',
-        days=days,
-        current_endpoint='campaigns',
-        content_type='campaigns',
-        content_items=campaign_items
-    )
+    return redirect(url_for('dashboard', view='campaigns', days=days))
 
 @app.route('/iocs')
 @login_required
 def iocs():
-    """IOC list page"""
-    # Get IOC data from API
+    """IOC list page - redirects to dashboard with iocs view"""
     days = request.args.get('days', '30')
-    iocs_data = api_request('iocs', {'days': days})
-    ioc_records = iocs_data.get('records', [])
-    
-    # Extract IOCs from records
-    ioc_items = []
-    for record in ioc_records:
-        ioc_items.extend(record.get('iocs', []))
-    
-    return render_template(
-        'content.html',
-        page_title='Indicators of Compromise',
-        page_icon='fingerprint',
-        page_subtitle='Collected IOCs from all sources',
-        days=days,
-        current_endpoint='iocs',
-        content_type='iocs',
-        content_items=ioc_items
-    )
+    return redirect(url_for('dashboard', view='iocs', days=days))
 
 # Ingest data manually
 @app.route('/ingest_threat_data')
