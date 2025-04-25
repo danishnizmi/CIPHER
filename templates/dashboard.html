@@ -7,9 +7,9 @@
     <div>
         <h1 class="page-title">
             <i class="fas fa-tachometer-alt page-icon"></i>
-            Threat Intelligence Dashboard
+            {{ page_title }}
         </h1>
-        <p class="text-gray-600">Real-time overview of threat intelligence with actionable insights</p>
+        <p class="text-gray-600">{{ page_subtitle }}</p>
     </div>
     <div class="relative inline-block text-left">
         <button id="timeRangeButton" class="btn btn-light flex items-center">
@@ -28,6 +28,7 @@
 
 <!-- Main metrics -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+    <!-- Feed stats -->
     <div class="stat-card">
         <div class="flex justify-between">
             <div>
@@ -47,6 +48,7 @@
         </div>
     </div>
     
+    <!-- IOC stats -->
     <div class="stat-card">
         <div class="flex justify-between">
             <div>
@@ -66,6 +68,7 @@
         </div>
     </div>
     
+    <!-- Campaign stats -->
     <div class="stat-card">
         <div class="flex justify-between">
             <div>
@@ -85,6 +88,7 @@
         </div>
     </div>
     
+    <!-- Analysis stats -->
     <div class="stat-card">
         <div class="flex justify-between">
             <div>
@@ -176,6 +180,7 @@
     
     <!-- Quick Actions and Alerts -->
     <div class="lg:col-span-1">
+        <!-- Quick Actions -->
         <div class="panel mb-6">
             <div class="panel-header">
                 <h3 class="panel-title">
@@ -188,9 +193,9 @@
                     <i class="fas fa-search text-blue-600 mr-3"></i>
                     <span>Search IOCs</span>
                 </a>
-                <a href="{{ url_for('reports') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
-                    <i class="fas fa-file-export text-green-600 mr-3"></i>
-                    <span>Generate Report</span>
+                <a href="{{ url_for('ingest_threat_data') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
+                    <i class="fas fa-sync text-green-600 mr-3"></i>
+                    <span>Refresh Threat Data</span>
                 </a>
                 <a href="{{ url_for('explore') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
                     <i class="fas fa-database text-cyan-600 mr-3"></i>
@@ -204,44 +209,35 @@
             </div>
         </div>
         
+        <!-- Recent Alerts -->
         <div class="panel">
             <div class="panel-header">
                 <h3 class="panel-title">
                     <i class="fas fa-exclamation-triangle text-amber-500 mr-2"></i>
-                    Recent Alerts
+                    Recent Activity
                 </h3>
             </div>
             <div class="divide-y">
-                <a href="{{ url_for('alerts') }}" class="block p-4 hover:bg-gray-50">
+                <div class="block p-4">
                     <div class="flex justify-between mb-1">
                         <h6 class="font-medium flex items-center">
-                            <span class="severity-badge critical mr-2">Critical</span>
-                            New Ransomware Campaign
+                            <span class="severity-badge high mr-2">New Data</span>
+                            Feeds Updated
                         </h6>
-                        <small class="text-gray-500">2h ago</small>
+                        <small class="text-gray-500">Recently</small>
                     </div>
-                    <p class="text-sm text-gray-600">Multiple indicators of BlackCat ransomware detected in financial sector.</p>
-                </a>
-                <a href="{{ url_for('alerts') }}" class="block p-4 hover:bg-gray-50">
+                    <p class="text-sm text-gray-600">{{ stats.feeds.total_sources|default(0) }} active feeds with {{ stats.iocs.total|default(0) }} total indicators</p>
+                </div>
+                <div class="block p-4">
                     <div class="flex justify-between mb-1">
                         <h6 class="font-medium flex items-center">
-                            <span class="severity-badge high mr-2">High</span>
-                            APT Activity Detected
+                            <span class="severity-badge medium mr-2">Status</span>
+                            System Status
                         </h6>
-                        <small class="text-gray-500">5h ago</small>
+                        <small class="text-gray-500">Current</small>
                     </div>
-                    <p class="text-sm text-gray-600">Suspected nation-state actor targeting critical infrastructure.</p>
-                </a>
-                <a href="{{ url_for('alerts') }}" class="block p-4 hover:bg-gray-50">
-                    <div class="flex justify-between mb-1">
-                        <h6 class="font-medium flex items-center">
-                            <span class="severity-badge medium mr-2">Medium</span>
-                            Unusual Authentication Activity
-                        </h6>
-                        <small class="text-gray-500">1d ago</small>
-                    </div>
-                    <p class="text-sm text-gray-600">Multiple failed login attempts detected from unusual locations.</p>
-                </a>
+                    <p class="text-sm text-gray-600">All system components operating normally</p>
+                </div>
             </div>
         </div>
     </div>
@@ -249,6 +245,7 @@
 
 <!-- Charts Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- IOC Types Distribution Chart -->
     <div class="panel">
         <div class="panel-header">
             <h3 class="panel-title">
@@ -262,6 +259,7 @@
         </div>
     </div>
     
+    <!-- Intelligence Collection Trends Chart -->
     <div class="panel">
         <div class="panel-header">
             <h3 class="panel-title">
@@ -278,6 +276,7 @@
 
 <!-- Tables Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- Recent Campaigns Table -->
     <div class="panel">
         <div class="panel-header">
             <h3 class="panel-title">
@@ -311,9 +310,11 @@
                         </td>
                         <td>{{ campaign.threat_actor|default('Unknown') if campaign is mapping else 'Unknown' }}</td>
                         <td>{{ campaign.source_count|default(0) if campaign is mapping else 0 }}</td>
-                        <td>{{ campaign.last_seen|default('N/A') if campaign is mapping else 'N/A' }}</td>
+                        <td>{{ campaign.last_seen|default('N/A')|datetime if campaign is mapping else 'N/A' }}</td>
                         <td>
-                            {% if campaign is mapping and campaign.source_count is defined %}
+                            {% if campaign is mapping and campaign.severity is defined %}
+                                <span class="severity-badge {{ campaign.severity }}">{{ campaign.severity|title }}</span>
+                            {% elif campaign is mapping and campaign.source_count is defined %}
                                 {% if campaign.source_count > 8 %}
                                 <span class="severity-badge critical">Critical</span>
                                 {% elif campaign.source_count > 5 %}
@@ -338,6 +339,7 @@
         </div>
     </div>
     
+    <!-- Top IOCs Table -->
     <div class="panel">
         <div class="panel-header">
             <h3 class="panel-title">
@@ -541,7 +543,7 @@
 
     Plotly.newPlot('threatMap', mapData, mapLayout);
     
-    // Mock live updates for the threat map
+    // Live updates for the threat map
     const liveUpdateSwitch = document.getElementById('liveUpdateSwitch');
     let updateInterval;
     
@@ -570,5 +572,31 @@
     
     liveUpdateSwitch.addEventListener('change', setupLiveUpdates);
     setupLiveUpdates();
+
+    // Add data refresh functionality
+    function refreshData() {
+        fetch(window.location.href)
+            .then(response => response.text())
+            .then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                
+                // Update metrics
+                document.querySelectorAll('.stat-card .text-3xl.font-bold').forEach((el, index) => {
+                    const newValue = doc.querySelectorAll('.stat-card .text-3xl.font-bold')[index]?.textContent;
+                    if (newValue) el.textContent = newValue;
+                });
+                
+                // Update GCP metrics
+                document.querySelectorAll('.p-4.border.rounded-lg .text-xl.font-bold').forEach((el, index) => {
+                    const newValue = doc.querySelectorAll('.p-4.border.rounded-lg .text-xl.font-bold')[index]?.textContent;
+                    if (newValue) el.textContent = newValue;
+                });
+            })
+            .catch(error => console.error('Error refreshing data:', error));
+    }
+    
+    // Auto refresh every 60 seconds
+    setInterval(refreshData, 60000);
 </script>
 {% endblock %}
