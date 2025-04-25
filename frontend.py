@@ -1,6 +1,6 @@
 """
-Threat Intelligence Platform - Simplified Frontend Module
-Provides web interface for the threat intelligence platform.
+Threat Intelligence Platform - Frontend Module
+Provides web interface for the threat intelligence platform with improved security and performance.
 """
 
 import os
@@ -9,13 +9,15 @@ import logging
 import hashlib
 import secrets
 import sys
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Union
+from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, abort
 import requests
 from flask_cors import CORS
-from functools import wraps
+from werkzeug.middleware.proxy_fix import ProxyFix
 from google.cloud import storage
 from google.cloud import bigquery
 
@@ -24,8 +26,8 @@ import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-                    handlers=[logging.StreamHandler(sys.stdout)])
+                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+                   handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 
 # GCP Configuration
@@ -42,37 +44,118 @@ if not API_KEY and hasattr(config, 'get_cached_config'):
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates')
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", secrets.token_hex(32)))
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 CORS(app)
 
 # Authentication settings
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
+SESSION_TIMEOUT = int(config.get("SESSION_TIMEOUT", "28800"))  # 8 hours in seconds
 
-# Admin credentials
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "Admin123!"
-ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
+# Admin credentials - securely retrieved
+def get_admin_credentials():
+    """Get admin credentials from Secret Manager or use fallback if not available"""
+    try:
+        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+        if auth_config and 'users' in auth_config and 'admin' in auth_config['users']:
+            admin_user = auth_config['users']['admin']
+            return {
+                'username': 'admin',
+                'password_hash': admin_user.get('password'),
+                'role': admin_user.get('role', 'admin')
+            }
+    except Exception as e:
+        logger.warning(f"Failed to retrieve admin credentials from Secret Manager: {e}")
+    
+    # Fallback to environment variables
+    admin_password = os.environ.get('ADMIN_PASSWORD', 'Admin123!')
+    admin_hash = hashlib.sha256(admin_password.encode()).hexdigest()
+    
+    # Create admin user in Secret Manager if possible
+    try:
+        if hasattr(config, 'add_user'):
+            config.add_user('admin', admin_password, 'admin')
+            logger.info("Admin user created in Secret Manager")
+    except Exception as e:
+        logger.warning(f"Failed to store admin credentials in Secret Manager: {e}")
+    
+    logger.info("Using fallback admin credentials (PLEASE CHANGE AFTER FIRST LOGIN)")
+    return {
+        'username': 'admin',
+        'password_hash': admin_hash,
+        'role': 'admin'
+    }
 
-# Log the admin credentials
-password_banner = f"\n======== INITIAL ADMIN CREDENTIALS ========\nUsername: {ADMIN_USERNAME}\nPassword: {ADMIN_PASSWORD}\n===========================================\nPLEASE CHANGE THIS PASSWORD AFTER FIRST LOGIN\n"
-print(password_banner)
-logger.info(password_banner)
+# Initialize admin credentials
+admin_creds = get_admin_credentials()
+ADMIN_USERNAME = admin_creds['username']
+ADMIN_HASH = admin_creds['password_hash']
 
 # Utility Functions
-def hash_password(password): return hashlib.sha256(password.encode()).hexdigest()
-def verify_password(stored_hash, password): return stored_hash == hash_password(password)
+def hash_password(password): 
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(stored_hash, password): 
+    return stored_hash == hash_password(password)
+
+def is_session_valid():
+    """Check if the session is valid and not expired"""
+    if not session.get('logged_in'):
+        return False
+    
+    last_activity = session.get('last_activity')
+    if not last_activity:
+        return False
+    
+    # Check if session has expired
+    now = time.time()
+    if now - last_activity > SESSION_TIMEOUT:
+        return False
+    
+    # Update last activity time
+    session['last_activity'] = now
+    return True
 
 # Authentication decorator
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if REQUIRE_AUTH and not session.get("logged_in"):
-            return redirect(url_for("login", next=request.url))
+        if REQUIRE_AUTH:
+            if not is_session_valid():
+                # Clear any existing session data
+                session.clear()
+                return redirect(url_for("login", next=request.url))
         return f(*args, **kwargs)
     return decorated_function
 
-# API Helper
-def api_request(endpoint: str, params: Dict = None) -> Dict:
-    """Make a request to the API service"""
+# Admin access decorator
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not is_session_valid() or session.get('role') != 'admin':
+            flash("Administrator access required", "danger")
+            return redirect(url_for("dashboard"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# API Helper with caching
+api_cache = {}
+api_cache_timestamp = {}
+
+def api_request(endpoint: str, params: Dict = None, cache_time: int = 60) -> Dict:
+    """Make a request to the API service with caching"""
+    # Generate cache key
+    cache_key = f"{endpoint}:{json.dumps(params or {})}"
+    
+    # Check cache
+    now = time.time()
+    if cache_key in api_cache and cache_key in api_cache_timestamp:
+        if now - api_cache_timestamp[cache_key] < cache_time:
+            return api_cache[cache_key]
+    
     # Default response structure for error cases
     default_response = {
         "error": "API request failed",
@@ -88,9 +171,22 @@ def api_request(endpoint: str, params: Dict = None) -> Dict:
         if hasattr(api, endpoint) and callable(getattr(api, endpoint)):
             direct_function = getattr(api, endpoint)
             result = direct_function(params)
-            if result: return result
-    except (ImportError, AttributeError):
-        pass
+            if result: 
+                # Cache successful result
+                api_cache[cache_key] = result
+                api_cache_timestamp[cache_key] = now
+                
+                # Manage cache size (max 100 items)
+                if len(api_cache) > 100:
+                    oldest_key = min(api_cache_timestamp, key=api_cache_timestamp.get)
+                    if oldest_key in api_cache:
+                        del api_cache[oldest_key]
+                    if oldest_key in api_cache_timestamp:
+                        del api_cache_timestamp[oldest_key]
+                
+                return result
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Direct API call failed, falling back to HTTP: {e}")
     
     # Build URL
     if API_URL:
@@ -102,10 +198,24 @@ def api_request(endpoint: str, params: Dict = None) -> Dict:
     headers = {"X-API-Key": API_KEY} if API_KEY else {}
     
     try:
-        logger.info(f"Making API request to: {url}")
+        logger.debug(f"Making API request to: {url}")
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        
+        # Cache successful result
+        api_cache[cache_key] = result
+        api_cache_timestamp[cache_key] = now
+        
+        # Manage cache size
+        if len(api_cache) > 100:
+            oldest_key = min(api_cache_timestamp, key=api_cache_timestamp.get)
+            if oldest_key in api_cache:
+                del api_cache[oldest_key]
+            if oldest_key in api_cache_timestamp:
+                del api_cache_timestamp[oldest_key]
+        
+        return result
     except Exception as e:
         logger.error(f"API request error: {str(e)}")
         return default_response
@@ -150,12 +260,36 @@ def login():
         
         logger.info(f"Login attempt for user: {username}")
         
-        if username == ADMIN_USERNAME and verify_password(ADMIN_HASH, password):
+        # First check if username exists in auth config
+        user_data = None
+        try:
+            auth_config = config.get_cached_config('auth-config')
+            if auth_config and 'users' in auth_config and username in auth_config['users']:
+                user_data = auth_config['users'][username]
+        except Exception as e:
+            logger.warning(f"Error accessing auth config: {e}")
+        
+        # Check credentials - either config stored or admin fallback
+        is_valid = False
+        user_role = 'readonly'
+        
+        if user_data and 'password' in user_data:
+            is_valid = user_data['password'] == hash_password(password)
+            user_role = user_data.get('role', 'readonly')
+        elif username == ADMIN_USERNAME and verify_password(ADMIN_HASH, password):
+            is_valid = True
+            user_role = 'admin'
+        
+        if is_valid:
+            # Set session data
+            session.clear()
             session['logged_in'] = True
             session['username'] = username
-            session['role'] = "admin"
+            session['role'] = user_role
+            session['last_activity'] = time.time()
+            session.permanent = True
             
-            logger.info(f"Admin user {username} logged in successfully")
+            logger.info(f"User {username} logged in successfully with role {user_role}")
             
             next_page = request.args.get('next')
             if next_page:
@@ -170,9 +304,10 @@ def login():
 @app.route('/logout')
 def logout():
     """Logout user"""
-    session.pop('logged_in', None)
-    session.pop('username', None)
-    session.pop('role', None)
+    username = session.get('username')
+    session.clear()
+    if username:
+        logger.info(f"User {username} logged out")
     return redirect(url_for('login'))
 
 @app.route('/profile', methods=['GET'])
@@ -182,33 +317,70 @@ def profile():
     return render_template('auth.html', 
                           page_type='profile', 
                           username=session.get('username'),
-                          user={"role": session.get('role', 'user'), "last_login": datetime.now().isoformat()})
+                          user={"role": session.get('role', 'user'), 
+                                "last_login": datetime.now().isoformat()})
 
 @app.route('/profile/change_password', methods=['POST'])
 @login_required
 def change_password():
     """Change user's own password"""
-    global ADMIN_HASH
     username = session.get('username')
     current_password = request.form.get('current_password')
     new_password = request.form.get('new_password')
     confirm_password = request.form.get('confirm_password')
     
-    # Verify current admin password
-    if username != ADMIN_USERNAME or not verify_password(ADMIN_HASH, current_password):
-        flash("Current password is incorrect", "danger")
+    # Validate inputs
+    if not current_password or not new_password or not confirm_password:
+        flash("All fields are required", "danger")
         return redirect(url_for('profile'))
     
-    # Validate new password
-    if not new_password or new_password != confirm_password:
+    if new_password != confirm_password:
         flash("New passwords do not match", "danger")
         return redirect(url_for('profile'))
     
-    # Update admin password globally
-    ADMIN_HASH = hash_password(new_password)
-    logger.info("Admin password updated successfully")
+    # Check password complexity
+    if len(new_password) < 8:
+        flash("Password must be at least 8 characters long", "danger")
+        return redirect(url_for('profile'))
     
-    flash("Password changed successfully", "success")
+    # Verify current password
+    is_valid = False
+    
+    # Check if admin user
+    if username == ADMIN_USERNAME:
+        # Update admin in local variable and Secret Manager
+        if verify_password(ADMIN_HASH, current_password):
+            is_valid = True
+            global ADMIN_HASH
+            ADMIN_HASH = hash_password(new_password)
+            
+            # Update in Secret Manager if available
+            try:
+                if hasattr(config, 'update_user'):
+                    config.update_user(username, {'password': ADMIN_HASH})
+                    logger.info("Admin password updated in Secret Manager")
+            except Exception as e:
+                logger.warning(f"Failed to update admin in Secret Manager: {e}")
+    else:
+        # Regular user password update
+        try:
+            auth_config = config.get_cached_config('auth-config', force_refresh=True)
+            if auth_config and 'users' in auth_config and username in auth_config['users']:
+                user_data = auth_config['users'][username]
+                if user_data.get('password') == hash_password(current_password):
+                    is_valid = True
+                    # Update in Secret Manager
+                    if hasattr(config, 'update_user'):
+                        config.update_user(username, {'password': hash_password(new_password)})
+                        logger.info(f"Password updated for user {username}")
+        except Exception as e:
+            logger.error(f"Error updating password: {e}")
+    
+    if is_valid:
+        flash("Password changed successfully", "success")
+    else:
+        flash("Current password is incorrect", "danger")
+    
     return redirect(url_for('profile'))
 
 # Main Routes
@@ -219,8 +391,8 @@ def dashboard():
     days = request.args.get('days', '30')
     view_type = request.args.get('view', 'dashboard')
     
-    # Get platform stats for all view types
-    stats = api_request('stats', {'days': days})
+    # Get platform stats for all view types - cache for 5 minutes
+    stats = api_request('stats', {'days': days}, cache_time=300)
     
     # Ensure stats has required structure
     if not isinstance(stats, dict):
@@ -328,12 +500,52 @@ def iocs():
     days = request.args.get('days', '30')
     return redirect(url_for('dashboard', view='iocs', days=days))
 
+@app.route('/campaigns')
+@login_required
+def campaigns():
+    """Campaigns view - placeholder for campaigns detail page"""
+    return redirect(url_for('dashboard', view='dashboard'))
+
+@app.route('/explore')
+@login_required
+def explore():
+    """Data exploration view - placeholder for data browser"""
+    return redirect(url_for('dashboard'))
+
+@app.route('/alerts')
+@login_required
+def alerts():
+    """Alerts view - placeholder for alerts page"""
+    return redirect(url_for('dashboard'))
+
+# Dynamic content detail
+@app.route('/content/<content_type>/<identifier>')
+@login_required
+def dynamic_content_detail(content_type, identifier):
+    """Generic handler for content details"""
+    return render_template('detail.html', 
+                          content_type=content_type, 
+                          identifier=identifier,
+                          title=f"{content_type.title()} Details: {identifier}",
+                          content={"type": content_type, "id": identifier})
+
 # Ingest data route
 @app.route('/ingest_threat_data')
 @login_required
 def ingest_threat_data():
     """Trigger the ingestion process"""
     try:
+        # Try local module first
+        try:
+            import ingestion
+            if hasattr(ingestion, 'ingest_threat_data'):
+                result = ingestion.ingest_threat_data(request)
+                flash("Ingestion process started successfully", "success")
+                return redirect(url_for('dashboard', view='feeds'))
+        except ImportError:
+            logger.debug("Local ingestion module not available, using API")
+        
+        # Fall back to API
         response = requests.post(
             f"{request.url_root.rstrip('/')}/api/ingest_threat_data",
             json={"process_all": True},
@@ -346,6 +558,7 @@ def ingest_threat_data():
         else:
             flash(f"Error starting ingestion: {response.text}", "danger")
     except Exception as e:
+        logger.error(f"Error starting ingestion: {str(e)}")
         flash(f"Error starting ingestion: {str(e)}", "danger")
     
     return redirect(url_for('dashboard', view='feeds'))
@@ -375,30 +588,236 @@ def health():
     """Root health check endpoint"""
     return api_health()
 
+# Error handlers
+@app.errorhandler(404)
+def page_not_found(e):
+    """Handle 404 errors"""
+    if request.path.startswith('/api/'):
+        return jsonify({
+            "error": "Resource not found",
+            "path": request.path,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 404
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    """Handle 500 errors"""
+    logger.error(f"Server error: {str(e)}")
+    if request.path.startswith('/api/'):
+        return jsonify({
+            "error": "Internal server error",
+            "path": request.path,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+    return render_template('500.html'), 500
+
+# ======== Admin Routes ========
+@app.route('/admin')
+@login_required
+@admin_required
+def admin_dashboard():
+    """Admin dashboard - redirects to user management for now"""
+    return redirect(url_for('users'))
+
+@app.route('/admin/users')
+@login_required
+@admin_required
+def users():
+    """User management page"""
+    # Get user list from auth config
+    users = []
+    try:
+        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+        if auth_config and 'users' in auth_config:
+            for username, user_data in auth_config['users'].items():
+                users.append({
+                    'username': username,
+                    'role': user_data.get('role', 'readonly'),
+                    'created_at': user_data.get('created_at'),
+                    'last_login': user_data.get('last_login', 'Never')
+                })
+    except Exception as e:
+        logger.error(f"Error getting user list: {e}")
+        flash(f"Error loading users: {str(e)}", "danger")
+    
+    return render_template('content.html', 
+                          page_title="User Management",
+                          content_type="users",
+                          users=users)
+
+@app.route('/admin/users/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_user_route():
+    """Add new user"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        role = request.form.get('role', 'readonly')
+        
+        # Validate inputs
+        if not username or not password or not confirm_password:
+            flash("All fields are required", "danger")
+            return render_template('auth.html', page_type='user_add', error="All fields are required")
+        
+        if password != confirm_password:
+            flash("Passwords do not match", "danger")
+            return render_template('auth.html', page_type='user_add', error="Passwords do not match")
+        
+        # Check if user already exists
+        try:
+            auth_config = config.get_cached_config('auth-config', force_refresh=True)
+            if auth_config and 'users' in auth_config and username in auth_config['users']:
+                flash(f"User {username} already exists", "danger")
+                return render_template('auth.html', page_type='user_add', error=f"User {username} already exists")
+        except Exception as e:
+            logger.error(f"Error checking existing user: {e}")
+        
+        # Create the user
+        try:
+            success = False
+            if hasattr(config, 'add_user'):
+                success = config.add_user(username, password, role)
+            
+            if success:
+                flash(f"User {username} created successfully", "success")
+                return redirect(url_for('users'))
+            else:
+                flash("Failed to create user", "danger")
+                return render_template('auth.html', page_type='user_add', error="Failed to create user")
+        except Exception as e:
+            logger.error(f"Error creating user: {e}")
+            flash(f"Error creating user: {str(e)}", "danger")
+            return render_template('auth.html', page_type='user_add', error=f"Error: {str(e)}")
+    
+    return render_template('auth.html', page_type='user_add')
+
+@app.route('/admin/users/edit/<username>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_user(username):
+    """Edit user"""
+    # Get user data
+    user_data = None
+    try:
+        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+        if auth_config and 'users' in auth_config and username in auth_config['users']:
+            user_data = auth_config['users'][username]
+    except Exception as e:
+        logger.error(f"Error getting user data: {e}")
+        flash(f"Error loading user data: {str(e)}", "danger")
+        return redirect(url_for('users'))
+    
+    if not user_data:
+        flash(f"User {username} not found", "danger")
+        return redirect(url_for('users'))
+    
+    if request.method == 'POST':
+        password = request.form.get('password')
+        role = request.form.get('role', 'readonly')
+        
+        # Update user
+        updates = {'role': role}
+        if password:
+            updates['password'] = hash_password(password)
+        
+        try:
+            success = False
+            if hasattr(config, 'update_user'):
+                success = config.update_user(username, updates)
+            
+            if success:
+                flash(f"User {username} updated successfully", "success")
+                return redirect(url_for('users'))
+            else:
+                flash("Failed to update user", "danger")
+        except Exception as e:
+            logger.error(f"Error updating user: {e}")
+            flash(f"Error updating user: {str(e)}", "danger")
+    
+    return render_template('auth.html', 
+                          page_type='user_edit', 
+                          username=username,
+                          user=user_data)
+
+@app.route('/admin/users/delete/<username>', methods=['POST'])
+@login_required
+@admin_required
+def delete_user(username):
+    """Delete user"""
+    if username == ADMIN_USERNAME or username == session.get('username'):
+        flash("Cannot delete admin user or yourself", "danger")
+        return redirect(url_for('users'))
+    
+    # Delete the user
+    try:
+        success = False
+        if hasattr(config, 'delete_user'):
+            success = config.delete_user(username)
+        elif hasattr(config, 'update_user'):
+            # Alternative approach - mark as inactive
+            success = config.update_user(username, {'active': False})
+        
+        if success:
+            flash(f"User {username} deleted successfully", "success")
+        else:
+            flash("Failed to delete user", "danger")
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        flash(f"Error deleting user: {str(e)}", "danger")
+    
+    return redirect(url_for('users'))
+
 # Utility Functions
 def get_gcp_metrics() -> Dict:
-    """Get metrics from GCP services"""
+    """Get metrics from GCP services with better error handling and caching"""
+    cache_key = "gcp_metrics"
+    cache_ttl = 300  # 5 minutes
+    
+    # Check cache
+    now = time.time()
+    if cache_key in api_cache and cache_key in api_cache_timestamp:
+        if now - api_cache_timestamp[cache_key] < cache_ttl:
+            return api_cache[cache_key]
+    
     metrics = {"table_count": 0, "storage_objects": 0, "storage_size": 0.0}
     
     try:
         # Get BigQuery table counts
         bq_client = bigquery.Client(project=PROJECT_ID)
-        query = f"SELECT COUNT(*) as tables FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`"
-        results = bq_client.query(query).result()
-        metrics["table_count"] = next(results).tables
+        query = f"""
+        SELECT COUNT(*) as table_count 
+        FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
+        """
+        
+        query_job = bq_client.query(query)
+        query_job.result()
+        for row in query_job:
+            metrics["table_count"] = row.table_count
         
         # Get Storage bucket info
-        storage_client = storage.Client(project=PROJECT_ID)
-        bucket = storage_client.get_bucket(config.gcs_bucket)
-        blobs = list(bucket.list_blobs())
-        metrics["storage_objects"] = len(blobs)
-        metrics["storage_size"] = sum(blob.size for blob in blobs) / (1024 * 1024)  # MB
+        try:
+            storage_client = storage.Client(project=PROJECT_ID)
+            bucket = storage_client.get_bucket(config.gcs_bucket)
+            # Use pagination to avoid memory issues with large buckets
+            blobs = list(bucket.list_blobs(max_results=1000))
+            metrics["storage_objects"] = len(blobs)
+            metrics["storage_size"] = sum(blob.size for blob in blobs if hasattr(blob, 'size')) / (1024 * 1024)  # MB
+        except Exception as e:
+            logger.warning(f"Error getting storage metrics: {str(e)}")
     except Exception as e:
         logger.warning(f"Error getting GCP metrics: {str(e)}")
+    
+    # Cache results
+    api_cache[cache_key] = metrics
+    api_cache_timestamp[cache_key] = now
     
     return metrics
 
 # Main entry point
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=config.environment != "production")
+    debug_mode = config.environment != "production"
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
