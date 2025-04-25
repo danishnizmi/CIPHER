@@ -170,10 +170,6 @@ def login():
 @app.route('/logout')
 def logout():
     """Logout user"""
-    username = session.get('username')
-    if username:
-        logger.info(f"User {username} logged out")
-    
     session.pop('logged_in', None)
     session.pop('username', None)
     session.pop('role', None)
@@ -183,18 +179,10 @@ def logout():
 @login_required
 def profile():
     """User Profile page"""
-    username = session.get('username')
-    
-    # Simple user data
-    user_data = {
-        "role": session.get('role', 'user'),
-        "last_login": datetime.now().isoformat()
-    }
-    
     return render_template('auth.html', 
-                           page_type='profile', 
-                           username=username, 
-                           user=user_data)
+                          page_type='profile', 
+                          username=session.get('username'),
+                          user={"role": session.get('role', 'user'), "last_login": datetime.now().isoformat()})
 
 @app.route('/profile/change_password', methods=['POST'])
 @login_required
@@ -207,20 +195,12 @@ def change_password():
     confirm_password = request.form.get('confirm_password')
     
     # Verify current admin password
-    if username == ADMIN_USERNAME:
-        if not verify_password(ADMIN_HASH, current_password):
-            flash("Current password is incorrect", "danger")
-            return redirect(url_for('profile'))
-    else:
-        flash("Only admin user can change password", "danger")
+    if username != ADMIN_USERNAME or not verify_password(ADMIN_HASH, current_password):
+        flash("Current password is incorrect", "danger")
         return redirect(url_for('profile'))
     
     # Validate new password
-    if not new_password or not confirm_password:
-        flash("New password is required", "danger")
-        return redirect(url_for('profile'))
-    
-    if new_password != confirm_password:
+    if not new_password or new_password != confirm_password:
         flash("New passwords do not match", "danger")
         return redirect(url_for('profile'))
     
@@ -235,14 +215,14 @@ def change_password():
 @app.route('/')
 @login_required
 def dashboard():
-    """Main dashboard page"""
+    """Main dashboard page with tabs"""
     days = request.args.get('days', '30')
     view_type = request.args.get('view', 'dashboard')
     
-    # Get platform stats - needed for ALL view types
+    # Get platform stats for all view types
     stats = api_request('stats', {'days': days})
     
-    # Ensure stats has required structure to prevent template errors
+    # Ensure stats has required structure
     if not isinstance(stats, dict):
         stats = {}
     if "feeds" not in stats:
@@ -258,124 +238,69 @@ def dashboard():
     common_data = {
         'days': days,
         'current_view': view_type,
-        'stats': stats,  # This ensures stats is available in ALL views
+        'stats': stats,
+        'campaigns': [],  # Initialize with empty lists
+        'top_iocs': [],
         'page_title': 'Threat Intelligence Dashboard',
         'page_subtitle': 'Real-time overview of threat intelligence with actionable insights',
-        'campaigns': [],  # Initialize with empty lists to prevent undefined errors
-        'top_iocs': []
     }
     
     # Dashboard view (default)
     if view_type == 'dashboard':
-        # Get recent campaigns with actual data
+        # Get real data for dashboard
         campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
-        campaigns = campaigns_data.get('campaigns', [])
-        
-        # Get top IOCs with actual data
         iocs_data = api_request('iocs', {'days': days, 'limit': 5})
-        top_iocs = iocs_data.get('records', [])
-        
-        # Get real GCP metrics
         gcp_metrics = get_gcp_metrics()
         
-        # Get IOC type distribution for chart
-        ioc_type_labels = []
-        ioc_type_values = []
+        # Get chart data
+        ioc_type_labels = ["ip", "url", "domain", "hash", "email", "cve"]
+        ioc_type_values = [42, 36, 28, 19, 12, 7]
         
-        if 'iocs' in stats and 'types' in stats['iocs']:
-            for item in stats['iocs']['types']:
-                if isinstance(item, dict):
-                    ioc_type_labels.append(item.get('type', 'unknown'))
-                    ioc_type_values.append(item.get('count', 0))
+        # Try to use real data if available
+        if 'iocs' in stats and 'types' in stats['iocs'] and stats['iocs']['types']:
+            types_data = stats['iocs']['types']
+            if isinstance(types_data, list) and len(types_data) > 0:
+                ioc_type_labels = []
+                ioc_type_values = []
+                for item in types_data:
+                    if isinstance(item, dict):
+                        ioc_type_labels.append(item.get('type', 'unknown'))
+                        ioc_type_values.append(item.get('count', 0))
         
-        # Provide default data if no real data available
-        if not ioc_type_labels:
-            ioc_type_labels = ["ip", "domain", "url", "hash", "email", "cve"]
-            ioc_type_values = [42, 28, 36, 19, 12, 7]
+        # Activity data
+        activity_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(30)]
+        activity_counts = [10 + i % 20 for i in range(30)]
         
-        # Get activity data
-        activity_data = api_request('feeds/alienvault_pulses/stats', {'days': days})
-        
-        # Generate reasonable default activity data if needed
-        default_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-        default_counts = [int(5 + i * 2.5) for i in range(7)]
-        
-        activity_dates = default_dates
-        activity_counts = default_counts
-        
-        # Try to use real activity data if available
-        if activity_data and "daily_counts" in activity_data:
-            dates = []
-            counts = []
-            for item in activity_data.get("daily_counts", []):
-                if isinstance(item, dict):
-                    date = item.get("date")
-                    count = item.get("count", 0)
-                    if date and count is not None:
-                        dates.append(date)
-                        counts.append(count)
-            
-            if dates and counts:
-                activity_dates = dates
-                activity_counts = counts
-        
-        # Provide trend data
-        feed_trend = 5
-        ioc_trend = 12
-        campaign_trend = 8
-        analysis_trend = 15
-        
-        # Add dashboard data to common_data
+        # Update data for dashboard view
         common_data.update({
-            'campaigns': campaigns,
-            'top_iocs': top_iocs,
+            'campaigns': campaigns_data.get('campaigns', []),
+            'top_iocs': iocs_data.get('records', []),
             'gcp_metrics': gcp_metrics,
             'ioc_type_labels': json.dumps(ioc_type_labels),
             'ioc_type_values': json.dumps(ioc_type_values),
             'activity_dates': json.dumps(activity_dates),
             'activity_counts': json.dumps(activity_counts),
-            'feed_trend': feed_trend,
-            'ioc_trend': ioc_trend,
-            'campaign_trend': campaign_trend,
-            'analysis_trend': analysis_trend
+            'feed_trend': 5,
+            'ioc_trend': 12,
+            'campaign_trend': 8,
+            'analysis_trend': 15
         })
     
     # Feeds view
     elif view_type == 'feeds':
-        # Get feed data from API
         feeds_data = api_request('feeds')
-        feed_items = feeds_data.get('feed_details', [])
-        
         common_data.update({
             'page_title': 'Threat Intelligence Feeds',
             'page_icon': 'rss',
             'page_subtitle': 'Collection of threat data from various sources',
-            'feed_items': feed_items
-        })
-    
-    # Campaigns view
-    elif view_type == 'campaigns':
-        # Get campaign data from API
-        campaigns_data = api_request('campaigns', {'days': days})
-        campaign_items = campaigns_data.get('campaigns', [])
-        
-        common_data.update({
-            'page_title': 'Threat Campaigns',
-            'page_icon': 'project-diagram',
-            'page_subtitle': 'Active and historical threat campaigns',
-            'campaign_items': campaign_items,
-            'campaigns': campaign_items  # Also update campaigns key for template compatibility
+            'feed_items': feeds_data.get('feed_details', [])
         })
     
     # IOCs view
     elif view_type == 'iocs':
-        # Get IOC data from API
         iocs_data = api_request('iocs', {'days': days})
-        ioc_records = iocs_data.get('records', [])
-        
-        # Extract IOCs from records
         ioc_items = []
-        for record in ioc_records:
+        for record in iocs_data.get('records', []):
             ioc_items.extend(record.get('iocs', []))
         
         common_data.update({
@@ -383,58 +308,32 @@ def dashboard():
             'page_icon': 'fingerprint',
             'page_subtitle': 'Collected IOCs from all sources',
             'ioc_items': ioc_items,
-            'top_iocs': ioc_records  # Update top_iocs for template compatibility
+            'top_iocs': iocs_data.get('records', [])
         })
     
     return render_template('dashboard.html', **common_data)
 
-# Route aliases that redirect to dashboard with appropriate view parameter
+# Simplified route aliases - only keep the essential ones
 @app.route('/feeds')
 @login_required
 def feeds():
-    """Feed list page - redirects to dashboard with feeds view"""
+    """Feeds view - redirects to dashboard with view parameter"""
     days = request.args.get('days', '30')
     return redirect(url_for('dashboard', view='feeds', days=days))
-
-@app.route('/campaigns')
-@login_required
-def campaigns():
-    """Campaign list page - redirects to dashboard with campaigns view"""
-    days = request.args.get('days', '30')
-    return redirect(url_for('dashboard', view='campaigns', days=days))
 
 @app.route('/iocs')
 @login_required
 def iocs():
-    """IOC list page - redirects to dashboard with iocs view"""
+    """IOCs view - redirects to dashboard with view parameter"""
     days = request.args.get('days', '30')
     return redirect(url_for('dashboard', view='iocs', days=days))
 
-# Support all the expected routes with minimal code
-@app.route('/<path>')
-@login_required
-def catch_all_other_routes(path):
-    """Handle all other expected routes"""
-    valid_routes = {'settings', 'reports', 'alerts', 'explore', 'users', 'search'}
-    if path in valid_routes:
-        return redirect(url_for('dashboard'))
-    return render_template('auth.html', page_type='not_authorized')
-
-@app.route('/dynamic_content_detail')
-@login_required
-def dynamic_content_detail():
-    """Dynamic content detail page"""
-    content_type = request.args.get('content_type', 'unknown')
-    identifier = request.args.get('identifier', 'unknown')
-    return redirect(url_for('dashboard'))
-
-# Ingest data manually
+# Ingest data route
 @app.route('/ingest_threat_data')
 @login_required
 def ingest_threat_data():
     """Trigger the ingestion process"""
     try:
-        # Call the ingestion endpoint
         response = requests.post(
             f"{request.url_root.rstrip('/')}/api/ingest_threat_data",
             json={"process_all": True},
@@ -446,21 +345,26 @@ def ingest_threat_data():
             flash("Ingestion process started successfully", "success")
         else:
             flash(f"Error starting ingestion: {response.text}", "danger")
-    
     except Exception as e:
         flash(f"Error starting ingestion: {str(e)}", "danger")
     
-    return redirect(url_for('feeds'))
+    return redirect(url_for('dashboard', view='feeds'))
+
+# Catch-all route for any other paths
+@app.route('/<path:path>')
+@login_required
+def catch_all(path):
+    """Redirect all other routes to dashboard"""
+    return redirect(url_for('dashboard'))
 
 # API health check for Cloud Run
 @app.route('/api/health', methods=['GET'])
 def api_health():
     """API health check endpoint"""
-    version = os.environ.get("VERSION", "1.0.0")
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": version,
+        "version": os.environ.get("VERSION", "1.0.0"),
         "environment": config.environment,
         "project": PROJECT_ID
     })
@@ -474,46 +378,27 @@ def health():
 # Utility Functions
 def get_gcp_metrics() -> Dict:
     """Get metrics from GCP services"""
-    metrics = {
-        "table_count": 0,
-        "storage_objects": 0,
-        "storage_size": 0.0
-    }
+    metrics = {"table_count": 0, "storage_objects": 0, "storage_size": 0.0}
     
     try:
         # Get BigQuery table counts
         bq_client = bigquery.Client(project=PROJECT_ID)
-        query = f"""
-        SELECT COUNT(*) as tables
-        FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
-        """
-        try:
-            query_job = bq_client.query(query)
-            results = query_job.result()
-            row = next(results)
-            metrics["table_count"] = row.tables
-        except Exception as e:
-            logger.warning(f"Error querying BigQuery tables: {str(e)}")
+        query = f"SELECT COUNT(*) as tables FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`"
+        results = bq_client.query(query).result()
+        metrics["table_count"] = next(results).tables
         
         # Get Storage bucket info
         storage_client = storage.Client(project=PROJECT_ID)
-        bucket_name = config.gcs_bucket
-        try:
-            bucket = storage_client.get_bucket(bucket_name)
-            blobs = list(bucket.list_blobs())
-            metrics["storage_objects"] = len(blobs)
-            metrics["storage_size"] = sum(blob.size for blob in blobs) / (1024 * 1024)  # MB
-        except Exception as e:
-            logger.warning(f"Error getting storage info: {str(e)}")
+        bucket = storage_client.get_bucket(config.gcs_bucket)
+        blobs = list(bucket.list_blobs())
+        metrics["storage_objects"] = len(blobs)
+        metrics["storage_size"] = sum(blob.size for blob in blobs) / (1024 * 1024)  # MB
     except Exception as e:
-        logger.error(f"Error getting GCP metrics: {str(e)}")
+        logger.warning(f"Error getting GCP metrics: {str(e)}")
     
     return metrics
 
 # Main entry point
 if __name__ == "__main__":
-    # Print admin credentials for visibility
-    print(f"\n\n{password_banner}\n\n")
-    
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=config.environment != "production")
