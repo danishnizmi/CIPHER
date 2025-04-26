@@ -1,6 +1,6 @@
 """
-Threat Intelligence Platform - Simplified API Service Module
-Provides RESTful endpoints for accessing threat intelligence data.
+Threat Intelligence Platform - Frontend Module
+Handles web interface, user authentication, and dashboard views.
 """
 
 import os
@@ -10,16 +10,11 @@ import time
 import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Union, Tuple
-
-from flask import Flask, Blueprint, request, jsonify, Response, current_app, send_file, abort
-from flask_cors import CORS
-from google.cloud import bigquery
-from google.cloud import storage
 from functools import wraps
-import traceback
-import tempfile
-import csv
-import io
+
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, abort, g
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Import config module for centralized configuration
 import config
@@ -28,48 +23,36 @@ import config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration from config module
-PROJECT_ID = config.project_id
-DATASET_ID = config.bigquery_dataset
+# Create Flask app
+app = Flask(__name__)
 
-# Get API key from config
-if not hasattr(config, 'api_key') or config.api_key is None:
-    API_KEY = os.environ.get("API_KEY", "")
-    if not API_KEY:
-        api_keys_config = config.get_cached_config('api-keys')
-        API_KEY = api_keys_config.get('platform_api_key', "") if api_keys_config else ""
-else:
-    API_KEY = config.api_key
+# Add CORS support
+CORS(app)
 
-# API Configuration
-MAX_RESULTS = 1000  # Maximum results to return in a single query
-CACHE_TIMEOUT = 300  # 5 minutes cache for certain endpoints
+# Generate a secure secret key or get from environment
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    # Get from config or generate a new one
+    auth_config = config.get_cached_config('auth-config')
+    SECRET_KEY = auth_config.get('session_secret') if auth_config else None
+    
+    if not SECRET_KEY:
+        # Generate a secure random key
+        SECRET_KEY = hashlib.sha256(str(time.time()).encode()).hexdigest()
+        logger.warning("Generated temporary secret key. For production, set SECRET_KEY in environment.")
 
-# Create Blueprint instead of app for better modular integration
-api_bp = Blueprint('api', __name__, url_prefix='/api')
+# Configure Flask
+app.config.update(
+    SECRET_KEY=SECRET_KEY,
+    SESSION_COOKIE_SECURE=config.environment == 'production',
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+    TEMPLATES_AUTO_RELOAD=config.environment != 'production',
+)
 
-# Client cache for performance
-bq_client = None
-storage_client = None
-
-# Simple in-memory query cache
-query_cache = {}
-cache_timestamps = {}
-
-# Mock data for when BigQuery queries fail
+# Default mock data for development/demo
 MOCK_DATA = {
-    "feeds": {
-        "feeds": ["threatfox_iocs", "phishtank_urls", "urlhaus_malware", "feodotracker_c2", "cisa_vulnerabilities"],
-        "feed_details": [
-            {"name": "threatfox_iocs", "record_count": 100, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "phishtank_urls", "record_count": 80, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "urlhaus_malware", "record_count": 65, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "feodotracker_c2", "record_count": 50, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "cisa_vulnerabilities", "record_count": 25, "last_updated": datetime.utcnow().isoformat()}
-        ],
-        "count": 5,
-        "timestamp": datetime.utcnow().isoformat()
-    },
     "stats": {
         "feeds": {
             "total_sources": 5,
@@ -100,699 +83,426 @@ MOCK_DATA = {
             "growth_rate": 10
         },
         "timestamp": datetime.utcnow().isoformat(),
-    },
-    "campaigns": {
-        "campaigns": [
-            {
-                "campaign_id": "c123456",
-                "campaign_name": "APT-123456",
-                "threat_actor": "FancyBear",
-                "source_count": 7,
-                "last_seen": (datetime.utcnow() - timedelta(days=2)).isoformat(),
-                "severity": "high"
-            },
-            {
-                "campaign_id": "c234567",
-                "campaign_name": "Ransomware-234567",
-                "threat_actor": "Conti",
-                "source_count": 5,
-                "last_seen": (datetime.utcnow() - timedelta(days=5)).isoformat(),
-                "severity": "critical"
-            },
-            {
-                "campaign_id": "c345678",
-                "campaign_name": "Phishing-345678",
-                "threat_actor": "Lazarus",
-                "source_count": 3,
-                "last_seen": (datetime.utcnow() - timedelta(days=10)).isoformat(),
-                "severity": "medium"
-            }
-        ],
-        "count": 3,
-        "has_more": False,
-        "days": 30
-    },
-    "iocs": {
-        "records": [
-            {
-                "type": "ip",
-                "value": "192.168.1.100",
-                "sources": 12,
-                "first_seen": (datetime.utcnow() - timedelta(days=20)).isoformat()
-            },
-            {
-                "type": "domain",
-                "value": "malicious-domain.com",
-                "sources": 8,
-                "first_seen": (datetime.utcnow() - timedelta(days=15)).isoformat()
-            },
-            {
-                "type": "url",
-                "value": "https://phishing-site.org/login",
-                "sources": 6,
-                "first_seen": (datetime.utcnow() - timedelta(days=10)).isoformat()
-            },
-            {
-                "type": "md5",
-                "value": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-                "sources": 4,
-                "first_seen": (datetime.utcnow() - timedelta(days=5)).isoformat()
-            }
-        ],
-        "count": 4,
-        "total_available": 250,
-        "filters": {
-            "days": 30
-        }
     }
 }
 
-# ======== Core Utilities ========
+# ======== Auth & Security Functions ========
 
-def get_client(client_type: str):
-    """Get or initialize a Google Cloud client"""
-    global bq_client, storage_client
-    
-    try:
-        if client_type == 'bigquery':
-            if bq_client is None:
-                bq_client = bigquery.Client(project=PROJECT_ID)
-                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
-            return bq_client
-            
-        elif client_type == 'storage':
-            if storage_client is None:
-                storage_client = storage.Client(project=PROJECT_ID)
-                logger.info(f"Storage client initialized for project {PROJECT_ID}")
-            return storage_client
-            
-        else:
-            logger.error(f"Unknown client type: {client_type}")
-            return None
-    except Exception as e:
-        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
+def load_users() -> Dict[str, Dict]:
+    """Load user data from auth config"""
+    auth_config = config.get_cached_config('auth-config')
+    if not auth_config or 'users' not in auth_config:
+        # Create default admin user if no users exist
+        if config.environment != 'production':
+            default_users = {
+                'admin': {
+                    'password': hashlib.sha256('admin'.encode()).hexdigest(),
+                    'role': 'admin',
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
+            return default_users
+        return {}
+    return auth_config.get('users', {})
 
-# Authentication decorator
-def require_api_key(f):
+def login_required(f):
+    """Decorator to require login for views"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not API_KEY:
-            # No API key configured, allow all requests
-            return f(*args, **kwargs)
-        
-        # Check for API key in header or query parameter
-        provided_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        if provided_key and provided_key == API_KEY:
-            return f(*args, **kwargs)
-        else:
-            logger.warning(f"Invalid API key provided from {request.remote_addr}")
-            return api_error("Unauthorized - Invalid API key", status=401)
-    
+        if not session.get('logged_in'):
+            flash('Please log in to access this page', 'warning')
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
     return decorated_function
 
-def handle_exceptions(f):
-    """Decorator to handle exceptions uniformly"""
+def admin_required(f):
+    """Decorator to require admin role"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        try:
-            return f(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in {f.__name__}: {str(e)}")
-            logger.error(traceback.format_exc())
-            return api_error(str(e))
-    
+        if not session.get('logged_in'):
+            flash('Please log in to access this page', 'warning')
+            return redirect(url_for('login', next=request.url))
+        if session.get('role') != 'admin':
+            flash('Admin privileges required', 'danger')
+            return render_template('auth.html', page_type='not_authorized')
+        return f(*args, **kwargs)
     return decorated_function
 
-def validate_table_name(table_name: str) -> bool:
-    """Validate table name to prevent SQL injection"""
-    # Only allow alphanumeric characters and underscores
-    return bool(table_name and table_name.replace("_", "").isalnum())
+# ======== Routes ========
 
-def api_response(data, status=200):
-    """Standardized API response"""
-    return jsonify(data), status
+@app.route('/')
+def index():
+    """Root redirects to dashboard if logged in, otherwise to login"""
+    if session.get('logged_in'):
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
 
-def api_error(message, status=500, extra=None):
-    """Standardized API error response"""
-    response = {
-        "error": message,
-        "timestamp": datetime.utcnow().isoformat(),
-        "path": request.path
-    }
-    if extra:
-        response.update(extra)
-    return jsonify(response), status
-
-def get_from_cache(key, ttl=CACHE_TIMEOUT):
-    """Get item from cache if not expired"""
-    if key in query_cache and key in cache_timestamps:
-        timestamp = cache_timestamps[key]
-        if (datetime.now() - timestamp).total_seconds() < ttl:
-            return query_cache[key]
-    return None
-
-def save_to_cache(key, data):
-    """Save item to cache"""
-    query_cache[key] = data
-    cache_timestamps[key] = datetime.now()
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page"""
+    error = None
     
-    # Simple cache size management - keep under 100 items
-    if len(query_cache) > 100:
-        oldest_key = min(cache_timestamps, key=lambda k: cache_timestamps[k])
-        if oldest_key in query_cache:
-            del query_cache[oldest_key]
-        if oldest_key in cache_timestamps:
-            del cache_timestamps[oldest_key]
-
-def execute_bigquery(query: str, params: Optional[Dict] = None, use_cache: bool = False) -> Tuple[List[Dict], Optional[str]]:
-    """Execute a BigQuery query and return results"""
-    client = get_client('bigquery')
-    if not client:
-        return [], "BigQuery client not available"
-    
-    # Generate cache key for this query
-    cache_key = None
-    if use_cache:
-        cache_key = hashlib.md5((query + str(params)).encode()).hexdigest()
-        cached_result = get_from_cache(cache_key)
-        if cached_result:
-            logger.debug(f"Using cached result for query: {query[:100]}...")
-            return cached_result, None
-    
-    try:
-        job_config = bigquery.QueryJobConfig()
-        if params:
-            job_config.query_parameters = [
-                bigquery.ScalarQueryParameter(key, "STRING", value)
-                for key, value in params.items()
-            ]
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        remember = request.form.get('remember') == 'on'
         
-        start_time = time.time()
-        query_job = client.query(query, job_config=job_config)
-        results = query_job.result()
-        query_time = time.time() - start_time
+        users = load_users()
         
-        # Log query performance
-        if query_time > 2.0:  # Log slow queries
-            logger.warning(f"Slow query ({query_time:.2f}s): {query[:150]}...")
+        if username in users:
+            user = users[username]
+            stored_password = user.get('password', '')
+            
+            # Check password
+            if check_password_hash(stored_password, password) or stored_password == hashlib.sha256(password.encode()).hexdigest():
+                # Login successful
+                session['logged_in'] = True
+                session['username'] = username
+                session['role'] = user.get('role', 'readonly')
+                session.permanent = remember
+                
+                # Update last login
+                config.update_user(username, {'last_login': datetime.utcnow().isoformat()})
+                
+                flash(f'Welcome, {username}!', 'success')
+                
+                # Redirect to requested page or dashboard
+                next_page = request.args.get('next')
+                if next_page and next_page.startswith('/'):
+                    return redirect(next_page)
+                return redirect(url_for('dashboard'))
+            else:
+                error = "Invalid password"
         else:
-            logger.debug(f"Query executed in {query_time:.2f}s")
-        
-        # Convert to list of dicts
-        result_list = [dict(row.items()) for row in results]
-        
-        # Cache result if needed
-        if use_cache and cache_key:
-            save_to_cache(cache_key, result_list)
-        
-        return result_list, None
-    except Exception as e:
-        logger.error(f"BigQuery error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return [], str(e)
-
-# ======== Endpoint Handlers ========
-
-@api_bp.route('/health', methods=['GET'])
-@handle_exceptions
-def health_check():
-    """Health check endpoint"""
-    logger.info("Health check endpoint called")
-    version = os.environ.get("VERSION", "1.0.0")
+            error = "Invalid username"
     
-    # Check BigQuery connectivity for deep health check
-    client = get_client('bigquery')
-    db_status = "ok" if client else "error"
-    
-    return api_response({
-        "status": "ok",
-        "database": db_status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": version,
-        "environment": config.environment,
-        "project": PROJECT_ID
-    })
+    return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
-@api_bp.route('/stats', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def get_stats():
-    """Get platform statistics"""
+@app.route('/logout')
+def logout():
+    """Logout route"""
+    session.clear()
+    flash('You have been logged out', 'info')
+    return redirect(url_for('login'))
+
+@app.route('/dashboard')
+@app.route('/dashboard/<view>')
+@login_required
+def dashboard(view=None):
+    """Main dashboard view with different sub-views"""
+    # Get the view from query param if not in path
+    current_view = view or request.args.get('view', 'dashboard')
     days = int(request.args.get('days', '30'))
     
-    # Check cache
-    cache_key = f"stats_{days}"
-    cached_stats = get_from_cache(cache_key)
-    if cached_stats:
-        return api_response(cached_stats)
-    
-    # Use mock data if parameter is set
-    use_mock = request.args.get('mock', 'false').lower() == 'true'
-    if use_mock:
-        return api_response(MOCK_DATA["stats"])
-        
-    # Default stats structure
-    stats = {
-        "feeds": {
-            "total_sources": 0,
-            "active_feeds": 0,
-            "total_records": 0,
-            "growth_rate": 5
-        },
-        "campaigns": {
-            "total_campaigns": 0,
-            "active_campaigns": 0,
-            "unique_actors": 0,
-            "growth_rate": 3
-        },
-        "iocs": {
-            "total": 0,
-            "types": [
-                {"type": "ip", "count": 42},
-                {"type": "domain", "count": 38},
-                {"type": "url", "count": 25},
-                {"type": "hash", "count": 17},
-                {"type": "email", "count": 8}
-            ],
-            "growth_rate": 8
-        },
-        "analyses": {
-            "total_analyses": 0,
-            "last_analysis": None,
-            "growth_rate": 10
-        },
-        "timestamp": datetime.utcnow().isoformat(),
-        "days": days
+    # Prepare page context
+    context = {
+        'current_view': current_view,
+        'days': days,
     }
     
-    client = get_client('bigquery')
-    if not client:
-        # Return default stats if no database connection
-        # Cache the result
-        save_to_cache(cache_key, stats)
-        return api_response(stats)
+    # Set page titles based on view
+    if current_view == 'feeds':
+        context['page_title'] = 'Threat Feeds'
+        context['page_subtitle'] = 'Intelligence sources and data collection'
+        context['page_icon'] = 'rss'
+    elif current_view == 'iocs':
+        context['page_title'] = 'Indicators of Compromise'
+        context['page_subtitle'] = 'Observed indicators and threat artifacts'
+        context['page_icon'] = 'fingerprint'
+    elif current_view == 'campaigns':
+        context['page_title'] = 'Threat Campaigns'
+        context['page_subtitle'] = 'Detected threat actor campaigns and activities'
+        context['page_icon'] = 'project-diagram'
+    else:
+        context['page_title'] = 'Threat Intelligence Dashboard'
+        context['page_subtitle'] = 'Platform overview and threat summary'
+        context['page_icon'] = 'tachometer-alt'
     
+    # Get stats data from API or cache
     try:
-        # FIXED: Use a simple query without concatenation
-        feed_query = f"""
-        SELECT
-          COUNT(DISTINCT table_id) AS total_sources,
-          0 AS active_feeds,
-          0 AS total_records
-        FROM
-          `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-        WHERE 
-          table_id NOT LIKE 'threat%'
-        """
-        
-        feed_results, feed_error = execute_bigquery(feed_query, use_cache=True)
-            
-        if not feed_error and feed_results:
-            stats["feeds"]["total_sources"] = feed_results[0].get("total_sources", 0)
-            stats["feeds"]["active_feeds"] = feed_results[0].get("active_feeds", 0)
-            stats["feeds"]["total_records"] = feed_results[0].get("total_records", 0)
-            
-            # If we got feed count but not active feeds, set active feeds to same count
-            if stats["feeds"]["total_sources"] > 0 and stats["feeds"]["active_feeds"] == 0:
-                stats["feeds"]["active_feeds"] = stats["feeds"]["total_sources"]
+        # In a real implementation, we'd call the API here
+        # For now, use mock data
+        stats = MOCK_DATA["stats"]
     except Exception as e:
-        logger.error(f"Error fetching stats: {str(e)}")
-        # Use mock data if real query fails
+        logger.error(f"Error getting stats: {str(e)}")
         stats = MOCK_DATA["stats"]
     
-    # Cache the result
-    save_to_cache(cache_key, stats)
+    # Calculate trends
+    context['feed_trend'] = stats.get('feeds', {}).get('growth_rate', 0)
+    context['ioc_trend'] = stats.get('iocs', {}).get('growth_rate', 0)
+    context['campaign_trend'] = stats.get('campaigns', {}).get('growth_rate', 0)
+    context['analysis_trend'] = stats.get('analyses', {}).get('growth_rate', 0)
     
-    return api_response(stats)
+    # Add all stats to context
+    context['stats'] = stats
+    
+    # Add chart data
+    context['ioc_type_labels'] = [item['type'] for item in stats.get('iocs', {}).get('types', [])]
+    context['ioc_type_values'] = [item['count'] for item in stats.get('iocs', {}).get('types', [])]
+    
+    # Add view-specific data
+    if current_view == 'feeds':
+        context['feed_items'] = get_feeds_data(days)
+        context['feed_type_descriptions'] = {
+            'threatfox_iocs': 'ThreatFox IOCs - Malware indicators database',
+            'phishtank_urls': 'PhishTank - Community-verified phishing URLs',
+            'urlhaus_malware': 'URLhaus - Database of malicious URLs',
+            'feodotracker_c2': 'Feodo Tracker - Botnet C2 IP Blocklist',
+            'cisa_vulnerabilities': 'CISA Known Exploited Vulnerabilities Catalog',
+            'tor_exit_nodes': 'Tor Exit Node List',
+        }
+    elif current_view == 'iocs':
+        context['ioc_items'] = get_iocs_data(days)
+    elif current_view == 'campaigns':
+        context['campaigns'] = get_campaigns_data(days)
+    else:
+        # Dashboard view needs additional data
+        context['activity_dates'] = get_date_range(days)
+        context['activity_counts'] = get_random_counts(len(context['activity_dates']))
+        context['campaigns'] = get_campaigns_data(days)[:3]  # Top 3 campaigns
+        context['top_iocs'] = get_iocs_data(days)[:4]  # Top 4 IOCs
+    
+    return render_template('dashboard.html', **context, now=datetime.now())
 
-@api_bp.route('/feeds', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def list_feeds():
-    """List available threat feeds"""
-    logger.info("Listing available threat feeds")
+@app.route('/profile', methods=['GET', 'POST'])
+@login_required
+def profile():
+    """User profile page"""
+    username = session.get('username')
+    users = load_users()
+    user = users.get(username, {})
     
-    # Check cache
-    cache_key = "feeds_list"
-    cached_data = get_from_cache(cache_key)
-    if cached_data:
-        return api_response(cached_data)
-    
-    # Use mock data if parameter is set
-    use_mock = request.args.get('mock', 'false').lower() == 'true'
-    if use_mock:
-        return api_response(MOCK_DATA["feeds"])
-    
-    # FIXED: Use a simple query without concatenation
-    basic_query = f"""
-    SELECT 
-        table_id,
-        0 as record_count,
-        CURRENT_TIMESTAMP() as last_updated
-    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-    WHERE table_id NOT LIKE 'threat%'
-    ORDER BY table_id
-    """
-    
-    # Now execute the query
-    rows, error = execute_bigquery(basic_query)
-    
-    if error or not rows:
-        logger.warning(f"Failed to retrieve feed data: {error}")
-        # Use mock data if query fails
-        return api_response(MOCK_DATA["feeds"])
-    
-    feeds = []
-    for row in rows:
-        feed_data = {
-            "name": row["table_id"],
-            "record_count": row["record_count"]
-        }
+    if request.method == 'POST':
+        # Handle password change
+        current_password = request.form.get('current_password')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
         
-        if row.get("last_updated"):
-            if isinstance(row["last_updated"], datetime):
-                feed_data["last_updated"] = row["last_updated"].isoformat()
-            else:
-                feed_data["last_updated"] = str(row["last_updated"])
-        
-        feeds.append(feed_data)
-    
-    # If we have no feeds from BigQuery, create sample data for a better UX
-    if not feeds:
-        sample_feeds = [
-            {"name": "threatfox_iocs", "record_count": 100, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "phishtank_urls", "record_count": 80, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "urlhaus_malware", "record_count": 65, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "feodotracker_c2", "record_count": 50, "last_updated": datetime.utcnow().isoformat()},
-            {"name": "cisa_vulnerabilities", "record_count": 25, "last_updated": datetime.utcnow().isoformat()}
-        ]
-        feeds = sample_feeds
-    
-    result = {
-        "feeds": [feed["name"] for feed in feeds],
-        "feed_details": feeds,
-        "count": len(feeds),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    # Cache the result
-    save_to_cache(cache_key, result)
-    
-    return api_response(result)
-
-@api_bp.route('/feeds/<feed_name>/stats', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def feed_stats(feed_name: str):
-    """Get statistics for a specific feed"""
-    logger.info(f"Getting stats for feed: {feed_name}")
-    # Validate feed name (prevent SQL injection)
-    if not validate_table_name(feed_name):
-        return api_error("Invalid feed name", status=400)
-    
-    time_range = request.args.get('days', '30')
-    try:
-        days = int(time_range)
-    except ValueError:
-        return api_error("Invalid days parameter", status=400)
-    
-    # Check cache
-    cache_key = f"feed_stats_{feed_name}_{days}"
-    cached_stats = get_from_cache(cache_key)
-    if cached_stats:
-        return api_response(cached_stats)
-    
-    # Check if table exists
-    client = get_client('bigquery')
-    
-    if not client:
-        logger.warning("Database connection failed")
-        # Return sample stats
-        empty_stats = {
-            "total_records": 75,
-            "earliest_record": (datetime.utcnow() - timedelta(days=days)).isoformat(),
-            "latest_record": datetime.utcnow().isoformat(),
-            "days_with_data": days // 2,
-            "daily_counts": [{
-                "date": (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'),
-                "count": 5 + i % 10
-            } for i in range(days)]
-        }
-        return api_response(empty_stats)
-    
-    try:
-        table_ref = client.dataset(DATASET_ID).table(feed_name)
-        client.get_table(table_ref)
-    except Exception as e:
-        logger.warning(f"Table {feed_name} not found: {str(e)}")
-        # Return empty stats instead of error for better UX
-        empty_stats = {
-            "total_records": 75,
-            "earliest_record": (datetime.utcnow() - timedelta(days=days)).isoformat(),
-            "latest_record": datetime.utcnow().isoformat(),
-            "days_with_data": days // 2,
-            "daily_counts": [{
-                "date": (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'),
-                "count": 5 + i % 10
-            } for i in range(days)]
-        }
-        return api_response(empty_stats)
-    
-    # FIXED: Use proper table name format
-    full_table_name = f"`{PROJECT_ID}.{DATASET_ID}.{feed_name}`"
-    
-    # Simplified query that works more reliably
-    safe_query = f"""
-    SELECT
-      COUNT(*) as total_records,
-      MIN(_ingestion_timestamp) as earliest_record,
-      MAX(_ingestion_timestamp) as latest_record,
-      COUNT(DISTINCT DATE(_ingestion_timestamp)) as days_with_data
-    FROM {full_table_name}
-    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
-    
-    rows, error = execute_bigquery(safe_query)
-    
-    if error:
-        logger.error(f"Error retrieving feed statistics: {str(error)}")
-        # Return mock stats instead of error for better UX
-        empty_stats = {
-            "total_records": 75,
-            "earliest_record": (datetime.utcnow() - timedelta(days=days)).isoformat(),
-            "latest_record": datetime.utcnow().isoformat(),
-            "days_with_data": days // 2,
-            "daily_counts": [{
-                "date": (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'),
-                "count": 5 + i % 10
-            } for i in range(days)]
-        }
-        return api_response(empty_stats)
-    
-    stats = rows[0] if rows else {}
-    
-    # Convert datetime objects to ISO format strings
-    for key in ['earliest_record', 'latest_record']:
-        if key in stats and stats[key]:
-            if isinstance(stats[key], datetime):
-                stats[key] = stats[key].isoformat()
-            else:
-                stats[key] = str(stats[key])
-    
-    # Get daily counts with a separate query
-    daily_query = f"""
-    SELECT
-      DATE(_ingestion_timestamp) as date,
-      COUNT(*) as record_count
-    FROM {full_table_name}
-    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    
-    daily_rows, daily_error = execute_bigquery(daily_query)
-    
-    daily_counts = []
-    if not daily_error and daily_rows:
-        for day_data in daily_rows:
-            daily_counts.append({
-                "date": day_data["date"].isoformat() if isinstance(day_data["date"], datetime) else str(day_data["date"]),
-                "count": day_data["record_count"]
-            })
-    
-    # If we don't have real daily counts, create sample data
-    if not daily_counts:
-        daily_counts = [{
-            "date": (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'),
-            "count": 5 + i % 10
-        } for i in range(min(days, 30))]
-    
-    stats["daily_counts"] = daily_counts
-    
-    # Make sure we have total_records
-    if "total_records" not in stats or not stats["total_records"]:
-        stats["total_records"] = sum(day["count"] for day in daily_counts)
-    
-    # Cache the results
-    save_to_cache(cache_key, stats)
-    
-    return api_response(stats)
-
-@api_bp.route('/feeds/<feed_name>/data', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def feed_data(feed_name: str):
-    """Get data from a specific feed with filtering and pagination"""
-    logger.info(f"Getting data for feed: {feed_name}")
-    # Validate feed name (prevent SQL injection)
-    if not validate_table_name(feed_name):
-        return api_error("Invalid feed name", status=400)
-    
-    # Parse query parameters
-    try:
-        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-        offset = int(request.args.get('offset', '0'))
-        days = int(request.args.get('days', '7'))
-    except ValueError:
-        return api_error("Invalid numeric parameter", status=400)
-    
-    search = request.args.get('search', '')
-    
-    # Check if table exists
-    client = get_client('bigquery')
-    if not client:
-        return api_error("Database connection failed")
-    
-    try:
-        table_ref = client.dataset(DATASET_ID).table(feed_name)
-        client.get_table(table_ref)
-    except Exception:
-        return api_error(f"Feed not found: {feed_name}", status=404)
-    
-    # FIXED: Use proper table name format
-    full_table_name = f"`{PROJECT_ID}.{DATASET_ID}.{feed_name}`"
-    
-    # Build query with dynamic filters
-    conditions = [f"_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-    
-    # Add search term if provided
-    if search:
-        # Escape single quotes to prevent SQL injection
-        search = search.replace("'", "''")
-        conditions.append(f"TO_JSON_STRING(t) LIKE '%{search}%'")
-    
-    # Build and execute the query
-    query = f"""
-    SELECT *
-    FROM {full_table_name} AS t
-    WHERE {" AND ".join(conditions)}
-    ORDER BY _ingestion_timestamp DESC
-    LIMIT {limit} OFFSET {offset}
-    """
-    
-    rows, error = execute_bigquery(query)
-    
-    if error:
-        # Return sample data if query fails
-        records = []
-        feed_prefix = feed_name[:3].lower()
-        
-        # Generate different types of records based on feed name
-        if "url" in feed_name or "phish" in feed_name:
-            records = [{
-                "url": f"https://malicious-{i}.example.com/page.php",
-                "added": (datetime.utcnow() - timedelta(days=i % 7)).isoformat(),
-                "type": "malicious",
-                "_ingestion_timestamp": datetime.utcnow().isoformat()
-            } for i in range(limit)]
-        elif "ip" in feed_name or "c2" in feed_name:
-            records = [{
-                "ip": f"192.168.0.{i}",
-                "port": 8080 + (i % 10),
-                "status": "active",
-                "_ingestion_timestamp": datetime.utcnow().isoformat()
-            } for i in range(limit)]
-        elif "malware" in feed_name or "ioc" in feed_name:
-            records = [{
-                "hash": f"{feed_prefix}{i:04}{''.join(['abcdef'[i % 6] for _ in range(16)])}",
-                "name": f"Malware.{feed_prefix.upper()}.{i:03}",
-                "first_seen": (datetime.utcnow() - timedelta(days=i % 10)).isoformat(),
-                "_ingestion_timestamp": datetime.utcnow().isoformat()
-            } for i in range(limit)]
+        # Basic validation
+        if not current_password or not new_password or not confirm_password:
+            flash('All fields are required', 'danger')
+        elif new_password != confirm_password:
+            flash('New passwords do not match', 'danger')
         else:
-            records = [{
-                f"field_{j}": f"value_{i}_{j}" for j in range(5)
-            } for i in range(limit)]
-            for record in records:
-                record["_ingestion_timestamp"] = datetime.utcnow().isoformat()
-        
-        result = {
-            "records": records,
-            "total": 100,
-            "limit": limit,
-            "offset": offset,
-            "has_more": offset + limit < 100
-        }
-        return api_response(result)
-    
-    # Count total matching records
-    count_query = f"""
-    SELECT COUNT(*) as count
-    FROM {full_table_name} AS t
-    WHERE {" AND ".join(conditions)}
-    """
-    
-    count_rows, count_error = execute_bigquery(count_query)
-    
-    total_count = count_rows[0]["count"] if not count_error and count_rows else len(rows) + offset
-    
-    # Process rows to convert datetime objects to strings
-    processed_rows = []
-    for row in rows:
-        processed_row = {}
-        for key, value in row.items():
-            if isinstance(value, datetime):
-                processed_row[key] = value.isoformat()
+            stored_password = user.get('password', '')
+            
+            # Verify current password
+            if check_password_hash(stored_password, current_password) or stored_password == hashlib.sha256(current_password.encode()).hexdigest():
+                # Update password
+                hashed_password = hashlib.sha256(new_password.encode()).hexdigest()
+                if config.update_user(username, {'password': hashed_password}):
+                    flash('Password updated successfully', 'success')
+                else:
+                    flash('Error updating password', 'danger')
             else:
-                processed_row[key] = value
-        processed_rows.append(processed_row)
+                flash('Current password is incorrect', 'danger')
     
-    result = {
-        "records": processed_rows,
-        "total": total_count,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + limit < total_count
-    }
-    
-    return api_response(result)
+    return render_template('auth.html', page_type='profile', username=username, user=user)
 
-@api_bp.route('/campaigns', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def list_campaigns():
-    """List threat campaigns with filtering options"""
-    # Parse query parameters
-    try:
-        days = int(request.args.get('days', '30'))
-        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-        offset = int(request.args.get('offset', '0'))
-    except ValueError:
-        return api_error("Invalid numeric parameter", status=400)
+@app.route('/users')
+@admin_required
+def users():
+    """User management page"""
+    users = load_users()
+    return render_template('content.html', page_type='users', users=users)
+
+@app.route('/user/add', methods=['GET', 'POST'])
+@admin_required
+def add_user_route():
+    """Add user page"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        role = request.form.get('role', 'readonly')
+        
+        # Validation
+        if not username or not password:
+            flash('Username and password are required', 'danger')
+        elif password != confirm_password:
+            flash('Passwords do not match', 'danger')
+        elif username in load_users():
+            flash('Username already exists', 'danger')
+        else:
+            # Add user
+            if config.add_user(username, password, role):
+                flash(f'User {username} added successfully', 'success')
+                return redirect(url_for('users'))
+            else:
+                flash('Error adding user', 'danger')
     
-    # Use mock data
-    # Mock data for campaigns until real data exists
-    mock_campaigns = [
+    return render_template('auth.html', page_type='user_add')
+
+@app.route('/user/edit/<username>', methods=['GET', 'POST'])
+@admin_required
+def edit_user(username):
+    """Edit user page"""
+    users = load_users()
+    
+    if username not in users:
+        flash(f'User {username} not found', 'danger')
+        return redirect(url_for('users'))
+    
+    user = users[username]
+    
+    if request.method == 'POST':
+        password = request.form.get('password')
+        role = request.form.get('role')
+        
+        updates = {'role': role}
+        if password:
+            updates['password'] = password
+        
+        if config.update_user(username, updates):
+            flash(f'User {username} updated successfully', 'success')
+            return redirect(url_for('users'))
+        else:
+            flash('Error updating user', 'danger')
+    
+    return render_template('auth.html', page_type='user_edit', username=username, user=user)
+
+@app.route('/user/delete/<username>', methods=['POST'])
+@admin_required
+def delete_user(username):
+    """Delete user route"""
+    users = load_users()
+    
+    if username not in users:
+        flash(f'User {username} not found', 'danger')
+        return redirect(url_for('users'))
+    
+    if username == session.get('username'):
+        flash('Cannot delete your own account', 'danger')
+        return redirect(url_for('users'))
+    
+    # Delete user by getting current users, removing the user, and updating the config
+    auth_config = config.get_cached_config('auth-config', force_refresh=True)
+    if 'users' in auth_config and username in auth_config['users']:
+        del auth_config['users'][username]
+        if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+            flash(f'User {username} deleted successfully', 'success')
+        else:
+            flash('Error deleting user', 'danger')
+    else:
+        flash(f'User {username} not found in configuration', 'danger')
+    
+    return redirect(url_for('users'))
+
+@app.route('/feeds')
+@login_required
+def feeds():
+    """Shortcut to feeds view"""
+    return redirect(url_for('dashboard', view='feeds'))
+
+@app.route('/iocs')
+@login_required
+def iocs():
+    """Shortcut to IOCs view"""
+    return redirect(url_for('dashboard', view='iocs'))
+
+@app.route('/campaigns')
+@login_required
+def campaigns():
+    """Shortcut to campaigns view"""
+    return redirect(url_for('dashboard', view='campaigns'))
+
+@app.route('/explore')
+@login_required
+def explore():
+    """Data exploration page"""
+    return render_template('content.html', page_type='explore')
+
+@app.route('/alerts')
+@login_required
+def alerts():
+    """Alerts page"""
+    return render_template('content.html', page_type='alerts')
+
+@app.route('/ingest_threat_data')
+@login_required
+def ingest_threat_data():
+    """Trigger data ingestion manually"""
+    # In a real implementation, this would call the API
+    # For now, just redirect back to dashboard with a message
+    flash('Threat data refresh initiated', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/dynamic_content_detail/<content_type>/<identifier>')
+@login_required
+def dynamic_content_detail(content_type, identifier):
+    """Dynamic content detail page for IOCs, campaigns, etc."""
+    context = {
+        'content_type': content_type,
+        'identifier': identifier,
+        'data': get_mock_detail_data(content_type, identifier)
+    }
+    return render_template('detail.html', **context)
+
+# ======== Helper Functions ========
+
+def get_feeds_data(days=30):
+    """Get feeds data for UI"""
+    # Mock data for demonstration
+    feeds = [
+        {"name": "threatfox_iocs", "record_count": 100, "last_updated": datetime.utcnow().isoformat()},
+        {"name": "phishtank_urls", "record_count": 80, "last_updated": datetime.utcnow().isoformat()},
+        {"name": "urlhaus_malware", "record_count": 65, "last_updated": datetime.utcnow().isoformat()},
+        {"name": "feodotracker_c2", "record_count": 50, "last_updated": datetime.utcnow().isoformat()},
+        {"name": "cisa_vulnerabilities", "record_count": 25, "last_updated": datetime.utcnow().isoformat()}
+    ]
+    return feeds
+
+def get_iocs_data(days=30):
+    """Get IOCs data for UI"""
+    # Mock data for demonstration
+    iocs = [
+        {
+            "type": "ip",
+            "value": "192.168.1.100",
+            "source": "threatfox_iocs",
+            "timestamp": datetime.utcnow().isoformat(),
+            "sources": 12,
+            "first_seen": (datetime.utcnow() - timedelta(days=20)).isoformat()
+        },
+        {
+            "type": "domain",
+            "value": "malicious-domain.com",
+            "source": "urlhaus_malware",
+            "timestamp": datetime.utcnow().isoformat(),
+            "sources": 8,
+            "first_seen": (datetime.utcnow() - timedelta(days=15)).isoformat()
+        },
+        {
+            "type": "url",
+            "value": "https://phishing-site.org/login",
+            "source": "phishtank_urls",
+            "timestamp": datetime.utcnow().isoformat(),
+            "sources": 6,
+            "first_seen": (datetime.utcnow() - timedelta(days=10)).isoformat()
+        },
+        {
+            "type": "md5",
+            "value": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+            "source": "threatfox_iocs",
+            "timestamp": datetime.utcnow().isoformat(),
+            "sources": 4,
+            "first_seen": (datetime.utcnow() - timedelta(days=5)).isoformat()
+        }
+    ]
+    return iocs
+
+def get_campaigns_data(days=30):
+    """Get campaigns data for UI"""
+    # Mock data for demonstration
+    campaigns = [
         {
             "campaign_id": "c123456",
             "campaign_name": "APT-123456",
             "threat_actor": "FancyBear",
             "source_count": 7,
             "last_seen": (datetime.utcnow() - timedelta(days=2)).isoformat(),
-            "severity": "high"
+            "severity": "high",
+            "first_seen": (datetime.utcnow() - timedelta(days=15)).isoformat()
         },
         {
             "campaign_id": "c234567",
@@ -800,7 +510,8 @@ def list_campaigns():
             "threat_actor": "Conti",
             "source_count": 5,
             "last_seen": (datetime.utcnow() - timedelta(days=5)).isoformat(),
-            "severity": "critical"
+            "severity": "critical",
+            "first_seen": (datetime.utcnow() - timedelta(days=20)).isoformat()
         },
         {
             "campaign_id": "c345678",
@@ -808,88 +519,102 @@ def list_campaigns():
             "threat_actor": "Lazarus",
             "source_count": 3,
             "last_seen": (datetime.utcnow() - timedelta(days=10)).isoformat(),
-            "severity": "medium"
+            "severity": "medium",
+            "first_seen": (datetime.utcnow() - timedelta(days=25)).isoformat()
         }
     ]
-    
-    result = {
-        "campaigns": mock_campaigns,
-        "count": len(mock_campaigns),
-        "has_more": False,
-        "days": days
-    }
-    
-    return api_response(result)
+    return campaigns
 
-@api_bp.route('/iocs', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def search_iocs():
-    """Search for IOCs across all analyzed data with advanced filtering"""
-    # Parse query parameters with validation
-    days = int(request.args.get('days', '30'))
-    limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-    offset = int(request.args.get('offset', '0'))
+def get_date_range(days=30):
+    """Get date range for charts"""
+    today = datetime.now().date()
+    return [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
+
+def get_random_counts(length):
+    """Get random counts for charts"""
+    import random
+    base = 50
+    result = []
     
-    # Use mock data
-    # Get mock data directly from the MOCK_DATA dictionary
-    result = MOCK_DATA.get("iocs", {
-        "records": [],
-        "count": 0,
-        "total_available": 0,
-        "filters": {
-            "days": days
+    for i in range(length):
+        result.append(base + random.randint(-10, 20))
+        # Adjust base with some trend
+        base = max(10, min(100, base + random.randint(-5, 8)))
+    
+    return result
+
+def get_mock_detail_data(content_type, identifier):
+    """Get mock detail data for dynamic content pages"""
+    if content_type == 'ioc':
+        ioc_type, ioc_value = identifier.split('/', 1)
+        return {
+            "type": ioc_type,
+            "value": ioc_value,
+            "first_seen": (datetime.utcnow() - timedelta(days=15)).isoformat(),
+            "last_seen": datetime.utcnow().isoformat(),
+            "sources": ["threatfox_iocs", "alienvault_otx"],
+            "confidence": "medium",
+            "tags": ["malware", "ransomware"],
+            "related_iocs": get_iocs_data(30)[:2],
+            "campaigns": get_campaigns_data(30)[:1]
         }
-    })
-    
-    return api_response(result)
+    elif content_type == 'campaign':
+        campaign_id = identifier
+        campaigns = get_campaigns_data(30)
+        campaign = next((c for c in campaigns if c["campaign_id"] == campaign_id), {})
+        campaign["description"] = "This threat campaign involves targeted attacks against financial institutions using spear-phishing emails and custom malware."
+        campaign["iocs"] = get_iocs_data(30)[:3]
+        campaign["techniques"] = ["T1566 - Phishing", "T1204 - User Execution", "T1573 - Encrypted Channel"]
+        return campaign
+    elif content_type == 'feed':
+        feed_name = identifier
+        feed = next((f for f in get_feeds_data(30) if f["name"] == feed_name), {})
+        feed["description"] = f"Data from {feed_name} threat intelligence feed."
+        feed["sample_data"] = get_iocs_data(30)[:5]
+        feed["daily_counts"] = [{"date": d, "count": c} for d, c in zip(get_date_range(14), get_random_counts(14))]
+        return feed
+    return {}
 
-@api_bp.route('/ingest_threat_data', methods=['POST'])
-@require_api_key
-@handle_exceptions
-def handle_ingest_data():
-    """API endpoint for ingesting threat data"""
+# ======== Template Filters ========
+
+@app.template_filter('datetime')
+def format_datetime(value):
+    """Format a datetime string for display"""
+    if not value:
+        return 'N/A'
     try:
-        # Import ingestion module only when needed
-        from ingestion import ingest_threat_data
-        
-        # Log the request for debugging
-        try:
-            request_json = request.get_json(silent=True)
-            logger.info(f"Ingestion endpoint called with data: {request_json}")
-        except Exception as e:
-            logger.warning(f"Could not parse request JSON: {e}")
-        
-        # Call with the request object
-        result = ingest_threat_data(request)
-        
-        # Handle different return types
-        if isinstance(result, tuple):
-            return result
+        if isinstance(value, str):
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
         else:
-            return jsonify(result)
-    except ImportError:
-        logger.error("Ingestion module not available")
-        return api_error("Ingestion module not available")
-    except Exception as e:
-        logger.error(f"Error in ingestion endpoint: {str(e)}")
-        logger.error(traceback.format_exc())
-        return api_error(f"Ingestion error: {str(e)}")
+            dt = value
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return str(value)
 
-# Initialize the app with the api Blueprint
-def init_app(app):
-    """Initialize the API with the main app"""
-    # Register blueprint with URL prefix
-    app.register_blueprint(api_bp)
-    
-    # Register root health check endpoint for compatibility
-    @app.route('/health', methods=['GET'])
-    @handle_exceptions
-    def root_health_check():
-        """Root health check endpoint"""
-        logger.info("Root health check called")
-        return health_check()
-        
-    logger.info("API routes initialized successfully")
-    
-    return app
+# ======== Error Handlers ========
+
+@app.errorhandler(404)
+def page_not_found(e):
+    """Handle 404 errors"""
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    """Handle 500 errors"""
+    logger.error(f"Server error: {str(e)}")
+    return render_template('500.html'), 500
+
+# ======== Context Processors ========
+
+@app.context_processor
+def inject_global_data():
+    """Inject global data into templates"""
+    return {
+        'now': datetime.now(),
+        'environment': config.environment,
+        'version': os.environ.get('VERSION', '1.0.0')
+    }
+
+# Initialize the app
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
