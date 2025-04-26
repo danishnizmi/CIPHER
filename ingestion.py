@@ -1,6 +1,7 @@
 """
-Threat Intelligence Platform - Simplified Ingestion Module
+Threat Intelligence Platform - Enhanced Ingestion Module
 Handles collection of threat data from open-source feeds and loads it into BigQuery.
+Optimized for GCP services with improved reliability and performance.
 """
 
 import os
@@ -8,23 +9,32 @@ import json
 import logging
 import csv
 import time
+import base64
 from io import StringIO, BytesIO
 import zipfile
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Union, Tuple
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Union, Tuple, Iterator
 from collections import defaultdict
 from functools import wraps
+import re
+import hashlib
 
 import requests
 from google.cloud import bigquery
 from google.cloud import storage
 from google.cloud import pubsub_v1
+from google.api_core import retry, exceptions
+from google.api_core.retry import Retry
+from google.cloud.exceptions import NotFound
 
 # Import config module
 import config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # GCP Configuration
@@ -41,14 +51,19 @@ publisher = None
 # Rate limiting management
 _last_request_time = defaultdict(float)
 _rate_limit_delays = {
-    "phishtank.com": 60,       # Increased from 30 to 60 seconds due to rate limit issues
-    "data.phishtank.com": 60,  # Added specific domain seen in logs
+    "phishtank.com": 60,       # 60 seconds due to rate limit issues
+    "data.phishtank.com": 60,  
     "urlhaus.abuse.ch": 10,   
     "threatfox.abuse.ch": 10, 
     "default": 5              
 }
 
-# Enhanced Open Source Feed Definitions with direct links and better fallbacks
+# BigQuery specific configuration
+BQ_INSERT_BATCH_SIZE = 500  # Number of rows to insert in a single batch
+BQ_MAX_RETRIES = 5         # Maximum number of retries for BigQuery operations
+BQ_RETRY_DELAY = 1.5       # Base delay factor for exponential backoff
+
+# Enhanced Open Source Feed Definitions with direct links
 FEED_SOURCES = {
     "threatfox": {
         "url": "https://threatfox.abuse.ch/export/json/recent/",
@@ -57,7 +72,15 @@ FEED_SOURCES = {
         "table_id": "threatfox_iocs",
         "format": "json",
         "auth_required": False,
-        "description": "ThreatFox IOCs - Malware indicators database"
+        "description": "ThreatFox IOCs - Malware indicators database",
+        "json_mapping": {
+            "path_options": [
+                "data.iocs",   # Standard path
+                "data",        # Alternative path
+                ""             # Root level
+            ],
+            "id_fields": ["id", "ioc_id"]  # Fields that might contain unique IDs
+        }
     },
     "phishtank": {
         "url": "https://data.phishtank.com/data/online-valid.json",
@@ -65,7 +88,7 @@ FEED_SOURCES = {
         "table_id": "phishtank_urls",
         "format": "json",
         "auth_required": False,
-        "rate_limit": 60,  # Increased from 30 to 60
+        "rate_limit": 60,
         "description": "PhishTank - Community-verified phishing URLs"
     },
     "urlhaus": {
@@ -76,7 +99,6 @@ FEED_SOURCES = {
         "skip_lines": 8,  # Skip header info/comments
         "description": "URLhaus - Database of malicious URLs"
     },
-    # Added more basic feeds for redundancy
     "feodotracker": {
         "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
         "fallback_url": "https://feodotracker.abuse.ch/downloads/ipblocklist.csv",
@@ -99,29 +121,68 @@ FEED_SOURCES = {
         "format": "text",
         "auth_required": False,
         "description": "Tor Exit Node List"
+    },
+    "alienvault_otx": {
+        "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
+        "table_id": "alienvault_otx",
+        "format": "json",
+        "auth_required": True,
+        "auth_header": "X-OTX-API-KEY",
+        "description": "AlienVault OTX - Open Threat Exchange"
+    },
+    "misp_feed": {
+        "url": "https://raw.githubusercontent.com/MISP/MISP-STIX-Converter/main/examples/threat_report.json",
+        "table_id": "misp_threats",
+        "format": "json",
+        "auth_required": False,
+        "description": "MISP - Malware Information Sharing Platform"
     }
 }
 
 def get_client(client_type: str):
-    """Get or initialize a Google Cloud client"""
+    """Get or initialize a Google Cloud client with proper retry settings"""
     global bq_client, storage_client, publisher
     
     try:
         if client_type == 'bigquery':
             if bq_client is None:
+                # Configure custom retry for BigQuery
+                custom_retry = retry.Retry(
+                    initial=1.0,  # Initial backoff in seconds
+                    maximum=60.0, # Maximum backoff
+                    multiplier=2.0, # Multiplier for exponential backoff
+                    predicate=retry.if_transient_error, # Retry on transient errors
+                    deadline=300.0 # Total deadline in seconds
+                )
+                
+                # Create client with custom retry
                 bq_client = bigquery.Client(project=PROJECT_ID)
-                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+                bq_client._transport._operations_client._transport._operations_stub._interceptors.append(
+                    retry.retry_interceptor(custom_retry)
+                )
+                logger.info(f"BigQuery client initialized for project {PROJECT_ID} with enhanced retry")
             return bq_client
+            
         elif client_type == 'storage':
             if storage_client is None:
                 storage_client = storage.Client(project=PROJECT_ID)
                 logger.info(f"Storage client initialized for project {PROJECT_ID}")
             return storage_client
+            
         elif client_type == 'pubsub':
             if publisher is None:
+                # Configure custom retry for Pub/Sub
+                custom_retry = retry.Retry(
+                    initial=1.0,
+                    maximum=30.0,
+                    multiplier=1.5,
+                    predicate=retry.if_transient_error,
+                    deadline=120.0
+                )
                 publisher = pubsub_v1.PublisherClient()
                 logger.info("Pub/Sub publisher initialized")
             return publisher
+            
         else:
             logger.error(f"Unknown client type: {client_type}")
             return None
@@ -129,8 +190,28 @@ def get_client(client_type: str):
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
         return None
 
-def _rate_limited_request(url, timeout=30, max_retries=3, headers=None):
-    """Make a rate-limited request with respect to API limits"""
+def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0):
+    """Decorator for exponential backoff retries on functions"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        raise
+                    
+                    wait_time = base_delay * (2 ** (retries - 1))
+                    logger.warning(f"Retry {retries}/{max_retries} after error: {str(e)}, waiting {wait_time:.2f}s")
+                    time.sleep(wait_time)
+        return wrapper
+    return decorator
+
+def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=None, auth_header=None):
+    """Make a rate-limited request with respect to API limits and authentication"""
     domain = url.split('/')[2]
     
     # Determine delay based on domain
@@ -142,6 +223,10 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None):
             'User-Agent': 'ThreatIntelligencePlatform/1.0 (Research)',
             'Accept': 'application/json, text/plain, */*'
         }
+    
+    # Add authentication if provided
+    if api_key and auth_header:
+        headers[auth_header] = api_key
     
     for retry in range(max_retries):
         # Check if we need to wait
@@ -201,7 +286,7 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None):
     raise requests.RequestException(f"Failed to make request to {url} after {max_retries} retries")
 
 def ensure_resources(force_create=False) -> bool:
-    """Ensure BigQuery datasets and tables exist"""
+    """Ensure BigQuery datasets and tables exist with proper ACLs and metadata"""
     client = get_client('bigquery')
     if not client:
         return False
@@ -209,14 +294,47 @@ def ensure_resources(force_create=False) -> bool:
     try:
         # Create dataset if it doesn't exist
         try:
-            client.get_dataset(DATASET_ID)
+            dataset = client.get_dataset(DATASET_ID)
             logger.info(f"Dataset {DATASET_ID} already exists")
-        except Exception as e:
-            logger.info(f"Dataset {DATASET_ID} not found, creating it: {str(e)}")
+        except NotFound:
+            logger.info(f"Dataset {DATASET_ID} not found, creating it")
             dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
             dataset.location = "US"
-            client.create_dataset(dataset, exists_ok=True)
+            
+            # Add metadata
+            dataset.description = "Threat Intelligence Platform Dataset"
+            dataset.labels = {
+                "env": config.environment,
+                "department": "security",
+                "application": "threat-intelligence"
+            }
+            
+            dataset = client.create_dataset(dataset, exists_ok=True)
             logger.info(f"Created dataset {DATASET_ID}")
+            
+            # Ensure service account has proper access
+            service_account = f"cloud-build-service@{PROJECT_ID}.iam.gserviceaccount.com"
+            dataset_access_entry = bigquery.AccessEntry(
+                role="roles/bigquery.dataEditor",
+                entity_type="userByEmail", 
+                entity_id=service_account
+            )
+            entries = list(dataset.access_entries)
+            entries.append(dataset_access_entry)
+            dataset.access_entries = entries
+            client.update_dataset(dataset, ["access_entries"])
+            logger.info(f"Updated dataset permissions for {service_account}")
+        
+        # Create GCS bucket if needed
+        storage_client = get_client('storage')
+        if storage_client:
+            try:
+                bucket = storage_client.get_bucket(BUCKET_NAME)
+                logger.info(f"GCS bucket {BUCKET_NAME} already exists")
+            except NotFound:
+                logger.info(f"GCS bucket {BUCKET_NAME} not found, creating it")
+                bucket = storage_client.create_bucket(BUCKET_NAME, location="us-central1")
+                logger.info(f"Created GCS bucket {BUCKET_NAME}")
         
         # Create tables if they don't exist
         for feed_name, feed_config in FEED_SOURCES.items():
@@ -229,33 +347,142 @@ def ensure_resources(force_create=False) -> bool:
                     logger.info(f"Table {table_id} already exists")
                 else:
                     # Force table creation for testing
-                    raise Exception("Forcing table creation")
-            except Exception:
-                # Create with minimal schema, BigQuery will auto-detect the rest
+                    raise NotFound("Forcing table creation")
+            except NotFound:
+                # Create with enhanced schema based on feed type
                 schema = [
-                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP")
+                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
+                    bigquery.SchemaField("_ingestion_id", "STRING"),
+                    bigquery.SchemaField("_source", "STRING"),
+                    bigquery.SchemaField("_feed_type", "STRING")
                 ]
+                
+                # Add feed-specific fields
+                feed_format = feed_config.get("format")
+                if feed_format == "json":
+                    if feed_name == "threatfox":
+                        schema.extend([
+                            bigquery.SchemaField("id", "STRING"),
+                            bigquery.SchemaField("ioc_type", "STRING"),
+                            bigquery.SchemaField("ioc_value", "STRING"),
+                            bigquery.SchemaField("threat_type", "STRING"),
+                            bigquery.SchemaField("malware", "STRING"),
+                            bigquery.SchemaField("confidence_level", "INTEGER"),
+                            bigquery.SchemaField("tags", "STRING", mode="REPEATED"),
+                            bigquery.SchemaField("first_seen", "TIMESTAMP")
+                        ])
+                    elif feed_name == "phishtank":
+                        schema.extend([
+                            bigquery.SchemaField("url", "STRING"),
+                            bigquery.SchemaField("phish_id", "STRING"),
+                            bigquery.SchemaField("submission_time", "TIMESTAMP"),
+                            bigquery.SchemaField("verified", "BOOLEAN"),
+                            bigquery.SchemaField("verification_time", "TIMESTAMP"),
+                            bigquery.SchemaField("target", "STRING")
+                        ])
+                
+                # Create the table with schema
                 table = bigquery.Table(full_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
+                
+                # Add table description and expiration
+                table.description = feed_config.get("description", "Threat Intelligence Feed")
+                if config.environment != "production":
+                    # Set 90-day expiration for non-production environments
+                    expiration_ms = 90 * 24 * 60 * 60 * 1000  # 90 days in milliseconds
+                    table.expires = datetime.now() + timedelta(days=90)
+                
+                # Add clustering/partitioning for large tables
+                if feed_name in ["threatfox", "phishtank", "urlhaus"]:
+                    table.time_partitioning = bigquery.TimePartitioning(
+                        type_=bigquery.TimePartitioningType.DAY,
+                        field="_ingestion_timestamp"
+                    )
+                    if feed_name == "threatfox":
+                        table.clustering_fields = ["ioc_type", "threat_type"]
+                    elif feed_name == "phishtank":
+                        table.clustering_fields = ["target", "verified"]
+                
+                # Create the table
+                table = client.create_table(table, exists_ok=True)
+                logger.info(f"Created table {table_id} with enhanced schema and settings")
         
         # Create an additional threat_analysis table for later use
         try:
             analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
             client.get_table(analysis_table_id)
             logger.info("Analysis table already exists")
-        except Exception:
-            # Create analysis table
+        except NotFound:
+            # Create analysis table with enhanced schema
             schema = [
                 bigquery.SchemaField("source_id", "STRING"),
                 bigquery.SchemaField("source_type", "STRING"),
                 bigquery.SchemaField("iocs", "STRING"),
                 bigquery.SchemaField("vertex_analysis", "STRING"),
-                bigquery.SchemaField("analysis_timestamp", "TIMESTAMP")
+                bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("analysis_id", "STRING"),
+                bigquery.SchemaField("analysis_version", "STRING"),
+                bigquery.SchemaField("severity", "STRING"),
+                bigquery.SchemaField("confidence", "STRING"),
+                bigquery.SchemaField("threat_actors", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("target_sectors", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("target_regions", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("malware_families", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("techniques", "STRING", mode="REPEATED")
             ]
+            
             table = bigquery.Table(analysis_table_id, schema=schema)
+            table.description = "Threat Intelligence Analysis Results"
+            
+            # Add partitioning and clustering
+            table.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field="analysis_timestamp"
+            )
+            table.clustering_fields = ["source_type", "severity"]
+            
             client.create_table(table, exists_ok=True)
-            logger.info("Created analysis table")
+            logger.info("Created analysis table with enhanced schema")
+        
+        # Create threat_campaigns table
+        try:
+            campaigns_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
+            client.get_table(campaigns_table_id)
+            logger.info("Campaigns table already exists")
+        except NotFound:
+            # Create campaigns table
+            schema = [
+                bigquery.SchemaField("campaign_id", "STRING"),
+                bigquery.SchemaField("campaign_name", "STRING"),
+                bigquery.SchemaField("threat_actor", "STRING"),
+                bigquery.SchemaField("malware", "STRING"),
+                bigquery.SchemaField("techniques", "STRING"),
+                bigquery.SchemaField("targets", "STRING"),
+                bigquery.SchemaField("severity", "STRING"),
+                bigquery.SchemaField("sources", "STRING"),
+                bigquery.SchemaField("iocs", "STRING"),
+                bigquery.SchemaField("source_count", "INTEGER"),
+                bigquery.SchemaField("ioc_count", "INTEGER"),
+                bigquery.SchemaField("first_seen", "TIMESTAMP"),
+                bigquery.SchemaField("last_seen", "TIMESTAMP"),
+                bigquery.SchemaField("detection_timestamp", "TIMESTAMP")
+            ]
+            
+            table = bigquery.Table(campaigns_table_id, schema=schema)
+            table.description = "Detected Threat Campaigns"
+            
+            client.create_table(table, exists_ok=True)
+            logger.info("Created campaigns table")
+        
+        # Ensure PubSub topic exists
+        pubsub_client = get_client('pubsub')
+        if pubsub_client:
+            topic_path = pubsub_client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
+            try:
+                pubsub_client.get_topic(request={"topic": topic_path})
+                logger.info(f"PubSub topic {PUBSUB_TOPIC} already exists")
+            except Exception:
+                pubsub_client.create_topic(request={"name": topic_path})
+                logger.info(f"Created PubSub topic {PUBSUB_TOPIC}")
         
         return True
     except Exception as e:
@@ -263,7 +490,7 @@ def ensure_resources(force_create=False) -> bool:
         return False
 
 class ThreatDataIngestion:
-    """Simplified threat data ingestion class"""
+    """Enhanced threat data ingestion class with improved reliability and performance"""
     
     def __init__(self):
         """Initialize the ingestion engine"""
@@ -271,7 +498,7 @@ class ThreatDataIngestion:
         self.feed_stats = {}
     
     def process_all_feeds(self) -> List[Dict]:
-        """Process all configured feeds"""
+        """Process all configured feeds with enhanced reliability"""
         if not self.ready:
             # Try to initialize resources again
             logger.warning("Ingestion engine not properly initialized, retrying initialization")
@@ -283,8 +510,11 @@ class ThreatDataIngestion:
         results = []
         logger.info(f"Processing {len(FEED_SOURCES)} feeds")
         
+        # Get API keys for authenticated feeds
+        api_keys = self._get_api_keys()
+        
         # Process feeds in order of reliability (most reliable first)
-        feed_order = ["cisa_known", "tor_exit", "feodotracker", "urlhaus", "phishtank", "threatfox"]
+        feed_order = ["cisa_known", "tor_exit", "feodotracker", "urlhaus", "phishtank", "threatfox", "alienvault_otx", "misp_feed"]
         
         # Add any feeds not in the ordered list
         for feed_name in FEED_SOURCES:
@@ -297,6 +527,23 @@ class ThreatDataIngestion:
                 
             try:
                 logger.info(f"Starting ingestion for feed: {feed_name}")
+                
+                # Check if feed requires authentication
+                feed_config = FEED_SOURCES[feed_name]
+                if feed_config.get("auth_required", False):
+                    api_key = api_keys.get(feed_name)
+                    if not api_key:
+                        logger.warning(f"Missing API key for {feed_name}, skipping")
+                        results.append({
+                            "feed_name": feed_name,
+                            "status": "error",
+                            "message": "Missing API key",
+                            "record_count": 0,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+                
+                # Process the feed
                 result = self.process_feed(feed_name)
                 results.append(result)
                 
@@ -321,11 +568,64 @@ class ThreatDataIngestion:
             "details": results
         }
         
+        # Store stats in GCS for persistence
+        self._store_stats()
+        
         return results
     
+    def _get_api_keys(self) -> Dict[str, str]:
+        """Get API keys for authenticated feeds from Secret Manager"""
+        api_keys = {}
+        api_keys_config = config.get_cached_config('api-keys', force_refresh=True)
+        
+        if not api_keys_config:
+            logger.warning("No API keys configuration found")
+            return api_keys
+        
+        # Extract keys for each feed that needs authentication
+        for feed_name, feed_config in FEED_SOURCES.items():
+            if feed_config.get("auth_required", False):
+                key_name = f"{feed_name}_api_key"
+                api_keys[feed_name] = api_keys_config.get(key_name)
+                
+                if not api_keys.get(feed_name):
+                    # Try alternate key name format
+                    alternate_key = feed_name.replace("_", "-") + "-api-key"
+                    api_keys[feed_name] = api_keys_config.get(alternate_key)
+        
+        return api_keys
+    
+    def _store_stats(self) -> bool:
+        """Store feed statistics in GCS for persistence"""
+        storage_client = get_client('storage')
+        if not storage_client or not self.feed_stats:
+            return False
+        
+        try:
+            bucket = storage_client.bucket(BUCKET_NAME)
+            stats_blob = bucket.blob("stats/feed_stats_latest.json")
+            
+            # Store with timestamp
+            stats_data = json.dumps(self.feed_stats)
+            stats_blob.upload_from_string(stats_data, content_type="application/json")
+            
+            # Also store a timestamped version for history
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            history_blob = bucket.blob(f"stats/feed_stats_{timestamp}.json")
+            history_blob.upload_from_string(stats_data, content_type="application/json")
+            
+            logger.info("Successfully stored feed statistics in GCS")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to store stats in GCS: {str(e)}")
+            return False
+    
     def process_feed(self, feed_name: str) -> Dict[str, Any]:
-        """Process a feed and return results"""
+        """Process a feed and return results with enhanced reliability"""
         start_time = datetime.now()
+        
+        # Generate a unique ingestion ID
+        ingestion_id = f"{feed_name}_{start_time.strftime('%Y%m%d%H%M%S')}_{hashlib.md5(feed_name.encode()).hexdigest()[:8]}"
         
         # Validate state and feed
         if not self.ready:
@@ -337,8 +637,19 @@ class ThreatDataIngestion:
         feed_config = FEED_SOURCES[feed_name]
         
         try:
+            # Get API key if needed
+            api_key = None
+            auth_header = None
+            if feed_config.get("auth_required", False):
+                api_keys = self._get_api_keys()
+                api_key = api_keys.get(feed_name)
+                auth_header = feed_config.get("auth_header")
+                
+                if not api_key:
+                    return self._error_result(feed_name, "Missing API key for authenticated feed")
+            
             # Get feed data
-            data, error = self._fetch_feed_data(feed_name)
+            data, error = self._fetch_feed_data(feed_name, api_key, auth_header)
             
             if error:
                 logger.warning(f"Primary feed fetch failed: {error}")
@@ -355,7 +666,7 @@ class ThreatDataIngestion:
                         if original_format == "json" and feed_config["fallback_url"].endswith(".csv"):
                             feed_config["format"] = "csv"
                             
-                        data, fallback_error = self._fetch_feed_data(feed_name)
+                        data, fallback_error = self._fetch_feed_data(feed_name, api_key, auth_header)
                         
                         # Restore original format
                         feed_config["format"] = original_format
@@ -376,25 +687,21 @@ class ThreatDataIngestion:
                     "feed_name": feed_name,
                     "status": "warning",
                     "message": "No data collected",
-                    "record_count": 0
+                    "record_count": 0,
+                    "ingestion_id": ingestion_id
                 }
             
             # Process records
-            records = self._process_records(data, feed_name, feed_config)
+            records = self._process_records(data, feed_name, feed_config, ingestion_id)
             
             if not records:
                 return {
                     "feed_name": feed_name,
                     "status": "warning",
                     "message": "No records extracted",
-                    "record_count": 0
+                    "record_count": 0,
+                    "ingestion_id": ingestion_id
                 }
-            
-            # Log sample of first record for debugging
-            if records and len(records) > 0:
-                first_record = records[0]
-                record_preview = {k: v for k, v in list(first_record.items())[:5]}  # First 5 fields
-                logger.info(f"Sample record from {feed_name}: {record_preview}")
             
             # Upload to BigQuery
             record_count = self._upload_to_bigquery(records, feed_name, feed_config)
@@ -404,11 +711,12 @@ class ThreatDataIngestion:
                     "feed_name": feed_name,
                     "status": "warning",
                     "message": "No records uploaded",
-                    "record_count": 0
+                    "record_count": 0,
+                    "ingestion_id": ingestion_id
                 }
             
             # Publish event
-            self._publish_event(feed_name, record_count)
+            self._publish_event(feed_name, record_count, ingestion_id)
             
             # Return success result
             duration = (datetime.now() - start_time).total_seconds()
@@ -419,63 +727,42 @@ class ThreatDataIngestion:
                 "status": "success",
                 "record_count": record_count,
                 "duration_seconds": duration,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                "ingestion_id": ingestion_id
             }
         except Exception as e:
             logger.error(f"Error processing feed {feed_name}: {str(e)}")
-            return self._error_result(feed_name, str(e), start_time)
+            return self._error_result(feed_name, str(e), start_time, ingestion_id)
     
-    def _error_result(self, feed_name: str, message: str, start_time=None) -> Dict[str, Any]:
+    def _error_result(self, feed_name: str, message: str, start_time=None, ingestion_id=None) -> Dict[str, Any]:
         """Create standardized error result"""
         duration = (datetime.now() - start_time).total_seconds() if start_time else 0
+        if not ingestion_id:
+            ingestion_id = f"{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_error"
+            
         return {
             "feed_name": feed_name,
             "status": "error",
             "message": message,
             "record_count": 0,
             "duration_seconds": duration,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "ingestion_id": ingestion_id
         }
     
-    def _fetch_feed_data(self, feed_name: str) -> Tuple[Any, Optional[str]]:
-        """Fetch data from a feed source"""
+    def _fetch_feed_data(self, feed_name: str, api_key=None, auth_header=None) -> Tuple[Any, Optional[str]]:
+        """Fetch data from a feed source with enhanced error handling"""
         feed_config = FEED_SOURCES[feed_name]
         url = feed_config["url"]
         
         logger.info(f"Fetching data from {feed_name} ({url})")
         
         try:
-            # Special handling for ThreatFox
-            if feed_name == "threatfox":
-                try:
-                    # Use the direct export URL 
-                    url = feed_config.get("opensrc_url", feed_config["url"])
-                    
-                    logger.info(f"Fetching ThreatFox data from {url}")
-                    response = _rate_limited_request(url, timeout=30)
-                    response.raise_for_status()
-                    
-                    # Debug information - print content length and first 100 chars
-                    content_length = len(response.content)
-                    logger.info(f"Received {content_length} bytes from ThreatFox")
-                    
-                    # Verify JSON structure by parsing
-                    try:
-                        data = response.json()
-                        return data, None
-                    except Exception as json_err:
-                        logger.error(f"Error parsing ThreatFox JSON: {str(json_err)}")
-                        # Try to return a simplified structure
-                        return {"data": {"data": response.text[:1000]}}, None  
-                except Exception as e:
-                    logger.error(f"Error fetching ThreatFox data: {str(e)}")
-                    return None, f"Error: {str(e)}"
-            
             # Handle compressed data
             if feed_config.get("zip_compressed"):
                 try:
                     logger.info(f"Fetching compressed data from {url}")
-                    response = _rate_limited_request(url, timeout=30)
+                    response = _rate_limited_request(url, timeout=30, api_key=api_key, auth_header=auth_header)
                     response.raise_for_status()
                     
                     with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
@@ -492,7 +779,7 @@ class ThreatDataIngestion:
                     return None, f"Error: {str(e)}"
             
             # Make the standard request
-            response = _rate_limited_request(url, timeout=30)
+            response = _rate_limited_request(url, timeout=30, api_key=api_key, auth_header=auth_header)
             response.raise_for_status()
             
             # Return data based on format
@@ -508,11 +795,15 @@ class ThreatDataIngestion:
                         if root_field in data:
                             data = data[root_field]
                     
+                    # Special handling for ThreatFox recursive exploration
+                    if feed_name == "threatfox":
+                        data = self._extract_threatfox_data(data)
+                    
                     return data, None
                 except json.JSONDecodeError as e:
-                    # Try to parse manually if the JSON is invalid
+                    # Better error handling for JSON parsing errors
                     logger.error(f"JSON decode error for {feed_name}: {str(e)}")
-                    logger.info(f"Content sample: {response.text[:100]}...")
+                    logger.info(f"Content sample: {response.text[:200]}...")
                     return None, f"JSON decode error: {str(e)}"
                 
             elif feed_format == "csv":
@@ -533,22 +824,81 @@ class ThreatDataIngestion:
             logger.error(f"Error fetching {feed_name}: {str(e)}")
             return None, f"Error: {str(e)}"
     
-    def _process_records(self, data: Any, feed_name: str, feed_config: Dict) -> List[Dict]:
-        """Process feed data into standardized records"""
+    def _extract_threatfox_data(self, data: Any) -> List[Dict[str, Any]]:
+        """Robustly extract ThreatFox data using recursive exploration"""
+        # Define the possible paths in the ThreatFox response
+        mapping = FEED_SOURCES["threatfox"].get("json_mapping", {})
+        path_options = mapping.get("path_options", ["data.iocs", "data", ""])
+        
+        # Try each path option
+        for path in path_options:
+            if not path:  # Root level
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    # Try to find IOC arrays
+                    for key, value in data.items():
+                        if key == "iocs" and isinstance(value, list):
+                            return value
+                        elif key == "data" and isinstance(value, dict) and "iocs" in value:
+                            return value["iocs"]
+            else:  # Nested path
+                current_data = data
+                path_parts = path.split(".")
+                valid_path = True
+                
+                # Traverse the path
+                for part in path_parts:
+                    if isinstance(current_data, dict) and part in current_data:
+                        current_data = current_data[part]
+                    else:
+                        valid_path = False
+                        break
+                
+                if valid_path and isinstance(current_data, list):
+                    return current_data
+        
+        # If we got here, try to flatten the structure
+        if isinstance(data, dict):
+            if "data" in data and isinstance(data["data"], dict):
+                # Extract IOC data
+                if "iocs" in data["data"] and isinstance(data["data"]["iocs"], list):
+                    return data["data"]["iocs"]
+                
+                # ThreatFox format with numeric IDs as keys
+                flattened = []
+                for key, value in data.items():
+                    if key.isdigit() and isinstance(value, list):
+                        flattened.extend(value)
+                    elif key.isdigit() and isinstance(value, dict) and "ioc_value" in value:
+                        flattened.append(value)
+                
+                if flattened:
+                    return flattened
+        
+        # No standard format found, return the original data
+        if isinstance(data, list):
+            return data
+        else:
+            # Return as a single-item list for consistent processing
+            return [data]
+    
+    def _process_records(self, data: Any, feed_name: str, feed_config: Dict, ingestion_id: str) -> List[Dict]:
+        """Process feed data into standardized records with enhanced type handling"""
         feed_format = feed_config.get("format", "json")
         
         if feed_format == "json":
-            return self._process_json_data(data, feed_name, feed_config)
+            return self._process_json_data(data, feed_name, feed_config, ingestion_id)
         elif feed_format == "csv":
-            return self._process_csv_data(data, feed_name, feed_config)
+            return self._process_csv_data(data, feed_name, feed_config, ingestion_id)
         elif feed_format == "text":
-            return self._process_text_data(data, feed_name, feed_config)
+            return self._process_text_data(data, feed_name, feed_config, ingestion_id)
         else:
             logger.error(f"Unsupported format: {feed_format}")
             return []
     
-    def _process_json_data(self, data: Any, feed_name: str, feed_config: Dict) -> List[Dict]:
-        """Process JSON feed data"""
+    def _process_json_data(self, data: Any, feed_name: str, feed_config: Dict, ingestion_id: str) -> List[Dict]:
+        """Process JSON feed data with enhanced format handling"""
         records = []
         timestamp = datetime.utcnow().isoformat()
         
@@ -566,7 +916,7 @@ class ThreatDataIngestion:
             # Special handling for some feeds like PhishTank 
             if feed_name == "phishtank" and isinstance(data, dict):
                 data = list(data.values())[0] if data else []
-            # Handle ThreatFox format with multiple key-value pairs
+            # Handle ThreatFox format with multiple key-value pairs - fallback
             elif feed_name == "threatfox" and isinstance(data, dict):
                 # ThreatFox format may have IOCs at the top level or in a field
                 iocs = data.get("data", {}).get("iocs", [])
@@ -601,19 +951,45 @@ class ThreatDataIngestion:
         # Process each record
         for item in data:
             if not isinstance(item, dict):
+                # Skip non-dict items
                 continue
-                
-            # Add ingestion timestamp
+            
+            # Add standard metadata fields
             record = item.copy()
             record["_ingestion_timestamp"] = timestamp
+            record["_ingestion_id"] = ingestion_id
+            record["_source"] = feed_name
+            record["_feed_type"] = feed_config.get("description", "Threat Intelligence Feed")
+            
+            # Type conversion for known fields
+            if feed_name == "threatfox":
+                # Convert confidence level to integer if present
+                if "confidence_level" in record and record["confidence_level"] is not None:
+                    try:
+                        record["confidence_level"] = int(record["confidence_level"])
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Convert first_seen to timestamp if present
+                if "first_seen" in record and record["first_seen"] is not None:
+                    try:
+                        # ThreatFox uses Unix timestamps
+                        first_seen = int(record["first_seen"])
+                        record["first_seen"] = datetime.fromtimestamp(first_seen).isoformat()
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Convert tags to array if it's a string
+                if "tags" in record and isinstance(record["tags"], str):
+                    record["tags"] = [tag.strip() for tag in record["tags"].split(",")]
             
             records.append(record)
         
         logger.info(f"Processed {len(records)} records from {feed_name} JSON")
         return records
     
-    def _process_csv_data(self, data: str, feed_name: str, feed_config: Dict) -> List[Dict]:
-        """Process CSV feed data with better handling of headers and comments"""
+    def _process_csv_data(self, data: str, feed_name: str, feed_config: Dict, ingestion_id: str) -> List[Dict]:
+        """Process CSV feed data with proper dialect detection"""
         try:
             # Handle skip lines if specified
             skip_lines = feed_config.get("skip_lines", 0)
@@ -662,15 +1038,13 @@ class ThreatDataIngestion:
             # Rejoin the content lines for CSV parsing
             filtered_data = '\n'.join(content_lines)
             
-            # Check for quoted content (common in URLhaus CSV)
-            has_quotes = '"' in filtered_data
-            
-            # Parse CSV with appropriate dialect
-            if has_quotes:
-                # Use csv.Sniffer to detect the dialect if needed
-                dialect = csv.excel
+            # Use csv.Sniffer to detect the dialect
+            try:
+                sample = filtered_data[:min(1024, len(filtered_data))]  # Use a sample for sniffing
+                dialect = csv.Sniffer().sniff(sample)
                 reader = csv.DictReader(StringIO(filtered_data), dialect=dialect)
-            else:
+            except Exception as e:
+                logger.warning(f"Could not sniff CSV dialect: {e}, falling back to default")
                 reader = csv.DictReader(StringIO(filtered_data))
             
             # Print headers to debug
@@ -692,8 +1066,11 @@ class ThreatDataIngestion:
                         clean_value = value.strip() if value else value
                         record[key] = clean_value
                 
-                # Add ingestion timestamp
+                # Add standard metadata fields
                 record["_ingestion_timestamp"] = timestamp
+                record["_ingestion_id"] = ingestion_id
+                record["_source"] = feed_name
+                record["_feed_type"] = feed_config.get("description", "Threat Intelligence Feed")
                 
                 records.append(record)
             
@@ -707,8 +1084,8 @@ class ThreatDataIngestion:
                 logger.error(f"First 200 chars of data: {data[:200]}")
             return []
     
-    def _process_text_data(self, data: str, feed_name: str, feed_config: Dict) -> List[Dict]:
-        """Process text-based feeds"""
+    def _process_text_data(self, data: str, feed_name: str, feed_config: Dict, ingestion_id: str) -> List[Dict]:
+        """Process text-based feeds with enhanced metadata"""
         try:
             lines = data.strip().split('\n')
             records = []
@@ -723,11 +1100,38 @@ class ThreatDataIngestion:
                 if not line or line.strip().startswith(comment_char):
                     continue
                 
+                # Extract metadata from comments
+                metadata = {}
+                if i > 0 and lines[i-1].startswith(comment_char):
+                    # Try to extract key-value pairs from comment line
+                    comment_line = lines[i-1].lstrip(comment_char).strip()
+                    for kv_pair in comment_line.split(','):
+                        if ':' in kv_pair:
+                            k, v = kv_pair.split(':', 1)
+                            metadata[k.strip()] = v.strip()
+                
+                content = line.strip()
+                
+                # Determine content type based on pattern matching
+                content_type = "unknown"
+                if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', content):
+                    content_type = "ip"
+                elif re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$', content):
+                    content_type = "domain"
+                
                 record = {
                     "line_number": i + 1,
-                    "content": line.strip(),
-                    "_ingestion_timestamp": timestamp
+                    "content": content,
+                    "content_type": content_type,
+                    "_ingestion_timestamp": timestamp,
+                    "_ingestion_id": ingestion_id,
+                    "_source": feed_name,
+                    "_feed_type": feed_config.get("description", "Threat Intelligence Feed")
                 }
+                
+                # Add any extracted metadata
+                record.update(metadata)
+                
                 records.append(record)
             
             logger.info(f"Processed {len(records)} records from {feed_name} text data")
@@ -736,8 +1140,57 @@ class ThreatDataIngestion:
             logger.error(f"Error processing text data for {feed_name}: {str(e)}")
             return []
     
+    def _infer_schema_type(self, value: Any) -> str:
+        """Infer BigQuery schema type from a Python value"""
+        if value is None:
+            return "STRING"
+        elif isinstance(value, bool):
+            return "BOOLEAN"
+        elif isinstance(value, int):
+            return "INTEGER"
+        elif isinstance(value, float):
+            return "FLOAT"
+        elif isinstance(value, (datetime, str)) and re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', str(value)):
+            return "TIMESTAMP"
+        elif isinstance(value, list):
+            if value:
+                # For arrays, determine element type from first item
+                element_type = self._infer_schema_type(value[0])
+                return element_type
+            return "STRING"
+        else:
+            return "STRING"
+    
+    def _get_schema_for_records(self, records: List[Dict]) -> List[bigquery.SchemaField]:
+        """Dynamically generate schema from records"""
+        if not records:
+            return []
+        
+        # Get a list of all fields from all records
+        field_types = {}
+        
+        # Process each record
+        for record in records:
+            for field_name, value in record.items():
+                if field_name not in field_types:
+                    field_types[field_name] = self._infer_schema_type(value)
+        
+        # Create schema fields
+        schema = []
+        for field_name, field_type in field_types.items():
+            mode = "NULLABLE"
+            
+            # Check if it's an array type
+            if field_type.endswith("_ARRAY"):
+                field_type = field_type[:-6]
+                mode = "REPEATED"
+            
+            schema.append(bigquery.SchemaField(field_name, field_type, mode=mode))
+        
+        return schema
+    
     def _upload_to_bigquery(self, records: List[Dict], feed_name: str, feed_config: Dict) -> int:
-        """Upload records to BigQuery with automatic table creation and retry logic"""
+        """Upload records to BigQuery with automatic table creation and batch processing"""
         if not records:
             logger.warning(f"No records to upload for {feed_name}")
             return 0
@@ -749,92 +1202,130 @@ class ThreatDataIngestion:
         
         table_id = feed_config["table_id"]
         full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
+        processed_count = 0
         
         try:
-            # Create a rows_to_insert list for the insert_rows_json method
-            rows_to_insert = []
-            for record in records:
-                # Convert any datetime objects to strings to ensure JSON compatibility
-                processed_record = {}
-                for key, value in record.items():
-                    if isinstance(value, datetime):
-                        processed_record[key] = value.isoformat()
-                    else:
-                        processed_record[key] = value
-                
-                rows_to_insert.append(processed_record)
+            # Get table if it exists
+            try:
+                table = client.get_table(full_table_id)
+                table_exists = True
+            except NotFound:
+                table_exists = False
+                logger.info(f"Table {full_table_id} not found, will create it")
             
-            # Insert rows using insert_rows_json instead of load_table_from_string
-            errors = client.insert_rows_json(full_table_id, rows_to_insert)
-            
-            if errors:
-                logger.error(f"Errors encountered while inserting rows: {errors}")
-                
-                # Check if table exists, create if it doesn't
-                try:
-                    client.get_table(full_table_id)
-                except Exception:
-                    logger.info(f"Table {full_table_id} not found, creating it...")
-                    
-                    # Create with minimal schema, BigQuery will auto-detect the rest
+            # Create table if it doesn't exist
+            if not table_exists:
+                schema = self._get_schema_for_records(records)
+                if not schema:
+                    # Fallback to minimal schema
                     schema = [
-                        bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP")
+                        bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
+                        bigquery.SchemaField("_ingestion_id", "STRING"),
+                        bigquery.SchemaField("_source", "STRING"),
+                        bigquery.SchemaField("_feed_type", "STRING")
                     ]
-                    table = bigquery.Table(full_table_id, schema=schema)
-                    client.create_table(table, exists_ok=True)
-                    logger.info(f"Created table {full_table_id}")
-                    
-                    # Try again after creating the table
-                    errors = client.insert_rows_json(full_table_id, rows_to_insert)
-                    
-                    if errors:
-                        logger.error(f"Errors inserting data after table creation: {errors}")
-                        return 0
-                else:
-                    # Handle schema evolution for the existing table
-                    try:
-                        table = client.get_table(full_table_id)
-                        schema = table.schema
-                        
-                        # Find existing field names
-                        existing_fields = {field.name for field in schema}
-                        
-                        # Find new fields from the records
-                        new_fields = set()
-                        for record in records:
-                            for key in record:
-                                if key not in existing_fields:
-                                    new_fields.add(key)
-                        
-                        # Add new fields to schema
-                        if new_fields:
-                            logger.info(f"Adding new fields to schema: {new_fields}")
-                            for field_name in new_fields:
-                                schema.append(bigquery.SchemaField(field_name, "STRING"))
-                            
-                            table.schema = schema
-                            client.update_table(table, ["schema"])
-                            logger.info(f"Updated schema for {full_table_id}")
-                            
-                            # Try insert again after schema update
-                            errors = client.insert_rows_json(full_table_id, rows_to_insert)
-                            
-                            if errors:
-                                logger.error(f"Errors inserting data after schema update: {errors}")
-                                return 0
-                    except Exception as e:
-                        logger.error(f"Error updating schema: {str(e)}")
-                        return 0
+                
+                table = bigquery.Table(full_table_id, schema=schema)
+                table.description = feed_config.get("description", "Threat Intelligence Feed")
+                
+                table = client.create_table(table, exists_ok=True)
+                logger.info(f"Created table {full_table_id} with {len(schema)} fields")
             
-            logger.info(f"Successfully uploaded {len(records)} records to {full_table_id}")
-            return len(records)
+            # Process records in batches to avoid memory issues
+            total_records = len(records)
+            record_batches = [records[i:i + BQ_INSERT_BATCH_SIZE] for i in range(0, total_records, BQ_INSERT_BATCH_SIZE)]
+            
+            logger.info(f"Uploading {total_records} records in {len(record_batches)} batches")
+            
+            for batch_index, batch in enumerate(record_batches):
+                # Process each batch with retries
+                for retry_attempt in range(BQ_MAX_RETRIES):
+                    try:
+                        # Clean records for JSON serialization
+                        rows_to_insert = []
+                        for record in batch:
+                            # Convert non-serializable objects to strings
+                            processed_record = {}
+                            for key, value in record.items():
+                                if isinstance(value, datetime):
+                                    processed_record[key] = value.isoformat()
+                                elif isinstance(value, (dict, list)):
+                                    processed_record[key] = json.dumps(value)
+                                else:
+                                    processed_record[key] = value
+                            
+                            rows_to_insert.append(processed_record)
+                        
+                        # Insert batch
+                        errors = client.insert_rows_json(full_table_id, rows_to_insert)
+                        
+                        if not errors:
+                            # Successful insertion
+                            processed_count += len(batch)
+                            logger.info(f"Batch {batch_index+1}/{len(record_batches)} uploaded successfully ({len(batch)} records)")
+                            break
+                        
+                        # Handle schema evolution for errors
+                        if retry_attempt == 0 and "no such field" in str(errors):
+                            logger.warning(f"Schema mismatch errors: {errors}")
+                            
+                            # Get current schema
+                            table = client.get_table(full_table_id)
+                            existing_fields = {field.name for field in table.schema}
+                            
+                            # Find new fields
+                            new_fields = set()
+                            for record in batch:
+                                for key in record:
+                                    if key not in existing_fields:
+                                        new_fields.add(key)
+                            
+                            if new_fields:
+                                logger.info(f"Adding {len(new_fields)} new fields to schema: {new_fields}")
+                                new_schema_fields = [
+                                    bigquery.SchemaField(
+                                        field_name, 
+                                        self._infer_schema_type(next((r.get(field_name) for r in batch if field_name in r), None))
+                                    )
+                                    for field_name in new_fields
+                                ]
+                                
+                                # Update schema
+                                schema = list(table.schema)
+                                schema.extend(new_schema_fields)
+                                table.schema = schema
+                                
+                                client.update_table(table, ["schema"])
+                                logger.info(f"Updated schema for {full_table_id}")
+                                
+                                # Continue to next retry attempt
+                                continue
+                        
+                        # Apply backoff delay
+                        if retry_attempt < BQ_MAX_RETRIES - 1:
+                            delay = BQ_RETRY_DELAY * (2 ** retry_attempt)
+                            logger.warning(f"Insertion errors, retry {retry_attempt+1}/{BQ_MAX_RETRIES} in {delay:.2f}s: {errors[:2]}")
+                            time.sleep(delay)
+                        else:
+                            logger.error(f"Failed to insert batch after {BQ_MAX_RETRIES} retries: {errors}")
+                    
+                    except Exception as e:
+                        if retry_attempt < BQ_MAX_RETRIES - 1:
+                            delay = BQ_RETRY_DELAY * (2 ** retry_attempt)
+                            logger.warning(f"Error inserting batch: {str(e)}, retry {retry_attempt+1}/{BQ_MAX_RETRIES} in {delay:.2f}s")
+                            time.sleep(delay)
+                        else:
+                            logger.error(f"Failed to insert batch after {BQ_MAX_RETRIES} retries: {str(e)}")
+            
+            logger.info(f"Successfully uploaded {processed_count} of {total_records} records to {full_table_id}")
+            return processed_count
             
         except Exception as e:
             logger.error(f"Error uploading to BigQuery: {str(e)}")
-            return 0
+            return processed_count
     
-    def _publish_event(self, feed_name: str, count: int) -> bool:
-        """Publish event to Pub/Sub to trigger analysis"""
+    def _publish_event(self, feed_name: str, count: int, ingestion_id: str) -> bool:
+        """Publish event to Pub/Sub to trigger analysis with enhanced retry"""
         client = get_client('pubsub')
         if not client:
             logger.error("Pub/Sub publisher not initialized")
@@ -848,23 +1339,36 @@ class ThreatDataIngestion:
                 "feed_name": feed_name,
                 "record_count": count,
                 "timestamp": datetime.utcnow().isoformat(),
-                "event_type": "ingestion_complete"
+                "event_type": "ingestion_complete",
+                "ingestion_id": ingestion_id,
+                "project_id": PROJECT_ID,
+                "dataset_id": DATASET_ID
             }
             
             data = json.dumps(message).encode("utf-8")
             
-            # Publish message
-            future = client.publish(topic_path, data=data)
-            message_id = future.result(timeout=30)
+            # Publish message with explicit retry
+            for retry_attempt in range(3):
+                try:
+                    future = client.publish(topic_path, data=data)
+                    message_id = future.result(timeout=30)
+                    logger.info(f"Published ingestion event {message_id} for {feed_name}")
+                    return True
+                except Exception as e:
+                    if retry_attempt < 2:
+                        delay = 1.0 * (2 ** retry_attempt)
+                        logger.warning(f"PubSub publish error: {str(e)}, retrying in {delay}s")
+                        time.sleep(delay)
+                    else:
+                        raise
             
-            logger.info(f"Published ingestion event {message_id} for {feed_name}")
-            return True
+            return False
         except Exception as e:
             logger.error(f"Error publishing message: {str(e)}")
             return False
 
     def get_feed_statistics(self) -> Dict:
-        """Get statistics about ingested data"""
+        """Get statistics about ingested data with enhanced visualization data"""
         client = get_client('bigquery')
         if not client:
             return {"error": "BigQuery client not initialized"}
@@ -875,7 +1379,12 @@ class ThreatDataIngestion:
                 "total_records": 0,
                 "active_feeds": 0,
                 "timestamp": datetime.utcnow().isoformat(),
-                "last_ingestion_run": self.feed_stats.get("last_run", "Never")
+                "last_ingestion_run": self.feed_stats.get("last_run", "Never"),
+                "visualization_data": {
+                    "daily_counts": [],
+                    "feed_distribution": [],
+                    "ioc_types": []
+                }
             }
             
             # Query for all tables in the dataset
@@ -942,12 +1451,79 @@ class ThreatDataIngestion:
                         "description": feed_config.get("description") if feed_config else "Custom feed"
                     }
                     
+                    # Get daily counts data if significant records
+                    if record_count > 10:
+                        daily_query = f"""
+                        SELECT 
+                            CAST(_ingestion_timestamp AS DATE) as date,
+                            COUNT(*) as record_count
+                        FROM {full_table_id}
+                        WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                        GROUP BY date
+                        ORDER BY date
+                        """
+                        
+                        daily_job = client.query(daily_query)
+                        daily_results = list(daily_job.result())
+                        
+                        if daily_results:
+                            feed_stats["daily_counts"] = [
+                                {"date": row.date.isoformat(), "count": row.record_count}
+                                for row in daily_results
+                            ]
+                            
+                            # Add to global visualization data
+                            for row in daily_results:
+                                stats["visualization_data"]["daily_counts"].append({
+                                    "date": row.date.isoformat(),
+                                    "feed": feed_name,
+                                    "count": row.record_count
+                                })
+                    
+                    # Get IOC type distribution for relevant feeds
+                    if feed_name in ["threatfox", "alienvault_otx"]:
+                        ioc_query = f"""
+                        SELECT 
+                            ioc_type as type,
+                            COUNT(*) as count
+                        FROM {full_table_id}
+                        GROUP BY ioc_type
+                        ORDER BY count DESC
+                        LIMIT 10
+                        """
+                        
+                        try:
+                            ioc_job = client.query(ioc_query)
+                            ioc_results = list(ioc_job.result())
+                            
+                            if ioc_results:
+                                feed_stats["ioc_types"] = [
+                                    {"type": row.type or "unknown", "count": row.count}
+                                    for row in ioc_results
+                                ]
+                                
+                                # Add to global visualization data
+                                for row in ioc_results:
+                                    stats["visualization_data"]["ioc_types"].append({
+                                        "feed": feed_name,
+                                        "type": row.type or "unknown",
+                                        "count": row.count
+                                    })
+                        except Exception as e:
+                            logger.warning(f"Error getting IOC types for {feed_name}: {str(e)}")
+                    
                     stats["feeds"].append(feed_stats)
                     stats["total_records"] += record_count
                     
                     # Count as active if it has data
                     if record_count > 0:
                         stats["active_feeds"] += 1
+                    
+                    # Add feed distribution data
+                    stats["visualization_data"]["feed_distribution"].append({
+                        "feed": feed_name,
+                        "count": record_count
+                    })
                     
                 except Exception as e:
                     logger.warning(f"Error getting stats for table {table_id}: {str(e)}")
@@ -979,9 +1555,102 @@ class ThreatDataIngestion:
             logger.error(f"Error getting feed statistics: {str(e)}")
             return {"error": str(e)}
 
+    def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
+        """Analyze an uploaded CSV file to extract threat intelligence"""
+        if not csv_content:
+            return {"error": "Empty CSV data"}
+            
+        try:
+            # Generate a unique ingestion ID
+            ingestion_id = f"upload_{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            # First, determine the CSV dialect using sniffer
+            try:
+                sample = csv_content[:min(10000, len(csv_content))]  # Use a sample for sniffing
+                dialect = csv.Sniffer().sniff(sample)
+                has_header = csv.Sniffer().has_header(sample)
+            except Exception as e:
+                logger.warning(f"Could not detect CSV dialect: {e}, using default")
+                dialect = csv.excel
+                has_header = True
+            
+            # Parse CSV
+            csv_io = StringIO(csv_content)
+            reader = csv.reader(csv_io, dialect=dialect)
+            
+            # Get headers
+            headers = next(reader) if has_header else [f"column_{i+1}" for i in range(len(next(reader)))]
+            
+            # Reset and skip the header row
+            csv_io.seek(0)
+            if has_header:
+                next(reader)
+            
+            # Process the rows
+            records = []
+            timestamp = datetime.utcnow().isoformat()
+            
+            for row in reader:
+                if not row or all(not cell.strip() for cell in row):
+                    continue  # Skip empty rows
+                
+                record = {
+                    headers[i]: value for i, value in enumerate(row) if i < len(headers)
+                }
+                
+                # Add metadata
+                record["_ingestion_timestamp"] = timestamp
+                record["_ingestion_id"] = ingestion_id
+                record["_source"] = "csv_upload"
+                record["_feed_type"] = f"Uploaded CSV: {feed_name}"
+                
+                records.append(record)
+            
+            # Upload to BigQuery with custom table name for the upload
+            table_id = f"upload_{feed_name.lower().replace(' ', '_').replace('-', '_')}"
+            
+            # Configure as a temporary feed
+            temp_feed_config = {
+                "table_id": table_id,
+                "format": "csv",
+                "description": f"Uploaded CSV: {feed_name}"
+            }
+            
+            # Upload to BigQuery
+            record_count = self._upload_to_bigquery(records, feed_name, temp_feed_config)
+            
+            # Return result
+            result = {
+                "analysis_id": ingestion_id,
+                "feed_name": feed_name,
+                "table_id": table_id,
+                "record_count": record_count,
+                "column_count": len(headers),
+                "headers": headers,
+                "has_header": has_header,
+                "dialect": {
+                    "delimiter": dialect.delimiter,
+                    "quotechar": dialect.quotechar,
+                    "doublequote": dialect.doublequote,
+                    "escapechar": dialect.escapechar or ""
+                },
+                "sample_records": records[:5] if records else [],
+                "timestamp": timestamp
+            }
+            
+            # Trigger analysis job if records were uploaded
+            if record_count > 0:
+                self._publish_event(feed_name, record_count, ingestion_id)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing CSV file: {e}")
+            return {"error": f"Analysis failed: {e}"}
+
 # HTTP endpoint for triggering data ingestion
 def ingest_threat_data(request):
-    """HTTP endpoint for triggering data ingestion"""
+    """HTTP endpoint for triggering data ingestion with enhanced options"""
     logger.info("Ingestion endpoint called")
     
     # Parse request
@@ -1004,10 +1673,28 @@ def ingest_threat_data(request):
             stats = ingestion.get_feed_statistics()
             return stats
         
+        # Check for CSV upload
+        if request_json.get("file_type") == "csv" and "content" in request_json:
+            feed_name = request_json.get("feed_name", "csv_upload")
+            content = request_json["content"]
+            
+            # Handle base64 encoded content
+            if request_json.get("encoding") == "base64":
+                try:
+                    content = base64.b64decode(content).decode('utf-8')
+                except Exception as e:
+                    return {"error": f"Failed to decode base64 content: {str(e)}"}, 400
+            
+            return ingestion.analyze_csv_file(content, feed_name)
+        
         # Check for specific feed
         feed_name = request_json.get("feed_name")
         if feed_name:
-            if feed_name not in FEED_SOURCES:
+            if feed_name == "all":
+                # Process all feeds
+                results = ingestion.process_all_feeds()
+                return {"results": results, "count": len(results)}
+            elif feed_name not in FEED_SOURCES:
                 return {"error": f"Unknown feed: {feed_name}"}, 400
             
             try:
