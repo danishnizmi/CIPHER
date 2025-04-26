@@ -7,11 +7,10 @@ import os
 import json
 import logging
 import hashlib
-import secrets
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, abort
@@ -20,6 +19,7 @@ from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google.cloud import storage
 from google.cloud import bigquery
+from google.cloud import secretmanager
 
 # Import config module
 import config
@@ -41,9 +41,89 @@ if not API_KEY and hasattr(config, 'get_cached_config'):
     api_keys_config = config.get_cached_config('api-keys')
     API_KEY = api_keys_config.get('platform_api_key', "") if api_keys_config else ""
 
-# Initialize Flask app
+# Secret Manager client
+_secret_client = None
+
+def get_secret_client():
+    """Get or initialize Secret Manager client"""
+    global _secret_client
+    if _secret_client is None:
+        try:
+            _secret_client = secretmanager.SecretManagerServiceClient()
+        except Exception as e:
+            logger.error(f"Failed to initialize Secret Manager client: {e}")
+    return _secret_client
+
+def get_or_create_secret(secret_id, secret_value):
+    """Get secret or create if it doesn't exist"""
+    client = get_secret_client()
+    if not client:
+        return None
+        
+    try:
+        # Check if secret exists
+        name = f"projects/{PROJECT_ID}/secrets/{secret_id}"
+        try:
+            client.get_secret(request={"name": name})
+            # Secret exists - get latest version
+            latest = client.access_secret_version(request={"name": f"{name}/versions/latest"})
+            return latest.payload.data.decode("UTF-8")
+        except Exception:
+            # Secret doesn't exist or access error - create it
+            parent = f"projects/{PROJECT_ID}"
+            
+            try:
+                # Create secret
+                client.create_secret(
+                    request={
+                        "parent": parent,
+                        "secret_id": secret_id,
+                        "secret": {"replication": {"automatic": {}}},
+                    }
+                )
+                
+                # Add version with value
+                client.add_secret_version(
+                    request={
+                        "parent": f"{parent}/secrets/{secret_id}",
+                        "payload": {"data": secret_value.encode("UTF-8")},
+                    }
+                )
+                
+                logger.info(f"Created secret {secret_id}")
+                return secret_value
+            except Exception as e:
+                logger.error(f"Error creating secret {secret_id}: {e}")
+                return None
+    except Exception as e:
+        logger.error(f"Error accessing secret {secret_id}: {e}")
+        return None
+
+# Get or generate persistent Flask secret key
+def get_flask_secret_key():
+    """Get or create a persistent Flask secret key"""
+    # Try environment variable first
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        return env_key
+        
+    # Try config
+    config_key = config.get("FLASK_SECRET_KEY")
+    if config_key:
+        return config_key
+        
+    # Try Secret Manager
+    secret_key = get_or_create_secret("flask-secret-key", os.urandom(32).hex())
+    if secret_key:
+        return secret_key
+        
+    # Fallback to random (but log warning)
+    logger.warning("Using temporary random Flask secret key - sessions will not persist across restarts")
+    return os.urandom(32).hex()
+
+# Initialize Flask app with persistent secret key
 app = Flask(__name__, template_folder='templates')
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", config.get("FLASK_SECRET_KEY", secrets.token_hex(32)))
+app.secret_key = get_flask_secret_key()
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -55,55 +135,62 @@ CORS(app)
 REQUIRE_AUTH = config.get("REQUIRE_AUTH", os.environ.get("REQUIRE_AUTH", "true").lower() == "true")
 SESSION_TIMEOUT = int(config.get("SESSION_TIMEOUT", "28800"))  # 8 hours in seconds
 
-# Admin credentials - securely retrieved and initialized at module scope
+# Admin credentials - securely retrieved and initialized
 ADMIN_USERNAME = 'admin'
-ADMIN_HASH = None  # Will be populated by get_admin_credentials
+ADMIN_HASH = None
 
 def get_admin_credentials():
     """Get admin credentials from Secret Manager or create a secure fallback"""
     global ADMIN_HASH
 
+    # Try to get credentials from Secret Manager
     try:
-        # Try to get credentials from Secret Manager
         auth_config = config.get_cached_config('auth-config', force_refresh=True)
         if auth_config and 'users' in auth_config and 'admin' in auth_config['users']:
             admin_user = auth_config['users']['admin']
             ADMIN_HASH = admin_user.get('password')
             logger.info("Admin credentials loaded from Secret Manager")
-            return {
-                'username': 'admin',
-                'password_hash': ADMIN_HASH,
-                'role': admin_user.get('role', 'admin')
-            }
+            return {'username': 'admin', 'password_hash': ADMIN_HASH, 'role': admin_user.get('role', 'admin')}
     except Exception as e:
-        logger.warning(f"Failed to retrieve admin credentials from Secret Manager: {e}")
+        logger.warning(f"Failed to retrieve admin credentials: {e}")
     
-    # If we couldn't get credentials from Secret Manager, generate a secure random password
-    secure_password = secrets.token_urlsafe(12)  # 16 character secure random password
+    # Check for admin password in secrets
+    try:
+        admin_password_secret = get_or_create_secret("admin-initial-password", None)
+        if admin_password_secret:
+            ADMIN_HASH = hashlib.sha256(admin_password_secret.encode()).hexdigest()
+            logger.info("Admin credentials loaded from admin-initial-password secret")
+            return {'username': 'admin', 'password_hash': ADMIN_HASH, 'role': 'admin'}
+    except Exception as e:
+        logger.warning(f"Failed to retrieve admin password from secret: {e}")
+    
+    # Generate a secure random password as last resort
+    secure_password = os.urandom(8).hex()
     ADMIN_HASH = hashlib.sha256(secure_password.encode()).hexdigest()
     
-    # Create admin user in Secret Manager
+    # Store in Secret Manager for persistence
     try:
+        # Save password in a dedicated secret for recovery
+        get_or_create_secret("admin-initial-password", secure_password)
+        
+        # Also save in auth-config
         if hasattr(config, 'add_user'):
             config.add_user('admin', secure_password, 'admin')
-            logger.info("Admin user created in Secret Manager with secure random password")
+        
+        logger.warning(f"IMPORTANT: Generated admin password: {secure_password}")
+        logger.warning("Password saved to Secret Manager as 'admin-initial-password'")
     except Exception as e:
-        logger.warning(f"Failed to store admin credentials in Secret Manager: {e}")
+        logger.error(f"Failed to store admin credentials: {e}")
     
-    logger.warning(f"Using generated secure password for admin. Please check logs for password or change after first login.")
     return {
         'username': 'admin',
         'password_hash': ADMIN_HASH,
         'role': 'admin',
-        'generated_password': secure_password  # Include this in case it's needed for logging
+        'generated_password': secure_password
     }
 
 # Initialize admin credentials
 admin_creds = get_admin_credentials()
-# If admin credentials are newly generated, log the password for initial access
-if admin_creds.get('generated_password'):
-    logger.warning(f"IMPORTANT: Generated admin password: {admin_creds.get('generated_password')}")
-    # Update auth.html with the correct password
 
 # Utility Functions
 def hash_password(password): 
@@ -353,7 +440,7 @@ def profile():
 @login_required
 def change_password():
     """Change user's own password"""
-    global ADMIN_HASH  # Proper global declaration at the beginning of the function
+    global ADMIN_HASH
     
     username = session.get('username')
     current_password = request.form.get('current_password')
@@ -447,7 +534,7 @@ def dashboard():
         'days': days,
         'current_view': view_type,
         'stats': stats,
-        'campaigns': [],  # Initialize with empty lists
+        'campaigns': [],
         'top_iocs': [],
         'page_title': 'Threat Intelligence Dashboard',
         'page_subtitle': 'Real-time overview of threat intelligence with actionable insights',
@@ -460,7 +547,7 @@ def dashboard():
         iocs_data = api_request('iocs', {'days': days, 'limit': 5})
         gcp_metrics = get_gcp_metrics()
         
-        # Get chart data from real metrics if available
+        # Get chart data
         ioc_type_labels = []
         ioc_type_values = []
         
@@ -473,12 +560,7 @@ def dashboard():
                         ioc_type_labels.append(item.get('type', 'unknown'))
                         ioc_type_values.append(item.get('count', 0))
         
-        # If no real data available, don't show any data rather than dummy data
-        if not ioc_type_labels:
-            ioc_type_labels = []
-            ioc_type_values = []
-        
-        # Activity data - try to get real data
+        # Activity data
         activity_dates = []
         activity_counts = []
         
@@ -538,7 +620,7 @@ def dashboard():
     
     return render_template('dashboard.html', **common_data)
 
-# Simplified route aliases - only keep the essential ones
+# Route aliases
 @app.route('/feeds')
 @login_required
 def feeds():
@@ -657,30 +739,6 @@ def api_health():
 def health():
     """Root health check endpoint"""
     return api_health()
-
-# Error handlers
-@app.errorhandler(404)
-def page_not_found(e):
-    """Handle 404 errors"""
-    if request.path.startswith('/api/'):
-        return jsonify({
-            "error": "Resource not found",
-            "path": request.path,
-            "timestamp": datetime.utcnow().isoformat()
-        }), 404
-    return render_template('404.html'), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    """Handle 500 errors"""
-    logger.error(f"Server error: {str(e)}")
-    if request.path.startswith('/api/'):
-        return jsonify({
-            "error": "Internal server error",
-            "path": request.path,
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-    return render_template('500.html'), 500
 
 # ======== Admin Routes ========
 @app.route('/admin')
@@ -844,6 +902,30 @@ def delete_user(username):
         flash(f"Error deleting user: {str(e)}", "danger")
     
     return redirect(url_for('users'))
+
+# Error handlers
+@app.errorhandler(404)
+def page_not_found(e):
+    """Handle 404 errors"""
+    if request.path.startswith('/api/'):
+        return jsonify({
+            "error": "Resource not found",
+            "path": request.path,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 404
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    """Handle 500 errors"""
+    logger.error(f"Server error: {str(e)}")
+    if request.path.startswith('/api/'):
+        return jsonify({
+            "error": "Internal server error",
+            "path": request.path,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+    return render_template('500.html'), 500
 
 # Utility Functions
 def get_gcp_metrics() -> Dict:
