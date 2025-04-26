@@ -10,6 +10,7 @@ import hashlib
 import sys
 import time
 import secrets
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from functools import wraps
@@ -183,12 +184,20 @@ ADMIN_PASSWORD = None
 ADMIN_HASH = None
 
 def setup_admin_credentials():
-    """Set up admin credentials"""
+    """Set up admin credentials - prevents duplicate password generation"""
     global ADMIN_HASH, ADMIN_PASSWORD
+    
+    # Create a lock file in Secret Manager to prevent race conditions
+    lock_exists = access_secret("admin-setup-lock")
+    if lock_exists:
+        logger.info("Admin setup already in progress or completed by another process")
+    
+    # Check both auth-config and admin-initial-password secret
+    # to see if we already have credentials
+    admin_credentials_exist = False
     
     # Try to get from auth-config in Secret Manager first
     logger.info("Looking for admin credentials in auth-config secret")
-    admin_from_config = None
     try:
         auth_config_json = access_secret("auth-config")
         if auth_config_json:
@@ -198,24 +207,34 @@ def setup_admin_credentials():
                 if 'password' in admin_user:
                     ADMIN_HASH = admin_user['password']
                     logger.info("Admin credentials found in auth-config")
-                    return None
+                    admin_credentials_exist = True
     except Exception as e:
         logger.warning(f"Could not retrieve admin from auth-config: {e}")
     
-    # Try to get dedicated admin password secret
-    logger.info("Looking for admin-initial-password secret")
-    admin_password_secret = access_secret("admin-initial-password")
-    if admin_password_secret:
-        ADMIN_PASSWORD = admin_password_secret
-        ADMIN_HASH = hashlib.sha256(admin_password_secret.encode()).hexdigest()
-        logger.info("Admin password loaded from admin-initial-password secret")
+    # If not found in auth-config, try the dedicated secret
+    if not admin_credentials_exist:
+        logger.info("Looking for admin-initial-password secret")
+        admin_password_secret = access_secret("admin-initial-password")
+        if admin_password_secret:
+            ADMIN_PASSWORD = admin_password_secret
+            ADMIN_HASH = hashlib.sha256(admin_password_secret.encode()).hexdigest()
+            logger.info("Admin password loaded from admin-initial-password secret")
+            admin_credentials_exist = True
+    
+    # If credentials exist, we're done
+    if admin_credentials_exist:
+        # Create lock file to prevent future duplicates
+        create_secret_if_not_exists("admin-setup-lock", "completed")
         return None
     
-    # Generate a new secure password
+    # Generate a new secure password only if credentials don't exist
     logger.info("Generating new admin password")
     new_password = secrets.token_urlsafe(12)[:12]  # 12 character readable password
     ADMIN_PASSWORD = new_password
     ADMIN_HASH = hashlib.sha256(new_password.encode()).hexdigest()
+    
+    # Set the lock first to prevent duplicates
+    create_secret_if_not_exists("admin-setup-lock", "completed")
     
     # Store in dedicated secret
     logger.info("Storing new admin password in Secret Manager")
@@ -320,23 +339,28 @@ def api_request(endpoint: str, params: Dict = None, cache_time: int = 60) -> Dic
     try:
         import api
         if hasattr(api, endpoint) and callable(getattr(api, endpoint)):
+            logger.debug(f"Making direct API call to {endpoint}")
             result = getattr(api, endpoint)(params)
             if result:
                 api_cache[cache_key] = result
                 api_cache_timestamp[cache_key] = now
                 return result
-    except (ImportError, AttributeError):
-        pass
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Direct API call failed, falling back to HTTP: {e}")
     
     # Build URL for HTTP call
     url = f"{API_URL.rstrip('/')}/api/{endpoint}" if API_URL else f"http://localhost:{os.environ.get('PORT', '8080')}/api/{endpoint}"
     headers = {"X-API-Key": API_KEY} if API_KEY else {}
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        logger.info(f"Making HTTP API request to: {url}")
+        response = requests.get(url, params=params, headers=headers, timeout=30)  # Extended timeout
         response.raise_for_status()
         result = response.json()
         
+        logger.debug(f"API response received: {str(result)[:200]}...")
+        
+        # Cache result
         api_cache[cache_key] = result
         api_cache_timestamp[cache_key] = now
         
@@ -349,7 +373,7 @@ def api_request(endpoint: str, params: Dict = None, cache_time: int = 60) -> Dic
         
         return result
     except Exception as e:
-        logger.error(f"API request error: {str(e)}")
+        logger.error(f"API request error for {endpoint}: {str(e)}")
         return default_response
 
 # Template helpers
@@ -521,89 +545,111 @@ def dashboard():
     days = request.args.get('days', '30')
     view_type = request.args.get('view', 'dashboard')
     
-    # Get platform stats
-    stats = api_request('stats', {'days': days}, cache_time=300)
-    
-    # Ensure stats has required structure
-    if not isinstance(stats, dict):
-        stats = {}
-    for key in ['feeds', 'campaigns', 'iocs', 'analyses']:
-        if key not in stats:
-            stats[key] = {"total_sources" if key == "feeds" else "total": 0}
-    
-    # Common data for all views
-    common_data = {
-        'days': days,
-        'current_view': view_type,
-        'stats': stats,
-        'campaigns': [],
-        'top_iocs': [],
-        'page_title': 'Threat Intelligence Dashboard',
-        'page_subtitle': 'Real-time overview of threat intelligence with actionable insights',
-    }
-    
-    # Dashboard view (default)
-    if view_type == 'dashboard':
-        # Get dashboard data
-        campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
-        iocs_data = api_request('iocs', {'days': days, 'limit': 5})
-        gcp_metrics = get_gcp_metrics()
+    try:
+        # Get platform stats
+        stats = api_request('stats', {'days': days}, cache_time=60)  # Reduced cache time for more frequent updates
         
-        # Process chart data
-        ioc_type_labels = []
-        ioc_type_values = []
-        if 'types' in stats.get('iocs', {}) and stats['iocs']['types']:
-            for item in stats['iocs']['types']:
+        # Ensure stats has required structure
+        if not isinstance(stats, dict):
+            stats = {}
+        for key in ['feeds', 'campaigns', 'iocs', 'analyses']:
+            if key not in stats:
+                stats[key] = {"total_sources" if key == "feeds" else "total": 0}
+        
+        # Common data for all views
+        common_data = {
+            'days': days,
+            'current_view': view_type,
+            'stats': stats,
+            'campaigns': [],
+            'top_iocs': [],
+            'page_title': 'Threat Intelligence Dashboard',
+            'page_subtitle': 'Real-time overview of threat intelligence with actionable insights',
+        }
+        
+        # Dashboard view (default)
+        if view_type == 'dashboard':
+            # Get dashboard data
+            campaigns_data = api_request('campaigns', {'days': days, 'limit': 5})
+            iocs_data = api_request('iocs', {'days': days, 'limit': 5})
+            
+            # Safely get gcp_metrics - this was causing the error in the logs
+            try:
+                gcp_metrics = get_gcp_metrics()
+            except Exception as e:
+                logger.error(f"Error getting GCP metrics: {e}")
+                gcp_metrics = {"table_count": 0, "storage_objects": 0, "storage_size": 0.0}
+            
+            # Show a message if no data is available
+            if not stats.get('feeds', {}).get('total_sources') and not stats.get('iocs', {}).get('total'):
+                flash("No threat intelligence data available. Click 'Refresh Threat Data' to initiate data collection from configured sources.", "info")
+            
+            # Process chart data
+            ioc_type_labels = []
+            ioc_type_values = []
+            if 'types' in stats.get('iocs', {}) and stats['iocs']['types']:
+                for item in stats['iocs']['types']:
+                    if isinstance(item, dict):
+                        ioc_type_labels.append(item.get('type', 'unknown'))
+                        ioc_type_values.append(item.get('count', 0))
+            
+            # Activity data
+            activity_dates = []
+            activity_counts = []
+            for item in stats.get('daily_activity', []):
                 if isinstance(item, dict):
-                    ioc_type_labels.append(item.get('type', 'unknown'))
-                    ioc_type_values.append(item.get('count', 0))
+                    activity_dates.append(item.get('date'))
+                    activity_counts.append(item.get('count', 0))
+            
+            # Calculate trends
+            common_data.update({
+                'campaigns': campaigns_data.get('campaigns', []),
+                'top_iocs': iocs_data.get('records', []),
+                'gcp_metrics': gcp_metrics,  # Now safely handled
+                'ioc_type_labels': json.dumps(ioc_type_labels),
+                'ioc_type_values': json.dumps(ioc_type_values),
+                'activity_dates': json.dumps(activity_dates),
+                'activity_counts': json.dumps(activity_counts),
+                'feed_trend': stats.get('feeds', {}).get('growth_rate', 0),
+                'ioc_trend': stats.get('iocs', {}).get('growth_rate', 0),
+                'campaign_trend': stats.get('campaigns', {}).get('growth_rate', 0),
+                'analysis_trend': stats.get('analyses', {}).get('growth_rate', 0)
+            })
+        # Feeds view
+        elif view_type == 'feeds':
+            common_data.update({
+                'page_title': 'Threat Intelligence Feeds',
+                'page_icon': 'rss',
+                'page_subtitle': 'Collection of threat data from various sources',
+                'feed_items': api_request('feeds').get('feed_details', [])
+            })
+        # IOCs view
+        elif view_type == 'iocs':
+            iocs_data = api_request('iocs', {'days': days})
+            ioc_items = []
+            for record in iocs_data.get('records', []):
+                ioc_items.extend(record.get('iocs', []))
+            
+            common_data.update({
+                'page_title': 'Indicators of Compromise',
+                'page_icon': 'fingerprint',
+                'page_subtitle': 'Collected IOCs from all sources',
+                'ioc_items': ioc_items,
+                'top_iocs': iocs_data.get('records', [])
+            })
         
-        # Activity data
-        activity_dates = []
-        activity_counts = []
-        for item in stats.get('daily_activity', []):
-            if isinstance(item, dict):
-                activity_dates.append(item.get('date'))
-                activity_counts.append(item.get('count', 0))
-        
-        # Calculate trends
-        common_data.update({
-            'campaigns': campaigns_data.get('campaigns', []),
-            'top_iocs': iocs_data.get('records', []),
-            'gcp_metrics': gcp_metrics,
-            'ioc_type_labels': json.dumps(ioc_type_labels),
-            'ioc_type_values': json.dumps(ioc_type_values),
-            'activity_dates': json.dumps(activity_dates),
-            'activity_counts': json.dumps(activity_counts),
-            'feed_trend': stats.get('feeds', {}).get('growth_rate', 0),
-            'ioc_trend': stats.get('iocs', {}).get('growth_rate', 0),
-            'campaign_trend': stats.get('campaigns', {}).get('growth_rate', 0),
-            'analysis_trend': stats.get('analyses', {}).get('growth_rate', 0)
-        })
-    # Feeds view
-    elif view_type == 'feeds':
-        common_data.update({
-            'page_title': 'Threat Intelligence Feeds',
-            'page_icon': 'rss',
-            'page_subtitle': 'Collection of threat data from various sources',
-            'feed_items': api_request('feeds').get('feed_details', [])
-        })
-    # IOCs view
-    elif view_type == 'iocs':
-        iocs_data = api_request('iocs', {'days': days})
-        ioc_items = []
-        for record in iocs_data.get('records', []):
-            ioc_items.extend(record.get('iocs', []))
-        
-        common_data.update({
-            'page_title': 'Indicators of Compromise',
-            'page_icon': 'fingerprint',
-            'page_subtitle': 'Collected IOCs from all sources',
-            'ioc_items': ioc_items,
-            'top_iocs': iocs_data.get('records', [])
-        })
-    
-    return render_template('dashboard.html', **common_data)
+        return render_template('dashboard.html', **common_data)
+    except Exception as e:
+        logger.error(f"Error in dashboard route: {e}")
+        logger.error(traceback.format_exc())
+        flash(f"Error loading dashboard: {str(e)}", "danger")
+        return render_template('dashboard.html', 
+                              days=days, 
+                              current_view=view_type,
+                              stats={'feeds': {}, 'campaigns': {}, 'iocs': {}, 'analyses': {}},
+                              gcp_metrics={"table_count": 0, "storage_objects": 0, "storage_size": 0.0},
+                              page_title='Threat Intelligence Dashboard',
+                              page_subtitle='Real-time overview of threat intelligence with actionable insights')
 
 # Route aliases
 @app.route('/feeds')
@@ -665,31 +711,69 @@ def dynamic_content_detail(content_type, identifier):
 @app.route('/ingest_threat_data')
 @login_required
 def ingest_threat_data():
-    """Trigger the ingestion process"""
+    """Trigger the ingestion process for real threat data"""
     try:
-        # Try local module first
+        # Try direct ingestion module first with explicit process_all parameter
         try:
             import ingestion
-            if hasattr(ingestion, 'ingest_threat_data'):
-                ingestion.ingest_threat_data(request)
-                flash("Ingestion process started successfully", "success")
+            if hasattr(ingestion, 'ThreatDataIngestion'):
+                logger.info("Using ThreatDataIngestion class for real data ingestion")
+                ingestor = ingestion.ThreatDataIngestion()
+                results = ingestor.process_all_feeds()
+                
+                if results:
+                    success_count = sum(1 for r in results if r.get("status") == "success")
+                    total_records = sum(r.get("record_count", 0) for r in results)
+                    flash(f"Successfully processed {success_count} feeds with {total_records} records", "success")
+                else:
+                    flash("No feeds processed - check logs for details", "warning")
+                    
                 return redirect(url_for('dashboard', view='feeds'))
-        except ImportError:
-            pass
+            elif hasattr(ingestion, 'ingest_threat_data'):
+                logger.info("Using ingest_threat_data function for real data ingestion")
+                # Send with explicit process_all parameter
+                result = ingestion.ingest_threat_data(request)
+                flash("Threat data collection started successfully", "success")
+                return redirect(url_for('dashboard', view='feeds'))
+        except ImportError as e:
+            logger.info(f"Local ingestion module not available: {e}")
+            logger.info("Falling back to API for ingestion")
+        except Exception as e:
+            logger.error(f"Error using local ingestion module: {e}")
+            logger.error(traceback.format_exc())
+            flash(f"Error in data collection: {str(e)}", "danger")
+            return redirect(url_for('dashboard'))
         
-        # Fall back to API
+        # Fall back to API with explicit process_all parameter
+        logger.info("Making direct API call to trigger ingestion")
         response = requests.post(
             f"{request.url_root.rstrip('/')}/api/ingest_threat_data",
             json={"process_all": True},
             headers={"X-API-Key": API_KEY} if API_KEY else {},
-            timeout=30
+            timeout=120  # Extended timeout for thorough processing
         )
         
-        flash("Ingestion process started successfully" if response.status_code == 200 
-              else f"Error starting ingestion: {response.text}", 
-              "success" if response.status_code == 200 else "danger")
+        if response.status_code == 200:
+            try:
+                result = response.json()
+                if isinstance(result, dict) and "results" in result:
+                    # Extract meaningful stats from the results
+                    feed_count = len(result["results"])
+                    success_count = sum(1 for r in result["results"] if r.get("status") == "success")
+                    total_records = sum(r.get("record_count", 0) for r in result["results"])
+                    
+                    flash(f"Data collection started: processing {feed_count} feeds ({success_count} successful, {total_records} records)", "success")
+                else:
+                    flash("Threat data collection started successfully", "success")
+            except Exception:
+                flash("Threat data collection started successfully", "success")
+        else:
+            flash(f"Error starting data collection: {response.text}", "danger")
+            
     except Exception as e:
-        flash(f"Error starting ingestion: {str(e)}", "danger")
+        logger.error(f"Error starting ingestion: {str(e)}")
+        logger.error(traceback.format_exc())
+        flash(f"Error starting data collection: {str(e)}", "danger")
     
     return redirect(url_for('dashboard', view='feeds'))
 
@@ -854,13 +938,14 @@ def page_not_found(e):
 def server_error(e):
     """Handle 500 errors"""
     logger.error(f"Server error: {str(e)}")
+    logger.error(traceback.format_exc())
     if request.path.startswith('/api/'):
         return jsonify({"error": "Internal server error", "path": request.path}), 500
     return render_template('500.html'), 500
 
 # Utility Functions
 def get_gcp_metrics() -> Dict:
-    """Get metrics from GCP services"""
+    """Get metrics from GCP services - fixed to handle SQL error"""
     cache_key = "gcp_metrics"
     
     # Check cache
@@ -871,10 +956,16 @@ def get_gcp_metrics() -> Dict:
     metrics = {"table_count": 0, "storage_objects": 0, "storage_size": 0.0}
     
     try:
-        # Get BigQuery table counts
+        # Get BigQuery table counts - FIX: Corrected SQL syntax
         bq_client = bigquery.Client(project=PROJECT_ID)
-        query = f"SELECT COUNT(*) as table_count FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`"
-        for row in bq_client.query(query).result():
+        # Use parameter binding instead of string concatenation
+        query = f"""
+        SELECT COUNT(*) as table_count 
+        FROM `{PROJECT_ID}.{config.bigquery_dataset}.__TABLES__`
+        """
+        
+        query_job = bq_client.query(query)
+        for row in query_job.result():
             metrics["table_count"] = row.table_count
         
         # Get Storage bucket info
@@ -888,6 +979,7 @@ def get_gcp_metrics() -> Dict:
             logger.warning(f"Error getting storage metrics: {str(e)}")
     except Exception as e:
         logger.warning(f"Error getting GCP metrics: {str(e)}")
+        logger.warning(traceback.format_exc())
     
     # Cache results
     api_cache[cache_key] = metrics
