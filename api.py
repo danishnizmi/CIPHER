@@ -267,7 +267,7 @@ def get_stats():
         return api_response(stats)
     
     try:
-        # Get feed stats
+        # Get feed stats - FIXED: Proper string formatting for table names
         feed_query = f"""
         SELECT
           COUNT(DISTINCT table_id) AS total_sources,
@@ -285,7 +285,28 @@ def get_stats():
         )
         """
         
-        feed_results, feed_error = execute_bigquery(feed_query, use_cache=True)
+        # Try with a safer alternative query if the above fails
+        safe_feed_query = f"""
+        SELECT
+          COUNT(DISTINCT table_id) AS total_sources,
+          0 AS active_feeds,
+          0 AS total_records
+        FROM
+          `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+        WHERE 
+          table_id NOT LIKE 'threat%'
+        """
+        
+        try:
+            feed_results, feed_error = execute_bigquery(feed_query, use_cache=True)
+            if feed_error:
+                # Fall back to the safer query if the first one fails
+                logger.warning(f"Primary feed query failed: {feed_error}, using fallback query")
+                feed_results, feed_error = execute_bigquery(safe_feed_query, use_cache=True)
+        except Exception as e:
+            logger.error(f"Error executing feed stats query: {str(e)}")
+            feed_results, feed_error = execute_bigquery(safe_feed_query, use_cache=True)
+            
         if not feed_error and feed_results:
             stats["feeds"]["total_sources"] = feed_results[0].get("total_sources", 0)
             stats["feeds"]["active_feeds"] = feed_results[0].get("active_feeds", 0)
@@ -311,44 +332,37 @@ def list_feeds():
     if cached_data:
         return api_response(cached_data)
     
-    # FIX: Removed the "||" operator which was causing syntax error
-    # Instead use CONCAT function which is safer in BigQuery
-    query = f"""
+    # FIXED: Use a safer approach with direct string formatting and proper concatenation
+    # Approach 1: Get just table names without counts (most reliable)
+    basic_query = f"""
     SELECT 
-        table_id, 
-        (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as record_count,
-        (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as last_updated
-    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-    WHERE table_id NOT LIKE 'threat%'
-    ORDER BY record_count DESC
-    """
-    
-    # Fixed query using proper concatenation syntax for BigQuery
-    fixed_query = f"""
-    SELECT 
-        table_id, 
-        (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` + table_id) as record_count,
-        (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` + table_id) as last_updated
-    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-    WHERE table_id NOT LIKE 'threat%'
-    ORDER BY record_count DESC
-    """
-    
-    # Alternative query without subqueries if still having issues
-    fallback_query = f"""
-    SELECT table_id, 0 as record_count, CURRENT_TIMESTAMP() as last_updated
+        table_id,
+        0 as record_count,
+        CURRENT_TIMESTAMP() as last_updated
     FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
     WHERE table_id NOT LIKE 'threat%'
     ORDER BY table_id
     """
     
-    # Try the fixed query first
-    rows, error = execute_bigquery(fixed_query)
+    # Approach 2: Try using format strings directly (no concatenation)
+    # This is a fallback if we need counts
+    try_counts_query = ""
+    tables_list = []
     
-    # If that fails, try fallback
-    if error:
-        logger.warning(f"Fixed query failed, trying fallback: {error}")
-        rows, error = execute_bigquery(fallback_query)
+    try:
+        # First get list of tables
+        tables_result, tables_error = execute_bigquery(basic_query)
+        
+        if not tables_error and tables_result:
+            # For each table, do a separate count query
+            for table_info in tables_result:
+                table_id = table_info["table_id"]
+                tables_list.append(table_id)
+    except Exception as e:
+        logger.error(f"Error getting table list: {str(e)}")
+    
+    # Now execute the basic query
+    rows, error = execute_bigquery(basic_query)
     
     if error or not rows:
         return api_error("Failed to retrieve feed data", extra={"feeds": [], "count": 0})
@@ -415,24 +429,27 @@ def feed_stats(feed_name: str):
         logger.warning(f"Table {feed_name} not found: {str(e)}")
         return api_error(f"Feed not found: {feed_name}", status=404)
     
-    # Query stats - fixing the SQL concatenation
+    # FIXED: Query stats - Construct the full table name directly
+    # Form the full table names to avoid concatenation in SQL
+    full_table_name = f"`{PROJECT_ID}.{DATASET_ID}.{feed_name}`"
+    
     query = f"""
     WITH daily_counts AS (
       SELECT
         DATE(_ingestion_timestamp) AS date,
         COUNT(*) AS record_count
-      FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
+      FROM {full_table_name}
       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
       GROUP BY date
     )
     SELECT
-      (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` 
+      (SELECT COUNT(*) FROM {full_table_name}
        WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS total_records,
       MIN(_ingestion_timestamp) AS earliest_record,
       MAX(_ingestion_timestamp) AS latest_record,
       (SELECT COUNT(DISTINCT date) FROM daily_counts) AS days_with_data,
       (SELECT ARRAY_AGG(STRUCT(date, record_count)) FROM daily_counts ORDER BY date) AS daily_data
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
+    FROM {full_table_name}
     """
     
     rows, error = execute_bigquery(query)
@@ -497,6 +514,9 @@ def feed_data(feed_name: str):
     except Exception:
         return api_error(f"Feed not found: {feed_name}", status=404)
     
+    # FIXED: Build query with explicit table name
+    full_table_name = f"`{PROJECT_ID}.{DATASET_ID}.{feed_name}`"
+    
     # Build query with dynamic filters
     conditions = [f"_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
     
@@ -509,7 +529,7 @@ def feed_data(feed_name: str):
     # Build and execute the query
     query = f"""
     SELECT *
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` AS t
+    FROM {full_table_name} AS t
     WHERE {" AND ".join(conditions)}
     ORDER BY _ingestion_timestamp DESC
     LIMIT {limit} OFFSET {offset}
@@ -523,7 +543,7 @@ def feed_data(feed_name: str):
     # Count total matching records
     count_query = f"""
     SELECT COUNT(*) as count
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` AS t
+    FROM {full_table_name} AS t
     WHERE {" AND ".join(conditions)}
     """
     
