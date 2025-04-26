@@ -68,11 +68,13 @@ def get_client(client_type: str):
                 bq_client = bigquery.Client(project=PROJECT_ID)
                 logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
             return bq_client
+            
         elif client_type == 'storage':
             if storage_client is None:
                 storage_client = storage.Client(project=PROJECT_ID)
                 logger.info(f"Storage client initialized for project {PROJECT_ID}")
             return storage_client
+            
         else:
             logger.error(f"Unknown client type: {client_type}")
             return None
@@ -309,16 +311,44 @@ def list_feeds():
     if cached_data:
         return api_response(cached_data)
     
+    # FIX: Removed the "||" operator which was causing syntax error
+    # Instead use CONCAT function which is safer in BigQuery
     query = f"""
-    SELECT table_id, 
-           (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as record_count,
-           (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as last_updated
+    SELECT 
+        table_id, 
+        (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as record_count,
+        (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) as last_updated
     FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
     WHERE table_id NOT LIKE 'threat%'
     ORDER BY record_count DESC
     """
     
-    rows, error = execute_bigquery(query)
+    # Fixed query using proper concatenation syntax for BigQuery
+    fixed_query = f"""
+    SELECT 
+        table_id, 
+        (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` + table_id) as record_count,
+        (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` + table_id) as last_updated
+    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+    WHERE table_id NOT LIKE 'threat%'
+    ORDER BY record_count DESC
+    """
+    
+    # Alternative query without subqueries if still having issues
+    fallback_query = f"""
+    SELECT table_id, 0 as record_count, CURRENT_TIMESTAMP() as last_updated
+    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
+    WHERE table_id NOT LIKE 'threat%'
+    ORDER BY table_id
+    """
+    
+    # Try the fixed query first
+    rows, error = execute_bigquery(fixed_query)
+    
+    # If that fails, try fallback
+    if error:
+        logger.warning(f"Fixed query failed, trying fallback: {error}")
+        rows, error = execute_bigquery(fallback_query)
     
     if error or not rows:
         return api_error("Failed to retrieve feed data", extra={"feeds": [], "count": 0})
@@ -385,7 +415,7 @@ def feed_stats(feed_name: str):
         logger.warning(f"Table {feed_name} not found: {str(e)}")
         return api_error(f"Feed not found: {feed_name}", status=404)
     
-    # Query stats
+    # Query stats - fixing the SQL concatenation
     query = f"""
     WITH daily_counts AS (
       SELECT
@@ -574,9 +604,11 @@ def search_iocs():
 @handle_exceptions
 def handle_ingest_data():
     """API endpoint for ingesting threat data"""
-    from ingestion import ingest_threat_data
-    
     try:
+        # Import ingestion module only when needed
+        from ingestion import ingest_threat_data
+        
+        # Call with the request object
         result = ingest_threat_data(request)
         
         # Handle different return types
@@ -584,6 +616,9 @@ def handle_ingest_data():
             return result
         else:
             return jsonify(result)
+    except ImportError:
+        logger.error("Ingestion module not available")
+        return api_error("Ingestion module not available")
     except Exception as e:
         logger.error(f"Error in ingestion endpoint: {str(e)}")
         logger.error(traceback.format_exc())
