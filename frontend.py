@@ -635,11 +635,35 @@ def dashboard():
             })
         # Feeds view
         elif view_type == 'feeds':
+            feed_items = api_request('feeds', force_refresh=True).get('feed_details', [])
+            
+            # Add feed type descriptions mapping
+            feed_type_descriptions = {
+                "threatfox_iocs": "ThreatFox - Malware IOC database",
+                "phishtank_urls": "PhishTank - Community-verified phishing URLs",
+                "urlhaus_malware": "URLhaus - Database of malicious URLs",
+                "feodotracker_c2": "Feodo Tracker - Botnet C2 tracking",
+                "cisa_vulnerabilities": "CISA Known Exploited Vulnerabilities",
+                "tor_exit_nodes": "Tor Exit Nodes - Anonymity network exit points"
+            }
+            
+            # Make sure we have sample data if the list is empty
+            if not feed_items:
+                logger.info("No feeds found, adding sample data")
+                feed_items = [
+                    {"name": "threatfox_iocs", "record_count": 0, "last_updated": datetime.utcnow().isoformat()},
+                    {"name": "phishtank_urls", "record_count": 0, "last_updated": datetime.utcnow().isoformat()},
+                    {"name": "urlhaus_malware", "record_count": 0, "last_updated": datetime.utcnow().isoformat()},
+                    {"name": "feodotracker_c2", "record_count": 0, "last_updated": datetime.utcnow().isoformat()},
+                    {"name": "cisa_vulnerabilities", "record_count": 0, "last_updated": datetime.utcnow().isoformat()}
+                ]
+            
             common_data.update({
                 'page_title': 'Threat Intelligence Feeds',
                 'page_icon': 'rss',
                 'page_subtitle': 'Collection of threat data from various sources',
-                'feed_items': api_request('feeds', force_refresh=True).get('feed_details', [])
+                'feed_items': feed_items,
+                'feed_type_descriptions': feed_type_descriptions
             })
         # IOCs view
         elif view_type == 'iocs':
@@ -677,6 +701,16 @@ def dashboard():
             activity_dates.append(date)
             activity_counts.append(int(5 + i * 0.8))
         
+        # Default feed_type_descriptions to avoid undefined errors
+        feed_type_descriptions = {
+            "threatfox_iocs": "ThreatFox - Malware IOC database",
+            "phishtank_urls": "PhishTank - Community-verified phishing URLs",
+            "urlhaus_malware": "URLhaus - Database of malicious URLs",
+            "feodotracker_c2": "Feodo Tracker - Botnet C2 tracking",
+            "cisa_vulnerabilities": "CISA Known Exploited Vulnerabilities",
+            "tor_exit_nodes": "Tor Exit Nodes - Anonymity network exit points"
+        }
+        
         return render_template('dashboard.html', 
                               days=days, 
                               current_view=view_type,
@@ -693,6 +727,7 @@ def dashboard():
                               ioc_trend=0,
                               campaign_trend=0,
                               analysis_trend=0,
+                              feed_type_descriptions=feed_type_descriptions,
                               page_title='Threat Intelligence Dashboard',
                               page_subtitle='Real-time overview of threat intelligence with actionable insights')
 
@@ -758,73 +793,76 @@ def dynamic_content_detail(content_type, identifier):
 def ingest_threat_data():
     """Trigger the ingestion process for real threat data"""
     try:
-        # Try direct ingestion module first with explicit process_all parameter
+        logger.info("Starting threat data ingestion process")
+        
+        # First try calling the API endpoint directly
         try:
-            import ingestion
-            if hasattr(ingestion, 'ThreatDataIngestion'):
-                logger.info("Using ThreatDataIngestion class for real data ingestion")
-                ingestor = ingestion.ThreatDataIngestion()
-                results = ingestor.process_all_feeds()
-                
-                if results:
-                    success_count = sum(1 for r in results if r.get("status") == "success")
-                    total_records = sum(r.get("record_count", 0) for r in results)
-                    flash(f"Successfully processed {success_count} feeds with {total_records} records", "success")
-                else:
-                    flash("No feeds processed - check logs for details", "warning")
+            logger.info("Making direct API call to trigger ingestion")
+            api_url = f"{request.url_root.rstrip('/')}/api/ingest_threat_data"
+            logger.info(f"API URL: {api_url}")
+            
+            response = requests.post(
+                api_url,
+                json={"process_all": True},
+                headers={"X-API-Key": API_KEY} if API_KEY else {},
+                timeout=120  # Extended timeout for thorough processing
+            )
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    logger.info(f"API ingestion response: {str(result)[:200]}...")
                     
-                return redirect(url_for('dashboard', view='feeds'))
-            elif hasattr(ingestion, 'ingest_threat_data'):
-                logger.info("Using ingest_threat_data function for real data ingestion")
-                # Build a mock request with process_all set to True
-                class MockRequest:
-                    def get_json(self, *args, **kwargs):
-                        return {"process_all": True}
-                
-                # Call the ingestion function
-                result = ingestion.ingest_threat_data(MockRequest())
-                if isinstance(result, dict) and "results" in result:
-                    feed_count = len(result["results"])
-                    success_count = sum(1 for r in result["results"] if r.get("status") == "success")
-                    total_records = sum(r.get("record_count", 0) for r in result["results"])
-                    flash(f"Successfully processed {success_count} of {feed_count} feeds with {total_records} records", "success")
-                else:
+                    if isinstance(result, dict) and "results" in result:
+                        # Extract meaningful stats from the results
+                        feed_count = len(result["results"])
+                        success_count = sum(1 for r in result["results"] if r.get("status") == "success")
+                        total_records = sum(r.get("record_count", 0) for r in result["results"])
+                        
+                        flash(f"Data collection started: processing {feed_count} feeds ({success_count} successful, {total_records} records)", "success")
+                    else:
+                        flash("Threat data collection started successfully", "success")
+                except Exception as e:
+                    logger.error(f"Error parsing API response: {e}")
                     flash("Threat data collection started successfully", "success")
-                return redirect(url_for('dashboard', view='feeds'))
-        except ImportError as e:
-            logger.info(f"Local ingestion module not available: {e}")
-            logger.info("Falling back to API for ingestion")
-        except Exception as e:
-            logger.error(f"Error using local ingestion module: {e}")
-            logger.error(traceback.format_exc())
-            flash(f"Error in data collection: {str(e)}", "danger")
-            return redirect(url_for('dashboard'))
-        
-        # Fall back to API with explicit process_all parameter
-        logger.info("Making direct API call to trigger ingestion")
-        response = requests.post(
-            f"{request.url_root.rstrip('/')}/api/ingest_threat_data",
-            json={"process_all": True},
-            headers={"X-API-Key": API_KEY} if API_KEY else {},
-            timeout=120  # Extended timeout for thorough processing
-        )
-        
-        if response.status_code == 200:
+            else:
+                logger.error(f"API returned status {response.status_code}: {response.text}")
+                raise Exception(f"API error: {response.text}")
+                
+        except Exception as api_error:
+            logger.error(f"API method failed: {str(api_error)}")
+            
+            # Fallback to direct module import
             try:
-                result = response.json()
-                if isinstance(result, dict) and "results" in result:
-                    # Extract meaningful stats from the results
-                    feed_count = len(result["results"])
-                    success_count = sum(1 for r in result["results"] if r.get("status") == "success")
-                    total_records = sum(r.get("record_count", 0) for r in result["results"])
+                logger.info("Falling back to direct ingestion module")
+                import ingestion
+                
+                if hasattr(ingestion, 'ThreatDataIngestion'):
+                    logger.info("Using ThreatDataIngestion class for ingestion")
+                    ingestor = ingestion.ThreatDataIngestion()
+                    results = ingestor.process_all_feeds()
                     
-                    flash(f"Data collection started: processing {feed_count} feeds ({success_count} successful, {total_records} records)", "success")
+                    if results:
+                        success_count = sum(1 for r in results if r.get("status") == "success")
+                        total_records = sum(r.get("record_count", 0) for r in results)
+                        flash(f"Successfully processed {success_count} feeds with {total_records} records", "success")
+                        logger.info(f"Ingestion results: {str(results)[:200]}...")
+                    else:
+                        flash("No feeds processed - check logs for details", "warning")
                 else:
-                    flash("Threat data collection started successfully", "success")
-            except Exception:
-                flash("Threat data collection started successfully", "success")
-        else:
-            flash(f"Error starting data collection: {response.text}", "danger")
+                    flash("Ingestion module available but lacks expected methods", "warning")
+            except ImportError as e:
+                logger.error(f"Import error: {e}")
+                flash(f"Error accessing ingestion module: {str(e)}", "danger")
+            except Exception as e:
+                logger.error(f"General error: {e}")
+                flash(f"Error in data collection: {str(e)}", "danger")
+        
+        # Clear API cache to ensure fresh data after ingestion
+        global api_cache, api_cache_timestamp
+        api_cache.clear()
+        api_cache_timestamp.clear()
+        logger.info("API cache cleared to refresh dashboard data")
             
     except Exception as e:
         logger.error(f"Error starting ingestion: {str(e)}")
@@ -1047,96 +1085,6 @@ def get_gcp_metrics() -> Dict:
     api_cache_timestamp[cache_key] = now
     
     return metrics
-
-# Generate mock data for dashboards when no real data is available
-def generate_mock_data():
-    """Generate mock data for visualization when real data is unavailable"""
-    mock_data = {
-        "feeds": {
-            "total_sources": 6,
-            "active_feeds": 6,
-            "total_records": 1250
-        },
-        "campaigns": {
-            "total_campaigns": 3,
-            "active_campaigns": 2,
-            "unique_actors": 5
-        },
-        "iocs": {
-            "total": 842,
-            "types": [
-                {"type": "ip", "count": 325},
-                {"type": "domain", "count": 210},
-                {"type": "url", "count": 180},
-                {"type": "md5", "count": 76},
-                {"type": "sha256", "count": 51}
-            ]
-        },
-        "analyses": {
-            "total_analyses": 18,
-            "last_analysis": datetime.utcnow().isoformat()
-        },
-        "timestamp": datetime.utcnow().isoformat(),
-        "days": 30
-    }
-    
-    # Generate mock campaigns
-    mock_campaigns = [
-        {
-            "campaign_id": "c123456",
-            "campaign_name": "APT-123456",
-            "threat_actor": "FancyBear",
-            "source_count": 7,
-            "last_seen": (datetime.utcnow() - timedelta(days=2)).isoformat(),
-            "severity": "high"
-        },
-        {
-            "campaign_id": "c234567",
-            "campaign_name": "Ransomware-234567",
-            "threat_actor": "Conti",
-            "source_count": 5,
-            "last_seen": (datetime.utcnow() - timedelta(days=5)).isoformat(),
-            "severity": "critical"
-        },
-        {
-            "campaign_id": "c345678",
-            "campaign_name": "Phishing-345678",
-            "threat_actor": "Lazarus",
-            "source_count": 3,
-            "last_seen": (datetime.utcnow() - timedelta(days=10)).isoformat(),
-            "severity": "medium"
-        }
-    ]
-    
-    # Generate mock IOCs
-    mock_iocs = [
-        {
-            "type": "ip",
-            "value": "192.168.1.100",
-            "count": 12
-        },
-        {
-            "type": "domain",
-            "value": "malicious-domain.com",
-            "count": 8
-        },
-        {
-            "type": "url",
-            "value": "https://phishing-site.org/login",
-            "count": 6
-        },
-        {
-            "type": "md5",
-            "value": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-            "count": 4
-        }
-    ]
-    
-    return {
-        "stats": mock_data,
-        "campaigns": mock_campaigns,
-        "iocs": mock_iocs
-    }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
