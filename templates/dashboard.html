@@ -123,7 +123,8 @@
                 <div class="flex items-center justify-between">
                     <div>
                         <p class="text-gray-500 text-sm">BigQuery Tables</p>
-                        <p class="text-xl font-bold">{{ gcp_metrics.table_count|default(0) }}</p>
+                        <!-- Fixed: Use default filter and ensure gcp_metrics is defined -->
+                        <p class="text-xl font-bold">{{ gcp_metrics.table_count|default(0) if gcp_metrics is defined else 0 }}</p>
                     </div>
                     <div class="text-2xl text-blue-500">
                         <i class="fas fa-database"></i>
@@ -134,7 +135,8 @@
                 <div class="flex items-center justify-between">
                     <div>
                         <p class="text-gray-500 text-sm">Storage Objects</p>
-                        <p class="text-xl font-bold">{{ gcp_metrics.storage_objects|default(0) }}</p>
+                        <!-- Fixed: Use default filter and ensure gcp_metrics is defined -->
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_objects|default(0) if gcp_metrics is defined else 0 }}</p>
                     </div>
                     <div class="text-2xl text-blue-500">
                         <i class="fas fa-hdd"></i>
@@ -145,7 +147,8 @@
                 <div class="flex items-center justify-between">
                     <div>
                         <p class="text-gray-500 text-sm">Storage Used</p>
-                        <p class="text-xl font-bold">{{ gcp_metrics.storage_size|default(0)|round(1) }} MB</p>
+                        <!-- Fixed: Use default filter and ensure gcp_metrics is defined -->
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_size|default(0)|round(1) if gcp_metrics is defined else 0 }} MB</p>
                     </div>
                     <div class="text-2xl text-blue-500">
                         <i class="fas fa-save"></i>
@@ -435,8 +438,8 @@
     
     // IOC Types Chart
     const iocTypesData = {
-        labels: {{ ioc_type_labels|safe }},
-        values: {{ ioc_type_values|safe }}
+        labels: {{ ioc_type_labels|default('[]')|safe }},
+        values: {{ ioc_type_values|default('[]')|safe }}
     };
     
     const iocTypesLayout = {
@@ -445,21 +448,27 @@
         legend: { orientation: 'h', y: -0.2 }
     };
     
-    Plotly.newPlot('iocTypesChart', [{
-        labels: iocTypesData.labels,
-        values: iocTypesData.values,
-        type: 'pie',
-        textinfo: 'label+percent',
-        insidetextorientation: 'radial',
-        marker: {
-            colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
-        }
-    }], iocTypesLayout);
+    // Only create chart if we have data
+    if (iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
+        Plotly.newPlot('iocTypesChart', [{
+            labels: iocTypesData.labels,
+            values: iocTypesData.values,
+            type: 'pie',
+            textinfo: 'label+percent',
+            insidetextorientation: 'radial',
+            marker: {
+                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+            }
+        }], iocTypesLayout);
+    } else {
+        // Show empty state
+        document.getElementById('iocTypesChart').innerHTML = '<div class="flex items-center justify-center h-full text-gray-400">No IOC type data available</div>';
+    }
     
     // Activity Chart
     const activityData = {
-        dates: {{ activity_dates|safe }},
-        counts: {{ activity_counts|safe }}
+        dates: {{ activity_dates|default('[]')|safe }},
+        counts: {{ activity_counts|default('[]')|safe }}
     };
     
     const activityLayout = {
@@ -468,14 +477,20 @@
         yaxis: { title: 'Records' }
     };
     
-    Plotly.newPlot('activityChart', [{
-        x: activityData.dates,
-        y: activityData.counts,
-        type: 'scatter',
-        mode: 'lines+markers',
-        line: { color: '#3b82f6', shape: 'spline' },
-        marker: { color: '#3b82f6', size: 6 }
-    }], activityLayout);
+    // Only create chart if we have data
+    if (activityData.dates.length > 0 && activityData.counts.length > 0) {
+        Plotly.newPlot('activityChart', [{
+            x: activityData.dates,
+            y: activityData.counts,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: '#3b82f6', shape: 'spline' },
+            marker: { color: '#3b82f6', size: 6 }
+        }], activityLayout);
+    } else {
+        // Show empty state
+        document.getElementById('activityChart').innerHTML = '<div class="flex items-center justify-center h-full text-gray-400">No activity data available</div>';
+    }
     
     // Small Trend Charts
     createSparkline('feedTrendChart', 1, '#3b82f6');
@@ -541,7 +556,12 @@
         plot_bgcolor: '#FFFFFF'
     };
 
-    Plotly.newPlot('threatMap', mapData, mapLayout);
+    try {
+        Plotly.newPlot('threatMap', mapData, mapLayout);
+    } catch(e) {
+        console.error("Error rendering threat map:", e);
+        document.getElementById('threatMap').innerHTML = '<div class="flex items-center justify-center h-full text-gray-400">Could not render threat map</div>';
+    }
     
     // Live updates for the threat map
     const liveUpdateSwitch = document.getElementById('liveUpdateSwitch');
@@ -549,29 +569,37 @@
     
     function setupLiveUpdates() {
         if (liveUpdateSwitch.checked) {
-            updateInterval = setInterval(() => {
-                // Add random new threat point
-                const newCountry = ['MEX', 'AUS', 'JPN', 'CAN', 'FRA', 'ESP', 'ITA', 'UKR', 'TUR'][Math.floor(Math.random() * 9)];
-                const newSize = Math.floor(Math.random() * 15) + 5;
-                const newColor = ['#ef4444', '#fcd34d', '#d9f99d'][Math.floor(Math.random() * 3)];
-                const newText = `${newCountry}: ${Math.floor(Math.random() * 100) + 50} threats detected`;
-                
-                Plotly.extendTraces('threatMap', {
-                    locations: [[newCountry]],
-                    marker: {
-                        size: [[newSize]],
-                        color: [[newColor]]
-                    },
-                    text: [[newText]]
-                }, [0]);
-            }, 5000);
+            try {
+                updateInterval = setInterval(() => {
+                    // Add random new threat point
+                    const newCountry = ['MEX', 'AUS', 'JPN', 'CAN', 'FRA', 'ESP', 'ITA', 'UKR', 'TUR'][Math.floor(Math.random() * 9)];
+                    const newSize = Math.floor(Math.random() * 15) + 5;
+                    const newColor = ['#ef4444', '#fcd34d', '#d9f99d'][Math.floor(Math.random() * 3)];
+                    const newText = `${newCountry}: ${Math.floor(Math.random() * 100) + 50} threats detected`;
+                    
+                    Plotly.extendTraces('threatMap', {
+                        locations: [[newCountry]],
+                        marker: {
+                            size: [[newSize]],
+                            color: [[newColor]]
+                        },
+                        text: [[newText]]
+                    }, [0]);
+                }, 5000);
+            } catch(e) {
+                console.error("Error updating threat map:", e);
+            }
         } else {
             clearInterval(updateInterval);
         }
     }
     
     liveUpdateSwitch.addEventListener('change', setupLiveUpdates);
-    setupLiveUpdates();
+    
+    // Only start live updates if map rendered successfully
+    if (document.getElementById('threatMap').children.length > 0) {
+        setupLiveUpdates();
+    }
 
     // Add data refresh functionality
     function refreshData() {
