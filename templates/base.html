@@ -42,10 +42,9 @@
             .badge-ip { @apply bg-amber-300 text-gray-800; }
             .badge-domain { @apply bg-emerald-400 text-gray-800; }
             .badge-url { @apply bg-blue-500 text-white; }
-            .badge-md5 { @apply bg-pink-500 text-white; }
-            .badge-sha1 { @apply bg-blue-900 text-white; }
-            .badge-sha256 { @apply bg-purple-700 text-white; }
+            .badge-md5, .badge-sha1, .badge-sha256, .badge-hash { @apply bg-pink-500 text-white; }
             .badge-email { @apply bg-orange-500 text-gray-800; }
+            .badge-unknown { @apply bg-gray-300 text-gray-800; }
             
             .severity-badge {
                 @apply inline-block px-2 py-1 rounded text-xs font-bold uppercase;
@@ -88,6 +87,7 @@
             .btn-warning { @apply bg-yellow-500 text-gray-800 hover:bg-yellow-600; }
             .btn-info { @apply bg-cyan-500 text-white hover:bg-cyan-600; }
             .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50; }
+            .btn-sm { @apply px-3 py-1 text-sm; }
             
             .form-group {
                 @apply mb-4;
@@ -143,6 +143,19 @@
             .table-pagination {
                 @apply border-t border-gray-200 px-6 py-4 flex items-center justify-between;
             }
+            
+            /* Empty states */
+            .empty-state {
+                @apply flex flex-col items-center justify-center py-12 px-4 text-center;
+            }
+            .empty-state-icon {
+                @apply text-gray-300 text-5xl mb-4;
+            }
+            
+            /* Loading states */
+            .loading-spinner {
+                @apply animate-spin h-6 w-6 mx-auto;
+            }
         }
     </style>
     
@@ -185,10 +198,10 @@
         </div>
     </nav>
     
-    <div class="container mx-auto px-4 flex">
+    <div class="container mx-auto px-4 flex mt-4">
         <!-- Sidebar -->
         <div class="w-64 flex-shrink-0 hidden md:block">
-            <div class="bg-white rounded-lg shadow-md mt-4 p-4">
+            <div class="bg-white rounded-lg shadow-md p-4">
                 <!-- Search Box -->
                 <form action="{{ url_for('dashboard') }}" method="get" class="mb-6">
                     <div class="relative">
@@ -199,18 +212,33 @@
                     </div>
                 </form>
                 
-                <!-- Navigation Menu - SIMPLIFIED -->
+                <!-- Navigation Menu -->
                 <div class="space-y-1">
-                    <a href="{{ url_for('dashboard') }}" class="sidebar-item {% if request.args.get('view', 'dashboard') == 'dashboard' %}active{% endif %}">
+                    <a href="{{ url_for('dashboard') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view', 'dashboard') == 'dashboard' %}active{% endif %}">
                         <i class="fas fa-tachometer-alt w-5 mr-2"></i> Dashboard
                     </a>
-                    <a href="{{ url_for('feeds') }}" class="sidebar-item {% if request.args.get('view') == 'feeds' %}active{% endif %}">
+                    <a href="{{ url_for('feeds') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'feeds' %}active{% endif %}">
                         <i class="fas fa-rss w-5 mr-2"></i> Threat Feeds
                     </a>
-                    <a href="{{ url_for('iocs') }}" class="sidebar-item {% if request.args.get('view') == 'iocs' %}active{% endif %}">
+                    <a href="{{ url_for('iocs') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'iocs' %}active{% endif %}">
                         <i class="fas fa-fingerprint w-5 mr-2"></i> IOCs
                     </a>
+                    <a href="{{ url_for('campaigns') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'campaigns' %}active{% endif %}">
+                        <i class="fas fa-project-diagram w-5 mr-2"></i> Campaigns
+                    </a>
                 </div>
+                
+                <!-- Admin Section (if admin user) -->
+                {% if session.get('role') == 'admin' %}
+                <div class="border-t border-gray-200 my-4 pt-4">
+                    <h6 class="font-semibold text-sm mb-2 text-gray-500 uppercase tracking-wider px-4">Administration</h6>
+                    <div class="space-y-1">
+                        <a href="{{ url_for('users') }}" class="sidebar-item {% if request.endpoint == 'users' %}active{% endif %}">
+                            <i class="fas fa-users w-5 mr-2"></i> User Management
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
                 
                 <!-- System Status -->
                 <div class="mt-auto pt-4">
@@ -309,26 +337,73 @@
 
         // Utility functions for charts
         function createSparkline(elementId, trend = 1, color = '#3b82f6') {
-            const data = [];
-            // Generate random trending data
-            for (let i = 0; i < 10; i++) {
-                data.push(Math.floor(Math.random() * 20) + (i * trend));
+            try {
+                const element = document.getElementById(elementId);
+                if (!element) return;
+                
+                const data = [];
+                // Generate random trending data
+                for (let i = 0; i < 10; i++) {
+                    data.push(Math.floor(Math.random() * 20) + (i * trend));
+                }
+                
+                Plotly.newPlot(elementId, [{
+                    y: data,
+                    type: 'scatter',
+                    mode: 'lines',
+                    fill: 'tozeroy',
+                    line: { color: color, width: 2, shape: 'spline' }
+                }], {
+                    margin: { t: 0, r: 0, l: 0, b: 0 },
+                    xaxis: { showticklabels: false, showgrid: false, zeroline: false },
+                    yaxis: { showticklabels: false, showgrid: false, zeroline: false },
+                    showlegend: false,
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)'
+                });
+            } catch (error) {
+                console.error(`Error creating sparkline for ${elementId}:`, error);
+                // Create fallback display
+                if (document.getElementById(elementId)) {
+                    document.getElementById(elementId).innerHTML = `
+                        <div class="flex items-center justify-center h-full">
+                            <div class="w-full h-2 bg-gray-200 rounded-full">
+                                <div class="h-2 bg-${color.replace('#', '')} rounded-full" style="width: 60%"></div>
+                            </div>
+                        </div>
+                    `;
+                }
             }
+        }
+        
+        // Empty state creator
+        function createEmptyState(elementId, icon, message, submessage = '') {
+            const element = document.getElementById(elementId);
+            if (!element) return;
             
-            Plotly.newPlot(elementId, [{
-                y: data,
-                type: 'scatter',
-                mode: 'lines',
-                fill: 'tozeroy',
-                line: { color: color, width: 2, shape: 'spline' }
-            }], {
-                margin: { t: 0, r: 0, l: 0, b: 0 },
-                xaxis: { showticklabels: false, showgrid: false, zeroline: false },
-                yaxis: { showticklabels: false, showgrid: false, zeroline: false },
-                showlegend: false,
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                plot_bgcolor: 'rgba(0,0,0,0)'
-            });
+            element.innerHTML = `
+                <div class="empty-state">
+                    <i class="fas fa-${icon} empty-state-icon"></i>
+                    <h3 class="text-lg font-medium text-gray-700 mb-1">${message}</h3>
+                    ${submessage ? `<p class="text-sm text-gray-500">${submessage}</p>` : ''}
+                </div>
+            `;
+        }
+        
+        // Format numbers with commas
+        function formatNumber(num) {
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+        
+        // Format date strings
+        function formatDate(dateString) {
+            if (!dateString) return 'N/A';
+            try {
+                const date = new Date(dateString);
+                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+            } catch (e) {
+                return dateString;
+            }
         }
     </script>
     
