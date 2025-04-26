@@ -1,3 +1,8 @@
+"""
+Threat Intelligence Platform - Main Application Module
+Initializes and configures the application, integrating all components.
+"""
+
 import os
 import sys
 import logging
@@ -7,17 +12,24 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-# Set up enhanced logging
+# Configure enhanced logging
 logging.basicConfig(
     level=logging.INFO if os.environ.get('ENVIRONMENT', 'development') != 'production' else logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Initialize environment
+VERSION = os.environ.get("VERSION", "1.0.0")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+PORT = int(os.environ.get('PORT', 8080))
+HOST = os.environ.get('HOST', '0.0.0.0')
+DEBUG_MODE = ENVIRONMENT != 'production'
+
 # Create a fallback Flask app for graceful degradation
 fallback_app = Flask(__name__)
 
-# Modules that might be available
+# Modules that will be initialized
 available_modules = {
     'config': False,
     'api': False,
@@ -42,17 +54,17 @@ try:
         
     logger.info(f"Configuration initialized successfully")
     
-    # Step 2: Import API module for API endpoints
-    logger.info("Importing API module...")
-    import api
-    logger.info("API module imported successfully")
-    available_modules['api'] = True
-    
-    # Step 3: Import frontend module which has the fully configured Flask app
+    # Step 2: Import frontend module which has the Flask app
     logger.info("Importing frontend module...")
     import frontend
     logger.info("Frontend module imported successfully")
     available_modules['frontend'] = True
+    
+    # Step 3: Import API module for API endpoints
+    logger.info("Importing API module...")
+    import api
+    logger.info("API module imported successfully")
+    available_modules['api'] = True
     
     # Step 4: Import ingestion module for threat data collection
     logger.info("Importing ingestion module...")
@@ -75,7 +87,16 @@ try:
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Step 7: Register error handlers for consistent error handling
+    # Step 7: Ensure all required routes exist (important routes if not in frontend)
+    if not hasattr(app, 'view_functions') or 'login' not in app.view_functions:
+        logger.warning("Login route not found in frontend - adding fallback login route")
+        
+        @app.route('/login', methods=['GET', 'POST'])
+        def login_fallback():
+            """Fallback login route if missing in frontend"""
+            return render_template('auth.html', page_type='login', error=None, now=datetime.now())
+    
+    # Step 8: Register additional error handlers
     @app.errorhandler(404)
     def handle_not_found(e):
         logger.info(f"404 error: {request.path}")
@@ -86,7 +107,7 @@ try:
                 "path": request.path,
                 "timestamp": datetime.utcnow().isoformat()
             }), 404
-        return render_template('auth.html', page_type='login', error="Page not found"), 404
+        return render_template('404.html', error="Page not found"), 404
     
     @app.errorhandler(500)
     def handle_server_error(e):
@@ -99,15 +120,18 @@ try:
                 "path": request.path,
                 "timestamp": datetime.utcnow().isoformat()
             }), 500
-        return render_template('auth.html', page_type='login', error="Server error occurred"), 500
+        return render_template('500.html', error="Server error occurred"), 500
     
-    # Add a simple health check handler
+    # Add a simple health check handler for kubernetes/cloud run
     @app.route('/health-check')
     def health_check():
+        """Health check endpoint for container orchestration"""
         return jsonify({
             "status": "ok", 
             "components": available_modules,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": VERSION,
+            "environment": ENVIRONMENT
         })
     
     logger.info("Application initialization completed successfully!")
@@ -126,19 +150,15 @@ except Exception as e:
     init_error = str(e)
     init_traceback = error_tb
     
-    # Set up environment information
-    environment = os.environ.get("ENVIRONMENT", "development")
-    version = os.environ.get("VERSION", "1.0.0")
-    
-    # Fallback routes
+    # Fallback routes for essential functionality
     @app.route('/api/health', methods=['GET'])
-    def health_check():
+    def api_health_check():
         """Health check that always succeeds but reports errors"""
         logger.info("Health check called (degraded mode)")
         return jsonify({
             "status": "degraded",
-            "environment": environment,
-            "version": version,
+            "environment": ENVIRONMENT,
+            "version": VERSION,
             "message": "Application running in degraded mode",
             "error": init_error,
             "timestamp": datetime.utcnow().isoformat()
@@ -147,8 +167,18 @@ except Exception as e:
     @app.route('/health', methods=['GET'])
     def root_health_check():
         """Root health check endpoint (for k8s/cloud run probes)"""
-        return health_check()
+        return api_health_check()
     
+    @app.route('/login', methods=['GET', 'POST'])
+    def login():
+        """Emergency login page"""
+        if request.method == 'POST':
+            flash('System is in maintenance mode. Please try again later.', 'warning')
+            return redirect('/login')
+        return render_template('auth.html', page_type='login', 
+                              error="System is in maintenance mode. Please try again later.",
+                              now=datetime.now())
+        
     @app.route('/', methods=['GET'])
     def index():
         """Basic index page with error information"""
@@ -194,7 +224,7 @@ except Exception as e:
                 </div>
                 
                 <div class="text-center text-gray-500 text-sm mt-8">
-                    <p>Environment: {environment} | Version: {version}</p>
+                    <p>Environment: {ENVIRONMENT} | Version: {VERSION}</p>
                     <p>&copy; {datetime.utcnow().year} Threat Intelligence Platform</p>
                 </div>
             </div>
@@ -204,15 +234,11 @@ except Exception as e:
 
 # Entry point for running the application directly (not via gunicorn)
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    debug_mode = os.environ.get('ENVIRONMENT', 'development') != 'production'
-    host = os.environ.get('HOST', '0.0.0.0')
-    
-    logger.info(f"Starting Flask app on {host}:{port} (debug={debug_mode})...")
+    logger.info(f"Starting Flask app on {HOST}:{PORT} (debug={DEBUG_MODE})...")
     
     try:
         # Trigger initial data ingestion if in development mode
-        if debug_mode and available_modules['ingestion']:
+        if DEBUG_MODE and available_modules['ingestion']:
             try:
                 logger.info("Triggering initial data ingestion for development mode...")
                 ingestor = ingestion.ThreatDataIngestion()
@@ -222,7 +248,7 @@ if __name__ == '__main__':
                 logger.warning(f"Initial ingestion failed: {e}")
                 logger.warning(traceback.format_exc())
         
-        app.run(host=host, port=port, debug=debug_mode)
+        app.run(host=HOST, port=PORT, debug=DEBUG_MODE)
     except Exception as e:
         logger.error(f"Failed to start application: {str(e)}")
         logger.error(traceback.format_exc())
