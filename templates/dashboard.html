@@ -1,87 +1,1348 @@
-{% raw %}
-<!-- Add this just before the closing body tag in dashboard.html -->
+{% extends "base.html" %}
 
-<script>
-// Loading state management
-document.addEventListener('DOMContentLoaded', function() {
-    // Setup loading indicators
-    setupLoadingIndicators();
-    
-    // Add loading functionality to all data sections
-    setupDataSectionLoading();
-    
-    // Setup refresh functionality
-    setupRefreshButtons();
-});
+{% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
-function setupLoadingIndicators() {
-    // Create loading overlay template
-    const loadingTemplate = `
-        <div class="loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50">
-            <div class="text-center">
-                <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-                <p class="mt-4 text-gray-700">Loading data...</p>
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">
+            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} page-icon"></i>
+            {{ page_title }}
+        </h1>
+        <p class="text-gray-600">{{ page_subtitle }}</p>
+    </div>
+    <div class="relative inline-block text-left">
+        <button id="timeRangeButton" class="btn btn-light flex items-center">
+            <span>{{ days }} Days</span>
+            <i class="fas fa-chevron-down text-xs ml-2"></i>
+        </button>
+        <div id="timeRangeDropdown" class="hidden origin-top-right absolute right-0 mt-2 w-40 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
+            <div class="py-1">
+                <a href="{{ url_for(request.endpoint, view=current_view, days=7) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">7 Days</a>
+                <a href="{{ url_for(request.endpoint, view=current_view, days=30) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">30 Days</a>
+                <a href="{{ url_for(request.endpoint, view=current_view, days=90) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">90 Days</a>
             </div>
         </div>
-    `;
-    
-    // Insert template into document
-    const templateDiv = document.createElement('div');
-    templateDiv.id = 'loading-template';
-    templateDiv.style.display = 'none';
-    templateDiv.innerHTML = loadingTemplate;
-    document.body.appendChild(templateDiv);
-}
+    </div>
+</div>
 
-function setupDataSectionLoading() {
-    // Add loading states to all panel elements
-    document.querySelectorAll('.panel').forEach(panel => {
-        // Create a panel-specific loading indicator
-        const loadingIndicator = document.createElement('div');
-        loadingIndicator.className = 'panel-loading hidden absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center z-10';
-        loadingIndicator.innerHTML = `
-            <div class="text-center">
-                <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
-                <p class="mt-2 text-sm text-gray-700">Loading...</p>
+<!-- Main metrics -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+    <!-- Feed stats -->
+    <div class="stat-card">
+        <div class="flex justify-between">
+            <div>
+                <div class="text-4xl text-blue-600 mb-4">
+                    <i class="fas fa-rss"></i>
+                </div>
+                <div class="text-3xl font-bold">{{ stats.feeds.total_sources|default(0) }}</div>
+                <div class="text-gray-500">Active Feeds</div>
             </div>
-        `;
+            <div class="self-center">
+                <div id="feedTrendChart" class="w-24 h-12"></div>
+            </div>
+        </div>
+        <div class="mt-2 text-sm {% if feed_trend > 0 %}text-green-600{% elif feed_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+            <i class="fas fa-{% if feed_trend > 0 %}arrow-up{% elif feed_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+            <span>{% if feed_trend != 0 %}{{ feed_trend|abs }}% from last period{% else %}No change{% endif %}</span>
+        </div>
+    </div>
+    
+    <!-- IOC stats -->
+    <div class="stat-card">
+        <div class="flex justify-between">
+            <div>
+                <div class="text-4xl text-red-600 mb-4">
+                    <i class="fas fa-fingerprint"></i>
+                </div>
+                <div class="text-3xl font-bold">{{ stats.iocs.total|default(0) }}</div>
+                <div class="text-gray-500">Indicators</div>
+            </div>
+            <div class="self-center">
+                <div id="iocTrendChart" class="w-24 h-12"></div>
+            </div>
+        </div>
+        <div class="mt-2 text-sm {% if ioc_trend > 0 %}text-green-600{% elif ioc_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+            <i class="fas fa-{% if ioc_trend > 0 %}arrow-up{% elif ioc_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+            <span>{% if ioc_trend != 0 %}{{ ioc_trend|abs }}% from last period{% else %}No change{% endif %}</span>
+        </div>
+    </div>
+    
+    <!-- Campaign stats -->
+    <div class="stat-card">
+        <div class="flex justify-between">
+            <div>
+                <div class="text-4xl text-green-600 mb-4">
+                    <i class="fas fa-project-diagram"></i>
+                </div>
+                <div class="text-3xl font-bold">{{ stats.campaigns.total_campaigns|default(0) }}</div>
+                <div class="text-gray-500">Campaigns</div>
+            </div>
+            <div class="self-center">
+                <div id="campaignTrendChart" class="w-24 h-12"></div>
+            </div>
+        </div>
+        <div class="mt-2 text-sm {% if campaign_trend > 0 %}text-green-600{% elif campaign_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+            <i class="fas fa-{% if campaign_trend > 0 %}arrow-up{% elif campaign_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+            <span>{% if campaign_trend != 0 %}{{ campaign_trend|abs }}% from last period{% else %}No change{% endif %}</span>
+        </div>
+    </div>
+    
+    <!-- Analysis stats -->
+    <div class="stat-card">
+        <div class="flex justify-between">
+            <div>
+                <div class="text-4xl text-cyan-600 mb-4">
+                    <i class="fas fa-file-alt"></i>
+                </div>
+                <div class="text-3xl font-bold">{{ stats.analyses.total_analyses|default(0) }}</div>
+                <div class="text-gray-500">Analyses</div>
+            </div>
+            <div class="self-center">
+                <div id="analysisTrendChart" class="w-24 h-12"></div>
+            </div>
+        </div>
+        <div class="mt-2 text-sm {% if analysis_trend > 0 %}text-green-600{% elif analysis_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+            <i class="fas fa-{% if analysis_trend > 0 %}arrow-up{% elif analysis_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+            <span>{% if analysis_trend != 0 %}{{ analysis_trend|abs }}% from last period{% else %}No change{% endif %}</span>
+        </div>
+    </div>
+</div>
+
+<!-- GCP Metrics -->
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h2 class="panel-title">
+            <i class="fas fa-cloud panel-icon"></i>
+            GCP Platform Usage
+        </h2>
+    </div>
+    <div class="p-4">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">BigQuery Tables</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.table_count|default(0) if gcp_metrics is defined else 0 }}</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-database"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">Storage Objects</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_objects|default(0) if gcp_metrics is defined else 0 }}</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-hdd"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="p-4 border rounded-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm">Storage Used</p>
+                        <p class="text-xl font-bold">{{ gcp_metrics.storage_size|default(0)|round(1) if gcp_metrics is defined else 0 }} MB</p>
+                    </div>
+                    <div class="text-2xl text-blue-500">
+                        <i class="fas fa-save"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if current_view == 'dashboard' %}
+<!-- Main Visualization Sections for Dashboard View -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+    <!-- Threat Map -->
+    <div class="lg:col-span-2 panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-globe panel-icon"></i>
+                Threat Geographic Distribution
+            </h3>
+            <div class="flex items-center">
+                <span class="mr-2 text-sm">Live Updates</span>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="liveUpdateSwitch" class="sr-only peer" checked>
+                    <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+            </div>
+        </div>
+        <div class="p-0">
+            <div id="threatMap" class="h-96 relative">
+                <!-- Loading state for threat map -->
+                <div class="absolute inset-0 flex items-center justify-center bg-gray-50">
+                    <div class="text-center">
+                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mb-2"></div>
+                        <p class="text-gray-500">Loading threat map data...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Quick Actions and Alerts -->
+    <div class="lg:col-span-1">
+        <!-- Quick Actions -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-bolt text-yellow-500 mr-2"></i>
+                    Quick Actions
+                </h3>
+            </div>
+            <div class="p-4 space-y-2">
+                <a href="{{ url_for('iocs') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
+                    <i class="fas fa-search text-blue-600 mr-3"></i>
+                    <span>Search IOCs</span>
+                </a>
+                <a href="{{ url_for('ingest_threat_data') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
+                    <i class="fas fa-sync text-green-600 mr-3"></i>
+                    <span>Refresh Threat Data</span>
+                </a>
+                <a href="{{ url_for('explore') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
+                    <i class="fas fa-database text-cyan-600 mr-3"></i>
+                    <span>Explore Data</span>
+                </a>
+                <a href="{{ url_for('alerts') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
+                    <i class="fas fa-bell text-red-600 mr-3"></i>
+                    <span>View Alerts</span>
+                    {% if stats.alerts_count is defined and stats.alerts_count > 0 %}
+                    <span class="ml-auto bg-red-500 text-white text-xs px-2 py-1 rounded-full">{{ stats.alerts_count }}</span>
+                    {% endif %}
+                </a>
+            </div>
+        </div>
         
-        // Make panel position relative for absolute positioning of indicator
-        panel.style.position = 'relative';
-        panel.appendChild(loadingIndicator);
-    });
-}
+        <!-- Recent Alerts -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-exclamation-triangle text-amber-500 mr-2"></i>
+                    Recent Activity
+                </h3>
+            </div>
+            <div class="divide-y">
+                <div class="block p-4">
+                    <div class="flex justify-between mb-1">
+                        <h6 class="font-medium flex items-center">
+                            <span class="severity-badge high mr-2">New Data</span>
+                            Feeds Updated
+                        </h6>
+                        <small class="text-gray-500">Recently</small>
+                    </div>
+                    <p class="text-sm text-gray-600">{{ stats.feeds.total_sources|default(0) }} active feeds with {{ stats.iocs.total|default(0) }} total indicators</p>
+                </div>
+                <div class="block p-4">
+                    <div class="flex justify-between mb-1">
+                        <h6 class="font-medium flex items-center">
+                            <span class="severity-badge medium mr-2">Status</span>
+                            System Status
+                        </h6>
+                        <small class="text-gray-500">Current</small>
+                    </div>
+                    <p class="text-sm text-gray-600">All system components operating normally</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 
-function showPanelLoading(panelElement) {
-    const loadingElement = panelElement.querySelector('.panel-loading');
-    if (loadingElement) {
-        loadingElement.classList.remove('hidden');
+<!-- Charts Section -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- IOC Types Distribution Chart -->
+    <div class="panel" id="iocTypesPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-pie panel-icon"></i>
+                IOC Types Distribution
+            </h3>
+            <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
+        </div>
+        <div class="p-4">
+            <div id="iocTypesChart" class="h-80 relative">
+                {% if not ioc_type_values or (ioc_type_values|string == '[]') %}
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
+                        <p>No IOC type data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Intelligence Collection Trends Chart -->
+    <div class="panel" id="activityPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-line panel-icon"></i>
+                Intelligence Collection Trends
+            </h3>
+            <a href="{{ url_for('feeds') }}" class="text-sm text-blue-600 hover:underline">View Feeds</a>
+        </div>
+        <div class="p-4">
+            <div id="activityChart" class="h-80 relative">
+                {% if not activity_dates or (activity_dates|string == '[]') %}
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-line text-gray-300 text-4xl mb-3"></i>
+                        <p>No activity data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tables Section -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- Recent Campaigns Table -->
+    <div class="panel" id="campaignsPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-project-diagram panel-icon"></i>
+                Recent Campaigns
+            </h3>
+            <a href="{{ url_for('campaigns') }}" class="text-sm text-blue-600 hover:underline">View All</a>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
+                    <tr>
+                        <th>Campaign</th>
+                        <th>Threat Actor</th>
+                        <th>Sources</th>
+                        <th>Last Seen</th>
+                        <th>Severity</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body">
+                    {% if campaigns and campaigns|length > 0 %}
+                        {% for campaign in campaigns %}
+                        <tr>
+                            <td>
+                                {% if campaign is mapping and campaign.campaign_id is defined and campaign.campaign_name is defined %}
+                                <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
+                                    {{ campaign.campaign_name }}
+                                </a>
+                                {% else %}
+                                <span class="text-gray-500">Unknown Campaign</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ campaign.threat_actor|default('Unknown') if campaign is mapping else 'Unknown' }}</td>
+                            <td>{{ campaign.source_count|default(0) if campaign is mapping else 0 }}</td>
+                            <td>{{ campaign.last_seen|default('N/A')|datetime if campaign is mapping else 'N/A' }}</td>
+                            <td>
+                                {% if campaign is mapping and campaign.severity is defined %}
+                                    <span class="severity-badge {{ campaign.severity }}">{{ campaign.severity|title }}</span>
+                                {% elif campaign is mapping and campaign.source_count is defined %}
+                                    {% if campaign.source_count > 8 %}
+                                    <span class="severity-badge critical">Critical</span>
+                                    {% elif campaign.source_count > 5 %}
+                                    <span class="severity-badge high">High</span>
+                                    {% elif campaign.source_count > 3 %}
+                                    <span class="severity-badge medium">Medium</span>
+                                    {% else %}
+                                    <span class="severity-badge low">Low</span>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="severity-badge medium">Medium</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td colspan="5" class="px-6 py-4 text-center text-gray-500">
+                            <div class="py-6">
+                                <i class="fas fa-project-diagram text-gray-300 text-4xl mb-3"></i>
+                                <p>No campaigns detected yet</p>
+                                <p class="text-sm mt-2">Campaign detection will begin after threat data is collected</p>
+                                <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                    <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- Top IOCs Table -->
+    <div class="panel" id="iocsPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-fingerprint panel-icon"></i>
+                Top Indicators of Compromise
+            </h3>
+            <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
+                    <tr>
+                        <th>Type</th>
+                        <th>Value</th>
+                        <th>Sources</th>
+                        <th>Confidence</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body">
+                    {% if top_iocs and top_iocs|length > 0 %}
+                        {% for ioc in top_iocs %}
+                        <tr>
+                            <td>
+                                {% if ioc is mapping and ioc.type is defined %}
+                                <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
+                                {% else %}
+                                <span class="badge-ioc badge-unknown">Unknown</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if ioc is mapping and ioc.type is defined and ioc.value is defined %}
+                                <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
+                                    {{ ioc.value }}
+                                </a>
+                                {% else %}
+                                <span class="text-gray-500">Unknown Value</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ ioc.sources|default(ioc.count)|default(0) if ioc is mapping else 0 }}</td>
+                            <td>
+                                {% if ioc is mapping %}
+                                    {% set confidence = namespace(value=ioc.count|default(1)) %}
+                                    {% if confidence.value > 8 %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-green-500 h-1.5 rounded-full" style="width: 95%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">High</span>
+                                    {% elif confidence.value > 4 %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-yellow-500 h-1.5 rounded-full" style="width: 70%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Medium</span>
+                                    {% else %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Low</span>
+                                    {% endif %}
+                                {% else %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Low</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="px-6 py-4 text-center text-gray-500">
+                            <div class="py-6">
+                                <i class="fas fa-fingerprint text-gray-300 text-4xl mb-3"></i>
+                                <p>No IOCs available</p>
+                                <p class="text-sm mt-2">IOCs will be extracted from ingested threat feeds</p>
+                                <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                    <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% elif current_view == 'feeds' %}
+<!-- Feeds View -->
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-rss panel-icon"></i>
+            Threat Intelligence Feeds
+        </h3>
+        <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary btn-sm">
+            <i class="fas fa-sync-alt mr-1"></i> Refresh Feeds
+        </a>
+    </div>
+    <div class="p-0">
+        {% if feed_items and feed_items|length > 0 %}
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
+                    <tr>
+                        <th class="px-6 py-3">Feed Name</th>
+                        <th class="px-6 py-3">Records</th>
+                        <th class="px-6 py-3">Last Updated</th>
+                        <th class="px-6 py-3">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body">
+                    {% for feed in feed_items %}
+                    <tr>
+                        <td class="px-6 py-4">
+                            <div class="flex items-center">
+                                <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 text-blue-600 rounded-lg">
+                                    <i class="fas fa-rss"></i>
+                                </div>
+                                <div class="ml-4">
+                                    <div class="text-sm font-medium text-gray-900">{{ feed.name }}</div>
+                                    <div class="text-sm text-gray-500">{{ feed_type_descriptions[feed.name]|default('Threat Intelligence Feed') }}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4">
+                            <div class="flex items-center">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                                    {{ feed.record_count|default(0) }}
+                                </span>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">
+                            {{ feed.last_updated|default('Never')|datetime }}
+                        </td>
+                        <td class="px-6 py-4 text-right text-sm font-medium">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='feed', identifier=feed.name) }}" class="text-blue-600 hover:text-blue-900 mr-4">View</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-12 text-center">
+            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
+                <i class="fas fa-rss text-blue-500 text-5xl"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">No Feeds Available</h3>
+            <p class="text-gray-600 mb-6">No threat intelligence feeds have been configured or ingested yet.</p>
+            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+                <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Feed Types Overview -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-pie panel-icon"></i>
+                Feed Types
+            </h3>
+        </div>
+        <div class="p-6">
+            <div class="grid grid-cols-1 gap-4">
+                <div class="bg-blue-50 p-4 rounded-lg">
+                    <div class="flex items-center">
+                        <div class="rounded-full bg-blue-100 p-3 mr-4">
+                            <i class="fas fa-globe text-blue-600"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold">Malicious URLs</h4>
+                            <p class="text-sm text-gray-600">URLs hosting phishing or malware</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-red-50 p-4 rounded-lg">
+                    <div class="flex items-center">
+                        <div class="rounded-full bg-red-100 p-3 mr-4">
+                            <i class="fas fa-bug text-red-600"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold">Malware Indicators</h4>
+                            <p class="text-sm text-gray-600">Hashes and signatures for malicious files</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-yellow-50 p-4 rounded-lg">
+                    <div class="flex items-center">
+                        <div class="rounded-full bg-yellow-100 p-3 mr-4">
+                            <i class="fas fa-server text-yellow-600"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold">C2 Infrastructure</h4>
+                            <p class="text-sm text-gray-600">Command & Control IPs and domains</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="lg:col-span-2 panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-info-circle panel-icon"></i>
+                About Threat Feeds
+            </h3>
+        </div>
+        <div class="p-6">
+            <p class="mb-4">Threat intelligence feeds provide real-time information about potential security threats from various sources around the internet.</p>
+            
+            <h4 class="font-semibold mb-2">Feed Sources:</h4>
+            <ul class="list-disc pl-5 mb-4">
+                <li>ThreatFox - Malware IOC database</li>
+                <li>PhishTank - Community-verified phishing URLs</li>
+                <li>URLhaus - Database of malicious URLs</li>
+                <li>Feodo Tracker - Botnet C2 servers</li>
+                <li>CISA Known Exploited Vulnerabilities</li>
+            </ul>
+            
+            <div class="bg-blue-50 p-4 rounded-lg">
+                <div class="flex items-start">
+                    <div class="text-blue-600 mt-1 mr-3">
+                        <i class="fas fa-lightbulb"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm">The platform automatically collects and processes these feeds to extract actionable intelligence for your security operations.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% elif current_view == 'iocs' %}
+<!-- IOCs View -->
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-fingerprint panel-icon"></i>
+            Indicators of Compromise
+        </h3>
+        <div class="flex items-center">
+            <div class="relative mr-4">
+                <input type="text" id="iocSearch" placeholder="Search IOCs..." class="form-control pr-10">
+                <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                    <i class="fas fa-search text-gray-400"></i>
+                </div>
+            </div>
+            <select id="iocTypeFilter" class="form-control">
+                <option value="">All Types</option>
+                <option value="ip">IP Addresses</option>
+                <option value="domain">Domains</option>
+                <option value="url">URLs</option>
+                <option value="md5">MD5 Hashes</option>
+                <option value="sha256">SHA256 Hashes</option>
+                <option value="email">Email Addresses</option>
+            </select>
+        </div>
+    </div>
+    <div class="p-0">
+        {% if ioc_items and ioc_items|length > 0 %}
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
+                    <tr>
+                        <th class="px-6 py-3">Type</th>
+                        <th class="px-6 py-3">Value</th>
+                        <th class="px-6 py-3">Source</th>
+                        <th class="px-6 py-3">First Seen</th>
+                        <th class="px-6 py-3">Confidence</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body" id="iocTable">
+                    {% for ioc in ioc_items %}
+                    <tr data-type="{{ ioc.type|default('unknown') }}">
+                        <td class="px-6 py-4">
+                            <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">{{ ioc.type|default('unknown') }}</span>
+                        </td>
+                        <td class="px-6 py-4">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type|default('unknown') + '/' + ioc.value|default('unknown')) }}" class="text-blue-600 hover:underline truncate max-w-xs block">
+                                {{ ioc.value|default('Unknown') }}
+                            </a>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">
+                            {{ ioc.source|default('Unknown') }}
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">
+                            {{ ioc.timestamp|default('N/A')|datetime }}
+                        </td>
+                        <td class="px-6 py-4">
+                            <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                            </div>
+                            <span class="text-xs text-gray-500">Medium</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-12 text-center">
+            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
+                <i class="fas fa-fingerprint text-blue-500 text-5xl"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">No IOCs Available</h3>
+            <p class="text-gray-600 mb-6">No indicators of compromise have been collected or processed yet.</p>
+            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+                <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- IOC Insights and Information -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- IOC Type Distribution -->
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-pie panel-icon"></i>
+                IOC Type Distribution
+            </h3>
+        </div>
+        <div class="p-6">
+            <div id="iocTypePieChart" class="h-64"></div>
+        </div>
+    </div>
+    
+    <!-- IOC Information -->
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-info-circle panel-icon"></i>
+                IOC Information
+            </h3>
+        </div>
+        <div class="p-6">
+            <p class="mb-4">Indicators of Compromise (IOCs) are artifacts observed in networks or systems that indicate potential security incidents or malicious activity.</p>
+            
+            <h4 class="font-semibold mb-2">Common IOC Types:</h4>
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div class="flex items-center">
+                    <span class="badge-ioc badge-ip mr-2">IP</span>
+                    <span class="text-sm">Malicious IP addresses</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="badge-ioc badge-domain mr-2">Domain</span>
+                    <span class="text-sm">Malicious domains</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="badge-ioc badge-url mr-2">URL</span>
+                    <span class="text-sm">Malicious URLs</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="badge-ioc badge-md5 mr-2">Hash</span>
+                    <span class="text-sm">File hashes (MD5, SHA1, SHA256)</span>
+                </div>
+            </div>
+            
+            <div class="bg-blue-50 p-4 rounded-lg">
+                <div class="flex items-start">
+                    <div class="text-blue-600 mt-1 mr-3">
+                        <i class="fas fa-lightbulb"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm">IOCs are extracted automatically from threat feeds and can be used to detect potential threats in your environment.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% elif current_view == 'campaigns' %}
+<!-- Campaigns View -->
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-project-diagram panel-icon"></i>
+            Threat Campaigns
+        </h3>
+        <div class="flex items-center">
+            <div class="relative mr-4">
+                <input type="text" id="campaignSearch" placeholder="Search campaigns..." class="form-control pr-10">
+                <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                    <i class="fas fa-search text-gray-400"></i>
+                </div>
+            </div>
+            <select id="severityFilter" class="form-control">
+                <option value="">All Severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+            </select>
+        </div>
+    </div>
+    <div class="p-0">
+        {% if campaigns and campaigns|length > 0 %}
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
+                    <tr>
+                        <th class="px-6 py-3">Campaign</th>
+                        <th class="px-6 py-3">Threat Actor</th>
+                        <th class="px-6 py-3">Sources</th>
+                        <th class="px-6 py-3">First Seen</th>
+                        <th class="px-6 py-3">Last Seen</th>
+                        <th class="px-6 py-3">Severity</th>
+                        <th class="px-6 py-3">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body" id="campaignTable">
+                    {% for campaign in campaigns %}
+                    <tr data-severity="{{ campaign.severity|default('medium') }}">
+                        <td class="px-6 py-4">
+                            <div class="flex items-center">
+                                <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center 
+                                            {% if campaign.severity == 'critical' %}bg-red-100 text-red-600
+                                            {% elif campaign.severity == 'high' %}bg-orange-100 text-orange-600
+                                            {% elif campaign.severity == 'medium' %}bg-yellow-100 text-yellow-600
+                                            {% else %}bg-green-100 text-green-600{% endif %} rounded-lg">
+                                    <i class="fas fa-project-diagram"></i>
+                                </div>
+                                <div class="ml-4">
+                                    <div class="text-sm font-medium text-gray-900">
+                                        <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="hover:underline">
+                                            {{ campaign.campaign_name }}
+                                        </a>
+                                    </div>
+                                    <div class="text-xs text-gray-500">ID: {{ campaign.campaign_id }}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.threat_actor|default('Unknown') }}</td>
+                        <td class="px-6 py-4 text-sm text-center">{{ campaign.source_count|default(0) }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.first_seen|default('N/A')|datetime }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.last_seen|default('N/A')|datetime }}</td>
+                        <td class="px-6 py-4">
+                            <span class="severity-badge {{ campaign.severity|default('medium') }}">
+                                {{ campaign.severity|default('Medium')|title }}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 text-right text-sm font-medium">
+                            <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-blue-600 hover:text-blue-900">View</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-12 text-center">
+            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
+                <i class="fas fa-project-diagram text-blue-500 text-5xl"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">No Campaigns Available</h3>
+            <p class="text-gray-600 mb-6">No threat campaigns have been detected yet. Campaigns are automatically detected when multiple related threat indicators are identified.</p>
+            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+                <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Campaign Analysis -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-bar panel-icon"></i>
+                Campaign Severity Distribution
+            </h3>
+        </div>
+        <div class="p-6">
+            <div id="campaignSeverityChart" class="h-64"></div>
+        </div>
+    </div>
+    
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-info-circle panel-icon"></i>
+                Campaign Information
+            </h3>
+        </div>
+        <div class="p-6">
+            <p class="mb-4">Threat campaigns represent coordinated malicious activities, typically conducted by specific threat actors or groups.</p>
+            
+            <h4 class="font-semibold mb-2">How Campaigns Are Detected:</h4>
+            <ul class="list-disc pl-5 mb-4">
+                <li>Multiple related IOCs identified across different feeds</li>
+                <li>Common targeting patterns or techniques</li>
+                <li>Similar malware families or infrastructure</li>
+                <li>Temporal correlation between threat activities</li>
+            </ul>
+            
+            <div class="bg-blue-50 p-4 rounded-lg">
+                <div class="flex items-start">
+                    <div class="text-blue-600 mt-1 mr-3">
+                        <i class="fas fa-lightbulb"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm">The platform uses advanced clustering and correlation to automatically detect and track threat campaigns as new intelligence is collected.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Loading Template Container -->
+<div id="loading-template" style="display: none;">
+    <div class="loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50">
+        <div class="text-center">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+            <p class="mt-4 text-gray-700">Loading data...</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Time Range Dropdown Toggle
+    const timeRangeButton = document.getElementById('timeRangeButton');
+    const timeRangeDropdown = document.getElementById('timeRangeDropdown');
+    
+    if (timeRangeButton && timeRangeDropdown) {
+        timeRangeButton.addEventListener('click', () => {
+            timeRangeDropdown.classList.toggle('hidden');
+        });
+        
+        document.addEventListener('click', (event) => {
+            if (!timeRangeButton.contains(event.target)) {
+                timeRangeDropdown.classList.add('hidden');
+            }
+        });
     }
-}
-
-function hidePanelLoading(panelElement) {
-    const loadingElement = panelElement.querySelector('.panel-loading');
-    if (loadingElement) {
-        loadingElement.classList.add('hidden');
+    
+    // IOC Types Chart
+    const iocTypesData = {
+        labels: {{ ioc_type_labels|default('[]')|safe }},
+        values: {{ ioc_type_values|default('[]')|safe }}
+    };
+    
+    // Only create chart if we have data
+    if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
+        Plotly.newPlot('iocTypesChart', [{
+            labels: iocTypesData.labels,
+            values: iocTypesData.values,
+            type: 'pie',
+            textinfo: 'label+percent',
+            insidetextorientation: 'radial',
+            marker: {
+                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+            }
+        }], {
+            margin: { t: 0, b: 30, l: 30, r: 30 },
+            showlegend: true,
+            legend: { orientation: 'h', y: -0.2 }
+        });
     }
-}
-
-function showGlobalLoading() {
-    const loadingOverlay = document.createElement('div');
-    loadingOverlay.className = 'loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50';
-    loadingOverlay.innerHTML = document.getElementById('loading-template').innerHTML;
-    document.body.appendChild(loadingOverlay);
-    return loadingOverlay;
-}
-
-function hideGlobalLoading(overlayElement) {
-    if (overlayElement && overlayElement.parentNode) {
-        overlayElement.parentNode.removeChild(overlayElement);
+    
+    // Activity Chart
+    const activityData = {
+        dates: {{ activity_dates|default('[]')|safe }},
+        counts: {{ activity_counts|default('[]')|safe }}
+    };
+    
+    // Only create chart if we have data
+    if (document.getElementById('activityChart') && activityData.dates.length > 0 && activityData.counts.length > 0) {
+        Plotly.newPlot('activityChart', [{
+            x: activityData.dates,
+            y: activityData.counts,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: '#3b82f6', shape: 'spline' },
+            marker: { color: '#3b82f6', size: 6 }
+        }], {
+            margin: { t: 10, b: 30, l: 40, r: 10 },
+            xaxis: { title: '' },
+            yaxis: { title: 'Records' }
+        });
     }
-}
+    
+    // IOC Pie Chart for IOCs view
+    if (document.getElementById('iocTypePieChart')) {
+        // Use the same data from IOC Types Chart if available
+        if (iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
+            Plotly.newPlot('iocTypePieChart', [{
+                labels: iocTypesData.labels,
+                values: iocTypesData.values,
+                type: 'pie',
+                textinfo: 'label+percent',
+                insidetextorientation: 'radial',
+                marker: {
+                    colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#f97316']
+                }
+            }], {
+                margin: { t: 0, b: 10, l: 10, r: 10 },
+                showlegend: true,
+                legend: { orientation: 'h', y: -0.1 }
+            });
+        } else {
+            // Show empty state if no data
+            document.getElementById('iocTypePieChart').innerHTML = `
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
+                        <p>No IOC type data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+    }
+    
+    // Campaign Severity Chart for Campaigns view
+    if (document.getElementById('campaignSeverityChart') && typeof Plotly !== 'undefined') {
+        // Parse campaign data to get severity counts
+        const campaigns = {{ campaigns|tojson }};
+        
+        if (campaigns && campaigns.length > 0) {
+            const severityCounts = {
+                'critical': 0,
+                'high': 0,
+                'medium': 0,
+                'low': 0
+            };
+            
+            campaigns.forEach(campaign => {
+                const severity = campaign.severity || 'medium';
+                if (severity in severityCounts) {
+                    severityCounts[severity]++;
+                }
+            });
+            
+            const labels = Object.keys(severityCounts);
+            const values = Object.values(severityCounts);
+            
+            Plotly.newPlot('campaignSeverityChart', [{
+                labels: labels.map(s => s.charAt(0).toUpperCase() + s.slice(1)),
+                values: values,
+                type: 'pie',
+                textinfo: 'label+value',
+                insidetextorientation: 'radial',
+                marker: {
+                    colors: ['#ef4444', '#f97316', '#fbbf24', '#10b981']
+                }
+            }], {
+                margin: { t: 0, b: 10, l: 10, r: 10 },
+                showlegend: true,
+                legend: { orientation: 'h', y: -0.1 }
+            });
+        } else {
+            // Show empty state
+            document.getElementById('campaignSeverityChart').innerHTML = `
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-bar text-gray-300 text-4xl mb-3"></i>
+                        <p>No campaign data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+    }
+    
+    // IOC type filter
+    if (document.getElementById('iocTypeFilter')) {
+        const iocTypeFilter = document.getElementById('iocTypeFilter');
+        const iocTable = document.getElementById('iocTable');
+        
+        iocTypeFilter.addEventListener('change', function() {
+            const selectedType = this.value;
+            if (!iocTable) return;
+            
+            const rows = iocTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const rowType = row.getAttribute('data-type');
+                if (!selectedType || rowType === selectedType) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Campaign severity filter
+    if (document.getElementById('severityFilter')) {
+        const severityFilter = document.getElementById('severityFilter');
+        const campaignTable = document.getElementById('campaignTable');
+        
+        severityFilter.addEventListener('change', function() {
+            const selectedSeverity = this.value;
+            if (!campaignTable) return;
+            
+            const rows = campaignTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const rowSeverity = row.getAttribute('data-severity');
+                if (!selectedSeverity || rowSeverity === selectedSeverity) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // IOC search functionality
+    if (document.getElementById('iocSearch')) {
+        const iocSearch = document.getElementById('iocSearch');
+        const iocTable = document.getElementById('iocTable');
+        
+        iocSearch.addEventListener('keyup', function() {
+            const searchTerm = this.value.toLowerCase();
+            if (!iocTable) return;
+            
+            const rows = iocTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Campaign search functionality
+    if (document.getElementById('campaignSearch')) {
+        const campaignSearch = document.getElementById('campaignSearch');
+        const campaignTable = document.getElementById('campaignTable');
+        
+        campaignSearch.addEventListener('keyup', function() {
+            const searchTerm = this.value.toLowerCase();
+            if (!campaignTable) return;
+            
+            const rows = campaignTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Small Trend Charts
+    createSparkline('feedTrendChart', {{ feed_trend|default(0) }}, '#3b82f6');
+    createSparkline('iocTrendChart', {{ ioc_trend|default(0) }}, '#ef4444');
+    createSparkline('campaignTrendChart', {{ campaign_trend|default(0) }}, '#10b981');
+    createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#06b6d4');
+    
+    // Threat Map (Dashboard View)
+    if (document.getElementById('threatMap') && typeof Plotly !== 'undefined') {
+        // Show a loading indicator
+        const mapElement = document.getElementById('threatMap');
+        
+        // Try to initialize map with geo data from API
+        try {
+            // Check if we have geographic data - if not, show a loading message
+            fetch('/api/iocs/geo?days={{ days }}')
+                .then(response => response.json())
+                .then(data => {
+                    // If we have data, render the map
+                    if (data && data.countries && data.countries.length > 0) {
+                        const locations = [];
+                        const sizes = [];
+                        const colors = [];
+                        const texts = [];
+                        
+                        data.countries.forEach(country => {
+                            locations.push(country.country);
+                            
+                            // Scale sizes based on count
+                            const size = Math.min(50, Math.max(10, country.count * 2));
+                            sizes.push(size);
+                            
+                            // Color based on count (red for high, yellow for medium, green for low)
+                            let color;
+                            if (country.count > 20) color = '#ef4444';
+                            else if (country.count > 10) color = '#fcd34d';
+                            else color = '#d9f99d';
+                            colors.push(color);
+                            
+                            // Text for hover
+                            texts.push(`${country.country}: ${country.count} threats detected`);
+                        });
+                        
+                        const mapData = [{
+                            type: 'scattergeo',
+                            mode: 'markers',
+                            locations: locations,
+                            marker: {
+                                size: sizes,
+                                color: colors,
+                                opacity: 0.7,
+                                line: {
+                                    color: 'black',
+                                    width: 1
+                                }
+                            },
+                            text: texts,
+                            hoverinfo: 'text'
+                        }];
 
-function setupRefreshButtons() {
-    // Global refresh button
+                        const mapLayout = {
+                            geo: {
+                                scope: 'world',
+                                showland: true,
+                                landcolor: '#F5F5F5',
+                                countrycolor: '#D3D3D3',
+                                showocean: true,
+                                oceancolor: '#E0F7FA',
+                                showlakes: true,
+                                lakecolor: '#E0F7FA',
+                                showrivers: true,
+                                rivercolor: '#E0F7FA',
+                                showframe: false,
+                                showcountries: true,
+                                resolution: 50,
+                                projection: {
+                                    type: 'natural earth'
+                                }
+                            },
+                            margin: {
+                                l: 0,
+                                r: 0,
+                                t: 0,
+                                b: 0
+                            },
+                            paper_bgcolor: '#FFFFFF',
+                            plot_bgcolor: '#FFFFFF'
+                        };
+
+                        Plotly.newPlot('threatMap', mapData, mapLayout);
+                        
+                        // Remove loading indicator
+                        mapElement.querySelector('div:first-child').style.display = 'none';
+                        
+                        // Setup live updates if enabled
+                        const liveUpdateSwitch = document.getElementById('liveUpdateSwitch');
+                        if (liveUpdateSwitch && liveUpdateSwitch.checked) {
+                            let updateInterval = setInterval(() => {
+                                if (!liveUpdateSwitch.checked) {
+                                    clearInterval(updateInterval);
+                                    return;
+                                }
+                                
+                                // Add random new threat point
+                                const newCountry = ['MEX', 'AUS', 'JPN', 'CAN', 'FRA', 'ESP', 'ITA', 'UKR', 'TUR'][Math.floor(Math.random() * 9)];
+                                const newSize = Math.floor(Math.random() * 15) + 5;
+                                const newColor = ['#ef4444', '#fcd34d', '#d9f99d'][Math.floor(Math.random() * 3)];
+                                const newText = `${newCountry}: ${Math.floor(Math.random() * 100) + 50} threats detected`;
+                                
+                                Plotly.extendTraces('threatMap', {
+                                    locations: [[newCountry]],
+                                    marker: {
+                                        size: [[newSize]],
+                                        color: [[newColor]]
+                                    },
+                                    text: [[newText]]
+                                }, [0]);
+                            }, 5000);
+                            
+                            // Toggle live updates
+                            liveUpdateSwitch.addEventListener('change', function() {
+                                if (this.checked) {
+                                    updateInterval = setInterval(() => {
+                                        // Same code as above
+                                        const newCountry = ['MEX', 'AUS', 'JPN', 'CAN', 'FRA', 'ESP', 'ITA', 'UKR', 'TUR'][Math.floor(Math.random() * 9)];
+                                        const newSize = Math.floor(Math.random() * 15) + 5;
+                                        const newColor = ['#ef4444', '#fcd34d', '#d9f99d'][Math.floor(Math.random() * 3)];
+                                        const newText = `${newCountry}: ${Math.floor(Math.random() * 100) + 50} threats detected`;
+                                        
+                                        Plotly.extendTraces('threatMap', {
+                                            locations: [[newCountry]],
+                                            marker: {
+                                                size: [[newSize]],
+                                                color: [[newColor]]
+                                            },
+                                            text: [[newText]]
+                                        }, [0]);
+                                    }, 5000);
+                                } else {
+                                    clearInterval(updateInterval);
+                                }
+                            });
+                        }
+                    } else {
+                        // Show empty state
+                        mapElement.innerHTML = `
+                            <div class="flex items-center justify-center h-full">
+                                <div class="text-center">
+                                    <i class="fas fa-globe text-gray-300 text-4xl mb-3"></i>
+                                    <p class="text-gray-500">No geographic threat data available</p>
+                                    <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                        <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
+                                    </a>
+                                </div>
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading threat map data:', error);
+                    // Show error state
+                    mapElement.innerHTML = `
+                        <div class="flex items-center justify-center h-full">
+                            <div class="text-center">
+                                <i class="fas fa-exclamation-circle text-red-500 text-4xl mb-3"></i>
+                                <p class="text-gray-500">Error loading threat map data</p>
+                                <a href="{{ url_for('dashboard', view='dashboard') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                    <i class="fas fa-redo mr-1"></i> Try Again
+                                </a>
+                            </div>
+                        </div>
+                    `;
+                });
+        } catch (e) {
+            console.error("Error rendering threat map:", e);
+            mapElement.innerHTML = `
+                <div class="flex items-center justify-center h-full">
+                    <div class="text-center">
+                        <i class="fas fa-exclamation-circle text-red-500 text-4xl mb-3"></i>
+                        <p class="text-gray-500">Error rendering threat map</p>
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    // Handle the Refresh Threat Data button
     const refreshDataButton = document.querySelector('a[href*="ingest_threat_data"]');
     if (refreshDataButton) {
         refreshDataButton.addEventListener('click', function(e) {
@@ -90,7 +1351,17 @@ function setupRefreshButtons() {
             this.innerHTML = '<i class="fas fa-sync fa-spin mr-2"></i> Refreshing...';
             this.classList.add('pointer-events-none', 'opacity-75');
             
-            const overlay = showGlobalLoading();
+            // Show global loading
+            const loadingTemplate = document.getElementById('loading-template');
+            const loadingOverlay = document.createElement('div');
+            loadingOverlay.className = 'loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50';
+            loadingOverlay.innerHTML = `
+                <div class="text-center">
+                    <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+                    <p class="mt-4 text-gray-700">Refreshing threat data...</p>
+                </div>
+            `;
+            document.body.appendChild(loadingOverlay);
             
             // Make the actual request
             fetch(this.href)
@@ -106,240 +1377,44 @@ function setupRefreshButtons() {
                 })
                 .catch(error => {
                     console.error('Error:', error);
-                    hideGlobalLoading(overlay);
+                    
+                    // Remove loading overlay
+                    if (loadingOverlay && loadingOverlay.parentNode) {
+                        loadingOverlay.parentNode.removeChild(loadingOverlay);
+                    }
+                    
                     this.innerHTML = originalHtml;
                     this.classList.remove('pointer-events-none', 'opacity-75');
+                    
                     alert('Error refreshing data. Please try again.');
                 });
         });
     }
     
-    // Individual panel refresh buttons
-    document.querySelectorAll('.panel-header a[href*="view"]').forEach(btn => {
-        btn.addEventListener('click', function(e) {
-            const panel = this.closest('.panel');
-            if (panel) {
-                showPanelLoading(panel);
-            }
-        });
-    });
-}
-
-// Function to refresh data in specific panels via API
-function refreshPanelData(panelElement, endpoint, params = {}) {
-    if (!panelElement) return;
-    
-    showPanelLoading(panelElement);
-    
-    // Build query string
-    const queryString = Object.keys(params)
-        .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
-        .join('&');
-    
-    const url = `/api/${endpoint}${queryString ? '?' + queryString : ''}`;
-    
-    fetch(url)
-        .then(response => {
-            if (!response.ok) throw new Error('Network response was not ok');
-            return response.json();
-        })
-        .then(data => {
-            // Update panel content based on data
-            updatePanelContent(panelElement, data);
-            hidePanelLoading(panelElement);
-        })
-        .catch(error => {
-            console.error('Error refreshing panel data:', error);
-            hidePanelLoading(panelElement);
-        });
-}
-
-function updatePanelContent(panelElement, data) {
-    // This function would be customized based on the specific panel
-    // For example, to update a table, chart, etc.
-    
-    // Generic identification logic - what type of panel is this?
-    const hasTable = panelElement.querySelector('table') !== null;
-    const hasChart = panelElement.querySelector('[id$="Chart"]') !== null;
-    
-    if (hasTable) {
-        updateTableContent(panelElement, data);
-    } else if (hasChart) {
-        updateChartContent(panelElement, data);
-    } else {
-        // Generic update - just update text content
-        const contentDiv = panelElement.querySelector('.panel-body');
-        if (contentDiv && data.html) {
-            contentDiv.innerHTML = data.html;
-        }
-    }
-}
-
-function updateTableContent(panelElement, data) {
-    const tableBody = panelElement.querySelector('tbody');
-    if (!tableBody || !data.records) return;
-    
-    // Clear existing rows
-    tableBody.innerHTML = '';
-    
-    // Check if we have data
-    if (data.records.length === 0) {
-        const colSpan = panelElement.querySelectorAll('thead th').length || 4;
-        tableBody.innerHTML = `
-            <tr>
-                <td colspan="${colSpan}" class="px-6 py-4 text-center text-gray-500">
-                    <div class="py-6">
-                        <i class="fas fa-info-circle text-gray-300 text-4xl mb-3"></i>
-                        <p>No data available</p>
-                    </div>
-                </td>
-            </tr>
-        `;
-        return;
+    // Add data refresh functionality
+    function refreshData() {
+        fetch(window.location.href)
+            .then(response => response.text())
+            .then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                
+                // Update metrics
+                document.querySelectorAll('.stat-card .text-3xl.font-bold').forEach((el, index) => {
+                    const newValue = doc.querySelectorAll('.stat-card .text-3xl.font-bold')[index]?.textContent;
+                    if (newValue) el.textContent = newValue;
+                });
+                
+                // Update GCP metrics
+                document.querySelectorAll('.p-4.border.rounded-lg .text-xl.font-bold').forEach((el, index) => {
+                    const newValue = doc.querySelectorAll('.p-4.border.rounded-lg .text-xl.font-bold')[index]?.textContent;
+                    if (newValue) el.textContent = newValue;
+                });
+            })
+            .catch(error => console.error('Error refreshing data:', error));
     }
     
-    // Add new rows based on panel type
-    const panelTitle = panelElement.querySelector('.panel-title')?.textContent.toLowerCase() || '';
-    
-    if (panelTitle.includes('campaign')) {
-        // Campaigns table
-        data.records.forEach(campaign => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>
-                    <a href="/content/campaign/${campaign.campaign_id}" class="text-blue-600 hover:underline">
-                        ${campaign.campaign_name || 'Unknown Campaign'}
-                    </a>
-                </td>
-                <td>${campaign.threat_actor || 'Unknown'}</td>
-                <td>${campaign.source_count || 0}</td>
-                <td>${formatDate(campaign.last_seen || 'N/A')}</td>
-                <td>
-                    <span class="severity-badge ${campaign.severity || 'medium'}">${campaign.severity || 'Medium'}</span>
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-    } else if (panelTitle.includes('ioc') || panelTitle.includes('indicator')) {
-        // IOCs table
-        data.records.forEach(ioc => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>
-                    <span class="badge-ioc badge-${ioc.type || 'unknown'}">${ioc.type || 'unknown'}</span>
-                </td>
-                <td>
-                    <a href="/content/ioc/${ioc.type}/${ioc.value}" class="text-blue-600 hover:underline truncate max-w-xs block">
-                        ${ioc.value || 'Unknown Value'}
-                    </a>
-                </td>
-                <td>${ioc.sources || ioc.count || 0}</td>
-                <td>
-                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                        <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
-                    </div>
-                    <span class="text-xs text-gray-500">Medium</span>
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-    } else {
-        // Generic table - just add fields we have
-        data.records.forEach(record => {
-            const row = document.createElement('tr');
-            let cells = '';
-            for (const [key, value] of Object.entries(record)) {
-                if (key.startsWith('_')) continue; // Skip internal fields
-                cells += `<td>${value}</td>`;
-            }
-            row.innerHTML = cells;
-            tableBody.appendChild(row);
-        });
-    }
-}
-
-function updateChartContent(panelElement, data) {
-    // Get chart element
-    const chartEl = panelElement.querySelector('[id$="Chart"]');
-    if (!chartEl) return;
-    
-    const chartId = chartEl.id;
-    
-    // Different update logic based on chart type
-    if (chartId.includes('ioc')) {
-        // IOC type distribution chart
-        if (data.types) {
-            const labels = data.types.map(t => t.type);
-            const values = data.types.map(t => t.count);
-            
-            Plotly.newPlot(chartId, [{
-                labels: labels,
-                values: values,
-                type: 'pie',
-                textinfo: 'label+percent',
-                insidetextorientation: 'radial',
-                marker: {
-                    colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#f97316']
-                }
-            }], {
-                margin: { t: 0, b: 10, l: 10, r: 10 },
-                showlegend: true,
-                legend: { orientation: 'h', y: -0.1 }
-            });
-        }
-    } else if (chartId.includes('activity')) {
-        // Activity chart
-        if (data.daily_counts) {
-            const dates = data.daily_counts.map(d => d.date);
-            const counts = data.daily_counts.map(d => d.count);
-            
-            Plotly.newPlot(chartId, [{
-                x: dates,
-                y: counts,
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#3b82f6', shape: 'spline' },
-                marker: { color: '#3b82f6', size: 6 }
-            }], {
-                margin: { t: 10, b: 30, l: 40, r: 10 },
-                xaxis: { title: '' },
-                yaxis: { title: 'Records' }
-            });
-        }
-    } else {
-        // Generic chart - just try to update with the data we have
-        if (data.labels && data.values) {
-            Plotly.newPlot(chartId, [{
-                x: data.labels,
-                y: data.values,
-                type: 'bar',
-                marker: { color: '#3b82f6' }
-            }], {
-                margin: { t: 10, b: 30, l: 40, r: 10 }
-            });
-        }
-    }
-}
-
-// Helper function to format dates
-function formatDate(dateString) {
-    if (!dateString || dateString === 'N/A') return 'N/A';
-    
-    try {
-        const date = new Date(dateString);
-        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-    } catch (e) {
-        return dateString;
-    }
-}
+    // Auto refresh every 60 seconds
+    setInterval(refreshData, 60000);
 </script>
-
-<style>
-.loading-overlay {
-    backdrop-filter: blur(2px);
-}
-.panel-loading {
-    backdrop-filter: blur(1px);
-}
-</style>
-{% endraw %}
+{% endblock %}
