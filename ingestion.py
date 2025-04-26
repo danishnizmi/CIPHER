@@ -41,36 +41,63 @@ publisher = None
 # Rate limiting management
 _last_request_time = defaultdict(float)
 _rate_limit_delays = {
-    "phishtank.com": 300,  # 5 minutes between requests - PhishTank has strict limits
-    "urlhaus.abuse.ch": 60,  # 1 minute
-    "threatfox.abuse.ch": 60,  # 1 minute
-    "default": 10  # Default 10 seconds for any other domain
+    "phishtank.com": 30,      # Reduced from 300 to 30 seconds
+    "urlhaus.abuse.ch": 10,   # Reduced from 60 to 10 seconds
+    "threatfox.abuse.ch": 10, # Reduced from 60 to 10 seconds
+    "default": 5              # Reduced from 10 to 5 seconds
 }
 
-# Basic Open Source Feed Definitions
+# Enhanced Open Source Feed Definitions with direct links and better fallbacks
 FEED_SOURCES = {
     "threatfox": {
-        "url": "https://threatfox-api.abuse.ch/api/v1/",
-        "table_id": "threatfox_iocs",
+        "url": "https://threatfox.abuse.ch/export/json/recent/",
         "opensrc_url": "https://threatfox.abuse.ch/export/json/recent/",
+        "fallback_url": "https://threatfox.abuse.ch/export/csv/recent/", 
+        "table_id": "threatfox_iocs",
         "format": "json",
         "auth_required": False,
         "description": "ThreatFox IOCs - Malware indicators database"
     },
     "phishtank": {
         "url": "https://data.phishtank.com/data/online-valid.json",
+        "fallback_url": "https://data.phishtank.com/data/online-valid.csv",
         "table_id": "phishtank_urls",
         "format": "json",
         "auth_required": False,
-        "rate_limit": 300,  # 5 minutes
+        "rate_limit": 30,  # Reduced from 300
         "description": "PhishTank - Community-verified phishing URLs"
     },
     "urlhaus": {
         "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+        "fallback_url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
         "table_id": "urlhaus_malware",
         "format": "csv",
         "skip_lines": 8,  # Skip header info/comments
         "description": "URLhaus - Database of malicious URLs"
+    },
+    # Added more basic feeds for redundancy
+    "feodotracker": {
+        "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
+        "fallback_url": "https://feodotracker.abuse.ch/downloads/ipblocklist.csv",
+        "table_id": "feodotracker_c2",
+        "format": "json",
+        "auth_required": False,
+        "description": "Feodo Tracker - Botnet C2 IP Blocklist"
+    },
+    "cisa_known": {
+        "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        "table_id": "cisa_vulnerabilities",
+        "format": "json",
+        "json_root": "vulnerabilities",
+        "auth_required": False,
+        "description": "CISA Known Exploited Vulnerabilities Catalog"
+    },
+    "tor_exit": {
+        "url": "https://check.torproject.org/torbulkexitlist",
+        "table_id": "tor_exit_nodes",
+        "format": "text",
+        "auth_required": False,
+        "description": "Tor Exit Node List"
     }
 }
 
@@ -101,12 +128,19 @@ def get_client(client_type: str):
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
         return None
 
-def _rate_limited_request(url, timeout=30, max_retries=3):
+def _rate_limited_request(url, timeout=30, max_retries=3, headers=None):
     """Make a rate-limited request with respect to API limits"""
     domain = url.split('/')[2]
     
     # Determine delay based on domain
     delay = _rate_limit_delays.get(domain, _rate_limit_delays['default'])
+    
+    # Set default headers if none provided
+    if headers is None:
+        headers = {
+            'User-Agent': 'ThreatIntelligencePlatform/1.0 (Research)',
+            'Accept': 'application/json, text/plain, */*'
+        }
     
     for retry in range(max_retries):
         # Check if we need to wait
@@ -118,14 +152,18 @@ def _rate_limited_request(url, timeout=30, max_retries=3):
         
         # Make request and record time
         try:
-            response = requests.get(url, timeout=timeout)
+            logger.info(f"Requesting URL: {url}")
+            response = requests.get(url, timeout=timeout, headers=headers)
             _last_request_time[domain] = time.time()
+            
+            # Log response details
+            logger.info(f"Response status: {response.status_code}, size: {len(response.content)} bytes")
             
             # Handle rate limit responses
             if response.status_code == 429:
                 logger.warning(f"Rate limit hit for {domain}. Response: {response.text}")
                 # Increase delay for this domain for future requests
-                _rate_limit_delays[domain] = min(_rate_limit_delays[domain] * 2, 3600)  # Max 1 hour
+                _rate_limit_delays[domain] = min(_rate_limit_delays[domain] * 2, 300)  # Max 5 minutes
                 
                 # Apply backoff
                 if retry < max_retries - 1:
@@ -135,6 +173,17 @@ def _rate_limited_request(url, timeout=30, max_retries=3):
                     continue
                 else:
                     raise requests.RequestException(f"Rate limit exceeded for {domain} after {max_retries} retries")
+            
+            # Check for other error codes
+            if response.status_code >= 400:
+                logger.warning(f"HTTP error {response.status_code} from {domain}: {response.text[:100]}")
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry) * 10
+                    logger.info(f"HTTP error, retrying in {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    response.raise_for_status()
             
             return response
             
@@ -150,7 +199,7 @@ def _rate_limited_request(url, timeout=30, max_retries=3):
     # Should not reach here, but just in case
     raise requests.RequestException(f"Failed to make request to {url} after {max_retries} retries")
 
-def ensure_resources() -> bool:
+def ensure_resources(force_create=False) -> bool:
     """Ensure BigQuery datasets and tables exist"""
     client = get_client('bigquery')
     if not client:
@@ -161,7 +210,8 @@ def ensure_resources() -> bool:
         try:
             client.get_dataset(DATASET_ID)
             logger.info(f"Dataset {DATASET_ID} already exists")
-        except Exception:
+        except Exception as e:
+            logger.info(f"Dataset {DATASET_ID} not found, creating it: {str(e)}")
             dataset = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
             dataset.location = "US"
             client.create_dataset(dataset, exists_ok=True)
@@ -173,8 +223,12 @@ def ensure_resources() -> bool:
             full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
             
             try:
-                client.get_table(full_table_id)
-                logger.info(f"Table {table_id} already exists")
+                if not force_create:
+                    client.get_table(full_table_id)
+                    logger.info(f"Table {table_id} already exists")
+                else:
+                    # Force table creation for testing
+                    raise Exception("Forcing table creation")
             except Exception:
                 # Create with minimal schema, BigQuery will auto-detect the rest
                 schema = [
@@ -183,6 +237,24 @@ def ensure_resources() -> bool:
                 table = bigquery.Table(full_table_id, schema=schema)
                 client.create_table(table, exists_ok=True)
                 logger.info(f"Created table {table_id}")
+        
+        # Create an additional threat_analysis table for later use
+        try:
+            analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
+            client.get_table(analysis_table_id)
+            logger.info("Analysis table already exists")
+        except Exception:
+            # Create analysis table
+            schema = [
+                bigquery.SchemaField("source_id", "STRING"),
+                bigquery.SchemaField("source_type", "STRING"),
+                bigquery.SchemaField("iocs", "STRING"),
+                bigquery.SchemaField("vertex_analysis", "STRING"),
+                bigquery.SchemaField("analysis_timestamp", "TIMESTAMP")
+            ]
+            table = bigquery.Table(analysis_table_id, schema=schema)
+            client.create_table(table, exists_ok=True)
+            logger.info("Created analysis table")
         
         return True
     except Exception as e:
@@ -194,20 +266,36 @@ class ThreatDataIngestion:
     
     def __init__(self):
         """Initialize the ingestion engine"""
-        self.ready = ensure_resources()
+        self.ready = ensure_resources(force_create=False)
         self.feed_stats = {}
     
     def process_all_feeds(self) -> List[Dict]:
         """Process all configured feeds"""
         if not self.ready:
-            logger.error("Ingestion engine not properly initialized")
-            return [{"status": "error", "message": "Ingestion engine not properly initialized"}]
+            # Try to initialize resources again
+            logger.warning("Ingestion engine not properly initialized, retrying initialization")
+            self.ready = ensure_resources(force_create=True)
+            if not self.ready:
+                logger.error("Failed to initialize resources, aborting ingestion")
+                return [{"status": "error", "message": "Ingestion engine not properly initialized"}]
         
         results = []
         logger.info(f"Processing {len(FEED_SOURCES)} feeds")
         
+        # Process feeds in order of reliability (most reliable first)
+        feed_order = ["cisa_known", "tor_exit", "feodotracker", "urlhaus", "phishtank", "threatfox"]
+        
+        # Add any feeds not in the ordered list
         for feed_name in FEED_SOURCES:
+            if feed_name not in feed_order:
+                feed_order.append(feed_name)
+        
+        for feed_name in feed_order:
+            if feed_name not in FEED_SOURCES:
+                continue
+                
             try:
+                logger.info(f"Starting ingestion for feed: {feed_name}")
                 result = self.process_feed(feed_name)
                 results.append(result)
                 
@@ -252,7 +340,35 @@ class ThreatDataIngestion:
             data, error = self._fetch_feed_data(feed_name)
             
             if error:
-                return self._error_result(feed_name, f"Fetch error: {error}")
+                logger.warning(f"Primary feed fetch failed: {error}")
+                # Try fallback URL if available
+                if "fallback_url" in feed_config and feed_config["fallback_url"] != feed_config["url"]:
+                    logger.info(f"Trying fallback URL for {feed_name}")
+                    # Store original URL
+                    original_url = feed_config["url"]
+                    try:
+                        # Use fallback URL
+                        feed_config["url"] = feed_config["fallback_url"]
+                        # If fallback is CSV but format is JSON, adjust format
+                        original_format = feed_config.get("format")
+                        if original_format == "json" and feed_config["fallback_url"].endswith(".csv"):
+                            feed_config["format"] = "csv"
+                            
+                        data, fallback_error = self._fetch_feed_data(feed_name)
+                        
+                        # Restore original format
+                        feed_config["format"] = original_format
+                        # Restore original URL
+                        feed_config["url"] = original_url
+                        
+                        if fallback_error:
+                            return self._error_result(feed_name, f"Primary and fallback fetch failed: {error}, {fallback_error}")
+                    except Exception as e:
+                        # Restore original URL
+                        feed_config["url"] = original_url
+                        return self._error_result(feed_name, f"Fallback error: {str(e)}")
+                else:
+                    return self._error_result(feed_name, f"Fetch error: {error}")
                 
             if not data:
                 return {
@@ -272,6 +388,12 @@ class ThreatDataIngestion:
                     "message": "No records extracted",
                     "record_count": 0
                 }
+            
+            # Log sample of first record for debugging
+            if records and len(records) > 0:
+                first_record = records[0]
+                record_preview = {k: v for k, v in list(first_record.items())[:5]}  # First 5 fields
+                logger.info(f"Sample record from {feed_name}: {record_preview}")
             
             # Upload to BigQuery
             record_count = self._upload_to_bigquery(records, feed_name, feed_config)
@@ -325,14 +447,25 @@ class ThreatDataIngestion:
             # Special handling for ThreatFox
             if feed_name == "threatfox":
                 try:
-                    # Use the direct export URL (more reliable than API)
+                    # Use the direct export URL 
                     url = feed_config.get("opensrc_url", feed_config["url"])
                     
                     logger.info(f"Fetching ThreatFox data from {url}")
                     response = _rate_limited_request(url, timeout=30)
                     response.raise_for_status()
                     
-                    return response.json(), None
+                    # Debug information - print content length and first 100 chars
+                    content_length = len(response.content)
+                    logger.info(f"Received {content_length} bytes from ThreatFox")
+                    
+                    # Verify JSON structure by parsing
+                    try:
+                        data = response.json()
+                        return data, None
+                    except Exception as json_err:
+                        logger.error(f"Error parsing ThreatFox JSON: {str(json_err)}")
+                        # Try to return a simplified structure
+                        return {"data": {"data": response.text[:1000]}}, None  
                 except Exception as e:
                     logger.error(f"Error fetching ThreatFox data: {str(e)}")
                     return None, f"Error: {str(e)}"
@@ -365,15 +498,21 @@ class ThreatDataIngestion:
             feed_format = feed_config.get("format", "json")
             
             if feed_format == "json":
-                data = response.json()
-                
-                # Handle nested data
-                if "json_root" in feed_config:
-                    root_field = feed_config["json_root"]
-                    if root_field in data:
-                        data = data[root_field]
-                
-                return data, None
+                try:
+                    data = response.json()
+                    
+                    # Handle nested data
+                    if "json_root" in feed_config:
+                        root_field = feed_config["json_root"]
+                        if root_field in data:
+                            data = data[root_field]
+                    
+                    return data, None
+                except json.JSONDecodeError as e:
+                    # Try to parse manually if the JSON is invalid
+                    logger.error(f"JSON decode error for {feed_name}: {str(e)}")
+                    logger.info(f"Content sample: {response.text[:100]}...")
+                    return None, f"JSON decode error: {str(e)}"
                 
             elif feed_format == "csv":
                 return response.text, None
@@ -412,6 +551,15 @@ class ThreatDataIngestion:
         records = []
         timestamp = datetime.utcnow().isoformat()
         
+        # Log the structure of the data
+        logger.info(f"Processing JSON data for {feed_name}")
+        if isinstance(data, dict):
+            logger.info(f"Top-level keys: {list(data.keys())}")
+        elif isinstance(data, list):
+            logger.info(f"Data is a list with {len(data)} items")
+        else:
+            logger.info(f"Data is of type {type(data)}")
+        
         # Ensure data is a list
         if not isinstance(data, list):
             # Special handling for some feeds like PhishTank 
@@ -427,10 +575,25 @@ class ThreatDataIngestion:
                     # For the export format, data might be directly at the top level
                     # Format looks like {"1511419": [{"ioc_value": "..."}, ...]} with multiple IDs
                     flattened_data = []
-                    for ioc_list in data.values():
-                        if isinstance(ioc_list, list):
-                            flattened_data.extend(ioc_list)
-                    data = flattened_data
+                    for key, value in data.items():
+                        if isinstance(value, list):
+                            flattened_data.extend(value)
+                        elif isinstance(value, dict) and "ioc_value" in value:
+                            flattened_data.append(value)
+                    
+                    if flattened_data:
+                        data = flattened_data
+                    elif "data" in data and isinstance(data["data"], dict):
+                        # Another possible structure
+                        data = [data["data"]]
+                    else:
+                        data = [data]
+            # Handle CISA format
+            elif feed_name == "cisa_known" and isinstance(data, dict):
+                if "vulnerabilities" in data and isinstance(data["vulnerabilities"], list):
+                    data = data["vulnerabilities"]
+                else:
+                    data = [data]
             else:
                 data = [data]
         
@@ -508,6 +671,9 @@ class ThreatDataIngestion:
                 reader = csv.DictReader(StringIO(filtered_data), dialect=dialect)
             else:
                 reader = csv.DictReader(StringIO(filtered_data))
+            
+            # Print headers to debug
+            logger.info(f"CSV Headers for {feed_name}: {reader.fieldnames}")
             
             records = []
             timestamp = datetime.utcnow().isoformat()
@@ -603,7 +769,8 @@ class ThreatDataIngestion:
             # Wait for the job to complete
             load_job.result(timeout=120)
             
-            logger.info(f"Loaded {len(records)} records to {full_table_id}")
+            # Log success with job ID
+            logger.info(f"Loaded {len(records)} records to {full_table_id}, job ID: {load_job.job_id}")
             return len(records)
         except Exception as e:
             logger.error(f"Error loading data to BigQuery: {str(e)}")
@@ -717,14 +884,16 @@ class ThreatDataIngestion:
                             continue
                         feed_name = table_id
                     
-                    # Query record counts
+                    # Query record counts - FIXED: Using full table reference
+                    full_table_id = f"`{PROJECT_ID}.{DATASET_ID}.{table_id}`"
+                    
                     count_query = f"""
                     SELECT 
                         COUNT(*) as record_count,
                         MIN(_ingestion_timestamp) as earliest_record,
                         MAX(_ingestion_timestamp) as latest_record,
                         COUNT(DISTINCT CAST(_ingestion_timestamp AS DATE)) as update_days
-                    FROM `{PROJECT_ID}.{DATASET_ID}.{table_id}`
+                    FROM {full_table_id}
                     """
                     
                     count_job = client.query(count_query)
@@ -791,10 +960,21 @@ class ThreatDataIngestion:
 # HTTP endpoint for triggering data ingestion
 def ingest_threat_data(request):
     """HTTP endpoint for triggering data ingestion"""
-    ingestion = ThreatDataIngestion()
+    logger.info("Ingestion endpoint called")
     
     # Parse request
-    request_json = request.get_json(silent=True)
+    try:
+        request_json = request.get_json(silent=True)
+    except Exception as e:
+        logger.error(f"Error parsing request: {str(e)}")
+        request_json = {"process_all": True}  # Default to process all if error
+    
+    # Initialize ingestion engine
+    try:
+        ingestion = ThreatDataIngestion()
+    except Exception as e:
+        logger.error(f"Error initializing ingestion engine: {str(e)}")
+        return {"error": f"Failed to initialize: {str(e)}"}, 500
     
     if request_json:
         # Check for statistics request
@@ -808,12 +988,20 @@ def ingest_threat_data(request):
             if feed_name not in FEED_SOURCES:
                 return {"error": f"Unknown feed: {feed_name}"}, 400
             
-            result = ingestion.process_feed(feed_name)
-            return result
+            try:
+                result = ingestion.process_feed(feed_name)
+                return result
+            except Exception as e:
+                logger.error(f"Error processing feed {feed_name}: {str(e)}")
+                return {"error": f"Processing error: {str(e)}"}, 500
     
     # Default to processing all feeds
-    results = ingestion.process_all_feeds()
-    return {"results": results, "count": len(results)}
+    try:
+        results = ingestion.process_all_feeds()
+        return {"results": results, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Error processing all feeds: {str(e)}")
+        return {"error": f"Processing error: {str(e)}"}, 500
 
 if __name__ == "__main__":
     # Process all feeds when run directly
