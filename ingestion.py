@@ -41,10 +41,11 @@ publisher = None
 # Rate limiting management
 _last_request_time = defaultdict(float)
 _rate_limit_delays = {
-    "phishtank.com": 30,      # Reduced from 300 to 30 seconds
-    "urlhaus.abuse.ch": 10,   # Reduced from 60 to 10 seconds
-    "threatfox.abuse.ch": 10, # Reduced from 60 to 10 seconds
-    "default": 5              # Reduced from 10 to 5 seconds
+    "phishtank.com": 60,       # Increased from 30 to 60 seconds due to rate limit issues
+    "data.phishtank.com": 60,  # Added specific domain seen in logs
+    "urlhaus.abuse.ch": 10,   
+    "threatfox.abuse.ch": 10, 
+    "default": 5              
 }
 
 # Enhanced Open Source Feed Definitions with direct links and better fallbacks
@@ -64,7 +65,7 @@ FEED_SOURCES = {
         "table_id": "phishtank_urls",
         "format": "json",
         "auth_required": False,
-        "rate_limit": 30,  # Reduced from 300
+        "rate_limit": 60,  # Increased from 30 to 60
         "description": "PhishTank - Community-verified phishing URLs"
     },
     "urlhaus": {
@@ -161,7 +162,7 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None):
             
             # Handle rate limit responses
             if response.status_code == 429:
-                logger.warning(f"Rate limit hit for {domain}. Response: {response.text}")
+                logger.warning(f"Rate limit hit for {domain}. Response: {response.text[:100]}")
                 # Increase delay for this domain for future requests
                 _rate_limit_delays[domain] = min(_rate_limit_delays[domain] * 2, 300)  # Max 5 minutes
                 
@@ -750,65 +751,86 @@ class ThreatDataIngestion:
         full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
         
         try:
-            # Configure load job with schema auto-detection
-            job_config = bigquery.LoadJobConfig(
-                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-                schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                autodetect=True
-            )
-            
-            # Convert records to newline-delimited JSON
-            json_data = "\n".join([json.dumps(record) for record in records])
-            
-            # Load the data
-            load_job = client.load_table_from_string(
-                json_data, full_table_id, job_config=job_config
-            )
-            
-            # Wait for the job to complete
-            load_job.result(timeout=120)
-            
-            # Log success with job ID
-            logger.info(f"Loaded {len(records)} records to {full_table_id}, job ID: {load_job.job_id}")
-            return len(records)
-        except Exception as e:
-            logger.error(f"Error loading data to BigQuery: {str(e)}")
-            
-            # Check if table exists, create if it doesn't
-            try:
-                client.get_table(full_table_id)
-            except Exception:
-                logger.info(f"Table {full_table_id} not found, creating it...")
+            # Create a rows_to_insert list for the insert_rows_json method
+            rows_to_insert = []
+            for record in records:
+                # Convert any datetime objects to strings to ensure JSON compatibility
+                processed_record = {}
+                for key, value in record.items():
+                    if isinstance(value, datetime):
+                        processed_record[key] = value.isoformat()
+                    else:
+                        processed_record[key] = value
                 
-                # Create with minimal schema, BigQuery will auto-detect the rest
-                schema = [
-                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP")
-                ]
-                table = bigquery.Table(full_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
+                rows_to_insert.append(processed_record)
+            
+            # Insert rows using insert_rows_json instead of load_table_from_string
+            errors = client.insert_rows_json(full_table_id, rows_to_insert)
+            
+            if errors:
+                logger.error(f"Errors encountered while inserting rows: {errors}")
                 
-                # Try again after creating the table
+                # Check if table exists, create if it doesn't
                 try:
-                    job_config = bigquery.LoadJobConfig(
-                        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-                        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                        autodetect=True
-                    )
+                    client.get_table(full_table_id)
+                except Exception:
+                    logger.info(f"Table {full_table_id} not found, creating it...")
                     
-                    json_data = "\n".join([json.dumps(record) for record in records])
-                    load_job = client.load_table_from_string(
-                        json_data, full_table_id, job_config=job_config
-                    )
-                    load_job.result(timeout=120)
+                    # Create with minimal schema, BigQuery will auto-detect the rest
+                    schema = [
+                        bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP")
+                    ]
+                    table = bigquery.Table(full_table_id, schema=schema)
+                    client.create_table(table, exists_ok=True)
+                    logger.info(f"Created table {full_table_id}")
                     
-                    logger.info(f"Loaded {len(records)} records to newly created {full_table_id}")
-                    return len(records)
-                except Exception as retry_e:
-                    logger.error(f"Error loading data to newly created table: {str(retry_e)}")
+                    # Try again after creating the table
+                    errors = client.insert_rows_json(full_table_id, rows_to_insert)
+                    
+                    if errors:
+                        logger.error(f"Errors inserting data after table creation: {errors}")
+                        return 0
+                else:
+                    # Handle schema evolution for the existing table
+                    try:
+                        table = client.get_table(full_table_id)
+                        schema = table.schema
+                        
+                        # Find existing field names
+                        existing_fields = {field.name for field in schema}
+                        
+                        # Find new fields from the records
+                        new_fields = set()
+                        for record in records:
+                            for key in record:
+                                if key not in existing_fields:
+                                    new_fields.add(key)
+                        
+                        # Add new fields to schema
+                        if new_fields:
+                            logger.info(f"Adding new fields to schema: {new_fields}")
+                            for field_name in new_fields:
+                                schema.append(bigquery.SchemaField(field_name, "STRING"))
+                            
+                            table.schema = schema
+                            client.update_table(table, ["schema"])
+                            logger.info(f"Updated schema for {full_table_id}")
+                            
+                            # Try insert again after schema update
+                            errors = client.insert_rows_json(full_table_id, rows_to_insert)
+                            
+                            if errors:
+                                logger.error(f"Errors inserting data after schema update: {errors}")
+                                return 0
+                    except Exception as e:
+                        logger.error(f"Error updating schema: {str(e)}")
+                        return 0
             
-            # If we got here, both attempts failed
+            logger.info(f"Successfully uploaded {len(records)} records to {full_table_id}")
+            return len(records)
+            
+        except Exception as e:
+            logger.error(f"Error uploading to BigQuery: {str(e)}")
             return 0
     
     def _publish_event(self, feed_name: str, count: int) -> bool:
