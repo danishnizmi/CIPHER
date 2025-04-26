@@ -13,6 +13,7 @@ import secrets
 import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
+from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, abort
 import requests
@@ -235,6 +236,7 @@ def is_session_valid():
 
 # Authentication decorator
 def login_required(f):
+    @wraps(f)
     def decorated_function(*args, **kwargs):
         if REQUIRE_AUTH:
             if not is_session_valid():
@@ -245,6 +247,7 @@ def login_required(f):
 
 # Admin access decorator
 def admin_required(f):
+    @wraps(f)
     def decorated_function(*args, **kwargs):
         if not is_session_valid() or session.get('role') != 'admin':
             flash("Administrator access required", "danger")
@@ -411,9 +414,10 @@ def profile():
                           user={"role": user_data.get('role', session.get('role', 'user')), 
                                 "last_login": user_data.get('last_login', datetime.now().isoformat())})
 
-@app.route('/profile/change_password', methods=['POST'])
+# FIX: Added endpoint name to fix the conflict
+@app.route('/profile/change_password', methods=['POST'], endpoint='user_change_password')
 @login_required
-def change_password():
+def user_change_password():
     """Change user's own password"""
     global ADMIN_HASH
     
