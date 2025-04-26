@@ -9,9 +9,9 @@ import logging
 import hashlib
 import sys
 import time
-import base64
+import secrets
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, abort
@@ -21,6 +21,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from google.cloud import storage
 from google.cloud import bigquery
 from google.cloud import secretmanager
+from google.api_core.exceptions import AlreadyExists, NotFound, PermissionDenied
 
 # Import config module
 import config
@@ -36,7 +37,7 @@ PROJECT_ID = config.project_id
 REGION = config.region
 API_URL = config.api_url
 
-# Get API key with fallbacks
+# API key with fallbacks
 API_KEY = os.environ.get("API_KEY", "") or config.api_key or ""
 if not API_KEY and hasattr(config, 'get_cached_config'):
     api_keys_config = config.get_cached_config('api-keys')
@@ -51,76 +52,118 @@ def get_secret_client():
     if _secret_client is None:
         try:
             _secret_client = secretmanager.SecretManagerServiceClient()
+            logger.info("Secret Manager client initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Secret Manager client: {e}")
     return _secret_client
 
-def get_secret(secret_id, version_id="latest"):
-    """Get secret from Secret Manager"""
+def access_secret(secret_id, version="latest"):
+    """Access a secret by ID and version"""
     client = get_secret_client()
     if not client:
+        logger.error("No Secret Manager client available")
         return None
         
     try:
-        name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version_id}"
+        name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version}"
         response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8")
+        payload = response.payload.data.decode("UTF-8")
+        logger.info(f"Successfully accessed secret: {secret_id}")
+        return payload
+    except NotFound:
+        logger.info(f"Secret not found: {secret_id}")
+        return None
+    except PermissionDenied:
+        logger.error(f"Permission denied accessing secret: {secret_id}")
+        return None
     except Exception as e:
-        logger.debug(f"Secret {secret_id} not found: {e}")
+        logger.error(f"Error accessing secret {secret_id}: {str(e)}")
         return None
 
-def create_secret(secret_id, secret_value):
-    """Create a new secret"""
+def create_secret_if_not_exists(secret_id, secret_value):
+    """Create a secret if it doesn't already exist"""
     client = get_secret_client()
     if not client:
+        logger.error("No Secret Manager client available")
         return False
         
     try:
+        # First try to access the secret to see if it exists
+        existing_value = access_secret(secret_id)
+        if existing_value:
+            logger.info(f"Secret {secret_id} already exists")
+            return existing_value
+    
+        # Secret doesn't exist, create it
         parent = f"projects/{PROJECT_ID}"
         
-        # Create the secret
-        client.create_secret(
-            request={
-                "parent": parent,
-                "secret_id": secret_id,
-                "secret": {"replication": {"automatic": {}}},
-            }
-        )
-        
-        # Add the secret version
-        client.add_secret_version(
-            request={
-                "parent": f"{parent}/secrets/{secret_id}",
-                "payload": {"data": secret_value.encode("UTF-8")},
-            }
-        )
-        return True
+        try:
+            # Create secret resource
+            client.create_secret(
+                request={
+                    "parent": parent,
+                    "secret_id": secret_id,
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+            logger.info(f"Created secret resource: {secret_id}")
+        except AlreadyExists:
+            logger.info(f"Secret {secret_id} already exists")
+        except Exception as e:
+            logger.error(f"Error creating secret resource {secret_id}: {str(e)}")
+            return False
+            
+        # Add version with value
+        try:
+            secret_parent = f"{parent}/secrets/{secret_id}"
+            client.add_secret_version(
+                request={
+                    "parent": secret_parent,
+                    "payload": {"data": secret_value.encode("UTF-8")},
+                }
+            )
+            logger.info(f"Added version to secret: {secret_id}")
+            return secret_value
+        except Exception as e:
+            logger.error(f"Error adding version to secret {secret_id}: {str(e)}")
+            return False
     except Exception as e:
-        logger.error(f"Error creating secret {secret_id}: {e}")
+        logger.error(f"Unexpected error with secret {secret_id}: {str(e)}")
         return False
 
-def get_or_create_secret(secret_id, default_value_func=None):
-    """Get secret or create it if it doesn't exist"""
-    # Try to get existing secret
-    value = get_secret(secret_id)
-    if value:
-        return value
-        
-    # Generate default value if not exists
-    if default_value_func:
-        new_value = default_value_func()
-        if create_secret(secret_id, new_value):
-            return new_value
+# Get or create Flask secret key
+def setup_flask_secret_key():
+    """Get or create a persistent Flask secret key"""
+    # Try environment variable first
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        logger.info("Using Flask secret key from environment variable")
+        return env_key
     
-    return None
+    # Try to get from Secret Manager
+    logger.info("Attempting to get Flask secret key from Secret Manager")
+    secret_key = access_secret("flask-secret-key")
+    
+    # If found, use it
+    if secret_key:
+        logger.info("Using existing Flask secret key from Secret Manager")
+        return secret_key
+        
+    # Create a new one
+    logger.info("Creating new Flask secret key")
+    new_key = secrets.token_hex(32)
+    result = create_secret_if_not_exists("flask-secret-key", new_key)
+    
+    if result:
+        logger.info("Created and stored new Flask secret key")
+        return new_key
+    else:
+        # Fallback
+        logger.warning("Using temporary Flask secret key - sessions will not persist")
+        return secrets.token_hex(32)
 
 # Initialize Flask app
-# Get Flask secret key from Secret Manager or create a persistent one
-flask_secret_key = get_or_create_secret("flask-secret-key", lambda: os.urandom(24).hex())
-if not flask_secret_key:
-    flask_secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
-    logger.warning("Using temporary Flask secret key - sessions will not persist across restarts")
-
+flask_secret_key = setup_flask_secret_key()
 app = Flask(__name__, template_folder='templates')
 app.secret_key = flask_secret_key
 app.config['SESSION_COOKIE_SECURE'] = True
@@ -140,52 +183,68 @@ ADMIN_PASSWORD = None
 ADMIN_HASH = None
 
 def setup_admin_credentials():
-    """Set up admin credentials - returns the password if newly generated"""
+    """Set up admin credentials"""
     global ADMIN_HASH, ADMIN_PASSWORD
     
-    # Try to get credentials from auth-config first
+    # Try to get from auth-config in Secret Manager first
+    logger.info("Looking for admin credentials in auth-config secret")
+    admin_from_config = None
     try:
-        auth_config = config.get_cached_config('auth-config', force_refresh=True)
-        if auth_config and 'users' in auth_config and 'admin' in auth_config['users']:
-            admin_user = auth_config['users']['admin']
-            ADMIN_HASH = admin_user.get('password')
-            logger.info("Admin credentials loaded from auth-config")
-            return None
+        auth_config_json = access_secret("auth-config")
+        if auth_config_json:
+            auth_config = json.loads(auth_config_json)
+            if 'users' in auth_config and 'admin' in auth_config['users']:
+                admin_user = auth_config['users']['admin']
+                if 'password' in admin_user:
+                    ADMIN_HASH = admin_user['password']
+                    logger.info("Admin credentials found in auth-config")
+                    return None
     except Exception as e:
-        logger.warning(f"Failed to retrieve admin credentials from auth-config: {e}")
+        logger.warning(f"Could not retrieve admin from auth-config: {e}")
     
-    # Try to get admin password from Secret Manager
-    admin_secret = get_secret("admin-initial-password")
-    if admin_secret:
-        ADMIN_PASSWORD = admin_secret
-        ADMIN_HASH = hashlib.sha256(admin_secret.encode()).hexdigest()
-        logger.info("Admin credentials loaded from admin-initial-password secret")
+    # Try to get dedicated admin password secret
+    logger.info("Looking for admin-initial-password secret")
+    admin_password_secret = access_secret("admin-initial-password")
+    if admin_password_secret:
+        ADMIN_PASSWORD = admin_password_secret
+        ADMIN_HASH = hashlib.sha256(admin_password_secret.encode()).hexdigest()
+        logger.info("Admin password loaded from admin-initial-password secret")
         return None
     
-    # Generate a new secure password as last resort
-    ADMIN_PASSWORD = base64.b64encode(os.urandom(9)).decode('utf-8')[:12]  # 12-char readable password
-    ADMIN_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
+    # Generate a new secure password
+    logger.info("Generating new admin password")
+    new_password = secrets.token_urlsafe(12)[:12]  # 12 character readable password
+    ADMIN_PASSWORD = new_password
+    ADMIN_HASH = hashlib.sha256(new_password.encode()).hexdigest()
     
-    # Store the password in Secret Manager
-    create_secret("admin-initial-password", ADMIN_PASSWORD)
+    # Store in dedicated secret
+    logger.info("Storing new admin password in Secret Manager")
+    if create_secret_if_not_exists("admin-initial-password", new_password):
+        logger.info("Successfully stored admin password in Secret Manager")
+    else:
+        logger.error("Failed to store admin password in Secret Manager")
     
-    # Store in auth-config as well
+    # Also try to add to auth-config
+    logger.info("Attempting to add admin user to auth-config")
     try:
         if hasattr(config, 'add_user'):
-            config.add_user('admin', ADMIN_PASSWORD, 'admin')
+            config.add_user('admin', new_password, 'admin')
+            logger.info("Added admin user to auth-config")
     except Exception as e:
         logger.error(f"Failed to add admin user to auth-config: {e}")
     
-    # This is a new admin password, return it for logging
-    return ADMIN_PASSWORD
+    return new_password
 
-# Set up admin credentials and log if newly generated
+# Set up admin credentials and display if newly created
 new_admin_password = setup_admin_credentials()
 if new_admin_password:
+    logger.warning("")
     logger.warning("="*80)
-    logger.warning(f"GENERATED NEW ADMIN PASSWORD: {new_admin_password}")
-    logger.warning(f"Username: admin, Password: {new_admin_password}")
+    logger.warning("IMPORTANT: NEW ADMIN PASSWORD GENERATED")
+    logger.warning(f"USERNAME: admin")
+    logger.warning(f"PASSWORD: {new_admin_password}")
     logger.warning("="*80)
+    logger.warning("")
 
 # Utility Functions
 def hash_password(password): 
@@ -212,16 +271,19 @@ def is_session_valid():
     session['last_activity'] = now
     return True
 
-# Decorators
+# Authentication decorator
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if REQUIRE_AUTH and not is_session_valid():
-            session.clear()
-            return redirect(url_for("login", next=request.url))
+        if REQUIRE_AUTH:
+            if not is_session_valid():
+                # Clear any existing session data
+                session.clear()
+                return redirect(url_for("login", next=request.url))
         return f(*args, **kwargs)
     return decorated_function
 
+# Admin access decorator
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -323,9 +385,13 @@ def inject_common_data():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page"""
+    error = None
+    
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
+        
+        logger.info(f"Login attempt for user: {username}")
         
         # Check credentials
         is_valid = False
@@ -338,21 +404,23 @@ def login():
                 user_data = auth_config['users'][username]
                 is_valid = user_data.get('password') == hash_password(password)
                 user_role = user_data.get('role', 'readonly')
-        except Exception:
-            pass
+                logger.info(f"Auth config validation: {is_valid}")
+        except Exception as e:
+            logger.warning(f"Error accessing auth config: {e}")
             
         # Try admin fallback
         if not is_valid and username == ADMIN_USERNAME:
             is_valid = verify_password(ADMIN_HASH, password)
             user_role = 'admin'
+            logger.info(f"Admin fallback validation: {is_valid}")
         
         if is_valid:
             # Update last login time
             try:
                 if hasattr(config, 'update_user'):
                     config.update_user(username, {'last_login': datetime.utcnow().isoformat()})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to update last login time: {e}")
                 
             # Set session data
             session.clear()
@@ -362,17 +430,25 @@ def login():
             session['last_activity'] = time.time()
             session.permanent = True
             
+            logger.info(f"User {username} logged in successfully with role {user_role}")
+            
             next_page = request.args.get('next')
-            return redirect(next_page if next_page else url_for('dashboard'))
+            if next_page:
+                return redirect(next_page)
+            return redirect(url_for('dashboard'))
         else:
-            flash("Invalid username or password", "danger")
+            error = "Invalid username or password"
+            logger.warning(f"Failed login attempt for user: {username}")
     
-    return render_template('auth.html', page_type='login')
+    return render_template('auth.html', page_type='login', error=error)
 
 @app.route('/logout')
 def logout():
     """Logout user"""
+    username = session.get('username')
     session.clear()
+    if username:
+        logger.info(f"User {username} logged out")
     return redirect(url_for('login'))
 
 @app.route('/profile', methods=['GET'])
@@ -386,8 +462,8 @@ def profile():
         auth_config = config.get_cached_config('auth-config')
         if auth_config and 'users' in auth_config and username in auth_config['users']:
             user_data = auth_config['users'][username]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error retrieving user data: {e}")
     
     return render_template('auth.html', 
                           page_type='profile', 
