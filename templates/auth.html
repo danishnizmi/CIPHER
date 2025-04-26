@@ -109,6 +109,26 @@
             .badge-readonly {
                 @apply bg-gray-100 text-gray-800;
             }
+
+            /* Password strength meter */
+            .password-strength-meter {
+                @apply h-2 w-full bg-gray-200 rounded-full overflow-hidden mt-1;
+            }
+            .password-strength-meter div {
+                @apply h-full transition-all duration-300;
+            }
+            .password-strength-meter.weak div {
+                @apply w-1/4 bg-red-500;
+            }
+            .password-strength-meter.medium div {
+                @apply w-2/4 bg-yellow-500;
+            }
+            .password-strength-meter.strong div {
+                @apply w-3/4 bg-green-500;
+            }
+            .password-strength-meter.very-strong div {
+                @apply w-full bg-green-600;
+            }
         }
     </style>
 </head>
@@ -185,7 +205,7 @@
             
             <div class="auth-footer">
                 <p>Default login credentials:</p>
-                <p>Username: <strong>admin</strong>, Password: <strong>changeme</strong></p>
+                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
                 <div class="mt-4 text-gray-500 text-xs">
                     <p>&copy; {{ now.year }} Threat Intelligence Platform</p>
                     <p>Powered by Google Cloud Platform</p>
@@ -251,6 +271,11 @@
                             </button>
                         </div>
                     </div>
+                    <!-- Password strength meter -->
+                    <div class="password-strength-meter mt-1" id="passwordStrength">
+                        <div></div>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1" id="passwordFeedback">Password must be at least 8 characters</p>
                 </div>
                 <div class="form-group">
                     <label for="confirm_password" class="form-label">Confirm Password</label>
@@ -353,6 +378,11 @@
                             </button>
                         </div>
                     </div>
+                    <!-- Password strength meter (only shows when typing) -->
+                    <div class="password-strength-meter mt-1 hidden" id="passwordStrength">
+                        <div></div>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1 hidden" id="passwordFeedback"></p>
                 </div>
                 <div class="form-group">
                     <label for="role" class="form-label">Role</label>
@@ -505,6 +535,11 @@
                                 </button>
                             </div>
                         </div>
+                        <!-- Password strength meter -->
+                        <div class="password-strength-meter mt-1" id="newPasswordStrength">
+                            <div></div>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1" id="newPasswordFeedback">Password must be at least 8 characters</p>
                     </div>
                     <div class="form-group">
                         <label for="confirm_password" class="form-label">Confirm New Password</label>
@@ -629,7 +664,7 @@
             
             <div class="auth-footer">
                 <p>Default login credentials:</p>
-                <p>Username: <strong>admin</strong>, Password: <strong>changeme</strong></p>
+                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
                 <div class="mt-4 text-gray-500 text-xs">
                     <p>&copy; {{ now.year if now else 2025 }} Threat Intelligence Platform</p>
                     <p>Powered by Google Cloud Platform</p>
@@ -644,7 +679,7 @@
         // Toggle password visibility
         document.addEventListener('DOMContentLoaded', function() {
             // Setup toggle password visibility for all password fields
-            const toggleButtons = document.querySelectorAll('.toggle-password');
+            const toggleButtons = document.querySelectorAll('.toggle-password, #togglePassword');
             toggleButtons.forEach(button => {
                 button.addEventListener('click', function() {
                     const passwordField = this.closest('.relative').querySelector('input');
@@ -693,6 +728,62 @@
                     confirmPassword.addEventListener('keyup', checkPasswordMatch);
                 }
             }
+            
+            // Password strength meter
+            const passwordStrengthMeters = [
+                { input: document.getElementById('password'), meter: document.getElementById('passwordStrength'), feedback: document.getElementById('passwordFeedback') },
+                { input: document.getElementById('new_password'), meter: document.getElementById('newPasswordStrength'), feedback: document.getElementById('newPasswordFeedback') }
+            ];
+            
+            passwordStrengthMeters.forEach(item => {
+                if (item.input && item.meter && item.feedback) {
+                    item.input.addEventListener('input', function() {
+                        const password = this.value;
+                        
+                        // Show strength meter when typing
+                        item.meter.classList.remove('hidden');
+                        item.feedback.classList.remove('hidden');
+                        
+                        // Check password strength
+                        const hasUpperCase = /[A-Z]/.test(password);
+                        const hasLowerCase = /[a-z]/.test(password);
+                        const hasNumbers = /\d/.test(password);
+                        const hasSpecialChars = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+                        
+                        // Calculate strength
+                        let strength = 0;
+                        if (password.length >= 8) strength++;
+                        if (hasUpperCase && hasLowerCase) strength++;
+                        if (hasNumbers) strength++;
+                        if (hasSpecialChars) strength++;
+                        
+                        // Update meter and feedback
+                        item.meter.className = 'password-strength-meter';
+                        
+                        if (password.length === 0) {
+                            item.meter.classList.add('weak');
+                            item.feedback.textContent = 'Password must be at least 8 characters';
+                            item.feedback.className = 'text-xs text-gray-500 mt-1';
+                        } else if (strength === 1) {
+                            item.meter.classList.add('weak');
+                            item.feedback.textContent = 'Weak password';
+                            item.feedback.className = 'text-xs text-red-500 mt-1';
+                        } else if (strength === 2) {
+                            item.meter.classList.add('medium');
+                            item.feedback.textContent = 'Medium strength password';
+                            item.feedback.className = 'text-xs text-yellow-600 mt-1';
+                        } else if (strength === 3) {
+                            item.meter.classList.add('strong');
+                            item.feedback.textContent = 'Strong password';
+                            item.feedback.className = 'text-xs text-green-600 mt-1';
+                        } else if (strength === 4) {
+                            item.meter.classList.add('very-strong');
+                            item.feedback.textContent = 'Very strong password';
+                            item.feedback.className = 'text-xs text-green-600 mt-1';
+                        }
+                    });
+                }
+            });
             
             // Delete user modal functionality
             const deleteUserBtn = document.getElementById('deleteUserBtn');
