@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import hashlib
+import base64
 from datetime import datetime
 from functools import lru_cache
 from typing import Dict, Any, Optional
@@ -25,6 +26,23 @@ GCS_BUCKET = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
 BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_key = os.environ.get("API_KEY", "")
 
+# Overrides from environment variables
+AUTH_CONFIG_ENV = os.environ.get("AUTH_CONFIG", "")
+DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
+BYPASS_SECRET_MANAGER = os.environ.get("BYPASS_SECRET_MANAGER", "false").lower() == "true"
+
+# Default authentication config for development
+DEFAULT_AUTH_CONFIG = {
+    "users": {
+        "admin": {
+            "password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",  # 'admin'
+            "role": "admin",
+            "created_at": datetime.utcnow().isoformat()
+        }
+    },
+    "session_secret": "default_development_secret_should_be_changed_in_production"
+}
+
 # Lazy-loaded Secret Manager client
 _secret_client = None
 # Config cache with 30-minute TTL
@@ -35,13 +53,18 @@ CACHE_TTL_SECONDS = 1800  # 30 minutes
 def get_secret_client():
     """Get Secret Manager client (lazy initialization to save costs)"""
     global _secret_client
+    
+    if BYPASS_SECRET_MANAGER:
+        logger.info("Secret Manager bypassed due to BYPASS_SECRET_MANAGER flag")
+        return None
+        
     if _secret_client is None:
         try:
             from google.cloud import secretmanager
             _secret_client = secretmanager.SecretManagerServiceClient()
-            logger.debug("Secret Manager client initialized")
+            logger.info("Secret Manager client initialized")
         except Exception as e:
-            logger.error(f"Failed to initialize Secret Manager client: {e}")
+            logger.warning(f"Failed to initialize Secret Manager client: {e}")
             # Don't raise - allow operation in degraded mode without secrets
     return _secret_client
 
@@ -56,8 +79,15 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
     Returns:
         Secret payload or None if not available
     """
+    # If we have an environment variable override for auth-config, use it
+    if secret_id == "auth-config" and AUTH_CONFIG_ENV:
+        logger.info("Using AUTH_CONFIG environment variable instead of Secret Manager")
+        return AUTH_CONFIG_ENV
+        
     client = get_secret_client()
     if not client:
+        if DEBUG_MODE:
+            logger.info(f"Secret Manager client not available, returning None for {secret_id}")
         return None
         
     try:
@@ -84,7 +114,39 @@ def get_config(config_name: str) -> Dict[str, Any]:
         if now - _cache_timestamp.get(config_name, 0) < CACHE_TTL_SECONDS:
             return _config_cache[config_name]
     
-    # Load from Secret Manager
+    # Special handling for auth-config
+    if config_name == 'auth-config':
+        # Load from Secret Manager
+        config_json = access_secret(config_name)
+        if config_json:
+            try:
+                config_data = json.loads(config_json)
+                # Update cache
+                _config_cache[config_name] = config_data
+                _cache_timestamp[config_name] = now
+                logger.info(f"Loaded auth-config from Secret Manager")
+                return config_data
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in {config_name} config: {e}")
+        
+        # Fallback to environment variable if present
+        if AUTH_CONFIG_ENV:
+            try:
+                config_data = json.loads(AUTH_CONFIG_ENV)
+                _config_cache[config_name] = config_data
+                _cache_timestamp[config_name] = now
+                logger.info("Using auth-config from environment variable")
+                return config_data
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in AUTH_CONFIG environment variable: {e}")
+        
+        # Use default auth config as last resort
+        logger.warning(f"Using default auth-config because Secret Manager and environment variable failed")
+        _config_cache[config_name] = DEFAULT_AUTH_CONFIG
+        _cache_timestamp[config_name] = now
+        return DEFAULT_AUTH_CONFIG
+    
+    # Standard flow for other configs
     config_json = access_secret(config_name)
     if config_json:
         try:
@@ -125,6 +187,7 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
     """
     client = get_secret_client()
     if not client:
+        logger.warning(f"Cannot create/update secret {secret_id} - Secret Manager not available")
         return False
     
     parent = f"projects/{PROJECT_ID}"
@@ -200,10 +263,24 @@ def init_app_config() -> Dict[str, Any]:
         Configuration dict or error dict
     """
     try:
-        return load_configs()
+        configs = load_configs()
+        
+        # Make sure auth config has required structure
+        auth_config = configs.get('auth', {})
+        if not auth_config.get('users'):
+            logger.warning("Auth config missing required 'users' field, using default")
+            auth_config['users'] = DEFAULT_AUTH_CONFIG['users']
+            configs['auth'] = auth_config
+            
+        if not auth_config.get('session_secret'):
+            logger.warning("Auth config missing required 'session_secret' field, using default")
+            auth_config['session_secret'] = DEFAULT_AUTH_CONFIG['session_secret']
+            configs['auth'] = auth_config
+        
+        return configs
     except Exception as e:
         logger.error(f"Error initializing app config: {e}")
-        return {'error': str(e)}
+        return {'error': str(e), 'auth': DEFAULT_AUTH_CONFIG}
 
 def get(key: str, default: Any = None) -> Any:
     """Get configuration value from environment or secrets
@@ -224,8 +301,8 @@ def get(key: str, default: Any = None) -> Any:
         auth_config = get_cached_config('auth-config')
         if auth_config and key in auth_config:
             return auth_config[key]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error accessing auth config for key {key}: {e}")
     
     return default
 
@@ -255,8 +332,14 @@ def update_user(username: str, updates: Dict[str, Any]) -> bool:
                 value = hashlib.sha256(value.encode()).hexdigest()
         auth_config['users'][username][key] = value
     
-    # Save updated config (API call - used judiciously)
-    return create_or_update_secret('auth-config', json.dumps(auth_config))
+    # First, update local cache
+    _config_cache['auth-config'] = auth_config
+    _cache_timestamp['auth-config'] = datetime.now().timestamp()
+    
+    # Then try to save to Secret Manager if available
+    if not BYPASS_SECRET_MANAGER:
+        return create_or_update_secret('auth-config', json.dumps(auth_config))
+    return True
 
 def add_user(username: str, password: str, role: str = "readonly") -> bool:
     """Add a new user
@@ -278,57 +361,6 @@ def add_user(username: str, password: str, role: str = "readonly") -> bool:
     }
     
     return update_user(username, user_data)
-
-def update_api_key(service: str, api_key: str) -> bool:
-    """Update API key with minimal API calls
-    
-    Args:
-        service: Service name
-        api_key: API key
-        
-    Returns:
-        Success status
-    """
-    api_keys = get_cached_config('api-keys', force_refresh=True)
-    
-    # Update key
-    api_keys[service] = api_key
-    
-    # Save updated config
-    return create_or_update_secret('api-keys', json.dumps(api_keys))
-
-def update_feed_config(feed_name: str, updates: Dict[str, Any]) -> bool:
-    """Update feed configuration
-    
-    Args:
-        feed_name: Feed name
-        updates: Configuration updates
-        
-    Returns:
-        Success status
-    """
-    feed_config = get_cached_config('feed-config', force_refresh=True)
-    
-    if 'feeds' not in feed_config:
-        feed_config['feeds'] = []
-    
-    # Find feed in the list
-    found = False
-    for i, feed in enumerate(feed_config['feeds']):
-        if feed.get('name') == feed_name:
-            # Update feed
-            for key, value in updates.items():
-                feed_config['feeds'][i][key] = value
-            found = True
-            break
-    
-    # If feed not found, add it
-    if not found:
-        updates['name'] = feed_name
-        feed_config['feeds'].append(updates)
-    
-    # Save updated config
-    return create_or_update_secret('feed-config', json.dumps(feed_config))
 
 # Exported properties for other modules
 project_id = PROJECT_ID
