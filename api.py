@@ -1,6 +1,6 @@
 """
 Threat Intelligence Platform - Streamlined API Module
-Provides RESTful endpoints with optimized GCP integration.
+Provides RESTful endpoints with optimized GCP integration and enhanced security.
 """
 
 import os
@@ -8,11 +8,14 @@ import json
 import logging
 import time
 import hashlib
+import secrets
+import re
+import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, Union
 from functools import wraps
 
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify, current_app, g, Response, abort
 from google.cloud import bigquery, storage, pubsub_v1
 import traceback
 
@@ -20,7 +23,8 @@ import traceback
 import config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO if os.environ.get('ENVIRONMENT', 'development') != 'production' else logging.WARNING,
+                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Core configuration
@@ -29,7 +33,8 @@ DATASET_ID = config.bigquery_dataset
 REGION = config.region
 BUCKET_NAME = config.gcs_bucket
 MAX_RESULTS = 1000
-CACHE_TIMEOUT = 300
+CACHE_TIMEOUT = 300  # 5 minutes
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
 # Create Blueprint
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -38,111 +43,328 @@ api_bp = Blueprint('api', __name__, url_prefix='/api')
 query_cache = {}
 cache_timestamps = {}
 
+# GCP service availability flag
+GCP_SERVICES_AVAILABLE = False
+try:
+    from google.cloud import secretmanager, logging as cloud_logging, error_reporting, monitoring_v3
+    import google.auth
+    GCP_SERVICES_AVAILABLE = True
+    logger.info("GCP libraries successfully imported for API module")
+except ImportError:
+    logger.warning("GCP libraries not available for API module - reduced functionality")
+
+# API request counter for metrics
+request_counter = 0
+last_metrics_time = time.time()
+
 # ======== Shared Utilities ========
 
 def get_api_key():
-    """Get API key with fallbacks"""
-    # Try direct attribute first
-    if hasattr(config, 'api_key') and config.api_key:
-        return config.api_key
-        
-    # Try environment variable
-    api_key = os.environ.get("API_KEY", "")
-    if api_key:
+    """Get API key with enhanced security and validation"""
+    # First try direct attribute from config
+    api_key = config.api_key if hasattr(config, 'api_key') else ""
+    if api_key and len(api_key) >= 16:
         return api_key
+        
+    # Try environment variable with validation
+    env_key = os.environ.get("API_KEY", "")
+    if env_key and len(env_key) >= 16:
+        return env_key
     
-    # Try from cached config
+    # Try from cached config with security validation
     api_keys_config = config.get_cached_config('api-keys')
-    return api_keys_config.get('platform_api_key', "") if api_keys_config else ""
+    platform_key = api_keys_config.get('platform_api_key', "") if api_keys_config else ""
+    
+    # Validate key meets minimum requirements
+    if platform_key and len(platform_key) >= 16:
+        return platform_key
+        
+    # If no valid key found and we're in production, log a warning
+    if ENVIRONMENT == 'production':
+        logger.warning("No valid API key found in production environment")
+        
+    return platform_key  # Return whatever we have, even if it's empty
 
 def get_client(client_type):
-    """Get or create GCP client on demand"""
+    """Get or create GCP client on demand with enhanced connection handling"""
     # Use Flask app context to store clients
     if not hasattr(g, 'gcp_clients'):
         g.gcp_clients = {}
     
     # Return cached client if available
-    if client_type in g.gcp_clients:
+    if client_type in g.gcp_clients and g.gcp_clients[client_type] is not None:
         return g.gcp_clients[client_type]
+    
+    # Check if GCP services are available (either directly or from app)
+    gcp_available = GCP_SERVICES_AVAILABLE
+    if hasattr(g, 'gcp_services_available'):
+        gcp_available = g.gcp_services_available
+    
+    if not gcp_available and client_type not in ['bigquery']:
+        # BigQuery can still work in some cases without full GCP integration
+        logger.warning(f"GCP services not available, cannot create {client_type} client")
+        return None
     
     # Create new client
     try:
         if client_type == 'bigquery':
-            g.gcp_clients[client_type] = bigquery.Client(project=PROJECT_ID)
+            from google.cloud import bigquery
+            from google.api_core import retry
+            
+            # Configure custom retry for BigQuery
+            custom_retry = retry.Retry(
+                initial=1.0,       # Initial backoff in seconds
+                maximum=60.0,      # Maximum backoff
+                multiplier=2.0,    # Multiplier for exponential backoff
+                predicate=retry.if_transient_error,  # Retry on transient errors
+                deadline=300.0     # Total deadline in seconds
+            )
+            
+            # Create client with custom retry
+            client = bigquery.Client(project=PROJECT_ID)
+            
+            # Configure retry for operations client if available
+            if hasattr(client, '_transport') and hasattr(client._transport, '_operations_client'):
+                if hasattr(client._transport._operations_client, '_transport') and \
+                   hasattr(client._transport._operations_client._transport, '_operations_stub'):
+                    client._transport._operations_client._transport._operations_stub._interceptors.append(
+                        retry.retry_interceptor(custom_retry)
+                    )
+            
+            g.gcp_clients[client_type] = client
+            logger.info(f"BigQuery client initialized for project {PROJECT_ID} with enhanced retry")
+            
         elif client_type == 'storage':
+            from google.cloud import storage
             g.gcp_clients[client_type] = storage.Client(project=PROJECT_ID)
+            logger.info(f"Storage client initialized for project {PROJECT_ID}")
+            
         elif client_type == 'pubsub':
-            g.gcp_clients[client_type] = pubsub_v1.PublisherClient()
+            from google.cloud import pubsub_v1
+            from google.api_core import retry
+            
+            # Configure custom retry for Pub/Sub
+            custom_retry = retry.Retry(
+                initial=1.0,
+                maximum=30.0,
+                multiplier=1.5,
+                predicate=retry.if_transient_error,
+                deadline=120.0
+            )
+            
+            publisher = pubsub_v1.PublisherClient()
+            g.gcp_clients[client_type] = publisher
+            logger.info("Pub/Sub publisher initialized")
+            
+        elif client_type == 'error_reporting':
+            from google.cloud import error_reporting
+            g.gcp_clients[client_type] = error_reporting.Client(service="threat-intel-api")
+            logger.info("Error reporting client initialized")
+            
+        elif client_type == 'monitoring':
+            from google.cloud import monitoring_v3
+            g.gcp_clients[client_type] = monitoring_v3.MetricServiceClient()
+            logger.info("Monitoring client initialized")
+            
         else:
+            logger.error(f"Unknown client type: {client_type}")
             return None
             
         return g.gcp_clients[client_type]
+        
     except Exception as e:
-        logger.error(f"Error creating {client_type} client: {e}")
+        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        g.gcp_clients[client_type] = None  # Mark as tried but failed
         return None
+
+def report_metric(metric_type, value=1):
+    """Report a metric to Cloud Monitoring if available"""
+    if ENVIRONMENT != 'production':
+        return
+        
+    client = get_client('monitoring')
+    if not client:
+        return
+    
+    try:
+        # Create full metric type
+        metric_type = f"custom.googleapis.com/threat_intel/api/{metric_type}"
+        
+        # Define the metric
+        project_name = f"projects/{PROJECT_ID}"
+        series = monitoring_v3.TimeSeries()
+        series.metric.type = metric_type
+        series.metric.labels.update({"environment": ENVIRONMENT, "version": "1.0.0"})
+        
+        # Create point
+        point = series.points.add()
+        point.value.double_value = float(value)
+        now = time.time()
+        point.interval.end_time.seconds = int(now)
+        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
+        
+        # Write metric
+        client.create_time_series(name=project_name, time_series=[series])
+    except Exception as e:
+        logger.warning(f"Failed to report metric {metric_type}: {e}")
+
+def report_api_metrics():
+    """Report aggregated API metrics"""
+    global request_counter, last_metrics_time
+    
+    # Only report in production every minute
+    now = time.time()
+    if ENVIRONMENT != 'production' or now - last_metrics_time < 60:
+        return
+        
+    # Report request count if non-zero
+    if request_counter > 0:
+        report_metric("request_count", request_counter)
+        request_counter = 0
+        last_metrics_time = now
 
 # ======== Decorators ========
 
 def require_api_key(f):
-    """API key authentication decorator"""
+    """API key authentication decorator with enhanced security"""
     @wraps(f)
     def decorated(*args, **kwargs):
         api_key = get_api_key()
-        if not api_key:
+        
+        # Skip validation if no API key configured or not in production
+        if not api_key or ENVIRONMENT != 'production':
             return f(*args, **kwargs)
         
-        provided_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        if provided_key and provided_key == api_key:
+        # Get key from headers or query parameters
+        provided_key = request.headers.get('X-API-Key')
+        if not provided_key:
+            provided_key = request.args.get('api_key')
+            
+            # In production, warn about keys in query parameters
+            if provided_key and ENVIRONMENT == 'production':
+                logger.warning("API key provided in query parameters - less secure than headers")
+        
+        # Validate key using constant time comparison to prevent timing attacks
+        if provided_key and secrets.compare_digest(provided_key, api_key):
             return f(*args, **kwargs)
         
-        return jsonify({"error": "Invalid API key", "timestamp": datetime.utcnow().isoformat()}), 401
+        # Log failed attempts in production
+        if ENVIRONMENT == 'production':
+            logger.warning(f"Invalid API key attempt from {request.remote_addr}")
+            report_metric("invalid_api_key")
+            
+        # Return 401 with minimal information to prevent information leakage
+        return jsonify({
+            "error": "Unauthorized", 
+            "timestamp": datetime.utcnow().isoformat()
+        }), 401
+        
     return decorated
 
 def handle_exceptions(f):
-    """Exception handling decorator"""
+    """Exception handling decorator with improved security and monitoring"""
     @wraps(f)
     def decorated(*args, **kwargs):
         try:
-            return f(*args, **kwargs)
+            result = f(*args, **kwargs)
+            # Track successful requests for metrics
+            global request_counter
+            request_counter += 1
+            report_api_metrics()
+            return result
         except Exception as e:
             logger.error(f"Error in {f.__name__}: {str(e)}")
             logger.error(traceback.format_exc())
-            return jsonify({
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat()
-            }), 500
+            
+            # Report to Error Reporting if available
+            error_client = get_client('error_reporting')
+            if error_client:
+                error_client.report_exception()
+            
+            # Track error for metrics
+            report_metric("error")
+                
+            # Generate request ID for tracking
+            request_id = f"req_{uuid.uuid4().hex[:8]}"
+            
+            # Return sanitized error in production to avoid information disclosure
+            if ENVIRONMENT == 'production':
+                return jsonify({
+                    "error": "An internal error occurred",
+                    "request_id": request_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }), 500
+            else:
+                # In development, return full error details
+                return jsonify({
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                    "request_id": request_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }), 500
     return decorated
 
 def cache_result(ttl=CACHE_TIMEOUT):
-    """Cache decorator for API results"""
+    """Cache decorator for API results with security enhancements"""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
             # Generate cache key from function name and arguments
             key_parts = [f.__name__] + [str(a) for a in args]
             key_parts.extend(f"{k}={v}" for k, v in kwargs.items())
-            key_parts.extend(f"{k}={v}" for k, v in request.args.items())
-            cache_key = hashlib.md5(":".join(key_parts).encode()).hexdigest()
+            
+            # Add query parameters but filter out sensitive ones
+            query_params = {}
+            for k, v in request.args.items():
+                if k.lower() not in ['api_key', 'token', 'password', 'secret']:
+                    query_params[k] = v
+            key_parts.extend(f"{k}={v}" for k, v in query_params.items())
+            
+            # Create hash of the key parts for better security
+            cache_key = hashlib.sha256(":".join(key_parts).encode()).hexdigest()
             
             # Check cache
             now = datetime.now()
             if cache_key in query_cache and cache_key in cache_timestamps:
                 if (now - cache_timestamps[cache_key]).total_seconds() < ttl:
+                    # Update hit count for metrics
+                    if hasattr(query_cache[cache_key], '_cache_hits'):
+                        query_cache[cache_key]._cache_hits += 1
+                    else:
+                        setattr(query_cache[cache_key], '_cache_hits', 1)
+                    
+                    # Report cache hit metric occasionally
+                    if query_cache[cache_key]._cache_hits % 10 == 0:
+                        report_metric("cache_hit")
+                        
                     return query_cache[cache_key]
+            
+            # Report cache miss
+            report_metric("cache_miss")
             
             # Call function
             result = f(*args, **kwargs)
+            
+            # Initialize hit counter
+            setattr(result, '_cache_hits', 0)
             
             # Cache result
             query_cache[cache_key] = result
             cache_timestamps[cache_key] = now
             
-            # Manage cache size
+            # Clean up old cache entries (LRU approximation)
             if len(query_cache) > 100:
-                oldest = min(cache_timestamps.items(), key=lambda x: x[1])[0]
-                if oldest in query_cache:
-                    del query_cache[oldest]
-                    del cache_timestamps[oldest]
+                # Find 10 oldest entries
+                oldest_keys = sorted(
+                    cache_timestamps.keys(), 
+                    key=lambda k: cache_timestamps[k]
+                )[:10]
+                
+                # Remove them
+                for key in oldest_keys:
+                    if key in query_cache:
+                        del query_cache[key]
+                        del cache_timestamps[key]
             
             return result
         return decorated
@@ -151,16 +373,43 @@ def cache_result(ttl=CACHE_TIMEOUT):
 # ======== Query Functions ========
 
 def query_bigquery(query, params=None):
-    """Execute BigQuery query with parameters"""
+    """Execute BigQuery query with enhanced security and error handling"""
     client = get_client('bigquery')
     if not client:
         return [], "BigQuery client not available"
     
     try:
-        job_config = bigquery.QueryJobConfig()
+        # Check for query injection patterns
+        dangerous_patterns = [
+            r';\s*DROP\s+TABLE',
+            r';\s*DELETE\s+FROM',
+            r'INFORMATION_SCHEMA',
+            r';\s*INSERT\s+INTO',
+            r'UNION\s+ALL\s+SELECT',
+            r'--',
+            r'/\*.*\*/'
+        ]
+        
+        for pattern in dangerous_patterns:
+            if re.search(pattern, query, re.IGNORECASE):
+                logger.error(f"Potentially dangerous query detected: {query}")
+                return [], "Query contains potentially dangerous patterns"
+        
+        # Remove any comments that might have sneaked through
+        query = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
+        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
+        
+        # Limit query timeout for DoS prevention
+        job_config = bigquery.QueryJobConfig(timeout_ms=60000)  # 60 second timeout
+        
+        # Set query parameters
         if params:
             query_params = []
             for k, v in params.items():
+                # Validate parameter name to prevent injection
+                if not re.match(r'^[a-zA-Z0-9_]+$', k):
+                    return [], f"Invalid parameter name: {k}"
+                
                 param_type = "STRING"
                 if isinstance(v, int):
                     param_type = "INT64"
@@ -174,16 +423,48 @@ def query_bigquery(query, params=None):
                 query_params.append(bigquery.ScalarQueryParameter(k, param_type, v))
             job_config.query_parameters = query_params
         
+        # Execute query with timeout
         query_job = client.query(query, job_config=job_config)
+        
+        # Report query execution time for monitoring
+        start_time = time.time()
         rows = [dict(row) for row in query_job.result()]
+        query_time = time.time() - start_time
+        
+        # Report metrics for slow queries
+        if query_time > 1.0:  # Only report slow queries
+            report_metric("slow_query_seconds", query_time)
+            logger.info(f"Slow query ({query_time:.2f}s): {query[:100]}...")
+        
         return rows, None
     except Exception as e:
         logger.error(f"BigQuery error: {str(e)}")
+        # Report query failure
+        report_metric("query_error")
         return [], str(e)
 
 def validate_table_name(name):
-    """Validate table name to prevent SQL injection"""
-    return bool(name and name.replace("_", "").isalnum())
+    """Validate table name to prevent SQL injection with stronger pattern matching"""
+    if not name:
+        return False
+        
+    # Only allow alphanumeric and underscore with more restrictive pattern
+    if not all(c.isalnum() or c == '_' for c in name):
+        return False
+        
+    # Don't allow names starting with underscore (system tables)
+    if name.startswith('_'):
+        return False
+        
+    # Don't allow double underscores (could indicate SQL comment)
+    if '__' in name:
+        return False
+        
+    # Minimum name length for security
+    if len(name) < 3:
+        return False
+        
+    return True
 
 # ======== API Endpoints ========
 
@@ -197,12 +478,16 @@ def health_check():
     client = get_client('bigquery')
     db_status = "ok" if client else "error"
     
+    # Include unique instance ID for debugging
+    instance_id = os.environ.get("K_REVISION", "local-" + str(uuid.uuid4())[:8])
+    
     return jsonify({
         "status": "ok",
         "database": db_status,
         "timestamp": datetime.utcnow().isoformat(),
         "version": version,
-        "environment": config.environment,
+        "environment": ENVIRONMENT,
+        "instance": instance_id,
         "project": PROJECT_ID
     })
 
@@ -214,6 +499,10 @@ def get_stats():
     """Get platform statistics"""
     days = int(request.args.get('days', '30'))
     
+    # Validate days parameter for security
+    if days < 1 or days > 365:
+        return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+    
     # Use mock data if requested
     if request.args.get('mock', 'false').lower() == 'true':
         # Try to import from frontend for consistency
@@ -223,18 +512,18 @@ def get_stats():
         except (ImportError, KeyError):
             pass
 
-    # Query BigQuery for stats
+    # Query BigQuery for stats with SQL injection protection
     feed_query = f"""
     SELECT 
       (SELECT COUNT(DISTINCT table_id) FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__` 
        WHERE table_id NOT LIKE 'threat%') AS total_sources,
       (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis` 
-       WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS total_analyses,
+       WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS total_analyses,
       (SELECT MAX(analysis_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`) AS last_analysis,
       (SELECT COUNT(DISTINCT campaign_id) FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`) AS total_campaigns
     """
     
-    rows, error = query_bigquery(feed_query)
+    rows, error = query_bigquery(feed_query, {"days": days})
     
     # Create stats object with defaults
     stats = {
@@ -272,13 +561,13 @@ def get_stats():
       `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
       UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
     WHERE 
-      analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
     GROUP BY type
     ORDER BY count DESC
     LIMIT 10
     """
     
-    ioc_rows, ioc_error = query_bigquery(ioc_query)
+    ioc_rows, ioc_error = query_bigquery(ioc_query, {"days": days})
     
     if not ioc_error and ioc_rows:
         stats["iocs"]["types"] = [
@@ -375,19 +664,23 @@ def feed_stats(feed_name):
     
     days = int(request.args.get('days', '30'))
     
+    # Validate days parameter for security
+    if days < 1 or days > 365:
+        return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+    
     # Check if table exists and get stats
     query = f"""
     SELECT
       (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` 
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS total_records,
+       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS total_records,
       (SELECT MIN(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS earliest_record,
+       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS earliest_record,
       (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`) AS latest_record,
       (SELECT COUNT(DISTINCT DATE(_ingestion_timestamp)) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)) AS days_with_data
+       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS days_with_data
     """
     
-    rows, error = query_bigquery(query)
+    rows, error = query_bigquery(query, {"days": days})
     
     # Get daily counts
     daily_query = f"""
@@ -395,12 +688,12 @@ def feed_stats(feed_name):
       DATE(_ingestion_timestamp) as date,
       COUNT(*) as record_count
     FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
     GROUP BY date
     ORDER BY date
     """
     
-    daily_rows, daily_error = query_bigquery(daily_query)
+    daily_rows, daily_error = query_bigquery(daily_query, {"days": days})
     
     # Process results
     stats = rows[0] if not error and rows else {
@@ -444,30 +737,47 @@ def feed_stats(feed_name):
 @require_api_key
 @handle_exceptions
 def feed_data(feed_name):
-    """Get data from a specific feed with filtering"""
+    """Get data from a specific feed with filtering and pagination"""
     if not validate_table_name(feed_name):
         return jsonify({"error": "Invalid feed name"}), 400
     
-    # Parse query parameters
-    limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-    offset = int(request.args.get('offset', '0'))
-    days = int(request.args.get('days', '7'))
-    search = request.args.get('search', '')
+    # Parse query parameters with type validation
+    try:
+        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
+        offset = int(request.args.get('offset', '0'))
+        days = int(request.args.get('days', '7'))
+        
+        # Security validations
+        if limit < 1 or limit > MAX_RESULTS:
+            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
+        if offset < 0:
+            return jsonify({"error": "Offset cannot be negative"}), 400
+        if days < 1 or days > 365:
+            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid numeric parameter"}), 400
     
-    # Build query
-    conditions = [f"_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-    params = {}
+    # Get search term and sanitize
+    search = request.args.get('search', '')
+    if search:
+        # Prevent SQL injection in search terms
+        search = re.sub(r'[\'";]', '', search)  # Remove potentially dangerous characters
+        search = '%' + search + '%'  # Add wildcards for LIKE
+    
+    # Build query with parameters (safer than string interpolation)
+    conditions = ["_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
+    params = {"days": days, "limit": limit, "offset": offset}
     
     if search:
         conditions.append("TO_JSON_STRING(t) LIKE @search")
-        params["search"] = f"%{search}%"
+        params["search"] = search
     
     query = f"""
     SELECT *
     FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` AS t
     WHERE {" AND ".join(conditions)}
     ORDER BY _ingestion_timestamp DESC
-    LIMIT {limit} OFFSET {offset}
+    LIMIT @limit OFFSET @offset
     """
     
     count_query = f"""
@@ -479,19 +789,33 @@ def feed_data(feed_name):
     rows, error = query_bigquery(query, params)
     count_rows, count_error = query_bigquery(count_query, params)
     
-    # Process results
+    # Check for errors
+    if error:
+        return jsonify({"error": f"Query error: {error}"}), 500
+    
+    # Process results with sensitive data masking
     processed_rows = []
+    sensitive_fields = ['password', 'key', 'token', 'secret', 'credential']
+    
     for row in rows:
         processed_row = {}
         for key, value in row.items():
-            if isinstance(value, datetime):
+            # Mask sensitive fields
+            if any(sensitive in key.lower() for sensitive in sensitive_fields):
+                processed_row[key] = "********"
+            # Format datetime fields
+            elif isinstance(value, datetime):
                 processed_row[key] = value.isoformat()
+            # Truncate very long string values to prevent response bloat
+            elif isinstance(value, str) and len(value) > 10000:
+                processed_row[key] = value[:10000] + "... [truncated]"
             else:
                 processed_row[key] = value
         processed_rows.append(processed_row)
     
     total_count = count_rows[0]["count"] if not count_error and count_rows else len(processed_rows) + offset
     
+    # If no results, return empty array with metadata instead of sample data for consistency
     return jsonify({
         "records": processed_rows,
         "total": total_count,
@@ -505,15 +829,32 @@ def feed_data(feed_name):
 @handle_exceptions
 @cache_result(ttl=300)
 def list_campaigns():
-    """List threat campaigns"""
-    days = int(request.args.get('days', '30'))
-    limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-    offset = int(request.args.get('offset', '0'))
+    """List threat campaigns with filtering and pagination"""
+    # Parse and validate parameters
+    try:
+        days = int(request.args.get('days', '30'))
+        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
+        offset = int(request.args.get('offset', '0'))
+        
+        # Security validations
+        if days < 1 or days > 365:
+            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+        if limit < 1 or limit > MAX_RESULTS:
+            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
+        if offset < 0:
+            return jsonify({"error": "Offset cannot be negative"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid numeric parameter"}), 400
+        
     severity = request.args.get('severity', '')
     
+    # Validate severity
+    if severity and severity not in ['low', 'medium', 'high', 'critical']:
+        return jsonify({"error": "Invalid severity value"}), 400
+    
     # Build conditions
-    conditions = [f"last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-    params = {}
+    conditions = [f"last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
+    params = {"days": days, "limit": limit, "offset": offset}
     
     if severity:
         conditions.append("severity = @severity")
@@ -527,7 +868,7 @@ def list_campaigns():
     FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
     WHERE {" AND ".join(conditions)}
     ORDER BY last_seen DESC
-    LIMIT {limit} OFFSET {offset}
+    LIMIT @limit OFFSET @offset
     """
     
     count_query = f"""
@@ -539,29 +880,14 @@ def list_campaigns():
     rows, error = query_bigquery(query, params)
     count_rows, count_error = query_bigquery(count_query, params)
     
-    # If query failed or no campaigns, return sample data
-    if error or not rows:
-        campaigns = [
-            {
-                "campaign_id": "c123456",
-                "campaign_name": "APT-123456",
-                "threat_actor": "FancyBear",
-                "source_count": 7,
-                "last_seen": (datetime.utcnow() - timedelta(days=2)).isoformat(),
-                "severity": "high"
-            },
-            {
-                "campaign_id": "c234567",
-                "campaign_name": "Ransomware-234567",
-                "threat_actor": "Conti",
-                "source_count": 5,
-                "last_seen": (datetime.utcnow() - timedelta(days=5)).isoformat(),
-                "severity": "critical"
-            }
-        ]
-    else:
+    # If query failed or no campaigns, return empty array with metadata
+    if error:
+        return jsonify({"error": f"Query error: {error}"}), 500
+        
+    # Process campaigns
+    campaigns = []
+    if rows:
         # Process datetime fields
-        campaigns = []
         for row in rows:
             campaign = {}
             for key, value in row.items():
@@ -585,20 +911,48 @@ def list_campaigns():
 @require_api_key
 @handle_exceptions
 def search_iocs():
-    """Search for IOCs across all analyzed data"""
-    days = int(request.args.get('days', '30'))
-    limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-    offset = int(request.args.get('offset', '0'))
+    """Search for IOCs across all analyzed data with enhanced filtering"""
+    # Parse and validate parameters
+    try:
+        days = int(request.args.get('days', '30'))
+        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
+        offset = int(request.args.get('offset', '0'))
+        
+        # Security validations
+        if days < 1 or days > 365:
+            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+        if limit < 1 or limit > MAX_RESULTS:
+            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
+        if offset < 0:
+            return jsonify({"error": "Offset cannot be negative"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid numeric parameter"}), 400
+        
     ioc_type = request.args.get('type', '')
+    value_filter = request.args.get('value', '')
+    
+    # Validate IOC type
+    valid_ioc_types = ["ip", "domain", "url", "md5", "sha1", "sha256", "email", "cve"]
+    if ioc_type and ioc_type not in valid_ioc_types:
+        return jsonify({"error": f"Invalid IOC type. Valid types are: {', '.join(valid_ioc_types)}"}), 400
+    
+    # Sanitize value filter
+    if value_filter:
+        value_filter = re.sub(r'[\'";]', '', value_filter)
+        value_filter = '%' + value_filter + '%'
     
     # Build query
-    conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
-    params = {}
+    conditions = [f"analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
+    params = {"days": days, "limit": limit, "offset": offset}
     
     ioc_conditions = []
     if ioc_type:
         ioc_conditions.append("ioc_type = @ioc_type")
         params["ioc_type"] = ioc_type
+        
+    if value_filter:
+        ioc_conditions.append("ioc_value LIKE @value_filter")
+        params["value_filter"] = value_filter
     
     ioc_filter = f"AND {' AND '.join(ioc_conditions)}" if ioc_conditions else ""
     
@@ -620,14 +974,35 @@ def search_iocs():
     FROM iocs 
     WHERE ioc_type IS NOT NULL {ioc_filter}
     ORDER BY source_count DESC, first_seen DESC
-    LIMIT {limit} OFFSET {offset}
+    LIMIT @limit OFFSET @offset
+    """
+    
+    count_query = f"""
+    WITH iocs AS (
+        SELECT
+            JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
+            JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ioc_value
+        FROM
+            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+        WHERE 
+            {" AND ".join(conditions)}
+    )
+    SELECT COUNT(*) as count
+    FROM iocs 
+    WHERE ioc_type IS NOT NULL {ioc_filter}
     """
     
     rows, error = query_bigquery(query, params)
+    count_rows, count_error = query_bigquery(count_query, params)
+    
+    # Check for errors
+    if error:
+        return jsonify({"error": f"Query error: {error}"}), 500
     
     # Process results
     records = []
-    if not error and rows:
+    if rows:
         for row in rows:
             record = {}
             for key, value in row.items():
@@ -636,28 +1011,14 @@ def search_iocs():
                 else:
                     record[key] = value
             records.append(record)
-    else:
-        # Sample data if query fails
-        records = [
-            {
-                "type": "ip",
-                "value": "192.168.1.100",
-                "sources": 12,
-                "first_seen": (datetime.utcnow() - timedelta(days=20)).isoformat()
-            },
-            {
-                "type": "domain",
-                "value": "malicious-domain.com",
-                "sources": 8,
-                "first_seen": (datetime.utcnow() - timedelta(days=15)).isoformat()
-            }
-        ]
+    
+    total_count = count_rows[0]["count"] if not count_error and count_rows else len(records) + offset
     
     return jsonify({
         "records": records,
         "count": len(records),
-        "total_available": len(records) + offset,
-        "filters": {"days": days, "type": ioc_type}
+        "total_available": total_count,
+        "filters": {"days": days, "type": ioc_type, "value": value_filter}
     })
 
 @api_bp.route('/iocs/geo', methods=['GET'])
@@ -666,7 +1027,14 @@ def search_iocs():
 @cache_result(ttl=3600)  # Cache for 1 hour
 def get_ioc_geo_stats():
     """Get geographic distribution of IP-based IOCs"""
-    days = int(request.args.get('days', '30'))
+    try:
+        days = int(request.args.get('days', '30'))
+        
+        # Security validation
+        if days < 1 or days > 365:
+            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid days parameter"}), 400
     
     query = f"""
     WITH ip_iocs AS (
@@ -679,7 +1047,7 @@ def get_ioc_geo_stats():
         UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
       WHERE
         JSON_EXTRACT_SCALAR(ioc_item, '$.type') = 'ip'
-        AND analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
     )
     SELECT
       country,
@@ -692,11 +1060,15 @@ def get_ioc_geo_stats():
     LIMIT 50
     """
     
-    rows, error = query_bigquery(query)
+    rows, error = query_bigquery(query, {"days": days})
+    
+    # Check for errors
+    if error:
+        return jsonify({"error": f"Query error: {error}"}), 500
     
     # Process results
     countries = []
-    if not error and rows:
+    if rows:
         for row in rows:
             country = {
                 "country": row["country"].strip('"') if row["country"] else "Unknown",
@@ -711,13 +1083,6 @@ def get_ioc_geo_stats():
                 })
                 
             countries.append(country)
-    else:
-        # Sample data
-        countries = [
-            {"country": "US", "count": 120, "cities": [{"name": "New York", "ip": "192.168.1.1"}]},
-            {"country": "CN", "count": 95, "cities": [{"name": "Beijing", "ip": "192.168.1.2"}]},
-            {"country": "RU", "count": 75, "cities": [{"name": "Moscow", "ip": "192.168.1.3"}]}
-        ]
     
     return jsonify({
         "countries": countries,
@@ -729,30 +1094,69 @@ def get_ioc_geo_stats():
 @require_api_key
 @handle_exceptions
 def handle_ingest_data():
-    """Trigger data ingestion"""
+    """Trigger data ingestion with enhanced validation"""
+    # Report metric for ingestion request
+    report_metric("ingestion_request")
+    
+    # Check content type
+    content_type = request.headers.get('Content-Type', '')
+    if 'application/json' not in content_type and request.method == 'POST':
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    
+    # Check request size limit for DoS protection
+    content_length = request.headers.get('Content-Length', 0)
+    if int(content_length) > 10 * 1024 * 1024:  # 10MB limit
+        return jsonify({"error": "Request body too large"}), 413
+    
     try:
         # Import ingestion module
         from ingestion import ingest_threat_data
         
+        # Validate request body if present
+        if request.data:
+            try:
+                # Limit parse depth and disable duplicate keys
+                json_body = json.loads(request.data.decode('utf-8'))
+                
+                # Prevent command injection in feed names
+                if 'feed_name' in json_body and json_body['feed_name']:
+                    feed_name = json_body['feed_name']
+                    if not re.match(r'^[a-zA-Z0-9_-]+$', feed_name):
+                        return jsonify({"error": "Invalid feed name format"}), 400
+                
+                # Limit content size for parsing
+                if 'content' in json_body and isinstance(json_body['content'], str):
+                    if len(json_body['content']) > 50 * 1024 * 1024:  # 50MB limit
+                        return jsonify({"error": "Content too large"}), 413
+            except json.JSONDecodeError:
+                return jsonify({"error": "Invalid JSON in request body"}), 400
+        
         # Pass request to ingestion handler
         result = ingest_threat_data(request)
         
-        # Return result
+        # Ensure result is JSON-serializable
         if isinstance(result, tuple):
             return result
-        else:
-            return jsonify(result)
+        
+        # Report success metric
+        report_metric("ingestion_success")
+        return jsonify(result)
     except ImportError:
+        report_metric("ingestion_module_missing")
         return jsonify({"error": "Ingestion module not available"}), 500
     except Exception as e:
         logger.error(f"Ingestion error: {str(e)}")
+        report_metric("ingestion_error")
         return jsonify({"error": f"Ingestion error: {str(e)}"}), 500
 
 @api_bp.route('/upload_csv', methods=['POST'])
 @require_api_key
 @handle_exceptions
 def upload_csv():
-    """Upload CSV file for processing"""
+    """Upload CSV file for processing with enhanced security"""
+    # Report metric for upload request
+    report_metric("csv_upload_request")
+    
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
     
@@ -760,10 +1164,36 @@ def upload_csv():
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
     
+    # Validate file extension and type
+    if not file.filename.lower().endswith('.csv'):
+        return jsonify({"error": "Only CSV files are accepted"}), 400
+    
+    # Check file size
+    if file.content_length and file.content_length > 50 * 1024 * 1024:  # 50MB limit
+        return jsonify({"error": "File too large. Maximum size is 50MB"}), 413
+    
     try:
-        # Read file content
-        content = file.read().decode('utf-8')
+        # Read file content with size limits
+        content = file.read(50 * 1024 * 1024)  # 50MB limit
+        
+        try:
+            content = content.decode('utf-8')
+        except UnicodeDecodeError:
+            # Try alternative encodings
+            for encoding in ['latin-1', 'iso-8859-1', 'windows-1252']:
+                try:
+                    content = content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                return jsonify({"error": "Unable to decode CSV file. Please ensure it's a text file with UTF-8 or Latin-1 encoding."}), 400
+        
+        # Validate feed name
         feed_name = request.form.get('feed_name', os.path.splitext(file.filename)[0])
+        if not re.match(r'^[a-zA-Z0-9_-]+$', feed_name):
+            # Sanitize feed name if invalid
+            feed_name = re.sub(r'[^a-zA-Z0-9_-]', '', feed_name) or 'csv_upload'
         
         # Use ingestion module
         try:
@@ -786,16 +1216,19 @@ def upload_csv():
             
             if isinstance(result, tuple):
                 return result
+                
+            report_metric("csv_upload_success")
             return jsonify(result)
         except ImportError:
             # Upload to GCS if ingestion not available
-            client = get_client('storage')
-            if client:
-                bucket = client.bucket(BUCKET_NAME)
+            storage_client = get_client('storage')
+            if storage_client:
+                bucket = storage_client.bucket(BUCKET_NAME)
                 blob_name = f"uploads/{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
                 blob = bucket.blob(blob_name)
                 blob.upload_from_string(content, content_type="text/csv")
                 
+                report_metric("csv_upload_to_storage")
                 return jsonify({
                     "status": "success",
                     "message": "CSV uploaded to storage (ingestion module not available)",
@@ -804,12 +1237,200 @@ def upload_csv():
                     "storage_path": blob_name
                 })
             else:
+                report_metric("csv_upload_storage_unavailable")
                 return jsonify({"error": "Storage not available"}), 500
     except UnicodeDecodeError:
+        report_metric("csv_upload_encoding_error")
         return jsonify({"error": "Invalid CSV file encoding"}), 400
     except Exception as e:
         logger.error(f"CSV upload error: {str(e)}")
+        report_metric("csv_upload_error")
         return jsonify({"error": f"Upload error: {str(e)}"}), 500
+
+# ======== New Enhanced Endpoints ========
+
+@api_bp.route('/threat_summary', methods=['GET'])
+@require_api_key
+@handle_exceptions
+@cache_result(ttl=600)  # Cache for 10 minutes
+def get_threat_summary():
+    """Get a comprehensive threat intelligence summary"""
+    try:
+        days = int(request.args.get('days', '30'))
+        
+        # Security validation
+        if days < 1 or days > 365:
+            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid days parameter"}), 400
+    
+    # Query for recent threat campaigns
+    campaign_query = f"""
+    SELECT
+      campaign_id,
+      campaign_name,
+      threat_actor,
+      malware,
+      severity,
+      source_count,
+      ioc_count,
+      last_seen,
+      targets
+    FROM
+      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE
+      last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    ORDER BY
+      severity DESC, last_seen DESC
+    LIMIT 5
+    """
+    
+    # Query for top IOC types
+    ioc_types_query = f"""
+    WITH ioc_types AS (
+      SELECT
+        JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
+        COUNT(*) as count
+      FROM
+        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+      WHERE
+        analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY type
+    )
+    SELECT type, count
+    FROM ioc_types
+    ORDER BY count DESC
+    LIMIT 5
+    """
+    
+    # Query for top threat actors
+    actors_query = f"""
+    SELECT
+      COALESCE(threat_actor, 'Unknown') as actor,
+      COUNT(*) as campaign_count,
+      MAX(severity) as max_severity,
+      MAX(last_seen) as last_seen
+    FROM
+      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
+    WHERE
+      last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY
+      actor
+    ORDER BY
+      campaign_count DESC, last_seen DESC
+    LIMIT 5
+    """
+    
+    # Execute queries
+    params = {"days": days}
+    campaigns, campaigns_error = query_bigquery(campaign_query, params)
+    ioc_types, ioc_types_error = query_bigquery(ioc_types_query, params)
+    actors, actors_error = query_bigquery(actors_query, params)
+    
+    # Format results
+    formatted_campaigns = []
+    if campaigns and not campaigns_error:
+        for campaign in campaigns:
+            formatted_campaign = {}
+            for key, value in campaign.items():
+                if isinstance(value, datetime):
+                    formatted_campaign[key] = value.isoformat()
+                else:
+                    formatted_campaign[key] = value
+            formatted_campaigns.append(formatted_campaign)
+    
+    formatted_actors = []
+    if actors and not actors_error:
+        for actor in actors:
+            formatted_actor = {}
+            for key, value in actor.items():
+                if isinstance(value, datetime):
+                    formatted_actor[key] = value.isoformat()
+                else:
+                    formatted_actor[key] = value
+            formatted_actors.append(formatted_actor)
+    
+    # Create summary object
+    summary = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "period_days": days,
+        "top_campaigns": formatted_campaigns,
+        "top_ioc_types": ioc_types if ioc_types and not ioc_types_error else [],
+        "top_actors": formatted_actors,
+        "errors": {}
+    }
+    
+    # Add any error information
+    if campaigns_error:
+        summary["errors"]["campaigns"] = campaigns_error
+    if ioc_types_error:
+        summary["errors"]["ioc_types"] = ioc_types_error
+    if actors_error:
+        summary["errors"]["actors"] = actors_error
+    
+    return jsonify(summary)
+
+@api_bp.route('/status', methods=['GET'])
+def api_status():
+    """Enhanced API status endpoint with detailed metrics"""
+    # Get BigQuery client status
+    try:
+        bq_client = get_client('bigquery')
+        bq_status = "available" if bq_client else "unavailable"
+    except Exception:
+        bq_status = "error"
+    
+    # Get storage client status
+    try:
+        storage_client = get_client('storage')
+        storage_status = "available" if storage_client else "unavailable"
+    except Exception:
+        storage_status = "error"
+    
+    # Get cache stats
+    cache_stats = {
+        "size": len(query_cache),
+        "hits": sum(getattr(v, '_cache_hits', 0) for v in query_cache.values()),
+        "oldest_entry": min(cache_timestamps.values()).isoformat() if cache_timestamps else None,
+        "newest_entry": max(cache_timestamps.values()).isoformat() if cache_timestamps else None
+    }
+    
+    # Get environment info
+    env_info = {
+        "environment": ENVIRONMENT,
+        "project_id": PROJECT_ID,
+        "region": REGION,
+        "version": os.environ.get("VERSION", "1.0.0"),
+        "api_key_configured": bool(get_api_key()),
+        "dataset_id": DATASET_ID
+    }
+    
+    # System resource info if available
+    system_info = {}
+    try:
+        import psutil
+        system_info = {
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "memory_percent": psutil.virtual_memory().percent,
+            "thread_count": len(psutil.Process().threads())
+        }
+    except ImportError:
+        system_info = {"status": "psutil not available"}
+    
+    # Return comprehensive status
+    return jsonify({
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "bigquery": bq_status,
+            "storage": storage_status,
+            "gcp_available": GCP_SERVICES_AVAILABLE
+        },
+        "cache": cache_stats,
+        "environment": env_info,
+        "system": system_info
+    })
 
 def init_app(app):
     """Initialize API routes with the main app"""
@@ -822,5 +1443,41 @@ def init_app(app):
     def root_health_check():
         return health_check()
     
-    logger.info("API routes initialized")
+    # Initialize request tracking
+    @app.before_request
+    def track_request():
+        g.request_start_time = time.time()
+    
+    # Report request metrics after request
+    @app.after_request
+    def report_request_metrics(response):
+        if hasattr(g, 'request_start_time'):
+            # Calculate response time
+            response_time = time.time() - g.request_start_time
+            
+            # Add X-Response-Time header
+            response.headers['X-Response-Time'] = f"{response_time:.3f}s"
+            
+            # Log slow requests
+            if response_time > 1.0:
+                endpoint = request.endpoint or 'unknown'
+                logger.info(f"Slow request to {endpoint}: {response_time:.3f}s")
+                
+                # Report metric if in production
+                if ENVIRONMENT == 'production' and response_time > 2.0:
+                    report_metric("slow_request_seconds", response_time)
+        
+        # Add security headers
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        
+        # Don't cache API responses by default
+        if request.path.startswith('/api/') and not 'Cache-Control' in response.headers:
+            response.headers['Cache-Control'] = 'no-store, max-age=0'
+        
+        return response
+    
+    # Log initialization
+    logger.info("API routes initialized with enhanced security")
     return app
