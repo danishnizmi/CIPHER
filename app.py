@@ -1,6 +1,7 @@
 """
 Threat Intelligence Platform - Main Application Module
 Initializes and configures the application, integrating all components.
+Built for production use on Google Cloud Platform with comprehensive monitoring.
 """
 
 import os
@@ -8,8 +9,9 @@ import sys
 import logging
 import traceback
 import json
-from datetime import datetime
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
+import time
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, g
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Configure enhanced logging
@@ -25,6 +27,11 @@ ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 PORT = int(os.environ.get('PORT', 8080))
 HOST = os.environ.get('HOST', '0.0.0.0')
 DEBUG_MODE = ENVIRONMENT != 'production'
+PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
+REGION = os.environ.get("GCP_REGION", "us-central1")
+
+# Track startup time for health metrics
+START_TIME = time.time()
 
 # Create a fallback Flask app for graceful degradation
 fallback_app = Flask(__name__)
@@ -37,43 +44,147 @@ available_modules = {
     'ingestion': False
 }
 
+# GCP service clients
+gcp_clients = {}
+
+# GCP service availability flag
+GCP_SERVICES_AVAILABLE = False
+try:
+    from google.cloud import secretmanager, logging as cloud_logging, error_reporting, monitoring_v3
+    import google.auth
+    import google.auth.exceptions
+    
+    GCP_SERVICES_AVAILABLE = True
+    logger.info("GCP libraries successfully imported")
+    
+    try:
+        # Get GCP credentials - will verify we have access
+        credentials, detected_project_id = google.auth.default()
+        if detected_project_id != PROJECT_ID and detected_project_id:
+            logger.warning(f"Detected project ID ({detected_project_id}) differs from configured PROJECT_ID ({PROJECT_ID})")
+            PROJECT_ID = detected_project_id
+        
+        logger.info(f"Successfully authenticated with GCP for project: {PROJECT_ID}")
+    except google.auth.exceptions.DefaultCredentialsError:
+        logger.warning("GCP credentials not available - running without GCP integration")
+        GCP_SERVICES_AVAILABLE = False
+except ImportError:
+    logger.warning("GCP libraries not available - reduced functionality")
+
+# Set up Cloud Logging if in production
+if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
+    try:
+        # Configure Cloud Logging
+        logging_client = cloud_logging.Client()
+        cloud_handler = logging_client.get_default_handler()
+        logger.setLevel(logging.INFO)
+        cloud_logger = logging_client.logger('app')
+        logger.addHandler(cloud_handler)
+        
+        # Store client for later use
+        gcp_clients['logging'] = logging_client
+        
+        # Error reporting client for unhandled exceptions
+        error_client = error_reporting.Client(service="threat-intelligence-platform")
+        gcp_clients['error_reporting'] = error_client
+        
+        # Create monitoring client
+        monitoring_client = monitoring_v3.MetricServiceClient()
+        gcp_clients['monitoring'] = monitoring_client
+        
+        logger.info("GCP logging, monitoring, and error reporting initialized")
+    except Exception as e:
+        logger.error(f"Error setting up GCP logging: {str(e)}")
+
+def report_metric(metric_type, value=1):
+    """Report a metric to Cloud Monitoring if available"""
+    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production' or 'monitoring' not in gcp_clients:
+        return
+    
+    try:
+        # Create full metric type
+        metric_type = f"custom.googleapis.com/threat_intel/{metric_type}"
+        
+        # Get client
+        client = gcp_clients['monitoring']
+        
+        # Define the metric
+        project_name = f"projects/{PROJECT_ID}"
+        series = monitoring_v3.TimeSeries()
+        series.metric.type = metric_type
+        series.metric.labels.update({"environment": ENVIRONMENT, "version": VERSION})
+        
+        # Create point
+        point = series.points.add()
+        point.value.double_value = float(value)
+        now = time.time()
+        point.interval.end_time.seconds = int(now)
+        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
+        
+        # Write metric
+        client.create_time_series(name=project_name, time_series=[series])
+        logger.debug(f"Reported metric {metric_type}: {value}")
+    except Exception as e:
+        logger.warning(f"Failed to report metric {metric_type}: {e}")
+
 # Main application initialization with robust error handling
 try:
     logger.info("Beginning application initialization...")
+    init_start_time = time.time()
     
     # Step 1: Import and initialize configuration
     logger.info("Importing config module...")
     import config
     logger.info("Initializing application configuration...")
+    
+    # Initialize secure configuration first
+    config.secure_config_init()
+    
+    # Then load app config 
     config_result = config.init_app_config()
     available_modules['config'] = True
+    
+    # Print admin password to logs in dev mode for convenience
+    if ENVIRONMENT == 'development' or DEBUG_MODE:
+        admin_password = config.get_secret("admin-initial-password")
+        if admin_password:
+            logger.info(f"Admin password available: {admin_password}")
+            print(f"\n=== ADMIN PASSWORD: {admin_password} ===\n")
     
     if isinstance(config_result, dict) and config_result.get('error'):
         logger.error(f"Configuration initialization failed: {config_result.get('error')}")
         raise RuntimeError(f"Configuration initialization failed: {config_result.get('error')}")
         
-    logger.info(f"Configuration initialized successfully")
+    logger.info(f"Configuration initialized successfully in {time.time() - init_start_time:.2f}s")
+    report_metric("init_config_success")
     
     # Step 2: Import frontend module which has the Flask app
     logger.info("Importing frontend module...")
+    frontend_start_time = time.time()
     import frontend
-    logger.info("Frontend module imported successfully")
+    logger.info(f"Frontend module imported successfully in {time.time() - frontend_start_time:.2f}s")
     available_modules['frontend'] = True
+    report_metric("init_frontend_success")
     
     # Step 3: Import API module for API endpoints
     logger.info("Importing API module...")
+    api_start_time = time.time()
     import api
-    logger.info("API module imported successfully")
+    logger.info(f"API module imported successfully in {time.time() - api_start_time:.2f}s")
     available_modules['api'] = True
+    report_metric("init_api_success")
     
     # Step 4: Import ingestion module for threat data collection
     logger.info("Importing ingestion module...")
+    ingestion_start_time = time.time()
     try:
         import ingestion
-        logger.info("Ingestion module imported successfully")
+        logger.info(f"Ingestion module imported successfully in {time.time() - ingestion_start_time:.2f}s")
         available_modules['ingestion'] = True
+        report_metric("init_ingestion_success")
     except ImportError as e:
         logger.warning(f"Ingestion module import failed (will run in minimal mode): {e}")
+        report_metric("init_ingestion_fail")
     
     # Step 5: Use the frontend's Flask app as our main app
     logger.info("Using frontend.app as the main application")
@@ -81,11 +192,18 @@ try:
     
     # Step 6: Initialize API with the app
     logger.info("Initializing API routes...")
+    api_init_start_time = time.time()
     api.init_app(app)
-    logger.info("API routes initialized successfully")
+    logger.info(f"API routes initialized successfully in {time.time() - api_init_start_time:.2f}s")
     
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    
+    # Share GCP clients with the app context
+    @app.before_request
+    def setup_gcp_clients():
+        g.gcp_clients = gcp_clients
+        g.gcp_services_available = GCP_SERVICES_AVAILABLE
     
     # Step 7: Ensure all required routes exist (important routes if not in frontend)
     if not hasattr(app, 'view_functions') or 'login' not in app.view_functions:
@@ -99,6 +217,7 @@ try:
     # Step 8: Register additional error handlers
     @app.errorhandler(404)
     def handle_not_found(e):
+        report_metric("error_404")
         logger.info(f"404 error: {request.path}")
         if request.path.startswith('/api/'):
             return jsonify({
@@ -111,8 +230,17 @@ try:
     
     @app.errorhandler(500)
     def handle_server_error(e):
+        report_metric("error_500")
         logger.error(f"500 error: {str(e)}")
         logger.error(traceback.format_exc())
+        
+        # Report to Error Reporting if available
+        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_reporting' in gcp_clients:
+            try:
+                gcp_clients['error_reporting'].report_exception()
+            except Exception:
+                pass
+                
         if request.path.startswith('/api/'):
             return jsonify({
                 "error": "Internal server error", 
@@ -122,25 +250,146 @@ try:
             }), 500
         return render_template('500.html', error="Server error occurred"), 500
     
-    # Add a simple health check handler for kubernetes/cloud run
+    # Add enhanced health check handler for kubernetes/cloud run that reports component status
+    @app.route('/health')
     @app.route('/health-check')
+    @app.route('/_ah/health')  # App Engine health check path
     def health_check():
-        """Health check endpoint for container orchestration"""
-        return jsonify({
+        """Enhanced health check endpoint for container orchestration"""
+        # Calculate uptime
+        uptime_seconds = int(time.time() - START_TIME)
+        uptime_text = str(timedelta(seconds=uptime_seconds))
+        
+        # Check BigQuery connectivity if ingestion module is available
+        db_status = "unknown"
+        if available_modules['ingestion']:
+            try:
+                from google.cloud import bigquery
+                client = bigquery.Client(project=PROJECT_ID)
+                # Simple query to check connection
+                query_job = client.query("SELECT 1")
+                query_job.result()  # Wait for query to complete
+                db_status = "ok"
+            except Exception as e:
+                logger.warning(f"Database connectivity check failed: {e}")
+                db_status = "error"
+                
+        status_data = {
             "status": "ok", 
             "components": available_modules,
+            "database": db_status,
             "timestamp": datetime.utcnow().isoformat(),
             "version": VERSION,
-            "environment": ENVIRONMENT
+            "environment": ENVIRONMENT,
+            "uptime": uptime_text,
+            "project_id": PROJECT_ID,
+            "region": REGION
+        }
+        
+        # If any core module failed, report degraded status
+        if not all(available_modules[m] for m in ['config', 'frontend', 'api']):
+            status_data['status'] = 'degraded'
+            
+        # For Kubernetes liveness probes, always return 200 OK
+        # For Kubernetes readiness probes, return status code based on component health
+        is_readiness = request.args.get('readiness') == 'true'
+        if is_readiness and status_data['status'] != 'ok':
+            return jsonify(status_data), 503  # Service Unavailable
+            
+        return jsonify(status_data)
+    
+    # Add informational app routes
+    @app.route('/version')
+    def version():
+        """Simple version endpoint"""
+        return jsonify({
+            "version": VERSION,
+            "environment": ENVIRONMENT,
+            "timestamp": datetime.utcnow().isoformat()
         })
     
-    logger.info("Application initialization completed successfully!")
+    # Add detailed status endpoint for internal use (requires authentication)
+    @app.route('/internal/status')
+    def internal_status():
+        """Detailed status endpoint for internal diagnostics"""
+        # Only allow in development or with authentication
+        if ENVIRONMENT != 'development' and not hasattr(g, 'user'):
+            return jsonify({"error": "Unauthorized"}), 401
+            
+        import platform
+        import psutil
+        
+        # System information
+        sys_info = {
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "cpus": psutil.cpu_count(),
+            "memory": {
+                "total": psutil.virtual_memory().total,
+                "available": psutil.virtual_memory().available,
+                "used_percent": psutil.virtual_memory().percent
+            },
+            "process": {
+                "cpu_percent": psutil.Process().cpu_percent(),
+                "memory_percent": psutil.Process().memory_percent(),
+                "threads": len(psutil.Process().threads())
+            }
+        }
+        
+        # Module status with import times
+        module_status = {
+            name: {"available": status} for name, status in available_modules.items()
+        }
+        
+        # Cloud services status
+        cloud_status = {
+            "gcp_available": GCP_SERVICES_AVAILABLE,
+            "project_id": PROJECT_ID,
+            "region": REGION,
+            "environment": ENVIRONMENT
+        }
+        
+        # Configuration summary (no secrets)
+        config_summary = {
+            "api_key_set": bool(config.api_key),
+            "auth_config_available": bool(config.get_cached_config('auth-config')),
+            "feed_config_available": bool(config.get_cached_config('feed-config')),
+            "bigquery_dataset": config.bigquery_dataset,
+            "gcs_bucket": config.gcs_bucket
+        }
+        
+        return jsonify({
+            "status": "ok",
+            "version": VERSION,
+            "uptime": str(timedelta(seconds=int(time.time() - START_TIME))),
+            "timestamp": datetime.utcnow().isoformat(),
+            "system": sys_info,
+            "modules": module_status,
+            "cloud": cloud_status,
+            "config": config_summary
+        })
+    
+    # Report successful initialization
+    init_time = time.time() - init_start_time
+    logger.info(f"Application initialization completed successfully in {init_time:.2f}s!")
+    report_metric("init_complete_time", init_time)
+    report_metric("init_success", 1)
 
 except Exception as e:
     # Detailed error logging if anything fails
     error_tb = traceback.format_exc()
     logger.error(f"ERROR during application initialization: {str(e)}")
     logger.error(f"Traceback: {error_tb}")
+    
+    # Report initialization failure
+    report_metric("init_failure", 1)
+    
+    # Report to Error Reporting if available
+    if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_reporting' in gcp_clients:
+        try:
+            gcp_clients['error_reporting'].report_exception()
+        except Exception:
+            pass
     
     # Use fallback app instead
     app = fallback_app
@@ -165,6 +414,8 @@ except Exception as e:
         })
 
     @app.route('/health', methods=['GET'])
+    @app.route('/health-check', methods=['GET'])
+    @app.route('/_ah/health', methods=['GET'])  # App Engine health checks
     def root_health_check():
         """Root health check endpoint (for k8s/cloud run probes)"""
         return api_health_check()
@@ -248,8 +499,24 @@ if __name__ == '__main__':
                 logger.warning(f"Initial ingestion failed: {e}")
                 logger.warning(traceback.format_exc())
         
+        # Add psutil dependency if missing
+        try:
+            import psutil
+        except ImportError:
+            logger.warning("psutil library not available - some metrics will be limited")
+        
+        # Start the application
         app.run(host=HOST, port=PORT, debug=DEBUG_MODE)
     except Exception as e:
         logger.error(f"Failed to start application: {str(e)}")
         logger.error(traceback.format_exc())
+        
+        # Report application startup failure if available
+        if GCP_SERVICES_AVAILABLE and 'error_reporting' in gcp_clients:
+            try:
+                gcp_clients['error_reporting'].report_exception()
+            except Exception:
+                pass
+        
+        # Exit with error code
         sys.exit(1)
