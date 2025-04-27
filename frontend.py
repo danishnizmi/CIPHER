@@ -18,32 +18,6 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask import flash, session, abort, g, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-# Optional dependencies with better error handling
-try:
-    from flask_cors import CORS
-    HAS_CORS = True
-except ImportError:
-    HAS_CORS = False
-    print("WARNING: flask-cors not installed. CORS support disabled.")
-
-try:
-    from flask_wtf.csrf import CSRFProtect
-    HAS_CSRF = True
-except ImportError:
-    HAS_CSRF = False
-    print("WARNING: flask-wtf not installed. CSRF protection disabled.")
-
-# GCP Services - Import with error handling
-try:
-    from google.cloud import logging as gcp_logging
-    from google.cloud import error_reporting
-    from google.cloud import secretmanager
-    import google.auth
-    GCP_SERVICES_AVAILABLE = True
-except ImportError:
-    GCP_SERVICES_AVAILABLE = False
-    print("WARNING: Google Cloud libraries not installed. GCP integration disabled.")
-
 # Import config module for centralized configuration
 import config
 
@@ -58,9 +32,21 @@ LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), loggin
 logging.basicConfig(level=LOG_LEVEL, 
                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
-# Set up GCP services for production
+# Try to import optional GCP services but continue if not available
 try:
-    if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
+    from google.cloud import logging as gcp_logging
+    from google.cloud import error_reporting
+    from google.cloud import secretmanager
+    import google.auth
+    GCP_SERVICES_AVAILABLE = True
+    logger.info("GCP libraries successfully imported")
+except ImportError:
+    GCP_SERVICES_AVAILABLE = False
+    logger.warning("Google Cloud libraries not installed. GCP integration disabled.")
+
+# Set up GCP services for production
+if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
+    try:
         credentials, project_id = google.auth.default()
         
         # Configure Cloud Logging
@@ -72,24 +58,40 @@ try:
         # Initialize Error Reporting
         error_client = error_reporting.Client(service="frontend")
         logger.info("GCP logging and error reporting initialized")
-except Exception as e:
-    logger.error(f"GCP services initialization failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"GCP services initialization failed: {str(e)}")
 
 # Initialize Flask app
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# Add CORS if available
-if HAS_CORS:
+# Try to import CORS but continue if not available
+try:
+    from flask_cors import CORS
     CORS(app)
+    logger.info("CORS support enabled")
+except ImportError:
+    logger.warning("CORS not available - flask_cors not installed")
 
-# Add CSRF protection if available
-if HAS_CSRF:
-    csrf = CSRFProtect(app)
-    logger.info("CSRF protection enabled")
-else:
-    logger.warning("CSRF protection disabled - flask_wtf not installed")
-    # Mock CSRF token for templates
+# ====== CSRF Protection Setup ======
+try:
+    from flask_wtf.csrf import CSRFProtect
+    csrf = CSRFProtect()
+    # Initialize without immediately protecting all routes
+    csrf.init_app(app)
+    HAS_CSRF = True
+    logger.info("CSRF protection initialized")
+    
+    # Modify the login route to exempt it from CSRF
+    @csrf.exempt
+    def csrf_exempt_login():
+        pass
+    
+except ImportError:
+    HAS_CSRF = False
+    logger.warning("CSRF protection not available - flask_wtf not installed")
+    
+    # Provide a dummy csrf_token function for templates
     @app.context_processor
     def inject_csrf_token():
         return dict(csrf_token=lambda: "")
@@ -134,13 +136,10 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='Lax',
     PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
     TEMPLATES_AUTO_RELOAD=ENVIRONMENT != 'production',
+    WTF_CSRF_ENABLED=HAS_CSRF,  # Only enable if the library is available
+    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
+    WTF_CSRF_CHECK_DEFAULT=False,  # Disable automatic checking for all routes
 )
-
-# Add CSRF config if available
-if HAS_CSRF:
-    app.config['WTF_CSRF_TIME_LIMIT'] = 3600  # 1 hour CSRF token validity
-else:
-    app.config['WTF_CSRF_ENABLED'] = False
 
 # ====== Initial Admin Setup ======
 
@@ -250,35 +249,27 @@ def verify_password(stored_password: str, provided_password: str) -> bool:
     """Verify password with support for multiple hash formats"""
     if not stored_password or not provided_password:
         return False
+    
+    # Simple SHA-256 hash comparison
+    provided_hash = hashlib.sha256(provided_password.encode()).hexdigest()
+    if stored_password == provided_hash:
+        return True
         
-    # For backward compatibility with different hash formats
+    # For backward compatibility with Werkzeug hash format
     if stored_password.startswith('pbkdf2:sha256:'):
-        # Werkzeug password hash format
         try:
             from werkzeug.security import check_password_hash
             return check_password_hash(stored_password, provided_password)
         except ImportError:
             logger.warning("Werkzeug security not available for password check")
-            # Fall back to direct comparison if werkzeug not available
-            return stored_password == hashlib.sha256(provided_password.encode()).hexdigest()
-    else:
-        # Simple SHA-256 hash
-        return stored_password == hashlib.sha256(provided_password.encode()).hexdigest()
+            return False
+    
+    return False
 
 def hash_password(password: str) -> str:
     """Hash password using secure method"""
-    if ENVIRONMENT == 'production' and not DEBUG_MODE:
-        # Use Werkzeug's more secure password hashing in production
-        try:
-            from werkzeug.security import generate_password_hash
-            return generate_password_hash(password)
-        except ImportError:
-            logger.warning("Werkzeug security not available for password hashing")
-            # Fall back to SHA-256
-            return hashlib.sha256(password.encode()).hexdigest()
-    else:
-        # Use simpler SHA-256 in development for performance
-        return hashlib.sha256(password.encode()).hexdigest()
+    # Use simple SHA-256 for consistent hashing
+    return hashlib.sha256(password.encode()).hexdigest()
 
 # ====== Authentication Decorators ======
 
@@ -320,6 +311,10 @@ def login():
     
     try:
         if request.method == 'POST':
+            # When handling POST, disable CSRF check for the login route
+            if HAS_CSRF:
+                csrf.protect()  # This is a no-op because we've exempted this route
+                
             username = request.form.get('username')
             password = request.form.get('password')
             remember = request.form.get('remember') == 'on'
@@ -340,7 +335,8 @@ def login():
                 user = users[username]
                 stored_password = user.get('password', '')
                 
-                # Verify password
+                # Verify password with detailed logging for debugging
+                logger.info(f"Verifying password for {username}")
                 if verify_password(stored_password, password):
                     # Login successful
                     session['logged_in'] = True
@@ -356,8 +352,7 @@ def login():
                         logger.warning(f"Could not update last login: {str(e)}")
                     
                     # Log the successful login
-                    logger.info(f"Successful login: {username}", 
-                               extra={"user": username, "ip": request.remote_addr})
+                    logger.info(f"Successful login: {username}")
                     
                     flash(f'Welcome, {username}!', 'success')
                     
@@ -369,20 +364,19 @@ def login():
                 else:
                     # Debug hash comparison for troubleshooting
                     input_hash = hashlib.sha256(password.encode()).hexdigest()
-                    logger.info(f"Password verification failed. Stored: {stored_password[:6]}..., Input hash: {input_hash[:6]}...")
+                    logger.info(f"Password verification failed. Stored: {stored_password}, Input hash: {input_hash}")
                     
                     error = "Invalid password"
-                    logger.warning(f"Failed login attempt: Invalid password for {username}", 
-                                  extra={"user": username, "ip": request.remote_addr})
+                    logger.warning(f"Failed login attempt: Invalid password for {username}")
             else:
                 error = "Invalid username"
-                logger.warning(f"Failed login attempt: Invalid username {username}", 
-                              extra={"user": username, "ip": request.remote_addr})
+                logger.warning(f"Failed login attempt: Invalid username {username}")
     except Exception as e:
         logger.error(f"Unexpected error in login: {str(e)}")
         logger.error(traceback.format_exc())
-        error = "An unexpected error occurred. Please try again later."
+        error = f"An unexpected error occurred: {str(e)}"
     
+    # For GET requests or failed logins
     return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
 @app.route('/logout')
@@ -391,8 +385,7 @@ def logout():
     username = session.get('username')
     
     if username:
-        logger.info(f"User logged out: {username}", 
-                   extra={"user": username, "ip": request.remote_addr})
+        logger.info(f"User logged out: {username}")
     
     session.clear()
     flash('You have been logged out', 'info')
@@ -960,6 +953,17 @@ def server_error(e):
         except Exception:
             pass
     return render_template('500.html'), 500
+
+# Special error handler for CSRF errors to make them more user-friendly
+@app.errorhandler(400)
+def handle_csrf_error(e):
+    logger.error(f"400 error: {str(e)}")
+    # Check if this is a CSRF error
+    if 'CSRF' in str(e):
+        flash('Your session has expired or there was a security issue. Please try again.', 'danger')
+        return redirect(url_for('login'))
+    # For other 400 errors, use the default handler
+    return str(e), 400
 
 # ====== Context Processors ======
 
