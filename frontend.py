@@ -10,6 +10,8 @@ import logging
 import hashlib
 import time
 import traceback
+import secrets
+import string
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Dict, List, Any, Optional, Union
@@ -30,7 +32,7 @@ ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 logger = logging.getLogger('frontend')
 LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(level=LOG_LEVEL, 
-                  format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
 # Try to import optional GCP services but continue if not available
 try:
@@ -96,6 +98,67 @@ except ImportError:
     def inject_csrf_token():
         return dict(csrf_token=lambda: "")
 
+# ====== Secret Manager Functions ======
+
+def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
+    """Get a secret from Secret Manager"""
+    if not GCP_SERVICES_AVAILABLE:
+        logger.warning("Secret Manager not available, cannot retrieve secret")
+        return None
+        
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{config.project_id}/secrets/{secret_id}/versions/{version_id}"
+        response = client.access_secret_version(request={"name": name})
+        
+        if response and response.payload:
+            return response.payload.data.decode("UTF-8")
+        return None
+    except Exception as e:
+        logger.error(f"Error accessing secret {secret_id}: {str(e)}")
+        return None
+
+def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
+    """Create or update a secret in Secret Manager"""
+    if not GCP_SERVICES_AVAILABLE:
+        logger.warning("Secret Manager not available, cannot create/update secret")
+        return False
+        
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        parent = f"projects/{config.project_id}"
+        
+        # Check if secret exists
+        try:
+            client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
+            secret_exists = True
+        except Exception:
+            secret_exists = False
+        
+        # Create secret if it doesn't exist
+        if not secret_exists:
+            client.create_secret(
+                request={
+                    "parent": parent,
+                    "secret_id": secret_id,
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+            logger.info(f"Created secret: {secret_id}")
+        
+        # Add new version
+        client.add_secret_version(
+            request={
+                "parent": f"{parent}/secrets/{secret_id}",
+                "payload": {"data": secret_value.encode("UTF-8")},
+            }
+        )
+        logger.info(f"Updated secret: {secret_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
+        return False
+
 # ====== Session Secret Key ======
 
 def get_secret_key() -> str:
@@ -114,10 +177,9 @@ def get_secret_key() -> str:
         # Try Secret Manager in production
         if ENVIRONMENT == 'production' and GCP_SERVICES_AVAILABLE:
             try:
-                secret_client = secretmanager.SecretManagerServiceClient()
-                secret_name = f"projects/{config.project_id}/secrets/flask-secret-key/versions/latest"
-                response = secret_client.access_secret_version(request={"name": secret_name})
-                return response.payload.data.decode("UTF-8")
+                secret = get_secret("flask-secret-key")
+                if secret:
+                    return secret
             except Exception as e:
                 logger.warning(f"Failed to get secret from Secret Manager: {str(e)}")
     except Exception as e:
@@ -125,7 +187,7 @@ def get_secret_key() -> str:
     
     # Generate a secure key if all else fails
     logger.warning("Generating temporary secret key - sessions will be invalidated on restart")
-    return hashlib.sha256(f"{time.time()}{os.urandom(24).hex()}".encode()).hexdigest()
+    return hashlib.sha256(f"{time.time()}{secrets.token_hex(32)}".encode()).hexdigest()
 
 # Configure Flask
 SECRET_KEY = get_secret_key()
@@ -143,12 +205,34 @@ app.config.update(
 
 # ====== Initial Admin Setup ======
 
-# Fixed admin password for initial setup
-ADMIN_PASSWORD = "ThreatIntel@2025"
+def generate_secure_password(length=12):
+    """Generate a secure random password"""
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for i in range(length))
+
+def get_initial_admin_password():
+    """Get the initial admin password from Secret Manager or generate a new one"""
+    # Try to get from Secret Manager
+    if GCP_SERVICES_AVAILABLE:
+        password = get_secret("admin-initial-password")
+        if password:
+            return password
+    
+    # Generate a secure password
+    new_password = generate_secure_password(16)
+    
+    # Try to store in Secret Manager
+    if GCP_SERVICES_AVAILABLE:
+        create_or_update_secret("admin-initial-password", new_password)
+    
+    return new_password
+
+# Initial admin password
+ADMIN_PASSWORD = get_initial_admin_password()
 ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 def ensure_admin_user():
-    """Ensure admin user exists with consistent password"""
+    """Ensure admin user exists with secure password"""
     try:
         # Get current auth config
         auth_config = config.get_cached_config('auth-config', force_refresh=True)
@@ -564,6 +648,10 @@ def profile():
 def change_password():
     """Handle password change form submission"""
     try:
+        # CSRF protection
+        if HAS_CSRF:
+            csrf.protect()
+            
         username = session.get('username')
         users = load_users()
         user = users.get(username, {})
@@ -614,6 +702,10 @@ def add_user_route():
     """Add user page"""
     try:
         if request.method == 'POST':
+            # CSRF protection
+            if HAS_CSRF:
+                csrf.protect()
+                
             username = request.form.get('username')
             password = request.form.get('password')
             confirm_password = request.form.get('confirm_password')
@@ -660,6 +752,10 @@ def edit_user(username):
         user = users[username]
         
         if request.method == 'POST':
+            # CSRF protection
+            if HAS_CSRF:
+                csrf.protect()
+                
             password = request.form.get('password')
             role = request.form.get('role')
             
@@ -692,6 +788,10 @@ def edit_user(username):
 def delete_user(username):
     """Delete user route"""
     try:
+        # CSRF protection
+        if HAS_CSRF:
+            csrf.protect()
+            
         users = load_users()
         
         if username not in users:
