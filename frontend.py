@@ -12,12 +12,13 @@ import time
 import traceback
 import secrets
 import string
+import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Dict, List, Any, Optional, Union
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for
-from flask import flash, session, abort, g, Response
+from flask import flash, session, abort, g, Response, current_app
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Import config module for centralized configuration
@@ -237,6 +238,142 @@ def generate_trend_data(days: int) -> List[int]:
     
     return trend
 
+# ====== API Interaction Functions ======
+
+def get_stats_data():
+    """Get statistics data from API correctly"""
+    try:
+        # Make an internal request to the stats endpoint
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/stats"
+        
+        # Include days parameter if present in current request
+        days = request.args.get('days', '30')
+        api_url = f"{api_url}?days={days}"
+        
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.error(f"Error getting stats: status code {response.status_code}")
+            return {
+                'feeds': {},
+                'campaigns': {}, 
+                'iocs': {'types': []}, 
+                'analyses': {}
+            }
+    except Exception as e:
+        logger.error(f"Error getting stats: {str(e)}")
+        return {
+            'feeds': {},
+            'campaigns': {}, 
+            'iocs': {'types': []}, 
+            'analyses': {}
+        }
+
+def get_feeds_data():
+    """Get feeds data from API"""
+    try:
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/feeds"
+        
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {'feed_details': []}
+    except Exception as e:
+        logger.error(f"Error getting feeds: {str(e)}")
+        return {'feed_details': []}
+
+def get_iocs_data():
+    """Get IOCs data from API"""
+    try:
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/iocs"
+        
+        # Include query params if present
+        days = request.args.get('days', '30')
+        api_url = f"{api_url}?days={days}"
+        
+        ioc_type = request.args.get('type')
+        if ioc_type:
+            api_url = f"{api_url}&type={ioc_type}"
+            
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {'records': []}
+    except Exception as e:
+        logger.error(f"Error getting IOCs: {str(e)}")
+        return {'records': []}
+
+def get_campaigns_data():
+    """Get campaigns data from API"""
+    try:
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/campaigns"
+        
+        # Include query params if present
+        days = request.args.get('days', '30')
+        api_url = f"{api_url}?days={days}"
+        
+        severity = request.args.get('severity')
+        if severity:
+            api_url = f"{api_url}&severity={severity}"
+            
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {'campaigns': []}
+    except Exception as e:
+        logger.error(f"Error getting campaigns: {str(e)}")
+        return {'campaigns': []}
+
+def get_feed_stats(feed_name):
+    """Get feed stats from API"""
+    try:
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/feeds/{feed_name}/stats"
+        
+        days = request.args.get('days', '30')
+        api_url = f"{api_url}?days={days}"
+        
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {}
+    except Exception as e:
+        logger.error(f"Error getting feed stats: {str(e)}")
+        return {}
+
+def get_feed_data(feed_name):
+    """Get feed data from API"""
+    try:
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/feeds/{feed_name}/data"
+        
+        limit = request.args.get('limit', '100')
+        api_url = f"{api_url}?limit={limit}"
+        
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {'records': []}
+    except Exception as e:
+        logger.error(f"Error getting feed data: {str(e)}")
+        return {'records': []}
+
 # ====== Authentication Decorators ======
 
 def login_required(f):
@@ -440,11 +577,8 @@ def dashboard(view=None):
         
         # Load statistics for all views
         try:
-            # Import API module
-            from api import api_bp
-            
-            # Get statistics
-            stats_response = api_bp.get_stats()
+            # Get statistics using the helper function
+            stats_response = get_stats_data()
             context['stats'] = stats_response
             
             # Extract trends from statistics
@@ -459,17 +593,17 @@ def dashboard(view=None):
             
             # Load view-specific data
             if current_view == 'feeds':
-                feeds_response = api_bp.list_feeds()
+                feeds_response = get_feeds_data()
                 context['feed_items'] = feeds_response.get('feed_details', [])
                 context['feed_type_descriptions'] = {feed['name']: feed.get('description', 'Threat Intelligence Feed') 
                                                   for feed in context['feed_items']}
                 
             elif current_view == 'iocs':
-                iocs_response = api_bp.search_iocs()
+                iocs_response = get_iocs_data()
                 context['ioc_items'] = iocs_response.get('records', [])
                 
             elif current_view == 'campaigns':
-                campaigns_response = api_bp.list_campaigns()
+                campaigns_response = get_campaigns_data()
                 context['campaigns'] = campaigns_response.get('campaigns', [])
                 
             else:
@@ -494,25 +628,16 @@ def dashboard(view=None):
                     context['activity_counts'] = generate_trend_data(days)
                 
                 # Load campaigns for dashboard
-                campaigns_response = api_bp.list_campaigns()
+                campaigns_response = get_campaigns_data()
                 context['campaigns'] = campaigns_response.get('campaigns', [])[:3]
                 
                 # Load IOCs for dashboard
-                iocs_response = api_bp.search_iocs()
+                iocs_response = get_iocs_data()
                 context['top_iocs'] = iocs_response.get('records', [])[:4]
                 
-        except ImportError:
-            logger.warning("API module not available - cannot load dashboard data")
-            context['stats'] = {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}}
-            context['feed_trend'] = 0
-            context['ioc_trend'] = 0
-            context['campaign_trend'] = 0
-            context['analysis_trend'] = 0
-            context['ioc_type_labels'] = []
-            context['ioc_type_values'] = []
-            flash('API service unavailable. Some information may be missing.', 'warning')
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
+            logger.error(traceback.format_exc())
             safe_report_exception()
             
             # Initialize empty data structures on error
@@ -745,49 +870,29 @@ def campaigns():
 def ingest_threat_data():
     """Trigger data ingestion manually"""
     try:
-        # Import ingestion function directly
-        from ingestion import ThreatDataIngestion
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/ingest_threat_data"
         
-        # Create ingestion instance and process feeds
-        ingestion_engine = ThreatDataIngestion()
-        results = ingestion_engine.process_all_feeds()
+        response = requests.post(api_url, json={"process_all": True})
         
         # Log operation
         username = session.get('username')
-        logger.info(f"Manual ingestion triggered by {username}: {len(results)} feeds processed")
+        logger.info(f"Manual ingestion triggered by {username}")
         
-        # Handle success/failure messaging
-        success_count = sum(1 for r in results if r.get('status') == 'success')
-        if success_count == len(results):
-            flash(f'Threat data refreshed successfully. Processed {len(results)} feeds.', 'success')
-        elif success_count > 0:
-            flash(f'Threat data refresh partially completed. {success_count} of {len(results)} feeds processed successfully.', 'warning')
+        if response.status_code == 200:
+            result = response.json()
+            success_count = sum(1 for r in result.get('results', []) if r.get('status') == 'success')
+            total_count = len(result.get('results', []))
+            
+            if success_count == total_count and total_count > 0:
+                flash(f'Threat data refreshed successfully. Processed {total_count} feeds.', 'success')
+            elif success_count > 0:
+                flash(f'Threat data refresh partially completed. {success_count} of {total_count} feeds processed successfully.', 'warning')
+            else:
+                flash('Failed to refresh threat data. Please check logs for details.', 'danger')
         else:
-            flash('Failed to refresh threat data. Please check logs for details.', 'danger')
+            flash('Failed to trigger data ingestion. API returned error.', 'danger')
             
-        # Publish event to Pub/Sub to trigger analysis
-        try:
-            if GCP_SERVICES_AVAILABLE:
-                from google.cloud import pubsub_v1
-                publisher = pubsub_v1.PublisherClient()
-                topic_path = publisher.topic_path(config.project_id, config.get("PUBSUB_TOPIC", "threat-data-ingestion"))
-                
-                message = {
-                    "event_type": "manual_ingestion",
-                    "user": username,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "feeds_processed": len(results),
-                    "success_count": success_count
-                }
-                
-                data = json.dumps(message).encode("utf-8")
-                publisher.publish(topic_path, data=data)
-        except Exception as e:
-            logger.warning(f"Failed to publish ingestion event: {str(e)}")
-            
-    except ImportError:
-        logger.error("Ingestion module not available")
-        flash('Ingestion module not available. Please check your installation.', 'danger')
     except Exception as e:
         logger.error(f"Error triggering threat data ingestion: {str(e)}")
         logger.error(traceback.format_exc())
@@ -803,15 +908,12 @@ def dynamic_content_detail(content_type, identifier):
     try:
         data = {}
         
-        # Import API module
-        from api import api_bp
-        
         if content_type == 'ioc':
             # Split identifier
             ioc_type, ioc_value = identifier.split('/', 1)
             
             # Get IOCs with matching type/value
-            iocs_data = api_bp.search_iocs()
+            iocs_data = get_iocs_data()
             
             # Find the matching IOC
             for ioc in iocs_data.get('records', []):
@@ -821,7 +923,7 @@ def dynamic_content_detail(content_type, identifier):
                     
             # Get related campaigns
             if data:
-                campaigns_data = api_bp.list_campaigns()
+                campaigns_data = get_campaigns_data()
                 data['campaigns'] = []
                 
                 for campaign in campaigns_data.get('campaigns', [])[:3]:
@@ -834,7 +936,7 @@ def dynamic_content_detail(content_type, identifier):
                 
         elif content_type == 'campaign':
             # Get campaign details
-            campaigns_data = api_bp.list_campaigns()
+            campaigns_data = get_campaigns_data()
             
             # Find the specific campaign
             for campaign in campaigns_data.get('campaigns', []):
@@ -845,7 +947,7 @@ def dynamic_content_detail(content_type, identifier):
             # Enrich with additional data
             if data:
                 # Get IOCs related to this campaign
-                iocs_data = api_bp.search_iocs()
+                iocs_data = get_iocs_data()
                 data['iocs'] = iocs_data.get('records', [])[:5]
                 
                 # Add description if missing
@@ -854,8 +956,8 @@ def dynamic_content_detail(content_type, identifier):
                 
         elif content_type == 'feed':
             # Get feed stats and data
-            feed_stats = api_bp.feed_stats(identifier)
-            feed_data = api_bp.feed_data(identifier)
+            feed_stats = get_feed_stats(identifier)
+            feed_data = get_feed_data(identifier)
             
             # Combine data
             data = feed_stats or {}
@@ -864,8 +966,8 @@ def dynamic_content_detail(content_type, identifier):
             
             # Add description if missing
             if 'description' not in data:
-                feed_details = api_bp.list_feeds()
-                for feed in feed_details.get('feed_details', []):
+                feeds_data = get_feeds_data()
+                for feed in feeds_data.get('feed_details', []):
                     if feed.get('name') == identifier:
                         data['description'] = feed.get('description', f"Feed: {identifier}")
                         break
@@ -882,9 +984,6 @@ def dynamic_content_detail(content_type, identifier):
         
         return render_template('detail.html', **context)
     
-    except ImportError:
-        flash('API service unavailable. Cannot load details.', 'warning')
-        return redirect(url_for('dashboard'))
     except Exception as e:
         logger.error(f"Error loading detail page for {content_type}/{identifier}: {str(e)}")
         logger.error(traceback.format_exc())
