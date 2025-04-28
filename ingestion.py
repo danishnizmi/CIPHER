@@ -32,21 +32,20 @@ import config
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# GCP Configuration
+# Configuration from config module
 PROJECT_ID = config.project_id
 BUCKET_NAME = config.gcs_bucket
 DATASET_ID = config.bigquery_dataset
 PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-data-ingestion")
+ENVIRONMENT = config.environment
 
 # Global clients
-bq_client = None
-storage_client = None
-publisher = None
+_clients = {}
 
 # Rate limiting management
 _last_request_time = defaultdict(float)
@@ -62,6 +61,17 @@ _rate_limit_delays = {
 BQ_INSERT_BATCH_SIZE = 500  # Number of rows to insert in a single batch
 BQ_MAX_RETRIES = 5         # Maximum number of retries for BigQuery operations
 BQ_RETRY_DELAY = 1.5       # Base delay factor for exponential backoff
+
+# GCP service availability flag
+GCP_SERVICES_AVAILABLE = False
+try:
+    from google.cloud import bigquery, storage, pubsub_v1, secretmanager
+    from google.api_core import retry, exceptions
+    import google.auth
+    GCP_SERVICES_AVAILABLE = True
+    logger.info("GCP libraries successfully imported for ingestion module")
+except ImportError:
+    logger.warning("GCP libraries not available for ingestion module - will operate in degraded mode")
 
 # Enhanced Open Source Feed Definitions with direct links
 FEED_SOURCES = {
@@ -141,53 +151,72 @@ FEED_SOURCES = {
 
 def get_client(client_type: str):
     """Get or initialize a Google Cloud client with proper retry settings"""
-    global bq_client, storage_client, publisher
+    global _clients
+    
+    # Return cached client if available
+    if client_type in _clients and _clients[client_type] is not None:
+        return _clients[client_type]
+    
+    if not GCP_SERVICES_AVAILABLE and client_type not in ['bigquery']:
+        # BigQuery can still work in some cases without full GCP integration
+        logger.warning(f"GCP services not available, cannot create {client_type} client")
+        return None
     
     try:
         if client_type == 'bigquery':
-            if bq_client is None:
-                # Configure custom retry for BigQuery
-                custom_retry = retry.Retry(
-                    initial=1.0,  # Initial backoff in seconds
-                    maximum=60.0, # Maximum backoff
-                    multiplier=2.0, # Multiplier for exponential backoff
-                    predicate=retry.if_transient_error, # Retry on transient errors
-                    deadline=300.0 # Total deadline in seconds
-                )
-                
-                # Create client with custom retry
-                bq_client = bigquery.Client(project=PROJECT_ID)
-                bq_client._transport._operations_client._transport._operations_stub._interceptors.append(
-                    retry.retry_interceptor(custom_retry)
-                )
-                logger.info(f"BigQuery client initialized for project {PROJECT_ID} with enhanced retry")
-            return bq_client
+            # Configure custom retry for BigQuery
+            custom_retry = retry.Retry(
+                initial=1.0,       # Initial backoff in seconds
+                maximum=60.0,      # Maximum backoff
+                multiplier=2.0,    # Multiplier for exponential backoff
+                predicate=retry.if_transient_error,  # Retry on transient errors
+                deadline=300.0     # Total deadline in seconds
+            )
+            
+            # Create client
+            client = bigquery.Client(project=PROJECT_ID)
+            
+            # Configure retry for operations client
+            if hasattr(client, '_transport') and hasattr(client._transport, '_operations_client'):
+                if hasattr(client._transport._operations_client, '_transport') and \
+                   hasattr(client._transport._operations_client._transport, '_operations_stub'):
+                    client._transport._operations_client._transport._operations_stub._interceptors.append(
+                        retry.retry_interceptor(custom_retry)
+                    )
+            
+            _clients[client_type] = client
+            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
             
         elif client_type == 'storage':
-            if storage_client is None:
-                storage_client = storage.Client(project=PROJECT_ID)
-                logger.info(f"Storage client initialized for project {PROJECT_ID}")
-            return storage_client
+            _clients[client_type] = storage.Client(project=PROJECT_ID)
+            logger.info(f"Storage client initialized for project {PROJECT_ID}")
             
         elif client_type == 'pubsub':
-            if publisher is None:
-                # Configure custom retry for Pub/Sub
-                custom_retry = retry.Retry(
-                    initial=1.0,
-                    maximum=30.0,
-                    multiplier=1.5,
-                    predicate=retry.if_transient_error,
-                    deadline=120.0
-                )
-                publisher = pubsub_v1.PublisherClient()
-                logger.info("Pub/Sub publisher initialized")
-            return publisher
+            # Configure custom retry for Pub/Sub
+            custom_retry = retry.Retry(
+                initial=1.0,
+                maximum=30.0,
+                multiplier=1.5,
+                predicate=retry.if_transient_error,
+                deadline=120.0
+            )
+            
+            _clients[client_type] = pubsub_v1.PublisherClient()
+            logger.info("Pub/Sub publisher initialized")
+            
+        elif client_type == 'secretmanager':
+            _clients[client_type] = secretmanager.SecretManagerServiceClient()
+            logger.info("Secret Manager client initialized")
             
         else:
             logger.error(f"Unknown client type: {client_type}")
             return None
+            
+        return _clients[client_type]
+        
     except Exception as e:
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        _clients[client_type] = None  # Mark as tried but failed
         return None
 
 def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0):
@@ -304,7 +333,7 @@ def ensure_resources(force_create=False) -> bool:
             # Add metadata
             dataset.description = "Threat Intelligence Platform Dataset"
             dataset.labels = {
-                "env": config.environment,
+                "env": ENVIRONMENT,
                 "department": "security",
                 "application": "threat-intelligence"
             }
@@ -386,7 +415,7 @@ def ensure_resources(force_create=False) -> bool:
                 
                 # Add table description and expiration
                 table.description = feed_config.get("description", "Threat Intelligence Feed")
-                if config.environment != "production":
+                if ENVIRONMENT != "production":
                     # Set 90-day expiration for non-production environments
                     expiration_ms = 90 * 24 * 60 * 60 * 1000  # 90 days in milliseconds
                     table.expires = datetime.now() + timedelta(days=90)
@@ -489,6 +518,59 @@ def ensure_resources(force_create=False) -> bool:
         logger.error(f"Error ensuring resources: {str(e)}")
         return False
 
+def _get_api_keys() -> Dict[str, str]:
+    """Get API keys for authenticated feeds from Secret Manager or config"""
+    api_keys = {}
+    
+    # Try to get from config cache first
+    api_keys_config = config.get_cached_config('api-keys')
+    
+    if not api_keys_config:
+        logger.warning("No API keys configuration found")
+        return api_keys
+    
+    # Extract keys for each feed that needs authentication
+    for feed_name, feed_config in FEED_SOURCES.items():
+        if feed_config.get("auth_required", False):
+            key_name = f"{feed_name}_api_key"
+            api_keys[feed_name] = api_keys_config.get(key_name)
+            
+            if not api_keys.get(feed_name):
+                # Try alternate key name format
+                alternate_key = feed_name.replace("_", "-") + "-api-key"
+                api_keys[feed_name] = api_keys_config.get(alternate_key)
+    
+    return api_keys
+
+def publish_event(topic: str, data: Dict[str, Any]) -> bool:
+    """Publish event to Pub/Sub topic with retry logic"""
+    pubsub_client = get_client('pubsub')
+    if not pubsub_client:
+        logger.warning(f"Pub/Sub client not available, cannot publish to {topic}")
+        return False
+    
+    try:
+        topic_path = pubsub_client.topic_path(PROJECT_ID, topic)
+        json_data = json.dumps(data).encode("utf-8")
+        
+        # Publish with retry
+        for attempt in range(3):
+            try:
+                future = pubsub_client.publish(topic_path, data=json_data)
+                message_id = future.result(timeout=30)
+                logger.info(f"Published event {message_id} to {topic}")
+                return True
+            except Exception as e:
+                if attempt == 2:  # Last attempt
+                    raise
+                logger.warning(f"Publish attempt {attempt+1} failed: {str(e)}, retrying...")
+                time.sleep(1.5 ** attempt)
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error publishing message to {topic}: {str(e)}")
+        return False
+
 class ThreatDataIngestion:
     """Enhanced threat data ingestion class with improved reliability and performance"""
     
@@ -511,7 +593,7 @@ class ThreatDataIngestion:
         logger.info(f"Processing {len(FEED_SOURCES)} feeds")
         
         # Get API keys for authenticated feeds
-        api_keys = self._get_api_keys()
+        api_keys = _get_api_keys()
         
         # Process feeds in order of reliability (most reliable first)
         feed_order = ["cisa_known", "tor_exit", "feodotracker", "urlhaus", "phishtank", "threatfox", "alienvault_otx", "misp_feed"]
@@ -573,28 +655,6 @@ class ThreatDataIngestion:
         
         return results
     
-    def _get_api_keys(self) -> Dict[str, str]:
-        """Get API keys for authenticated feeds from Secret Manager"""
-        api_keys = {}
-        api_keys_config = config.get_cached_config('api-keys', force_refresh=True)
-        
-        if not api_keys_config:
-            logger.warning("No API keys configuration found")
-            return api_keys
-        
-        # Extract keys for each feed that needs authentication
-        for feed_name, feed_config in FEED_SOURCES.items():
-            if feed_config.get("auth_required", False):
-                key_name = f"{feed_name}_api_key"
-                api_keys[feed_name] = api_keys_config.get(key_name)
-                
-                if not api_keys.get(feed_name):
-                    # Try alternate key name format
-                    alternate_key = feed_name.replace("_", "-") + "-api-key"
-                    api_keys[feed_name] = api_keys_config.get(alternate_key)
-        
-        return api_keys
-    
     def _store_stats(self) -> bool:
         """Store feed statistics in GCS for persistence"""
         storage_client = get_client('storage')
@@ -641,7 +701,7 @@ class ThreatDataIngestion:
             api_key = None
             auth_header = None
             if feed_config.get("auth_required", False):
-                api_keys = self._get_api_keys()
+                api_keys = _get_api_keys()
                 api_key = api_keys.get(feed_name)
                 auth_header = feed_config.get("auth_header")
                 
@@ -716,7 +776,10 @@ class ThreatDataIngestion:
                 }
             
             # Publish event
-            self._publish_event(feed_name, record_count, ingestion_id)
+            try:
+                self._publish_event(feed_name, record_count, ingestion_id)
+            except Exception as e:
+                logger.warning(f"Failed to publish event for {feed_name}: {e}")
             
             # Return success result
             duration = (datetime.now() - start_time).total_seconds()
@@ -1326,235 +1389,19 @@ class ThreatDataIngestion:
     
     def _publish_event(self, feed_name: str, count: int, ingestion_id: str) -> bool:
         """Publish event to Pub/Sub to trigger analysis with enhanced retry"""
-        client = get_client('pubsub')
-        if not client:
-            logger.error("Pub/Sub publisher not initialized")
-            return False
+        # Prepare message
+        message = {
+            "feed_name": feed_name,
+            "record_count": count,
+            "timestamp": datetime.utcnow().isoformat(),
+            "event_type": "ingestion_complete",
+            "ingestion_id": ingestion_id,
+            "project_id": PROJECT_ID,
+            "dataset_id": DATASET_ID
+        }
         
-        try:
-            topic_path = client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
-            
-            # Prepare message
-            message = {
-                "feed_name": feed_name,
-                "record_count": count,
-                "timestamp": datetime.utcnow().isoformat(),
-                "event_type": "ingestion_complete",
-                "ingestion_id": ingestion_id,
-                "project_id": PROJECT_ID,
-                "dataset_id": DATASET_ID
-            }
-            
-            data = json.dumps(message).encode("utf-8")
-            
-            # Publish message with explicit retry
-            for retry_attempt in range(3):
-                try:
-                    future = client.publish(topic_path, data=data)
-                    message_id = future.result(timeout=30)
-                    logger.info(f"Published ingestion event {message_id} for {feed_name}")
-                    return True
-                except Exception as e:
-                    if retry_attempt < 2:
-                        delay = 1.0 * (2 ** retry_attempt)
-                        logger.warning(f"PubSub publish error: {str(e)}, retrying in {delay}s")
-                        time.sleep(delay)
-                    else:
-                        raise
-            
-            return False
-        except Exception as e:
-            logger.error(f"Error publishing message: {str(e)}")
-            return False
-
-    def get_feed_statistics(self) -> Dict:
-        """Get statistics about ingested data with enhanced visualization data"""
-        client = get_client('bigquery')
-        if not client:
-            return {"error": "BigQuery client not initialized"}
-        
-        try:
-            stats = {
-                "feeds": [],
-                "total_records": 0,
-                "active_feeds": 0,
-                "timestamp": datetime.utcnow().isoformat(),
-                "last_ingestion_run": self.feed_stats.get("last_run", "Never"),
-                "visualization_data": {
-                    "daily_counts": [],
-                    "feed_distribution": [],
-                    "ioc_types": []
-                }
-            }
-            
-            # Query for all tables in the dataset
-            query = f"""
-            SELECT table_id 
-            FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__` 
-            ORDER BY table_id
-            """
-            
-            query_job = client.query(query)
-            tables = [row.table_id for row in query_job.result()]
-            
-            # Get stats for each table
-            for table_id in tables:
-                try:
-                    # Find the feed name that corresponds to this table
-                    feed_name = None
-                    feed_config = None
-                    for name, config in FEED_SOURCES.items():
-                        if config.get("table_id") == table_id:
-                            feed_name = name
-                            feed_config = config
-                            break
-                    
-                    if not feed_name:
-                        # This may be a system table or custom table
-                        if table_id.startswith(('threat_', 'system_')):
-                            continue
-                        feed_name = table_id
-                    
-                    # Query record counts - FIXED: Using full table reference
-                    full_table_id = f"`{PROJECT_ID}.{DATASET_ID}.{table_id}`"
-                    
-                    count_query = f"""
-                    SELECT 
-                        COUNT(*) as record_count,
-                        MIN(_ingestion_timestamp) as earliest_record,
-                        MAX(_ingestion_timestamp) as latest_record,
-                        COUNT(DISTINCT CAST(_ingestion_timestamp AS DATE)) as update_days
-                    FROM {full_table_id}
-                    """
-                    
-                    count_job = client.query(count_query)
-                    result = list(count_job.result())[0]
-                    
-                    record_count = result.record_count
-                    earliest = result.earliest_record.isoformat() if result.earliest_record else None
-                    latest = result.latest_record.isoformat() if result.latest_record else None
-                    update_days = result.update_days
-                    
-                    # Calculate growth rate (records per day)
-                    growth_rate = 0
-                    if update_days > 0:
-                        growth_rate = record_count / update_days
-                    
-                    feed_stats = {
-                        "feed_name": feed_name,
-                        "table_id": table_id,
-                        "record_count": record_count,
-                        "earliest_record": earliest,
-                        "latest_record": latest,
-                        "update_days": update_days,
-                        "growth_rate": growth_rate,
-                        "description": feed_config.get("description") if feed_config else "Custom feed"
-                    }
-                    
-                    # Get daily counts data if significant records
-                    if record_count > 10:
-                        daily_query = f"""
-                        SELECT 
-                            CAST(_ingestion_timestamp AS DATE) as date,
-                            COUNT(*) as record_count
-                        FROM {full_table_id}
-                        WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-                        GROUP BY date
-                        ORDER BY date
-                        """
-                        
-                        daily_job = client.query(daily_query)
-                        daily_results = list(daily_job.result())
-                        
-                        if daily_results:
-                            feed_stats["daily_counts"] = [
-                                {"date": row.date.isoformat(), "count": row.record_count}
-                                for row in daily_results
-                            ]
-                            
-                            # Add to global visualization data
-                            for row in daily_results:
-                                stats["visualization_data"]["daily_counts"].append({
-                                    "date": row.date.isoformat(),
-                                    "feed": feed_name,
-                                    "count": row.record_count
-                                })
-                    
-                    # Get IOC type distribution for relevant feeds
-                    if feed_name in ["threatfox", "alienvault_otx"]:
-                        ioc_query = f"""
-                        SELECT 
-                            ioc_type as type,
-                            COUNT(*) as count
-                        FROM {full_table_id}
-                        GROUP BY ioc_type
-                        ORDER BY count DESC
-                        LIMIT 10
-                        """
-                        
-                        try:
-                            ioc_job = client.query(ioc_query)
-                            ioc_results = list(ioc_job.result())
-                            
-                            if ioc_results:
-                                feed_stats["ioc_types"] = [
-                                    {"type": row.type or "unknown", "count": row.count}
-                                    for row in ioc_results
-                                ]
-                                
-                                # Add to global visualization data
-                                for row in ioc_results:
-                                    stats["visualization_data"]["ioc_types"].append({
-                                        "feed": feed_name,
-                                        "type": row.type or "unknown",
-                                        "count": row.count
-                                    })
-                        except Exception as e:
-                            logger.warning(f"Error getting IOC types for {feed_name}: {str(e)}")
-                    
-                    stats["feeds"].append(feed_stats)
-                    stats["total_records"] += record_count
-                    
-                    # Count as active if it has data
-                    if record_count > 0:
-                        stats["active_feeds"] += 1
-                    
-                    # Add feed distribution data
-                    stats["visualization_data"]["feed_distribution"].append({
-                        "feed": feed_name,
-                        "count": record_count
-                    })
-                    
-                except Exception as e:
-                    logger.warning(f"Error getting stats for table {table_id}: {str(e)}")
-                    # Include the table with error
-                    stats["feeds"].append({
-                        "feed_name": feed_name if feed_name else table_id,
-                        "table_id": table_id,
-                        "error": str(e),
-                        "record_count": 0
-                    })
-            
-            # Add detail from last ingestion run if available
-            if self.feed_stats and "details" in self.feed_stats:
-                for feed_stat in stats["feeds"]:
-                    feed_name = feed_stat["feed_name"]
-                    # Find matching details from last run
-                    for detail in self.feed_stats["details"]:
-                        if detail.get("feed_name") == feed_name:
-                            feed_stat["last_ingestion"] = {
-                                "status": detail.get("status"),
-                                "record_count": detail.get("record_count", 0),
-                                "timestamp": detail.get("timestamp"),
-                                "duration_seconds": detail.get("duration_seconds", 0)
-                            }
-                            break
-            
-            return stats
-        except Exception as e:
-            logger.error(f"Error getting feed statistics: {str(e)}")
-            return {"error": str(e)}
-
+        return publish_event(PUBSUB_TOPIC, message)
+    
     def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
         """Analyze an uploaded CSV file to extract threat intelligence"""
         if not csv_content:
@@ -1576,21 +1423,21 @@ class ThreatDataIngestion:
             
             # Parse CSV
             csv_io = StringIO(csv_content)
-            reader = csv.reader(csv_io, dialect=dialect)
+            csv_reader = csv.reader(csv_io, dialect=dialect)
             
             # Get headers
-            headers = next(reader) if has_header else [f"column_{i+1}" for i in range(len(next(reader)))]
+            headers = next(csv_reader) if has_header else [f"column_{i+1}" for i in range(len(next(csv_reader)))]
             
             # Reset and skip the header row
             csv_io.seek(0)
             if has_header:
-                next(reader)
+                next(csv_reader)
             
             # Process the rows
             records = []
             timestamp = datetime.utcnow().isoformat()
             
-            for row in reader:
+            for row in csv_reader:
                 if not row or all(not cell.strip() for cell in row):
                     continue  # Skip empty rows
                 
@@ -1640,7 +1487,15 @@ class ThreatDataIngestion:
             
             # Trigger analysis job if records were uploaded
             if record_count > 0:
-                self._publish_event(feed_name, record_count, ingestion_id)
+                message = {
+                    "file_type": "csv",
+                    "feed_name": feed_name,
+                    "timestamp": timestamp,
+                    "event_type": "csv_upload",
+                    "analysis_id": ingestion_id,
+                    "record_count": record_count
+                }
+                publish_event(PUBSUB_TOPIC, message)
             
             return result
             
@@ -1670,7 +1525,7 @@ def ingest_threat_data(request):
     if request_json:
         # Check for statistics request
         if request_json.get("get_stats"):
-            stats = ingestion.get_feed_statistics()
+            stats = ingestion.get_feed_statistics() if hasattr(ingestion, 'get_feed_statistics') else {"status": "Stats function not available"}
             return stats
         
         # Check for CSV upload
