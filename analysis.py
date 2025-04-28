@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
+# Configuration from config module
 PROJECT_ID = config.project_id
 REGION = config.region
 DATASET_ID = config.bigquery_dataset
@@ -50,21 +50,44 @@ IOC_PATTERNS = {
     "cve": r'CVE-\d{4}-\d{4,7}',
 }
 
+# Create a dummy client for graceful degradation
+class DummyClient:
+    """Dummy client to use when a service is unavailable"""
+    
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        
+    def __getattr__(self, name):
+        def dummy_method(*args, **kwargs):
+            logger.warning(f"{self.service_name} not available, {name} called but will return None")
+            return None
+        return dummy_method
+
 # ======== Client Management ========
 
 def get_client(client_type: str):
     """Get or initialize a Google Cloud client (lazy initialization)"""
+    global _clients
+    
     if client_type in _clients:
         return _clients[client_type]
     
     try:
         if client_type == 'bigquery':
-            _clients[client_type] = bigquery.Client(project=PROJECT_ID)
-            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            try:
+                _clients[client_type] = bigquery.Client(project=PROJECT_ID)
+                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            except Exception as e:
+                logger.warning(f"BigQuery client initialization failed: {str(e)}")
+                _clients[client_type] = DummyClient("BigQuery")
             
         elif client_type == 'pubsub':
-            _clients[client_type] = pubsub_v1.PublisherClient()
-            logger.info("Pub/Sub publisher initialized")
+            try:
+                _clients[client_type] = pubsub_v1.PublisherClient()
+                logger.info("Pub/Sub publisher initialized")
+            except Exception as e:
+                logger.warning(f"Pub/Sub client initialization failed: {str(e)}")
+                _clients[client_type] = DummyClient("Pub/Sub")
             
         elif client_type == 'vertex':
             try:
@@ -89,6 +112,9 @@ def get_client(client_type: str):
 
 def extract_json_from_text(text: str) -> Optional[str]:
     """Extract JSON object from text response"""
+    if not text:
+        return None
+        
     text = text.strip()
     start_idx = text.find('{')
     end_idx = text.rfind('}') + 1
@@ -127,7 +153,7 @@ def publish_event(data: Dict[str, Any]) -> bool:
 def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
     """Execute a BigQuery query with parameters"""
     client = get_client('bigquery')
-    if not client:
+    if not client or isinstance(client, DummyClient):
         return []
         
     try:
@@ -161,7 +187,7 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
         return True
         
     client = get_client('bigquery')
-    if not client:
+    if not client or isinstance(client, DummyClient):
         return False
     
     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
@@ -272,8 +298,14 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
                     analysis = json.loads(json_str)
                     
                     # Add metadata
-                    analysis["source_id"] = metadata.get("id", "unknown") if metadata else "unknown"
-                    analysis["source_type"] = metadata.get("type", "unknown") if metadata else "unknown"
+                    source_id = "unknown"
+                    source_type = "unknown"
+                    if metadata:
+                        source_id = metadata.get("id", "unknown")
+                        source_type = metadata.get("type", "unknown")
+                        
+                    analysis["source_id"] = source_id
+                    analysis["source_type"] = source_type
                     analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
                     
                     logger.info(f"Successfully extracted structured analysis from Vertex AI")
@@ -458,7 +490,8 @@ class ThreatAnalyzer:
     def _ensure_tables(self):
         """Ensure required BigQuery tables exist"""
         client = get_client('bigquery')
-        if not client:
+        if not client or isinstance(client, DummyClient):
+            logger.warning("BigQuery not available, cannot ensure tables")
             return
             
         try:
@@ -466,6 +499,7 @@ class ThreatAnalyzer:
             analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
             try:
                 client.get_table(analysis_table_id)
+                logger.info("Analysis table already exists")
             except Exception:
                 # Create analysis table
                 schema = [
@@ -483,6 +517,7 @@ class ThreatAnalyzer:
             campaigns_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
             try:
                 client.get_table(campaigns_table_id)
+                logger.info("Campaigns table already exists")
             except Exception:
                 # Create campaigns table
                 schema = [
@@ -750,6 +785,7 @@ class ThreatAnalyzer:
             # Get sample rows for AI analysis
             import csv
             import io
+            import itertools
             
             csv_reader = csv.reader(io.StringIO(csv_content))
             headers = next(csv_reader, [])
