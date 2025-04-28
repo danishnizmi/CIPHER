@@ -240,6 +240,19 @@ def generate_trend_data(days: int) -> List[int]:
 
 # ====== API Interaction Functions ======
 
+def get_api_key() -> str:
+    """Get API key for internal requests"""
+    # Try to get API key from config module
+    api_key = getattr(config, 'api_key', None)
+    
+    # If not available directly, try to get from cached config
+    if not api_key:
+        api_keys_config = config.get_cached_config('api-keys')
+        if api_keys_config and 'platform_api_key' in api_keys_config:
+            api_key = api_keys_config['platform_api_key']
+    
+    return api_key or ''
+
 def get_stats_data():
     """Get statistics data from API correctly"""
     try:
@@ -251,7 +264,13 @@ def get_stats_data():
         days = request.args.get('days', '30')
         api_url = f"{api_url}?days={days}"
         
-        response = requests.get(api_url)
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
@@ -278,11 +297,18 @@ def get_feeds_data():
         base_url = request.url_root.rstrip('/')
         api_url = f"{base_url}/api/feeds"
         
-        response = requests.get(api_url)
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
         else:
+            logger.error(f"Error getting feeds: status code {response.status_code}")
             return {'feed_details': []}
     except Exception as e:
         logger.error(f"Error getting feeds: {str(e)}")
@@ -301,12 +327,19 @@ def get_iocs_data():
         ioc_type = request.args.get('type')
         if ioc_type:
             api_url = f"{api_url}&type={ioc_type}"
+        
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
             
-        response = requests.get(api_url)
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
         else:
+            logger.error(f"Error getting IOCs: status code {response.status_code}")
             return {'records': []}
     except Exception as e:
         logger.error(f"Error getting IOCs: {str(e)}")
@@ -325,12 +358,19 @@ def get_campaigns_data():
         severity = request.args.get('severity')
         if severity:
             api_url = f"{api_url}&severity={severity}"
+        
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
             
-        response = requests.get(api_url)
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
         else:
+            logger.error(f"Error getting campaigns: status code {response.status_code}")
             return {'campaigns': []}
     except Exception as e:
         logger.error(f"Error getting campaigns: {str(e)}")
@@ -345,11 +385,18 @@ def get_feed_stats(feed_name):
         days = request.args.get('days', '30')
         api_url = f"{api_url}?days={days}"
         
-        response = requests.get(api_url)
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
         else:
+            logger.error(f"Error getting feed stats: status code {response.status_code}")
             return {}
     except Exception as e:
         logger.error(f"Error getting feed stats: {str(e)}")
@@ -364,11 +411,18 @@ def get_feed_data(feed_name):
         limit = request.args.get('limit', '100')
         api_url = f"{api_url}?limit={limit}"
         
-        response = requests.get(api_url)
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        
+        response = requests.get(api_url, headers=headers)
         
         if response.status_code == 200:
             return response.json()
         else:
+            logger.error(f"Error getting feed data: status code {response.status_code}")
             return {'records': []}
     except Exception as e:
         logger.error(f"Error getting feed data: {str(e)}")
@@ -873,7 +927,13 @@ def ingest_threat_data():
         base_url = request.url_root.rstrip('/')
         api_url = f"{base_url}/api/ingest_threat_data"
         
-        response = requests.post(api_url, json={"process_all": True})
+        # Include API key in headers
+        api_key = get_api_key()
+        headers = {}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        
+        response = requests.post(api_url, json={"process_all": True}, headers=headers)
         
         # Log operation
         username = session.get('username')
