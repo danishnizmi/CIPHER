@@ -10,15 +10,17 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     
-    <!-- Tailwind Config -->
     <script>
         tailwind.config = {
             theme: {
                 extend: {
                     colors: {
-                        primary: '#0d6efd', secondary: '#6c757d', success: '#198754',
-                        info: '#0dcaf0', warning: '#ffc107', danger: '#dc3545',
-                        light: '#f8f9fa', dark: '#212529',
+                        primary: '#0d6efd',
+                        secondary: '#6c757d',
+                        success: '#198754',
+                        info: '#0dcaf0',
+                        warning: '#ffc107',
+                        danger: '#dc3545',
                     }
                 }
             }
@@ -27,7 +29,6 @@
     
     <style type="text/tailwindcss">
         @layer components {
-            /* Badge styles */
             .badge-ioc { @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block; }
             .badge-ip { @apply bg-amber-300 text-gray-800; }
             .badge-domain { @apply bg-emerald-400 text-gray-800; }
@@ -36,49 +37,32 @@
             .badge-email { @apply bg-orange-500 text-gray-800; }
             .badge-unknown { @apply bg-gray-300 text-gray-800; }
             
-            /* Severity indicators */
             .severity-badge { @apply inline-block px-2 py-1 rounded text-xs font-bold uppercase; }
             .severity-badge.critical { @apply bg-red-600 text-white; }
             .severity-badge.high { @apply bg-orange-500 text-white; }
             .severity-badge.medium { @apply bg-amber-400 text-gray-800; }
             .severity-badge.low { @apply bg-teal-500 text-white; }
             
-            /* Panel components */
             .panel { @apply bg-white rounded-lg shadow-md overflow-hidden mb-6; }
             .panel-header { @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center; }
             .panel-title { @apply font-semibold flex items-center; }
             .panel-icon { @apply mr-2 text-blue-600; }
-            .panel-body { @apply p-6; }
             
-            /* Cards and stats */
-            .stat-card { @apply bg-white rounded-lg shadow-md p-6 transition-shadow hover:shadow-lg; }
+            .stat-card { @apply bg-white rounded-lg shadow-md p-6 transform transition-transform hover:shadow-lg; }
             
-            /* Buttons */
             .btn { @apply px-4 py-2 rounded-md font-medium transition-colors duration-200; }
             .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
             .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
-            .btn-success { @apply bg-green-600 text-white hover:bg-green-700; }
             .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
-            .btn-warning { @apply bg-yellow-500 text-gray-800 hover:bg-yellow-600; }
             .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50; }
             .btn-sm { @apply px-3 py-1 text-sm; }
             
-            /* Forms */
-            .form-group { @apply mb-4; }
-            .form-label { @apply block text-sm font-medium text-gray-700 mb-1; }
             .form-control { @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500; }
             
-            /* Page headers */
-            .page-header { @apply flex justify-between items-center mb-6; }
-            .page-title { @apply text-2xl font-bold flex items-center; }
-            .page-icon { @apply mr-2 text-blue-600; }
-            
-            /* Sidebar navigation */
             .sidebar-item { @apply block px-4 py-2 rounded transition-colors; }
             .sidebar-item.active { @apply bg-blue-50 text-blue-600 border-l-4 border-blue-500; }
             .sidebar-item:not(.active) { @apply hover:bg-gray-50; }
             
-            /* Tables */
             .data-table { @apply min-w-full divide-y divide-gray-200; }
             .table-header { @apply bg-gray-50; }
             .table-header th { @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider; }
@@ -86,11 +70,14 @@
             .table-body tr { @apply hover:bg-gray-50; }
             .table-body td { @apply px-6 py-4 whitespace-nowrap; }
             
-            /* Empty states */
-            .empty-state { @apply flex flex-col items-center justify-center py-12 px-4 text-center; }
-            
-            /* User dropdown menu */
-            .user-dropdown { @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-10 hidden; }
+            /* User dropdown */
+            .user-dropdown {
+                @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-50;
+                display: none;
+            }
+            .user-dropdown.active {
+                display: block;
+            }
         }
     </style>
     
@@ -107,7 +94,7 @@
             <div class="flex items-center space-x-4">
                 {% if session.get('logged_in') %}
                 <div class="relative" id="userDropdownContainer">
-                    <button id="userDropdownBtn" class="flex items-center space-x-2">
+                    <button id="userDropdownButton" class="flex items-center space-x-2 focus:outline-none">
                         <i class="fas fa-user-circle text-lg"></i>
                         <span>{{ session.get('username', 'User') }}</span>
                         <span class="bg-blue-600 text-xs px-2 py-1 rounded">{{ session.get('role', 'user') }}</span>
@@ -218,7 +205,7 @@
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div class="mb-4 px-4 py-3 rounded relative {% if category == 'danger' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% elif category == 'warning' %}bg-yellow-100 text-yellow-700{% else %}bg-blue-100 text-blue-700{% endif %}">
+                        <div class="mb-4 px-4 py-3 rounded relative {% if category == 'danger' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% elif category == 'warning' %}bg-yellow-100 text-yellow-700{% else %}bg-blue-100 text-blue-700{% endif %} alert-message">
                             <span class="block sm:inline">{{ message }}</span>
                             <button class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
                                 <i class="fas fa-times"></i>
@@ -250,20 +237,21 @@
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             // User dropdown toggle
-            const userBtn = document.getElementById('userDropdownBtn');
+            const userDropdownButton = document.getElementById('userDropdownButton');
             const userDropdown = document.getElementById('userDropdown');
-            const userContainer = document.getElementById('userDropdownContainer');
             
-            if (userBtn && userDropdown) {
-                userBtn.addEventListener('click', function(e) {
+            if (userDropdownButton && userDropdown) {
+                userDropdownButton.addEventListener('click', function(e) {
                     e.stopPropagation();
-                    userDropdown.classList.toggle('hidden');
+                    userDropdown.classList.toggle('active');
                 });
                 
-                // Close dropdown when clicking outside
+                // Close dropdown when clicking elsewhere
                 document.addEventListener('click', function(e) {
-                    if (!userContainer.contains(e.target)) {
-                        userDropdown.classList.add('hidden');
+                    if (userDropdown.classList.contains('active') && 
+                        !userDropdownButton.contains(e.target) && 
+                        !userDropdown.contains(e.target)) {
+                        userDropdown.classList.remove('active');
                     }
                 });
             }
@@ -288,30 +276,30 @@
                     icon.classList.toggle('fa-times');
                 });
             }
-        
-            // Hide flash messages after 5 seconds
-            const alerts = document.querySelectorAll('.mb-4.px-4.py-3.rounded.relative');
-            alerts.forEach(alert => {
+            
+            // Auto-hide flash messages after 5 seconds
+            const alertMessages = document.querySelectorAll('.alert-message');
+            alertMessages.forEach(alert => {
                 setTimeout(() => {
                     alert.style.display = 'none';
                 }, 5000);
             });
+            
+            // Helper functions for formatting
+            window.formatNumber = function(num) {
+                return num ? num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0";
+            };
+            
+            window.formatDate = function(dateString) {
+                if (!dateString) return 'N/A';
+                try {
+                    const date = new Date(dateString);
+                    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+                } catch (e) {
+                    return dateString;
+                }
+            };
         });
-
-        // Helper functions
-        function formatNumber(num) {
-            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-        }
-        
-        function formatDate(dateString) {
-            if (!dateString) return 'N/A';
-            try {
-                const date = new Date(dateString);
-                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-            } catch (e) {
-                return dateString;
-            }
-        }
     </script>
     
     <!-- Page-specific scripts -->
