@@ -34,7 +34,8 @@ LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), loggin
 logging.basicConfig(level=LOG_LEVEL, 
                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
-# Try to import optional GCP services but continue if not available
+# GCP services availability flag
+GCP_SERVICES_AVAILABLE = False
 try:
     from google.cloud import logging as gcp_logging
     from google.cloud import error_reporting
@@ -46,7 +47,13 @@ except ImportError:
     GCP_SERVICES_AVAILABLE = False
     logger.warning("Google Cloud libraries not installed. GCP integration disabled.")
 
+# Create a dummy error reporting client to avoid failures
+class DummyErrorClient:
+    def report_exception(self, *args, **kwargs):
+        logger.warning("Error reporting attempted but API not available")
+
 # Set up GCP services for production
+error_client = DummyErrorClient()  # Default fallback
 if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
     try:
         credentials, project_id = google.auth.default()
@@ -57,11 +64,26 @@ if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
         logger.setLevel(LOG_LEVEL)
         logger.addHandler(cloud_handler)
         
-        # Initialize Error Reporting
-        error_client = error_reporting.Client(service="frontend")
+        # Initialize Error Reporting with fallback
+        try:
+            error_client = error_reporting.Client(service="frontend")
+            logger.info("GCP error reporting initialized")
+        except Exception as e:
+            logger.warning(f"Error reporting not available: {str(e)}")
+            # Existing fallback already set up
+            
         logger.info("GCP logging and error reporting initialized")
     except Exception as e:
         logger.error(f"GCP services initialization failed: {str(e)}")
+
+# Safe wrapper for error reporting
+def safe_report_exception():
+    """Safely report exception to Error Reporting"""
+    try:
+        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
+            error_client.report_exception()
+    except Exception as e:
+        logger.warning(f"Failed to report exception: {e}")
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -93,68 +115,7 @@ except ImportError:
     def inject_csrf_token():
         return dict(csrf_token=lambda: "")
 
-# ====== Secret Manager Functions ======
-
-def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
-    """Get a secret from Secret Manager"""
-    if not GCP_SERVICES_AVAILABLE:
-        logger.warning("Secret Manager not available, cannot retrieve secret")
-        return None
-        
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{config.project_id}/secrets/{secret_id}/versions/{version_id}"
-        response = client.access_secret_version(request={"name": name})
-        
-        if response and response.payload:
-            return response.payload.data.decode("UTF-8")
-        return None
-    except Exception as e:
-        logger.error(f"Error accessing secret {secret_id}: {str(e)}")
-        return None
-
-def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
-    """Create or update a secret in Secret Manager"""
-    if not GCP_SERVICES_AVAILABLE:
-        logger.warning("Secret Manager not available, cannot create/update secret")
-        return False
-        
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{config.project_id}"
-        
-        # Check if secret exists
-        try:
-            client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
-            secret_exists = True
-        except Exception:
-            secret_exists = False
-        
-        # Create secret if it doesn't exist
-        if not secret_exists:
-            client.create_secret(
-                request={
-                    "parent": parent,
-                    "secret_id": secret_id,
-                    "secret": {"replication": {"automatic": {}}},
-                }
-            )
-            logger.info(f"Created secret: {secret_id}")
-        
-        # Add new version
-        client.add_secret_version(
-            request={
-                "parent": f"{parent}/secrets/{secret_id}",
-                "payload": {"data": secret_value.encode("UTF-8")},
-            }
-        )
-        logger.info(f"Updated secret: {secret_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
-        return False
-
-# ====== Session Secret Key ======
+# ====== Secret Key for Sessions ======
 
 def get_secret_key() -> str:
     """Get secret key for Flask sessions"""
@@ -172,7 +133,7 @@ def get_secret_key() -> str:
         # Try Secret Manager in production
         if ENVIRONMENT == 'production' and GCP_SERVICES_AVAILABLE:
             try:
-                secret = get_secret("flask-secret-key")
+                secret = config.get_secret("flask-secret-key")
                 if secret:
                     return secret
             except Exception as e:
@@ -198,131 +159,75 @@ app.config.update(
     WTF_CSRF_SSL_STRICT=False,  # Allow HTTPS -> HTTP
 )
 
-# ====== Initial Admin Setup ======
+# ====== Helper Functions ======
 
-def generate_secure_password(length=12):
-    """Generate a secure random password"""
-    alphabet = string.ascii_letters + string.digits + string.punctuation
-    return ''.join(secrets.choice(alphabet) for i in range(length))
-
-def get_initial_admin_password():
-    """Get the initial admin password from Secret Manager or generate a new one"""
-    # Try to get from Secret Manager
-    if GCP_SERVICES_AVAILABLE:
-        password = get_secret("admin-initial-password")
-        if password:
-            return password
+def generate_trend_data(days: int) -> List[int]:
+    """Generate a smooth trend line for charts when real data isn't available"""
+    import random
+    from math import sin, pi
     
-    # Generate a secure password
-    new_password = generate_secure_password(16)
+    # Generate a more natural-looking trend
+    base = 50  # Base value
+    variance = 15  # Random variance
+    cycle = days / 4  # Cyclical component
     
-    # Try to store in Secret Manager
-    if GCP_SERVICES_AVAILABLE:
-        create_or_update_secret("admin-initial-password", new_password)
-    
-    return new_password
-
-# Initial admin password
-ADMIN_PASSWORD = get_initial_admin_password()
-ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
-
-def ensure_admin_user():
-    """Ensure admin user exists with secure password"""
-    try:
-        # Get current auth config
-        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+    trend = []
+    for i in range(days):
+        # Combine base, cyclical component, and random noise
+        cycle_component = sin(i * 2 * pi / cycle) * 20
+        value = max(5, int(base + cycle_component + random.randint(-variance, variance)))
+        trend.append(value)
         
-        # Check if config exists and has users
-        if not auth_config or not auth_config.get('users'):
-            # Create new config with admin user
-            if not auth_config:
-                auth_config = {}
-            
-            auth_config['users'] = {
-                'admin': {
-                    'password': ADMIN_PASSWORD_HASH,
-                    'role': 'admin',
-                    'created_at': datetime.utcnow().isoformat()
-                }
-            }
-            
-            # Ensure session secret is set
-            if 'session_secret' not in auth_config:
-                auth_config['session_secret'] = SECRET_KEY
-                
-            # Save the config
-            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
-                logger.info(f"Admin user created with password: {ADMIN_PASSWORD}")
-                print(f"\n=== ADMIN PASSWORD: {ADMIN_PASSWORD} ===\n")
-            else:
-                logger.error("Failed to save admin user configuration")
-            
-        elif 'admin' not in auth_config.get('users', {}):
-            # Add admin user to existing config
-            auth_config['users']['admin'] = {
-                'password': ADMIN_PASSWORD_HASH,
-                'role': 'admin',
-                'created_at': datetime.utcnow().isoformat()
-            }
-            
-            # Save the config
-            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
-                logger.info(f"Admin user created with password: {ADMIN_PASSWORD}")
-                print(f"\n=== ADMIN PASSWORD: {ADMIN_PASSWORD} ===\n")
-            else:
-                logger.error("Failed to save admin user configuration")
-        else:
-            logger.info("Admin user already exists")
-            
-    except Exception as e:
-        logger.error(f"Error ensuring admin user: {str(e)}")
-        logger.error(traceback.format_exc())
+        # Adjust base for next iteration (slight upward trend)
+        base += random.randint(-2, 3) / 10
+    
+    return trend
 
-# Create admin user on startup
-ensure_admin_user()
+# ====== Authentication Decorators ======
+
+def login_required(f):
+    """Decorator to require login for views"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            # Remember where the user was trying to go
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    """Decorator to require admin role"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login', next=request.url))
+        if session.get('role') != 'admin':
+            flash('Admin privileges required', 'danger')
+            return render_template('auth.html', page_type='not_authorized')
+        return f(*args, **kwargs)
+    return decorated_function
 
 # ====== Authentication Functions ======
 
 def load_users() -> Dict[str, Dict]:
     """Load user data from auth config with error handling"""
     try:
-        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+        auth_config = config.get_cached_config('auth-config')
         if auth_config and 'users' in auth_config:
             return auth_config.get('users', {})
         
-        # Create default admin user if no users exist
-        default_users = {
-            'admin': {
-                'password': ADMIN_PASSWORD_HASH,
-                'role': 'admin',
-                'created_at': datetime.utcnow().isoformat()
-            }
-        }
-        
-        # Try to save the default user
-        try:
-            if not auth_config:
-                auth_config = {}
+        # No users exist yet, ensure admin user is created
+        admin_password = config.set_initial_admin_password()
+        if admin_password and ENVIRONMENT == 'development':
+            print(f"\n=== ADMIN PASSWORD: {admin_password} ===\n")
             
-            auth_config['users'] = default_users
-            auth_config['session_secret'] = SECRET_KEY
-            config.create_or_update_secret('auth-config', json.dumps(auth_config))
-            logger.info(f"Created default admin user with password: {ADMIN_PASSWORD}")
-            print(f"\n=== ADMIN PASSWORD: {ADMIN_PASSWORD} ===\n")
-        except Exception as e:
-            logger.warning(f"Failed to save default user: {str(e)}")
+        # Reload auth config after setup
+        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+        return auth_config.get('users', {})
             
-        return default_users
     except Exception as e:
         logger.error(f"Failed to load users: {str(e)}")
-        # Return default admin in case of errors
-        return {
-            'admin': {
-                'password': ADMIN_PASSWORD_HASH,
-                'role': 'admin',
-                'created_at': datetime.utcnow().isoformat()
-            }
-        }
+        return {}
 
 def verify_password(stored_password: str, provided_password: str) -> bool:
     """Verify password with support for multiple hash formats"""
@@ -349,30 +254,6 @@ def hash_password(password: str) -> str:
     """Hash password using secure method"""
     # Use simple SHA-256 for consistent hashing
     return hashlib.sha256(password.encode()).hexdigest()
-
-# ====== Authentication Decorators ======
-
-def login_required(f):
-    """Decorator to require login for views"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            # Remember where the user was trying to go
-            return redirect(url_for('login', next=request.url))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def admin_required(f):
-    """Decorator to require admin role"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            return redirect(url_for('login', next=request.url))
-        if session.get('role') != 'admin':
-            flash('Admin privileges required', 'danger')
-            return render_template('auth.html', page_type='not_authorized')
-        return f(*args, **kwargs)
-    return decorated_function
 
 # ====== Route Handlers ======
 
@@ -403,16 +284,14 @@ def login():
                 error = "Username and password are required"
                 return render_template('auth.html', page_type='login', error=error, now=datetime.now())
             
-            # Load users and print them for debugging
+            # Load users
             users = load_users()
-            logger.info(f"Available users: {list(users.keys())}")
             
             if username in users:
                 user = users[username]
                 stored_password = user.get('password', '')
                 
-                # Verify password with detailed logging for debugging
-                logger.info(f"Verifying password for {username}")
+                # Verify password
                 if verify_password(stored_password, password):
                     # Login successful
                     session['logged_in'] = True
@@ -438,10 +317,6 @@ def login():
                         return redirect(next_page)
                     return redirect(url_for('dashboard'))
                 else:
-                    # Debug hash comparison for troubleshooting
-                    input_hash = hashlib.sha256(password.encode()).hexdigest()
-                    logger.info(f"Password verification failed. Stored: {stored_password}, Input hash: {input_hash}")
-                    
                     error = "Invalid password"
                     logger.warning(f"Failed login attempt: Invalid password for {username}")
             else:
@@ -587,8 +462,7 @@ def dashboard(view=None):
             flash('API service unavailable. Some information may be missing.', 'warning')
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
-            if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_client' in globals():
-                error_client.report_exception()
+            safe_report_exception()
             
             # Initialize empty data structures on error
             context['stats'] = {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}}
@@ -620,8 +494,7 @@ def dashboard(view=None):
     except Exception as e:
         logger.error(f"Unexpected error in dashboard: {str(e)}")
         logger.error(traceback.format_exc())
-        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_client' in globals():
-            error_client.report_exception()
+        safe_report_exception()
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('login'))
 
@@ -867,8 +740,7 @@ def ingest_threat_data():
     except Exception as e:
         logger.error(f"Error triggering threat data ingestion: {str(e)}")
         logger.error(traceback.format_exc())
-        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_client' in globals():
-            error_client.report_exception()
+        safe_report_exception()
         flash(f'Error refreshing threat data: {str(e)}', 'danger')
     
     return redirect(url_for('dashboard'))
@@ -966,34 +838,9 @@ def dynamic_content_detail(content_type, identifier):
     except Exception as e:
         logger.error(f"Error loading detail page for {content_type}/{identifier}: {str(e)}")
         logger.error(traceback.format_exc())
-        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_client' in globals():
-            error_client.report_exception()
+        safe_report_exception()
         flash('Error loading content details.', 'danger')
         return redirect(url_for('dashboard'))
-
-# ====== Helper Functions ======
-
-def generate_trend_data(days: int) -> List[int]:
-    """Generate a smooth trend line for charts when real data isn't available"""
-    import random
-    from math import sin, pi
-    
-    # Generate a more natural-looking trend
-    base = 50  # Base value
-    variance = 15  # Random variance
-    cycle = days / 4  # Cyclical component
-    
-    trend = []
-    for i in range(days):
-        # Combine base, cyclical component, and random noise
-        cycle_component = sin(i * 2 * pi / cycle) * 20
-        value = max(5, int(base + cycle_component + random.randint(-variance, variance)))
-        trend.append(value)
-        
-        # Adjust base for next iteration (slight upward trend)
-        base += random.randint(-2, 3) / 10
-    
-    return trend
 
 # ====== Template Filters ======
 
@@ -1024,11 +871,7 @@ def server_error(e):
     """Handle 500 errors"""
     logger.error(f"Server error: {str(e)}")
     logger.error(traceback.format_exc())
-    if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_client' in globals():
-        try:
-            error_client.report_exception()
-        except Exception:
-            pass
+    safe_report_exception()
     return render_template('500.html'), 500
 
 # Special error handler for CSRF errors to make them more user-friendly
