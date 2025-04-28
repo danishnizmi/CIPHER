@@ -84,11 +84,6 @@ try:
     HAS_CSRF = True
     logger.info("CSRF protection initialized")
     
-    # Modify the login route to exempt it from CSRF
-    @csrf.exempt
-    def csrf_exempt_login():
-        pass
-    
 except ImportError:
     HAS_CSRF = False
     logger.warning("CSRF protection not available - flask_wtf not installed")
@@ -200,7 +195,7 @@ app.config.update(
     TEMPLATES_AUTO_RELOAD=ENVIRONMENT != 'production',
     WTF_CSRF_ENABLED=HAS_CSRF,  # Only enable if the library is available
     WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
-    WTF_CSRF_CHECK_DEFAULT=False,  # Disable automatic checking for all routes
+    WTF_CSRF_SSL_STRICT=False,  # Allow HTTPS -> HTTP
 )
 
 # ====== Initial Admin Setup ======
@@ -389,16 +384,13 @@ def index():
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
+@csrf.exempt  # Properly exempt the login route from CSRF
 def login():
     """Login page handler with comprehensive error handling"""
     error = None
     
     try:
         if request.method == 'POST':
-            # When handling POST, disable CSRF check for the login route
-            if HAS_CSRF:
-                csrf.protect()  # This is a no-op because we've exempted this route
-                
             username = request.form.get('username')
             password = request.form.get('password')
             remember = request.form.get('remember') == 'on'
@@ -648,10 +640,7 @@ def profile():
 def change_password():
     """Handle password change form submission"""
     try:
-        # CSRF protection
-        if HAS_CSRF:
-            csrf.protect()
-            
+        # CSRF protection is applied to all POST routes except login
         username = session.get('username')
         users = load_users()
         user = users.get(username, {})
@@ -702,10 +691,6 @@ def add_user_route():
     """Add user page"""
     try:
         if request.method == 'POST':
-            # CSRF protection
-            if HAS_CSRF:
-                csrf.protect()
-                
             username = request.form.get('username')
             password = request.form.get('password')
             confirm_password = request.form.get('confirm_password')
@@ -752,10 +737,6 @@ def edit_user(username):
         user = users[username]
         
         if request.method == 'POST':
-            # CSRF protection
-            if HAS_CSRF:
-                csrf.protect()
-                
             password = request.form.get('password')
             role = request.form.get('role')
             
@@ -788,10 +769,6 @@ def edit_user(username):
 def delete_user(username):
     """Delete user route"""
     try:
-        # CSRF protection
-        if HAS_CSRF:
-            csrf.protect()
-            
         users = load_users()
         
         if username not in users:
