@@ -149,6 +149,19 @@ FEED_SOURCES = {
     }
 }
 
+# Create a dummy client for graceful degradation
+class DummyClient:
+    """Dummy client to use when a service is unavailable"""
+    
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        
+    def __getattr__(self, name):
+        def dummy_method(*args, **kwargs):
+            logger.warning(f"{self.service_name} not available, {name} called but will return None")
+            return None
+        return dummy_method
+
 def get_client(client_type: str):
     """Get or initialize a Google Cloud client with proper retry settings"""
     global _clients
@@ -160,7 +173,7 @@ def get_client(client_type: str):
     if not GCP_SERVICES_AVAILABLE and client_type not in ['bigquery']:
         # BigQuery can still work in some cases without full GCP integration
         logger.warning(f"GCP services not available, cannot create {client_type} client")
-        return None
+        return DummyClient(client_type)
     
     try:
         if client_type == 'bigquery':
@@ -210,14 +223,14 @@ def get_client(client_type: str):
             
         else:
             logger.error(f"Unknown client type: {client_type}")
-            return None
+            return DummyClient(client_type)
             
         return _clients[client_type]
         
     except Exception as e:
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-        _clients[client_type] = None  # Mark as tried but failed
-        return None
+        _clients[client_type] = DummyClient(client_type)
+        return _clients[client_type]
 
 def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0):
     """Decorator for exponential backoff retries on functions"""
@@ -317,7 +330,7 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=
 def ensure_resources(force_create=False) -> bool:
     """Ensure BigQuery datasets and tables exist with proper ACLs and metadata"""
     client = get_client('bigquery')
-    if not client:
+    if isinstance(client, DummyClient):
         return False
     
     try:
@@ -356,7 +369,7 @@ def ensure_resources(force_create=False) -> bool:
         
         # Create GCS bucket if needed
         storage_client = get_client('storage')
-        if storage_client:
+        if not isinstance(storage_client, DummyClient):
             try:
                 bucket = storage_client.get_bucket(BUCKET_NAME)
                 logger.info(f"GCS bucket {BUCKET_NAME} already exists")
@@ -365,6 +378,14 @@ def ensure_resources(force_create=False) -> bool:
                 bucket = storage_client.create_bucket(BUCKET_NAME, location="us-central1")
                 logger.info(f"Created GCS bucket {BUCKET_NAME}")
         
+        # Define standard fields all tables should have
+        standard_fields = [
+            bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
+            bigquery.SchemaField("_ingestion_id", "STRING"),
+            bigquery.SchemaField("_source", "STRING"),
+            bigquery.SchemaField("_feed_type", "STRING")
+        ]
+        
         # Create tables if they don't exist
         for feed_name, feed_config in FEED_SOURCES.items():
             table_id = feed_config["table_id"]
@@ -372,19 +393,28 @@ def ensure_resources(force_create=False) -> bool:
             
             try:
                 if not force_create:
-                    client.get_table(full_table_id)
+                    table = client.get_table(full_table_id)
                     logger.info(f"Table {table_id} already exists")
+                    
+                    # Check if standard fields exist
+                    existing_fields = {field.name for field in table.schema}
+                    missing_fields = []
+                    for field in standard_fields:
+                        if field.name not in existing_fields:
+                            missing_fields.append(field)
+                    
+                    if missing_fields:
+                        # Update schema with missing fields
+                        new_schema = list(table.schema) + missing_fields
+                        table.schema = new_schema
+                        client.update_table(table, ["schema"])
+                        logger.info(f"Added missing standard fields to {table_id}: {[f.name for f in missing_fields]}")
                 else:
                     # Force table creation for testing
                     raise NotFound("Forcing table creation")
             except NotFound:
                 # Create with enhanced schema based on feed type
-                schema = [
-                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                    bigquery.SchemaField("_ingestion_id", "STRING"),
-                    bigquery.SchemaField("_source", "STRING"),
-                    bigquery.SchemaField("_feed_type", "STRING")
-                ]
+                schema = standard_fields.copy()
                 
                 # Add feed-specific fields
                 feed_format = feed_config.get("format")
@@ -504,7 +534,7 @@ def ensure_resources(force_create=False) -> bool:
         
         # Ensure PubSub topic exists
         pubsub_client = get_client('pubsub')
-        if pubsub_client:
+        if not isinstance(pubsub_client, DummyClient):
             topic_path = pubsub_client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
             try:
                 pubsub_client.get_topic(request={"topic": topic_path})
@@ -545,7 +575,7 @@ def _get_api_keys() -> Dict[str, str]:
 def publish_event(topic: str, data: Dict[str, Any]) -> bool:
     """Publish event to Pub/Sub topic with retry logic"""
     pubsub_client = get_client('pubsub')
-    if not pubsub_client:
+    if isinstance(pubsub_client, DummyClient):
         logger.warning(f"Pub/Sub client not available, cannot publish to {topic}")
         return False
     
@@ -658,7 +688,7 @@ class ThreatDataIngestion:
     def _store_stats(self) -> bool:
         """Store feed statistics in GCS for persistence"""
         storage_client = get_client('storage')
-        if not storage_client or not self.feed_stats:
+        if isinstance(storage_client, DummyClient) or not self.feed_stats:
             return False
         
         try:
@@ -950,15 +980,30 @@ class ThreatDataIngestion:
         """Process feed data into standardized records with enhanced type handling"""
         feed_format = feed_config.get("format", "json")
         
+        # Initialize an empty result list
+        records = []
+        
+        # Process based on format
         if feed_format == "json":
-            return self._process_json_data(data, feed_name, feed_config, ingestion_id)
+            records = self._process_json_data(data, feed_name, feed_config, ingestion_id)
         elif feed_format == "csv":
-            return self._process_csv_data(data, feed_name, feed_config, ingestion_id)
+            records = self._process_csv_data(data, feed_name, feed_config, ingestion_id)
         elif feed_format == "text":
-            return self._process_text_data(data, feed_name, feed_config, ingestion_id)
+            records = self._process_text_data(data, feed_name, feed_config, ingestion_id)
         else:
             logger.error(f"Unsupported format: {feed_format}")
             return []
+        
+        # Ensure all required metadata fields are present in every record
+        timestamp = datetime.utcnow().isoformat()
+        for record in records:
+            # Add/normalize metadata fields for consistency
+            record["_ingestion_timestamp"] = record.get("_ingestion_timestamp", timestamp)
+            record["_ingestion_id"] = record.get("_ingestion_id", ingestion_id)
+            record["_source"] = record.get("_source", feed_name)
+            record["_feed_type"] = record.get("_feed_type", feed_config.get("description", "Threat Intelligence Feed"))
+        
+        return records
     
     def _process_json_data(self, data: Any, feed_name: str, feed_config: Dict, ingestion_id: str) -> List[Dict]:
         """Process JSON feed data with enhanced format handling"""
@@ -1225,12 +1270,20 @@ class ThreatDataIngestion:
             return "STRING"
     
     def _get_schema_for_records(self, records: List[Dict]) -> List[bigquery.SchemaField]:
-        """Dynamically generate schema from records"""
+        """Dynamically generate schema from records with required metadata fields"""
         if not records:
             return []
         
+        # Add required metadata fields that should always be present
+        required_fields = {
+            "_ingestion_timestamp": "TIMESTAMP",
+            "_ingestion_id": "STRING",
+            "_source": "STRING",
+            "_feed_type": "STRING"
+        }
+        
         # Get a list of all fields from all records
-        field_types = {}
+        field_types = required_fields.copy()
         
         # Process each record
         for record in records:
@@ -1252,6 +1305,51 @@ class ThreatDataIngestion:
         
         return schema
     
+    def _update_table_schema(self, client, full_table_id: str, missing_fields: set) -> bool:
+        """Update table schema to add new fields with better error handling"""
+        try:
+            # Get current table
+            table = client.get_table(full_table_id)
+            current_schema = table.schema
+            
+            # Create a map of existing field names
+            existing_fields = {field.name: field for field in current_schema}
+            
+            # Create new schema fields
+            new_schema_fields = []
+            for field_name in missing_fields:
+                if field_name not in existing_fields:
+                    # Special handling for known fields
+                    field_type = "STRING"  # Default type
+                    
+                    if field_name == "_ingestion_timestamp":
+                        field_type = "TIMESTAMP"
+                    elif field_name == "_ingestion_id":
+                        field_type = "STRING"
+                    elif field_name == "_source":
+                        field_type = "STRING"
+                    elif field_name == "_feed_type":
+                        field_type = "STRING"
+                    
+                    new_schema_fields.append(
+                        bigquery.SchemaField(field_name, field_type)
+                    )
+            
+            if not new_schema_fields:
+                return False  # No new fields to add
+            
+            # Update schema
+            updated_schema = list(current_schema) + new_schema_fields
+            table.schema = updated_schema
+            
+            # Update the table with the new schema
+            client.update_table(table, ["schema"])
+            logger.info(f"Updated schema for {full_table_id} with fields: {', '.join(f.name for f in new_schema_fields)}")
+            return True
+        except Exception as e:
+            logger.error(f"Schema update error: {str(e)}")
+            return False
+    
     def _upload_to_bigquery(self, records: List[Dict], feed_name: str, feed_config: Dict) -> int:
         """Upload records to BigQuery with automatic table creation and batch processing"""
         if not records:
@@ -1259,7 +1357,7 @@ class ThreatDataIngestion:
             return 0
         
         client = get_client('bigquery')
-        if not client:
+        if isinstance(client, DummyClient):
             logger.error("BigQuery client not initialized")
             return 0
         
@@ -1280,7 +1378,7 @@ class ThreatDataIngestion:
             if not table_exists:
                 schema = self._get_schema_for_records(records)
                 if not schema:
-                    # Fallback to minimal schema
+                    # Define standard fields all tables should have
                     schema = [
                         bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
                         bigquery.SchemaField("_ingestion_id", "STRING"),
@@ -1329,42 +1427,28 @@ class ThreatDataIngestion:
                             break
                         
                         # Handle schema evolution for errors
-                        if retry_attempt == 0 and "no such field" in str(errors):
+                        if "no such field" in str(errors):
                             logger.warning(f"Schema mismatch errors: {errors}")
                             
-                            # Get current schema
-                            table = client.get_table(full_table_id)
-                            existing_fields = {field.name for field in table.schema}
+                            # Extract field names that need to be added
+                            missing_fields = set()
+                            for error_item in errors:
+                                for error in error_item.get('errors', []):
+                                    error_msg = error.get('message', '')
+                                    if 'no such field' in error_msg:
+                                        field_name = error.get('location', '').strip()
+                                        if field_name:
+                                            missing_fields.add(field_name)
                             
-                            # Find new fields
-                            new_fields = set()
-                            for record in batch:
-                                for key in record:
-                                    if key not in existing_fields:
-                                        new_fields.add(key)
-                            
-                            if new_fields:
-                                logger.info(f"Adding {len(new_fields)} new fields to schema: {new_fields}")
-                                new_schema_fields = [
-                                    bigquery.SchemaField(
-                                        field_name, 
-                                        self._infer_schema_type(next((r.get(field_name) for r in batch if field_name in r), None))
-                                    )
-                                    for field_name in new_fields
-                                ]
+                            if missing_fields:
+                                logger.info(f"Attempting to add missing fields: {missing_fields}")
+                                success = self._update_table_schema(client, full_table_id, missing_fields)
                                 
-                                # Update schema
-                                schema = list(table.schema)
-                                schema.extend(new_schema_fields)
-                                table.schema = schema
-                                
-                                client.update_table(table, ["schema"])
-                                logger.info(f"Updated schema for {full_table_id}")
-                                
-                                # Continue to next retry attempt
-                                continue
+                                if success:
+                                    logger.info("Schema updated, retrying insertion")
+                                    continue  # Try insert again with updated schema
                         
-                        # Apply backoff delay
+                        # Apply backoff delay for other errors
                         if retry_attempt < BQ_MAX_RETRIES - 1:
                             delay = BQ_RETRY_DELAY * (2 ** retry_attempt)
                             logger.warning(f"Insertion errors, retry {retry_attempt+1}/{BQ_MAX_RETRIES} in {delay:.2f}s: {errors[:2]}")
@@ -1525,7 +1609,7 @@ def ingest_threat_data(request):
     if request_json:
         # Check for statistics request
         if request_json.get("get_stats"):
-            stats = ingestion.get_feed_statistics() if hasattr(ingestion, 'get_feed_statistics') else {"status": "Stats function not available"}
+            stats = ingestion.feed_stats if hasattr(ingestion, 'feed_stats') else {"status": "Stats function not available"}
             return stats
         
         # Check for CSV upload
