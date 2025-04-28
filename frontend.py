@@ -36,6 +36,10 @@ logging.basicConfig(level=LOG_LEVEL,
 
 # GCP services availability flag
 GCP_SERVICES_AVAILABLE = False
+
+# GCP clients dictionary
+gcp_clients = {}
+
 try:
     from google.cloud import logging as gcp_logging
     from google.cloud import error_reporting
@@ -52,36 +56,77 @@ class DummyErrorClient:
     def report_exception(self, *args, **kwargs):
         logger.warning("Error reporting attempted but API not available")
 
+# Get or create GCP client
+def get_client(client_type: str):
+    """Get or create a GCP client with proper error handling"""
+    global gcp_clients
+    
+    if client_type in gcp_clients and gcp_clients[client_type] is not None:
+        return gcp_clients[client_type]
+        
+    if not GCP_SERVICES_AVAILABLE:
+        logger.warning(f"GCP services not available, cannot create {client_type} client")
+        if client_type == 'error_reporting':
+            gcp_clients[client_type] = DummyErrorClient()
+            return gcp_clients[client_type]
+        return None
+    
+    try:
+        if client_type == 'error_reporting':
+            try:
+                gcp_clients[client_type] = error_reporting.Client(service="frontend")
+                logger.info("Error reporting client initialized")
+            except Exception as e:
+                logger.warning(f"Error reporting initialization failed: {e}")
+                gcp_clients[client_type] = DummyErrorClient()
+                
+        elif client_type == 'logging':
+            gcp_clients[client_type] = gcp_logging.Client()
+            logger.info("Cloud Logging client initialized")
+            
+        elif client_type == 'secretmanager':
+            gcp_clients[client_type] = secretmanager.SecretManagerServiceClient()
+            logger.info("Secret Manager client initialized")
+            
+        return gcp_clients[client_type]
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        if client_type == 'error_reporting':
+            gcp_clients[client_type] = DummyErrorClient()
+            return gcp_clients[client_type]
+        return None
+
 # Set up GCP services for production
-error_client = DummyErrorClient()  # Default fallback
 if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
     try:
         credentials, project_id = google.auth.default()
         
         # Configure Cloud Logging
-        logging_client = gcp_logging.Client()
-        cloud_handler = logging_client.get_default_handler()
-        logger.setLevel(LOG_LEVEL)
-        logger.addHandler(cloud_handler)
+        logging_client = get_client('logging')
+        if logging_client:
+            cloud_handler = logging_client.get_default_handler()
+            logger.setLevel(LOG_LEVEL)
+            logger.addHandler(cloud_handler)
         
-        # Initialize Error Reporting with fallback
-        try:
-            error_client = error_reporting.Client(service="frontend")
-            logger.info("GCP error reporting initialized")
-        except Exception as e:
-            logger.warning(f"Error reporting not available: {str(e)}")
-            # Existing fallback already set up
-            
+        # Initialize Error Reporting
+        error_client = get_client('error_reporting')
+        
         logger.info("GCP logging and error reporting initialized")
     except Exception as e:
         logger.error(f"GCP services initialization failed: {str(e)}")
+        error_client = DummyErrorClient()
+else:
+    error_client = DummyErrorClient()
 
 # Safe wrapper for error reporting
 def safe_report_exception():
     """Safely report exception to Error Reporting"""
     try:
         if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
-            error_client.report_exception()
+            client = get_client('error_reporting')
+            if client:
+                client.report_exception()
     except Exception as e:
         logger.warning(f"Failed to report exception: {e}")
 
@@ -159,6 +204,15 @@ app.config.update(
     WTF_CSRF_SSL_STRICT=False,  # Allow HTTPS -> HTTP
 )
 
+# Share GCP clients with the app context
+@app.before_request
+def setup_gcp_clients():
+    """Share GCP clients with application context"""
+    if not hasattr(g, 'gcp_clients'):
+        g.gcp_clients = gcp_clients
+    if not hasattr(g, 'gcp_services_available'):
+        g.gcp_services_available = GCP_SERVICES_AVAILABLE
+
 # ====== Helper Functions ======
 
 def generate_trend_data(days: int) -> List[int]:
@@ -213,7 +267,7 @@ def load_users() -> Dict[str, Dict]:
     """Load user data from auth config with error handling"""
     try:
         auth_config = config.get_cached_config('auth-config')
-        if auth_config and 'users' in auth_config:
+        if auth_config and 'users' in auth_config and auth_config['users']:
             return auth_config.get('users', {})
         
         # No users exist yet, ensure admin user is created
@@ -388,9 +442,6 @@ def dashboard(view=None):
         try:
             # Import API module
             from api import api_bp
-            
-            # Initialize g.gcp_clients for API usage
-            g.gcp_clients = {}
             
             # Get statistics
             stats_response = api_bp.get_stats()
@@ -751,7 +802,6 @@ def dynamic_content_detail(content_type, identifier):
     """Dynamic content detail page for IOCs, campaigns, etc."""
     try:
         data = {}
-        g.gcp_clients = {}  # Initialize for API calls
         
         # Import API module
         from api import api_bp
