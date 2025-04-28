@@ -37,15 +37,9 @@ BYPASS_SECRET_MANAGER = os.environ.get("BYPASS_SECRET_MANAGER", "false").lower()
 # Check if running on GCP
 RUNNING_ON_GCP = os.environ.get("K_SERVICE") is not None or os.environ.get("GOOGLE_CLOUD_PROJECT") is not None
 
-# Default authentication config for development
+# Default authentication config template (no user credentials included)
 DEFAULT_AUTH_CONFIG = {
-    "users": {
-        "admin": {
-            "password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",  # 'admin'
-            "role": "admin",
-            "created_at": datetime.utcnow().isoformat()
-        }
-    },
+    "users": {},
     "session_secret": secrets.token_hex(32)
 }
 
@@ -65,6 +59,28 @@ try:
 except ImportError:
     logger.warning("GCP Secret Manager library not available - will operate in degraded mode")
 
+# Create a dummy secret client to avoid failures
+class DummySecretClient:
+    def access_secret_version(self, request):
+        logger.warning(f"Secret access attempted but Secret Manager not available: {request}")
+        return None
+    
+    def add_secret_version(self, request):
+        logger.warning(f"Secret update attempted but Secret Manager not available: {request}")
+        return None
+    
+    def create_secret(self, request):
+        logger.warning(f"Secret creation attempted but Secret Manager not available: {request}")
+        return None
+    
+    def get_secret(self, request):
+        logger.warning(f"Secret retrieval attempted but Secret Manager not available: {request}")
+        return None
+    
+    def delete_secret(self, request):
+        logger.warning(f"Secret deletion attempted but Secret Manager not available: {request}")
+        return None
+
 def get_secret_client():
     """Get Secret Manager client (lazy initialization to save costs)"""
     global _secret_client, GCP_SERVICES_AVAILABLE
@@ -75,7 +91,7 @@ def get_secret_client():
         
     if not GCP_SERVICES_AVAILABLE:
         logger.warning("Secret Manager library not available")
-        return None
+        return DummySecretClient()
         
     if _secret_client is None:
         try:
@@ -84,7 +100,7 @@ def get_secret_client():
             logger.info("Secret Manager client initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize Secret Manager client: {e}")
-            # Don't raise - allow operation in degraded mode without secrets
+            _secret_client = DummySecretClient()
     
     return _secret_client
 
@@ -110,7 +126,9 @@ def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
     try:
         name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version_id}"
         response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8")
+        if hasattr(response, 'payload') and hasattr(response.payload, 'data'):
+            return response.payload.data.decode("UTF-8")
+        return None
     except Exception as e:
         logger.error(f"Error accessing secret {secret_id}: {str(e)}")
         return None
@@ -301,70 +319,33 @@ def load_configs(force_refresh: bool = False) -> Dict[str, Dict]:
     
     return configs
 
-def init_app_config() -> Dict[str, Any]:
-    """Initialize application configuration
-    
-    Returns:
-        Configuration dict or error dict
-    """
-    try:
-        configs = load_configs()
-        
-        # Make sure auth config has required structure
-        auth_config = configs.get('auth', {})
-        if not auth_config.get('users'):
-            logger.warning("Auth config missing required 'users' field, using default")
-            auth_config['users'] = DEFAULT_AUTH_CONFIG['users']
-            configs['auth'] = auth_config
-            
-        if not auth_config.get('session_secret'):
-            logger.warning("Auth config missing required 'session_secret' field, using default")
-            auth_config['session_secret'] = DEFAULT_AUTH_CONFIG['session_secret']
-            configs['auth'] = auth_config
-        
-        # If in production, make sure we have key configs
-        if ENVIRONMENT == 'production':
-            # Ensure API key exists
-            if not configs.get('api_keys') or not configs['api_keys'].get('platform_api_key'):
-                logger.warning("API key not found in production, generating and storing one")
-                
-                # Generate and store API key
-                api_key_config = configs.get('api_keys', {})
-                api_key_config['platform_api_key'] = secrets.token_hex(24)
-                
-                if create_or_update_secret('api-keys', json.dumps(api_key_config)):
-                    configs['api_keys'] = api_key_config
-                    api_key = api_key_config['platform_api_key']
-                    logger.info("Generated and stored new API key")
-        
-        return configs
-    except Exception as e:
-        logger.error(f"Error initializing app config: {e}")
-        return {'error': str(e), 'auth': DEFAULT_AUTH_CONFIG}
-
-def get(key: str, default: Any = None) -> Any:
-    """Get configuration value from environment or secrets
+def generate_secure_password(length: int = 16) -> str:
+    """Generate a cryptographically secure password
     
     Args:
-        key: Configuration key
-        default: Default value if not found
+        length: Password length
         
     Returns:
-        Configuration value
+        Secure password
     """
-    # Check environment first (no API cost)
-    if key in os.environ:
-        return os.environ[key]
+    # Use all character classes to ensure complexity
+    characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:,.<>?"
     
-    # Try auth config (using cache when possible)
-    try:
-        auth_config = get_cached_config('auth-config')
-        if auth_config and key in auth_config:
-            return auth_config[key]
-    except Exception as e:
-        logger.warning(f"Error accessing auth config for key {key}: {e}")
+    # Generate password with at least one character from each class
+    secure_pwd = [
+        secrets.choice("abcdefghijklmnopqrstuvwxyz"),  # lowercase
+        secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),  # uppercase
+        secrets.choice("0123456789"),                  # digit
+        secrets.choice("!@#$%^&*()-_=+[]{}|;:,.<>?")   # special
+    ]
     
-    return default
+    # Fill the rest with random characters
+    secure_pwd.extend(secrets.choice(characters) for _ in range(length - 4))
+    
+    # Shuffle to avoid predictable pattern
+    secrets.SystemRandom().shuffle(secure_pwd)
+    
+    return ''.join(secure_pwd)
 
 def update_user(username: str, updates: Dict[str, Any]) -> bool:
     """Update user in auth config
@@ -422,34 +403,6 @@ def add_user(username: str, password: str, role: str = "readonly") -> bool:
     
     return update_user(username, user_data)
 
-def generate_secure_password(length: int = 16) -> str:
-    """Generate a cryptographically secure password
-    
-    Args:
-        length: Password length
-        
-    Returns:
-        Secure password
-    """
-    # Use all character classes to ensure complexity
-    characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:,.<>?"
-    
-    # Generate password with at least one character from each class
-    secure_pwd = [
-        secrets.choice("abcdefghijklmnopqrstuvwxyz"),  # lowercase
-        secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),  # uppercase
-        secrets.choice("0123456789"),                  # digit
-        secrets.choice("!@#$%^&*()-_=+[]{}|;:,.<>?")   # special
-    ]
-    
-    # Fill the rest with random characters
-    secure_pwd.extend(secrets.choice(characters) for _ in range(length - 4))
-    
-    # Shuffle to avoid predictable pattern
-    secrets.SystemRandom().shuffle(secure_pwd)
-    
-    return ''.join(secure_pwd)
-
 def set_initial_admin_password(force: bool = False) -> Optional[str]:
     """Set or retrieve initial admin password from Secret Manager
     
@@ -459,31 +412,118 @@ def set_initial_admin_password(force: bool = False) -> Optional[str]:
     Returns:
         Admin password if successful, None otherwise
     """
-    # If not forcing update, check if auth config already has admin user
-    if not force:
-        auth_config = get_cached_config('auth-config')
-        if auth_config and 'users' in auth_config and 'admin' in auth_config['users']:
-            # Try to get password from Secret Manager
+    # Check if another process is already setting up admin
+    setup_lock = get_secret("admin-setup-lock")
+    if setup_lock and not force:
+        logger.info("Admin setup is being handled by another process")
+        return get_secret("admin-initial-password")
+    
+    # Create a setup lock to prevent race conditions
+    create_or_update_secret("admin-setup-lock", datetime.utcnow().isoformat())
+    
+    try:
+        # If not forcing update, check if admin password already exists
+        if not force:
             admin_password = get_secret("admin-initial-password")
             if admin_password:
                 logger.info("Retrieved initial admin password from Secret Manager")
+                # Ensure admin user exists with this password
+                auth_config = get_cached_config('auth-config')
+                if not auth_config or 'users' not in auth_config or 'admin' not in auth_config['users']:
+                    # Add admin user with existing password
+                    add_user("admin", admin_password, "admin")
                 return admin_password
-    
-    # Generate a secure admin password
-    admin_password = generate_secure_password(16)
-    
-    # Store in Secret Manager for retrieval
-    if create_or_update_secret("admin-initial-password", admin_password):
-        logger.info(f"Set initial admin password in Secret Manager: {admin_password}")
         
-        # Also update the admin user with this password
-        admin_hash = hashlib.sha256(admin_password.encode()).hexdigest()
-        add_user("admin", admin_password, "admin")
+        # Generate a secure admin password
+        admin_password = generate_secure_password(16)
         
-        return admin_password
+        # Store in Secret Manager for retrieval
+        if create_or_update_secret("admin-initial-password", admin_password):
+            logger.info(f"Set initial admin password in Secret Manager")
+            
+            # Also update the admin user with this password
+            add_user("admin", admin_password, "admin")
+            
+            return admin_password
+        
+        logger.error("Failed to set initial admin password in Secret Manager")
+        return None
+    finally:
+        # Remove setup lock
+        try:
+            client = get_secret_client()
+            if client:
+                name = f"projects/{PROJECT_ID}/secrets/admin-setup-lock"
+                client.delete_secret(request={"name": name})
+        except Exception as e:
+            logger.warning(f"Failed to remove admin setup lock: {e}")
+            # Let the lock expire naturally
+
+def init_app_config() -> Dict[str, Any]:
+    """Initialize application configuration
     
-    logger.error("Failed to set initial admin password in Secret Manager")
-    return None
+    Returns:
+        Configuration dict or error dict
+    """
+    try:
+        configs = load_configs()
+        
+        # Make sure auth config has required structure
+        auth_config = configs.get('auth', {})
+        if not auth_config.get('users'):
+            logger.warning("Auth config missing required 'users' field, creating an empty users dict")
+            auth_config['users'] = {}
+            configs['auth'] = auth_config
+            
+        if not auth_config.get('session_secret'):
+            logger.warning("Auth config missing required 'session_secret' field, generating a new one")
+            auth_config['session_secret'] = secrets.token_hex(32)
+            configs['auth'] = auth_config
+            create_or_update_secret('auth-config', json.dumps(auth_config))
+        
+        # If in production, make sure we have key configs
+        if ENVIRONMENT == 'production':
+            # Ensure API key exists
+            if not configs.get('api_keys') or not configs['api_keys'].get('platform_api_key'):
+                logger.warning("API key not found in production, generating and storing one")
+                
+                # Generate and store API key
+                api_key_config = configs.get('api_keys', {})
+                api_key_config['platform_api_key'] = secrets.token_hex(24)
+                
+                if create_or_update_secret('api-keys', json.dumps(api_key_config)):
+                    configs['api_keys'] = api_key_config
+                    api_key = api_key_config['platform_api_key']
+                    logger.info("Generated and stored new API key")
+        
+        return configs
+    except Exception as e:
+        logger.error(f"Error initializing app config: {e}")
+        return {'error': str(e), 'auth': DEFAULT_AUTH_CONFIG}
+
+def get(key: str, default: Any = None) -> Any:
+    """Get configuration value from environment or secrets
+    
+    Args:
+        key: Configuration key
+        default: Default value if not found
+        
+    Returns:
+        Configuration value
+    """
+    # Check environment first (no API cost)
+    if key in os.environ:
+        return os.environ[key]
+    
+    # Try auth config (using cache when possible)
+    try:
+        auth_config = get_cached_config('auth-config')
+        if auth_config and key in auth_config:
+            return auth_config[key]
+    except Exception as e:
+        logger.warning(f"Error accessing auth config for key {key}: {e}")
+    
+    return default
 
 def secure_config_init() -> bool:
     """Initialize secure configurations and sensitive data
@@ -505,12 +545,28 @@ def secure_config_init() -> bool:
             # Update auth config with new session secret
             create_or_update_secret('auth-config', json.dumps(auth_config))
         
-        # Set initial admin password
-        admin_password = set_initial_admin_password()
-        if admin_password:
-            logger.info(f"Admin user ready with initial password: {admin_password}")
-            # Print to console for admin access
-            if ENVIRONMENT == 'development' or DEBUG_MODE:
+        # Ensure admin user exists
+        if not auth_config.get('users') or 'admin' not in auth_config.get('users', {}):
+            # Create admin user with secure password
+            admin_password = set_initial_admin_password()
+            if admin_password:
+                logger.info("Admin user created with secure password")
+                # Print to console for admin access in development
+                if ENVIRONMENT == 'development' or DEBUG_MODE:
+                    print(f"\n=== ADMIN PASSWORD: {admin_password} ===\n")
+            else:
+                logger.error("Failed to create admin user")
+                return False
+        else:
+            # Admin already exists, just ensure we have the password
+            admin_password = get_secret("admin-initial-password")
+            if not admin_password:
+                # Store current admin password or generate new one if we can't retrieve it
+                logger.info("Admin exists but no password in Secret Manager, setting password")
+                admin_password = set_initial_admin_password(force=True)
+                
+            # Print to console for admin access in development
+            if admin_password and (ENVIRONMENT == 'development' or DEBUG_MODE):
                 print(f"\n=== ADMIN PASSWORD: {admin_password} ===\n")
         
         return True
