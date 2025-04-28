@@ -71,6 +71,11 @@ try:
 except ImportError:
     logger.warning("GCP libraries not available - reduced functionality")
 
+# Create a dummy error reporting client to avoid failures
+class DummyErrorClient:
+    def report_exception(self, *args, **kwargs):
+        logger.warning("Error reporting attempted but API not available")
+
 # Set up Cloud Logging if in production
 if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
     try:
@@ -84,17 +89,28 @@ if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
         # Store client for later use
         gcp_clients['logging'] = logging_client
         
-        # Error reporting client for unhandled exceptions
-        error_client = error_reporting.Client(service="threat-intelligence-platform")
-        gcp_clients['error_reporting'] = error_client
+        # Initialize Error Reporting with fallback
+        try:
+            error_client = error_reporting.Client(service="threat-intelligence-platform")
+            gcp_clients['error_reporting'] = error_client
+            logger.info("Error reporting client initialized")
+        except Exception as e:
+            logger.warning(f"Error reporting initialization failed: {e}")
+            gcp_clients['error_reporting'] = DummyErrorClient()
         
         # Create monitoring client
-        monitoring_client = monitoring_v3.MetricServiceClient()
-        gcp_clients['monitoring'] = monitoring_client
+        try:
+            monitoring_client = monitoring_v3.MetricServiceClient()
+            gcp_clients['monitoring'] = monitoring_client
+            logger.info("Monitoring client initialized")
+        except Exception as e:
+            logger.warning(f"Monitoring initialization failed: {e}")
         
-        logger.info("GCP logging, monitoring, and error reporting initialized")
+        logger.info("GCP logging and monitoring initialized")
     except Exception as e:
         logger.error(f"Error setting up GCP logging: {str(e)}")
+        # Ensure we have a dummy error client for graceful fallback
+        gcp_clients['error_reporting'] = DummyErrorClient()
 
 def report_metric(metric_type, value=1):
     """Report a metric to Cloud Monitoring if available"""
@@ -126,6 +142,20 @@ def report_metric(metric_type, value=1):
         logger.debug(f"Reported metric {metric_type}: {value}")
     except Exception as e:
         logger.warning(f"Failed to report metric {metric_type}: {e}")
+
+def safe_report_exception():
+    """Safely report exception to Error Reporting if available"""
+    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production':
+        return
+    
+    error_client = gcp_clients.get('error_reporting')
+    if not error_client:
+        return
+    
+    try:
+        error_client.report_exception()
+    except Exception as e:
+        logger.warning(f"Failed to report exception: {e}")
 
 # Main application initialization with robust error handling
 try:
@@ -234,12 +264,8 @@ try:
         logger.error(f"500 error: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # Report to Error Reporting if available
-        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_reporting' in gcp_clients:
-            try:
-                gcp_clients['error_reporting'].report_exception()
-            except Exception:
-                pass
+        # Safely report to Error Reporting
+        safe_report_exception()
                 
         if request.path.startswith('/api/'):
             return jsonify({
@@ -385,11 +411,7 @@ except Exception as e:
     report_metric("init_failure", 1)
     
     # Report to Error Reporting if available
-    if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and 'error_reporting' in gcp_clients:
-        try:
-            gcp_clients['error_reporting'].report_exception()
-        except Exception:
-            pass
+    safe_report_exception()
     
     # Use fallback app instead
     app = fallback_app
@@ -511,12 +533,8 @@ if __name__ == '__main__':
         logger.error(f"Failed to start application: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # Report application startup failure if available
-        if GCP_SERVICES_AVAILABLE and 'error_reporting' in gcp_clients:
-            try:
-                gcp_clients['error_reporting'].report_exception()
-            except Exception:
-                pass
+        # Report application startup failure
+        safe_report_exception()
         
         # Exit with error code
         sys.exit(1)
