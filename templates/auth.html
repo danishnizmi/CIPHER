@@ -37,98 +37,36 @@
             .form-control {
                 @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
             }
-            
             .form-label {
                 @apply block text-gray-700 font-medium mb-2;
             }
-            
             .form-group {
                 @apply mb-4;
             }
-            
             .btn {
                 @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
             }
-            
-            .btn-primary { 
-                @apply bg-blue-600 text-white hover:bg-blue-700; 
-            }
-            
-            .btn-secondary { 
-                @apply bg-gray-500 text-white hover:bg-gray-600; 
-            }
-            
-            .btn-danger { 
-                @apply bg-red-600 text-white hover:bg-red-700; 
-            }
-            
-            .auth-card {
-                @apply bg-white p-8 rounded-lg shadow-md w-full max-w-md;
-            }
-            
-            .auth-header {
-                @apply text-center mb-6;
-            }
-            
-            .auth-footer {
-                @apply mt-6 text-center text-sm text-gray-600;
-            }
-            
-            .alert {
-                @apply px-4 py-3 rounded relative mb-4;
-            }
-            
-            .alert-success {
-                @apply bg-green-100 border border-green-400 text-green-700;
-            }
-            
-            .alert-danger {
-                @apply bg-red-100 border border-red-400 text-red-700;
-            }
-            
-            .alert-warning {
-                @apply bg-yellow-100 border border-yellow-400 text-yellow-700;
-            }
-            
-            .alert-info {
-                @apply bg-blue-100 border border-blue-400 text-blue-700;
-            }
-            
-            .badge {
-                @apply px-2 py-1 rounded-full text-xs font-medium;
-            }
-            
-            .badge-admin {
-                @apply bg-purple-100 text-purple-800;
-            }
-            
-            .badge-analyst {
-                @apply bg-blue-100 text-blue-800;
-            }
-            
-            .badge-readonly {
-                @apply bg-gray-100 text-gray-800;
-            }
-
-            /* Password strength meter */
-            .password-strength-meter {
-                @apply h-2 w-full bg-gray-200 rounded-full overflow-hidden mt-1;
-            }
-            .password-strength-meter div {
-                @apply h-full transition-all duration-300;
-            }
-            .password-strength-meter.weak div {
-                @apply w-1/4 bg-red-500;
-            }
-            .password-strength-meter.medium div {
-                @apply w-2/4 bg-yellow-500;
-            }
-            .password-strength-meter.strong div {
-                @apply w-3/4 bg-green-500;
-            }
-            .password-strength-meter.very-strong div {
-                @apply w-full bg-green-600;
-            }
+            .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+            .auth-card { @apply bg-white p-8 rounded-lg shadow-md w-full max-w-md; }
+            .auth-header { @apply text-center mb-6; }
+            .auth-footer { @apply mt-6 text-center text-sm text-gray-600; }
+            .alert { @apply px-4 py-3 rounded relative mb-4; }
+            .alert-success { @apply bg-green-100 border border-green-400 text-green-700; }
+            .alert-danger { @apply bg-red-100 border border-red-400 text-red-700; }
+            .alert-warning { @apply bg-yellow-100 border border-yellow-400 text-yellow-700; }
+            .alert-info { @apply bg-blue-100 border border-blue-400 text-blue-700; }
+            .badge { @apply px-2 py-1 rounded-full text-xs font-medium; }
+            .badge-admin { @apply bg-purple-100 text-purple-800; }
+            .badge-analyst { @apply bg-blue-100 text-blue-800; }
+            .badge-readonly { @apply bg-gray-100 text-gray-800; }
+            .password-strength-meter { @apply h-2 w-full bg-gray-200 rounded-full overflow-hidden mt-1; }
+            .password-strength-meter div { @apply h-full transition-all duration-300; }
+            .password-strength-meter.weak div { @apply w-1/4 bg-red-500; }
+            .password-strength-meter.medium div { @apply w-2/4 bg-yellow-500; }
+            .password-strength-meter.strong div { @apply w-3/4 bg-green-500; }
+            .password-strength-meter.very-strong div { @apply w-full bg-green-600; }
         }
     </style>
 </head>
@@ -167,7 +105,7 @@
             {% endif %}
             
             <form action="{{ url_for('login') }}" method="post" class="space-y-4">
-                <!-- CSRF token field - critical for form submission -->
+                <!-- CSRF token field - critical for security -->
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
                 <div class="form-group">
@@ -187,9 +125,9 @@
                             <i class="fas fa-lock text-gray-400"></i>
                         </div>
                         <input type="password" id="password" name="password" required class="form-control pl-10" 
-                               placeholder="Enter your password">
+                               placeholder="Enter your password" autocomplete="current-password">
                         <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" id="togglePassword" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
@@ -280,9 +218,9 @@
                             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                                 <i class="fas fa-lock text-gray-400"></i>
                             </div>
-                            <input type="password" id="current_password" name="current_password" required class="form-control pl-10">
+                            <input type="password" id="current_password" name="current_password" required class="form-control pl-10" autocomplete="current-password">
                             <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                                <button type="button" class="toggle-password text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                     <i class="fas fa-eye"></i>
                                 </button>
                             </div>
@@ -294,9 +232,9 @@
                             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                                 <i class="fas fa-lock text-gray-400"></i>
                             </div>
-                            <input type="password" id="new_password" name="new_password" required class="form-control pl-10">
+                            <input type="password" id="new_password" name="new_password" required class="form-control pl-10" autocomplete="new-password">
                             <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                                <button type="button" class="toggle-password text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                     <i class="fas fa-eye"></i>
                                 </button>
                             </div>
@@ -313,7 +251,7 @@
                             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                                 <i class="fas fa-lock text-gray-400"></i>
                             </div>
-                            <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10">
+                            <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" autocomplete="new-password">
                         </div>
                         <div id="password-match-message" class="text-sm mt-1 hidden"></div>
                     </div>
@@ -380,9 +318,9 @@
                             <i class="fas fa-lock text-gray-400"></i>
                         </div>
                         <input type="password" id="password" name="password" required class="form-control pl-10" 
-                               placeholder="Enter password">
+                               placeholder="Enter password" autocomplete="new-password">
                         <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="toggle-password text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
@@ -400,7 +338,7 @@
                             <i class="fas fa-lock text-gray-400"></i>
                         </div>
                         <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" 
-                               placeholder="Confirm password">
+                               placeholder="Confirm password" autocomplete="new-password">
                     </div>
                     <div id="password-match-message" class="text-sm mt-1 hidden"></div>
                 </div>
@@ -479,9 +417,9 @@
                             <i class="fas fa-lock text-gray-400"></i>
                         </div>
                         <input type="password" id="password" name="password" class="form-control pl-10" 
-                               placeholder="Enter new password (optional)">
+                               placeholder="Enter new password (optional)" autocomplete="new-password">
                         <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="toggle-password text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
@@ -527,22 +465,22 @@
                 <button type="button" id="deleteUserBtn" class="btn btn-danger w-full flex items-center justify-center">
                     <i class="fas fa-trash-alt mr-2"></i> Delete User
                 </button>
-                
-                <!-- Delete confirmation modal -->
-                <div id="deleteModal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 hidden">
-                    <div class="bg-white rounded-lg p-6 max-w-md mx-4">
-                        <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                            <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
-                            Confirm Deletion
-                        </h3>
-                        <p class="mb-4">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
-                        <div class="flex justify-end space-x-3">
-                            <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
-                            <form action="{{ url_for('delete_user', username=username) }}" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn btn-danger">Delete User</button>
-                            </form>
-                        </div>
+            </div>
+            
+            <!-- Delete confirmation modal -->
+            <div id="deleteModal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 hidden">
+                <div class="bg-white rounded-lg p-6 max-w-md mx-4">
+                    <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                        <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
+                        Confirm Deletion
+                    </h3>
+                    <p class="mb-4">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
+                    <div class="flex justify-end space-x-3">
+                        <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
+                        <form action="{{ url_for('delete_user', username=username) }}" method="post">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-danger">Delete User</button>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -614,9 +552,9 @@
                             <i class="fas fa-lock text-gray-400"></i>
                         </div>
                         <input type="password" id="password" name="password" required class="form-control pl-10" 
-                               placeholder="Enter your password">
+                               placeholder="Enter your password" autocomplete="current-password">
                         <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="toggle-password text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
@@ -649,19 +587,19 @@
     
     <!-- JavaScript for Auth Forms -->
     <script>
-        // Toggle password visibility
         document.addEventListener('DOMContentLoaded', function() {
-            // Setup toggle password visibility 
-            const toggleButtons = document.querySelectorAll('.toggle-password, #togglePassword');
-            toggleButtons.forEach(button => {
-                button.addEventListener('click', function() {
+            // Toggle password visibility - unified handler for all password fields
+            const passwordToggles = document.querySelectorAll('.password-toggle');
+            passwordToggles.forEach(toggle => {
+                toggle.addEventListener('click', function() {
                     const passwordField = this.closest('.relative').querySelector('input');
+                    const icon = this.querySelector('i');
                     if (passwordField.type === 'password') {
                         passwordField.type = 'text';
-                        this.innerHTML = '<i class="fas fa-eye-slash"></i>';
+                        icon.className = 'fas fa-eye-slash';
                     } else {
                         passwordField.type = 'password';
-                        this.innerHTML = '<i class="fas fa-eye"></i>';
+                        icon.className = 'fas fa-eye';
                     }
                 });
             });
@@ -677,45 +615,49 @@
                 const messageEl = document.getElementById('password-match-message');
                 const submitBtn = form.querySelector('button[type="submit"]');
                 
-                function checkPasswordMatch() {
-                    if (confirmPassword.value === '') {
-                        messageEl.classList.add('hidden');
-                        return;
-                    }
+                if (newPassword && confirmPassword && messageEl) {
+                    const checkPasswordMatch = function() {
+                        if (confirmPassword.value === '') {
+                            messageEl.classList.add('hidden');
+                            return;
+                        }
+                        
+                        if (newPassword.value === confirmPassword.value) {
+                            messageEl.textContent = 'Passwords match';
+                            messageEl.classList.remove('hidden', 'text-red-600');
+                            messageEl.classList.add('text-green-600');
+                            submitBtn.disabled = false;
+                        } else {
+                            messageEl.textContent = 'Passwords do not match';
+                            messageEl.classList.remove('hidden', 'text-green-600');
+                            messageEl.classList.add('text-red-600');
+                            submitBtn.disabled = true;
+                        }
+                    };
                     
-                    if (newPassword.value === confirmPassword.value) {
-                        messageEl.textContent = 'Passwords match';
-                        messageEl.classList.remove('hidden', 'text-red-600');
-                        messageEl.classList.add('text-green-600');
-                        submitBtn.disabled = false;
-                    } else {
-                        messageEl.textContent = 'Passwords do not match';
-                        messageEl.classList.remove('hidden', 'text-green-600');
-                        messageEl.classList.add('text-red-600');
-                        submitBtn.disabled = true;
-                    }
-                }
-                
-                if (newPassword && confirmPassword) {
-                    newPassword.addEventListener('keyup', checkPasswordMatch);
-                    confirmPassword.addEventListener('keyup', checkPasswordMatch);
+                    newPassword.addEventListener('input', checkPasswordMatch);
+                    confirmPassword.addEventListener('input', checkPasswordMatch);
                 }
             }
             
             // Password strength meter
-            const passwordStrengthMeters = [
+            const strengthMeters = [
                 { input: document.getElementById('password'), meter: document.getElementById('passwordStrength'), feedback: document.getElementById('passwordFeedback') },
                 { input: document.getElementById('new_password'), meter: document.getElementById('newPasswordStrength'), feedback: document.getElementById('newPasswordFeedback') }
             ];
             
-            passwordStrengthMeters.forEach(item => {
+            strengthMeters.forEach(item => {
                 if (item.input && item.meter && item.feedback) {
                     item.input.addEventListener('input', function() {
                         const password = this.value;
                         
-                        // Show strength meter when typing
-                        item.meter.classList.remove('hidden');
-                        item.feedback.classList.remove('hidden');
+                        // Skip if password is empty
+                        if (!password) {
+                            item.meter.className = 'password-strength-meter';
+                            item.feedback.textContent = 'Password must be at least 8 characters';
+                            item.feedback.className = 'text-xs text-gray-500 mt-1';
+                            return;
+                        }
                         
                         // Check password strength
                         const hasUpperCase = /[A-Z]/.test(password);
@@ -733,11 +675,7 @@
                         // Update meter and feedback
                         item.meter.className = 'password-strength-meter';
                         
-                        if (password.length === 0) {
-                            item.meter.classList.add('weak');
-                            item.feedback.textContent = 'Password must be at least 8 characters';
-                            item.feedback.className = 'text-xs text-gray-500 mt-1';
-                        } else if (strength === 1) {
+                        if (strength === 1) {
                             item.meter.classList.add('weak');
                             item.feedback.textContent = 'Weak password';
                             item.feedback.className = 'text-xs text-red-500 mt-1';
@@ -768,9 +706,11 @@
                     deleteModal.classList.remove('hidden');
                 });
                 
-                cancelDeleteBtn.addEventListener('click', function() {
-                    deleteModal.classList.add('hidden');
-                });
+                if (cancelDeleteBtn) {
+                    cancelDeleteBtn.addEventListener('click', function() {
+                        deleteModal.classList.add('hidden');
+                    });
+                }
                 
                 // Close modal when clicking outside
                 deleteModal.addEventListener('click', function(e) {
