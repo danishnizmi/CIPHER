@@ -22,7 +22,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# Install Python dependencies with improved error handling
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    # Explicitly install GCP libraries to ensure they're available
+    pip install --no-cache-dir \
+    google-cloud-secret-manager>=2.12.0 \
+    google-cloud-bigquery>=3.3.5 \
+    google-cloud-storage>=2.7.0 \
+    google-cloud-pubsub>=2.13.11 \
+    google-cloud-logging>=3.2.5 \
+    google-cloud-error-reporting>=1.6.0 \
+    google-auth>=2.15.0 \
+    # Install other important dependencies
+    google-cloud-language>=2.6.1 \
+    vertexai>=1.0.0 \
+    flask-wtf>=1.0.1 \
+    flask-cors>=3.0.10 \
+    gunicorn>=20.1.0
 
 # Create necessary directories
 RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis
@@ -140,6 +158,7 @@ echo "Checking if key modules are importable:"\n\
 python -c "import sys; print(sys.path)" || echo "WARNING: Failed to print sys.path"\n\
 python -c "import flask; print(\"flask module found\")" || echo "WARNING: flask module not found"\n\
 python -c "import config; print(\"config module found\")" || echo "WARNING: config module not found"\n\
+python -c "import google.cloud.secretmanager; print(\"secretmanager module found\")" || echo "WARNING: secretmanager module not found"\n\
 \n\
 # Print Python environment information\n\
 echo "Python environment:"\n\
