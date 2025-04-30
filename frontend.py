@@ -11,8 +11,6 @@ import hashlib
 import time
 import traceback
 import secrets
-import string
-import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Dict, List, Any, Optional, Union
@@ -34,102 +32,6 @@ logger = logging.getLogger('frontend')
 LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(level=LOG_LEVEL, 
                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
-
-# GCP services availability flag
-GCP_SERVICES_AVAILABLE = False
-
-# GCP clients dictionary
-gcp_clients = {}
-
-try:
-    from google.cloud import logging as gcp_logging
-    from google.cloud import error_reporting
-    from google.cloud import secretmanager
-    import google.auth
-    GCP_SERVICES_AVAILABLE = True
-    logger.info("GCP libraries successfully imported")
-except ImportError:
-    GCP_SERVICES_AVAILABLE = False
-    logger.warning("Google Cloud libraries not installed. GCP integration disabled.")
-
-# Create a dummy error reporting client to avoid failures
-class DummyErrorClient:
-    def report_exception(self, *args, **kwargs):
-        logger.warning("Error reporting attempted but API not available")
-
-# Get or create GCP client
-def get_client(client_type: str):
-    """Get or create a GCP client with proper error handling"""
-    global gcp_clients
-    
-    if client_type in gcp_clients and gcp_clients[client_type] is not None:
-        return gcp_clients[client_type]
-        
-    if not GCP_SERVICES_AVAILABLE:
-        logger.warning(f"GCP services not available, cannot create {client_type} client")
-        if client_type == 'error_reporting':
-            gcp_clients[client_type] = DummyErrorClient()
-            return gcp_clients[client_type]
-        return None
-    
-    try:
-        if client_type == 'error_reporting':
-            try:
-                gcp_clients[client_type] = error_reporting.Client(service="frontend")
-                logger.info("Error reporting client initialized")
-            except Exception as e:
-                logger.warning(f"Error reporting initialization failed: {e}")
-                gcp_clients[client_type] = DummyErrorClient()
-                
-        elif client_type == 'logging':
-            gcp_clients[client_type] = gcp_logging.Client()
-            logger.info("Cloud Logging client initialized")
-            
-        elif client_type == 'secretmanager':
-            gcp_clients[client_type] = secretmanager.SecretManagerServiceClient()
-            logger.info("Secret Manager client initialized")
-            
-        return gcp_clients[client_type]
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-        if client_type == 'error_reporting':
-            gcp_clients[client_type] = DummyErrorClient()
-            return gcp_clients[client_type]
-        return None
-
-# Set up GCP services for production
-if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production' and not DEBUG_MODE:
-    try:
-        credentials, project_id = google.auth.default()
-        
-        # Configure Cloud Logging
-        logging_client = get_client('logging')
-        if logging_client:
-            cloud_handler = logging_client.get_default_handler()
-            logger.setLevel(LOG_LEVEL)
-            logger.addHandler(cloud_handler)
-        
-        # Initialize Error Reporting
-        error_client = get_client('error_reporting')
-        
-        logger.info("GCP logging and error reporting initialized")
-    except Exception as e:
-        logger.error(f"GCP services initialization failed: {str(e)}")
-        error_client = DummyErrorClient()
-else:
-    error_client = DummyErrorClient()
-
-# Safe wrapper for error reporting
-def safe_report_exception():
-    """Safely report exception to Error Reporting"""
-    try:
-        if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
-            client = get_client('error_reporting')
-            if client:
-                client.report_exception()
-    except Exception as e:
-        logger.warning(f"Failed to report exception: {e}")
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -164,7 +66,7 @@ except ImportError:
 # ====== Secret Key for Sessions ======
 
 def get_secret_key() -> str:
-    """Get secret key for Flask sessions"""
+    """Get secret key for Flask sessions using config module"""
     try:
         # Try config module first
         auth_config = config.get_cached_config('auth-config')
@@ -176,14 +78,10 @@ def get_secret_key() -> str:
         if secret_key:
             return secret_key
         
-        # Try Secret Manager in production
-        if ENVIRONMENT == 'production' and GCP_SERVICES_AVAILABLE:
-            try:
-                secret = config.get_secret("flask-secret-key")
-                if secret:
-                    return secret
-            except Exception as e:
-                logger.warning(f"Failed to get secret from Secret Manager: {str(e)}")
+        # Try Secret Manager via config module
+        secret = config.get_secret("flask-secret-key")
+        if secret:
+            return secret
     except Exception as e:
         logger.error(f"Error retrieving secret key: {str(e)}")
     
@@ -208,13 +106,20 @@ app.config.update(
 # Share GCP clients with the app context
 @app.before_request
 def setup_gcp_clients():
-    """Share GCP clients with application context"""
+    """Share GCP clients from config module with application context"""
     if not hasattr(g, 'gcp_clients'):
-        g.gcp_clients = gcp_clients
+        g.gcp_clients = config.get_gcp_clients()
     if not hasattr(g, 'gcp_services_available'):
-        g.gcp_services_available = GCP_SERVICES_AVAILABLE
+        g.gcp_services_available = config.GCP_SERVICES_AVAILABLE
 
 # ====== Helper Functions ======
+
+def safe_report_exception():
+    """Safely report exception using config module"""
+    try:
+        config.report_exception()
+    except Exception as e:
+        logger.warning(f"Failed to report exception: {e}")
 
 def generate_trend_data(days: int) -> List[int]:
     """Generate a smooth trend line for charts when real data isn't available"""
@@ -241,7 +146,7 @@ def generate_trend_data(days: int) -> List[int]:
 # ====== API Interaction Functions ======
 
 def get_api_key() -> str:
-    """Get API key for internal requests"""
+    """Get API key for internal requests using config module"""
     # Try to get API key from config module
     api_key = getattr(config, 'api_key', None)
     
@@ -455,8 +360,9 @@ def admin_required(f):
 # ====== Authentication Functions ======
 
 def load_users() -> Dict[str, Dict]:
-    """Load user data from auth config with error handling"""
+    """Load user data from auth config using config module"""
     try:
+        # Get auth config from config module
         auth_config = config.get_cached_config('auth-config')
         if auth_config and 'users' in auth_config and auth_config['users']:
             return auth_config.get('users', {})
@@ -469,7 +375,6 @@ def load_users() -> Dict[str, Dict]:
         # Reload auth config after setup
         auth_config = config.get_cached_config('auth-config', force_refresh=True)
         return auth_config.get('users', {})
-            
     except Exception as e:
         logger.error(f"Failed to load users: {str(e)}")
         return {}
@@ -570,6 +475,7 @@ def login():
     except Exception as e:
         logger.error(f"Unexpected error in login: {str(e)}")
         logger.error(traceback.format_exc())
+        safe_report_exception()
         error = f"An unexpected error occurred: {str(e)}"
     
     # For GET requests or failed logins
@@ -778,6 +684,7 @@ def change_password():
     except Exception as e:
         logger.error(f"Error in change_password: {str(e)}")
         logger.error(traceback.format_exc())
+        safe_report_exception()
         flash('An error occurred while changing password. Please try again.', 'danger')
         return redirect(url_for('profile'))
 
@@ -811,7 +718,7 @@ def add_user_route():
             elif not username.isalnum():
                 flash('Username must contain only letters and numbers', 'danger')
             else:
-                # Add user with secure password hash
+                # Add user with secure password hash using config module
                 if config.add_user(username, password, role):
                     flash(f'User {username} added successfully', 'success')
                     logger.info(f"New user added: {username} with role {role}")
@@ -823,6 +730,7 @@ def add_user_route():
     except Exception as e:
         logger.error(f"Error in add_user: {str(e)}")
         logger.error(traceback.format_exc())
+        safe_report_exception()
         flash('An error occurred while adding user. Please try again.', 'danger')
         return redirect(url_for('users'))
 
@@ -864,6 +772,7 @@ def edit_user(username):
     except Exception as e:
         logger.error(f"Error in edit_user: {str(e)}")
         logger.error(traceback.format_exc())
+        safe_report_exception()
         flash('An error occurred while editing user. Please try again.', 'danger')
         return redirect(url_for('users'))
 
@@ -898,6 +807,7 @@ def delete_user(username):
     except Exception as e:
         logger.error(f"Error in delete_user: {str(e)}")
         logger.error(traceback.format_exc())
+        safe_report_exception()
         flash('An error occurred while deleting user. Please try again.', 'danger')
         return redirect(url_for('users'))
 
@@ -924,6 +834,8 @@ def campaigns():
 def ingest_threat_data():
     """Trigger data ingestion manually"""
     try:
+        import requests
+        
         base_url = request.url_root.rstrip('/')
         api_url = f"{base_url}/api/ingest_threat_data"
         
@@ -1106,6 +1018,20 @@ def inject_global_data():
         'project_id': config.project_id,
         'debug_mode': DEBUG_MODE
     }
+
+# Import requests at the end to avoid circular import issues
+try:
+    import requests
+except ImportError:
+    logger.error("Requests library not available - API interactions will fail")
+    # Create a dummy requests object with a reasonable error message
+    class DummyRequests:
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                logger.error(f"Requests module not available, {name} called")
+                raise ImportError("The requests library is not installed")
+            return method
+    requests = DummyRequests()
 
 # Initialize the app
 if __name__ == "__main__":
