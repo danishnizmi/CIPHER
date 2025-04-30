@@ -172,7 +172,7 @@ steps:
       
       echo "Test phase completed"
 
-# Build frontend static files
+# Build frontend static files - FIXED VERSION
 - name: 'node:16'
   id: 'build-frontend'
   entrypoint: 'bash'
@@ -187,10 +187,21 @@ steps:
         echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
       fi
       
-      # Initialize package.json if it doesn't exist
-      if [ ! -f package.json ]; then
-        echo '{"name":"threat-intelligence-platform","version":"1.0.0"}' > package.json
-      fi
+      # Create proper package.json with scripts
+      cat > package.json << 'EOF'
+      {
+        "name": "threat-intelligence-platform",
+        "version": "1.0.0",
+        "scripts": {
+          "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
+        },
+        "devDependencies": {
+          "tailwindcss": "^3.3.0",
+          "postcss": "^8.4.21",
+          "autoprefixer": "^10.4.14"
+        }
+      }
+      EOF
       
       # Create tailwind config
       cat > tailwind.config.js << 'EOF'
@@ -215,8 +226,8 @@ steps:
       EOF
       
       # Install dependencies and build CSS
-      npm install tailwindcss postcss autoprefixer --no-package-lock
-      npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
+      npm install
+      npm run build
 
 # Enable required APIs
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
