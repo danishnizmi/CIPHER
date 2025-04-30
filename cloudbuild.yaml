@@ -6,7 +6,7 @@ steps:
   args:
     - '-c'
     - |
-      pip install --upgrade pip
+      pip install --upgrade pip && \
       pip install -r requirements.txt --user
 
 # Setup functions directories and placeholder files
@@ -116,6 +116,7 @@ steps:
       gcloud services enable run.googleapis.com
       gcloud services enable cloudbuild.googleapis.com
       gcloud services enable cloudresourcemanager.googleapis.com
+      gcloud services enable clouderrorreporting.googleapis.com
       echo "APIs enabled successfully."
 
 # Build the container image
@@ -167,8 +168,8 @@ steps:
       # First check if we already have a platform_api_key
       current_keys=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null || echo "{}")
       if ! echo "$$current_keys" | grep -q "platform_api_key"; then
-        # Generate a random API key if one doesn't exist
-        new_key=$(head -c 16 /dev/urandom | xxd -p)
+        # Generate a random API key using Python instead of xxd
+        new_key=$(python3 -c "import secrets; print(secrets.token_hex(16))")
         api_keys_json=$(echo "$$current_keys" | python3 -c "import sys, json; data=json.load(sys.stdin); data['platform_api_key']='$$new_key'; print(json.dumps(data))")
         echo "$$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
         echo "Generated and stored new API key"
@@ -188,11 +189,12 @@ steps:
       
       if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, generating a random one"
-        api_key_value=$(head -c 16 /dev/urandom | xxd -p)
+        # Use Python instead of xxd for generating hex values
+        api_key_value=$(python3 -c "import secrets; print(secrets.token_hex(16))")
       fi
       
-      # Generate a secret key for Flask sessions if needed
-      secret_key_value=$(head -c 32 /dev/urandom | xxd -p)
+      # Generate a secret key for Flask sessions using Python
+      secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       
       # Set the OTX API key if it exists in Secret Manager
       otx_api_key=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('otx_api_key', ''))" || echo "")
