@@ -194,6 +194,14 @@ steps:
       # Generate a secret key for Flask sessions if needed
       secret_key_value=$(head -c 32 /dev/urandom | xxd -p)
       
+      # Set the OTX API key if it exists in Secret Manager
+      otx_api_key=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('otx_api_key', ''))" || echo "")
+      if [ -n "$$otx_api_key" ]; then
+        otx_env_var="OTX_API_KEY=$$otx_api_key,"
+      else
+        otx_env_var=""
+      fi
+      
       # Deploy to Cloud Run with environment variables
       gcloud run deploy threat-intelligence-platform \
         --image gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
@@ -202,7 +210,7 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.1" \
+        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,$$otx_env_var API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.1" \
         --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
 
 # Create/update BigQuery dataset and tables
@@ -231,13 +239,21 @@ steps:
   args:
     - '-c'
     - |
-      # Create Pub/Sub topics if they don't exist
-      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID || echo "Topic threat-data-ingestion already exists"
-      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID || echo "Topic threat-analysis-events already exists"
+      # Create Pub/Sub topics using gcloud's built-in idempotent behavior
+      echo "Setting up Pub/Sub topics and subscriptions..."
       
-      # Create subscriptions if they don't exist
-      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=$PROJECT_ID || echo "Subscription threat-data-ingestion-sub already exists"
-      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=$PROJECT_ID || echo "Subscription threat-analysis-events-sub already exists"
+      # Use --no-user-output-enabled to suppress standard output messages
+      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID --no-user-output-enabled 2>/dev/null || \
+        echo "Topic threat-data-ingestion already exists"
+      
+      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID --no-user-output-enabled 2>/dev/null || \
+        echo "Topic threat-analysis-events already exists"
+      
+      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=$PROJECT_ID --no-user-output-enabled 2>/dev/null || \
+        echo "Subscription threat-data-ingestion-sub already exists"
+      
+      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=$PROJECT_ID --no-user-output-enabled 2>/dev/null || \
+        echo "Subscription threat-analysis-events-sub already exists"
 
 # Deploy Cloud Function for feed ingestion
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -267,6 +283,19 @@ steps:
         --project=$PROJECT_ID \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$$api_key_value || echo "Warning: Ingestion function deployment failed"
+
+# Fix IAM policy for ingestion function
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'fix-ingestion-iam'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      echo "Setting IAM policy for ingestion function..."
+      gcloud functions add-iam-policy-binding ingest_threat_data \
+        --region=us-central1 \
+        --member=allUsers \
+        --role=roles/cloudfunctions.invoker || echo "Warning: Could not set IAM policy for ingestion function"
 
 # Deploy Cloud Function for analysis
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -306,6 +335,9 @@ steps:
       # Get the API key from Secret Manager
       api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
+      # Delete any existing job regardless of type to avoid conflicts
+      gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
+      
       if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, using Pub/Sub method instead"
         # Use Pub/Sub approach if we can't get the API key
@@ -316,12 +348,8 @@ steps:
           --message-body='{"process_all": true}' \
           --time-zone="UTC" \
           --description="Hourly threat feed update" \
-          --project=$PROJECT_ID || echo "Scheduler job update-threat-feeds already exists"
+          --project=$PROJECT_ID || echo "Warning: Failed to create Pub/Sub scheduler job"
       else
-        # Create HTTP scheduler job with API key in header
-        # First delete any existing job to avoid conflicts
-        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
-        
         # Create with API key in header
         gcloud scheduler jobs create http update-threat-feeds \
           --location=us-central1 \
@@ -333,7 +361,7 @@ steps:
           --time-zone="UTC" \
           --attempt-deadline=30m \
           --description="Hourly threat feed update" \
-          --project=$PROJECT_ID || echo "Warning: Failed to create scheduler job"
+          --project=$PROJECT_ID || echo "Warning: Failed to create HTTP scheduler job"
       fi
 
 # Run post-deployment check
