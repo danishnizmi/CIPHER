@@ -165,12 +165,12 @@ steps:
       
       # Generate a secure API key and store it in api-keys secret
       # First check if we already have a platform_api_key
-      CURRENT_API_KEYS=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null || echo "{}")
-      if ! echo "$CURRENT_API_KEYS" | grep -q "platform_api_key"; then
+      current_keys=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null || echo "{}")
+      if ! echo "$$current_keys" | grep -q "platform_api_key"; then
         # Generate a random API key if one doesn't exist
-        NEW_API_KEY=$(head -c 16 /dev/urandom | xxd -p)
-        API_KEYS_JSON=$(echo "$CURRENT_API_KEYS" | python3 -c "import sys, json; data=json.load(sys.stdin); data['platform_api_key']='$NEW_API_KEY'; print(json.dumps(data))")
-        echo "$API_KEYS_JSON" | gcloud secrets versions add api-keys --data-file=-
+        new_key=$(head -c 16 /dev/urandom | xxd -p)
+        api_keys_json=$(echo "$$current_keys" | python3 -c "import sys, json; data=json.load(sys.stdin); data['platform_api_key']='$$new_key'; print(json.dumps(data))")
+        echo "$$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
         echo "Generated and stored new API key"
       else
         echo "API key already exists"
@@ -184,15 +184,15 @@ steps:
     - '-c'
     - |
       # Get the API key from Secret Manager for passing to the deployment
-      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      if [ -z "$API_KEY_VALUE" ]; then
+      if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, generating a random one"
-        API_KEY_VALUE=$(head -c 16 /dev/urandom | xxd -p)
+        api_key_value=$(head -c 16 /dev/urandom | xxd -p)
       fi
       
       # Generate a secret key for Flask sessions if needed
-      SECRET_KEY_VALUE=$(head -c 32 /dev/urandom | xxd -p)
+      secret_key_value=$(head -c 32 /dev/urandom | xxd -p)
       
       # Deploy to Cloud Run with environment variables
       gcloud run deploy threat-intelligence-platform \
@@ -202,7 +202,7 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,API_KEY=$API_KEY_VALUE,SECRET_KEY=$SECRET_KEY_VALUE,VERSION=1.0.1" \
+        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.1" \
         --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
 
 # Create/update BigQuery dataset and tables
@@ -247,11 +247,11 @@ steps:
     - '-c'
     - |
       # Get the API key for the function environment
-      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      if [ -z "$API_KEY_VALUE" ]; then
+      if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, using placeholder"
-        API_KEY_VALUE="placeholder_key"
+        api_key_value="placeholder_key"
       fi
       
       # Deploy the ingestion function
@@ -266,7 +266,7 @@ steps:
         --allow-unauthenticated \
         --project=$PROJECT_ID \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$API_KEY_VALUE || echo "Warning: Ingestion function deployment failed"
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$$api_key_value || echo "Warning: Ingestion function deployment failed"
 
 # Deploy Cloud Function for analysis
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -276,11 +276,11 @@ steps:
     - '-c'
     - |
       # Get the API key for the function environment
-      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      if [ -z "$API_KEY_VALUE" ]; then
+      if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, using placeholder"
-        API_KEY_VALUE="placeholder_key"
+        api_key_value="placeholder_key"
       fi
       
       # Deploy the analysis function
@@ -294,7 +294,7 @@ steps:
         --trigger-topic=threat-data-ingestion \
         --project=$PROJECT_ID \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$API_KEY_VALUE || echo "Warning: Analysis function deployment failed"
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$$api_key_value || echo "Warning: Analysis function deployment failed"
 
 # Set up Cloud Scheduler jobs for periodic feed updates
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -304,9 +304,9 @@ steps:
     - '-c'
     - |
       # Get the API key from Secret Manager
-      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      if [ -z "$API_KEY_VALUE" ]; then
+      if [ -z "$$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, using Pub/Sub method instead"
         # Use Pub/Sub approach if we can't get the API key
         gcloud scheduler jobs create pubsub update-threat-feeds \
@@ -328,7 +328,7 @@ steps:
           --schedule="0 * * * *" \
           --uri="https://us-central1-$PROJECT_ID.cloudfunctions.net/ingest_threat_data" \
           --http-method=POST \
-          --headers="X-API-Key=$API_KEY_VALUE" \
+          --headers="X-API-Key=$$api_key_value" \
           --message-body='{"process_all": true}' \
           --time-zone="UTC" \
           --attempt-deadline=30m \
