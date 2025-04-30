@@ -11,8 +11,9 @@ import hashlib
 import time
 import traceback
 import secrets
+import requests
 from datetime import datetime, timedelta
-from functools import wraps
+from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional, Union
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for
@@ -23,15 +24,21 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import config
 
 # Environment settings
-VERSION = os.environ.get("VERSION", "1.0.0")
+VERSION = os.environ.get("VERSION", "1.0.1")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
+
+# Cache settings
+CACHE_TIMEOUT = 300  # Cache for 5 minutes
+LONG_CACHE_TIMEOUT = 1800  # Cache for 30 minutes
+API_CACHE = {}
+API_CACHE_TIMESTAMP = {}
 
 # Configure logging
 logger = logging.getLogger('frontend')
 LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(level=LOG_LEVEL, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -121,14 +128,12 @@ def safe_report_exception():
     except Exception as e:
         logger.warning(f"Failed to report exception: {e}")
 
-def generate_trend_data(days: int) -> List[int]:
+def generate_trend_data(days: int, base: int = 50, variance: int = 15) -> List[int]:
     """Generate a smooth trend line for charts when real data isn't available"""
     import random
     from math import sin, pi
     
     # Generate a more natural-looking trend
-    base = 50  # Base value
-    variance = 15  # Random variance
     cycle = days / 4  # Cyclical component
     
     trend = []
@@ -143,6 +148,72 @@ def generate_trend_data(days: int) -> List[int]:
     
     return trend
 
+def get_cache_key(func_name: str, **params) -> str:
+    """Generate a cache key for a function call"""
+    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()) if k not in ['api_key', 'token', 'password'])
+    return f"{func_name}:{param_str}"
+
+def is_cache_valid(cache_key: str, timeout: int = CACHE_TIMEOUT) -> bool:
+    """Check if a cached value is still valid"""
+    if cache_key not in API_CACHE or cache_key not in API_CACHE_TIMESTAMP:
+        return False
+    
+    timestamp = API_CACHE_TIMESTAMP[cache_key]
+    return (time.time() - timestamp) < timeout
+
+def api_cache(timeout: int = CACHE_TIMEOUT):
+    """Decorator for caching API results"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Generate cache key
+            cache_key = get_cache_key(func.__name__, **kwargs)
+            
+            # Check cache
+            if is_cache_valid(cache_key, timeout):
+                logger.debug(f"Cache hit for {func.__name__}")
+                return API_CACHE[cache_key]
+            
+            # Call function if not cached or expired
+            logger.debug(f"Cache miss for {func.__name__}")
+            result = func(*args, **kwargs)
+            
+            # Update cache
+            API_CACHE[cache_key] = result
+            API_CACHE_TIMESTAMP[cache_key] = time.time()
+            
+            # Clean up old cache entries if too many
+            if len(API_CACHE) > 100:
+                # Find 10 oldest entries
+                old_keys = sorted(API_CACHE_TIMESTAMP, key=API_CACHE_TIMESTAMP.get)[:10]
+                for k in old_keys:
+                    if k in API_CACHE:
+                        del API_CACHE[k]
+                        del API_CACHE_TIMESTAMP[k]
+            
+            return result
+        return wrapper
+    return decorator
+
+def clear_api_cache(prefix: str = None):
+    """Clear API cache entries, optionally filtering by prefix"""
+    global API_CACHE, API_CACHE_TIMESTAMP
+    
+    if prefix:
+        # Clear only entries with matching prefix
+        keys_to_delete = [k for k in API_CACHE if k.startswith(prefix)]
+        for k in keys_to_delete:
+            if k in API_CACHE:
+                del API_CACHE[k]
+            if k in API_CACHE_TIMESTAMP:
+                del API_CACHE_TIMESTAMP[k]
+        logger.debug(f"Cleared {len(keys_to_delete)} cache entries with prefix '{prefix}'")
+    else:
+        # Clear all cache
+        API_CACHE = {}
+        API_CACHE_TIMESTAMP = {}
+        logger.debug("Cleared all API cache entries")
+
 # ====== API Interaction Functions ======
 
 def get_api_key() -> str:
@@ -156,182 +227,155 @@ def get_api_key() -> str:
         if api_keys_config and 'platform_api_key' in api_keys_config:
             api_key = api_keys_config['platform_api_key']
     
+    # Try environment variable as last resort
+    if not api_key:
+        api_key = os.environ.get('API_KEY', '')
+    
     return api_key or ''
 
-def get_stats_data():
-    """Get statistics data from API correctly"""
+@api_cache(timeout=CACHE_TIMEOUT)
+def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
+    """Make an internal API request with caching and error handling"""
     try:
-        # Make an internal request to the stats endpoint
+        # Construct base URL
         base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/stats"
+        api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # Include days parameter if present in current request
-        days = request.args.get('days', '30')
-        api_url = f"{api_url}?days={days}"
-        
-        # Include API key in headers
+        # Add API key in headers
         api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
+        headers = {"X-API-Key": api_key} if api_key else {}
+        headers["Content-Type"] = "application/json"
         
-        response = requests.get(api_url, headers=headers)
+        # Make the request
+        logger.debug(f"API request: {method} {api_url}")
+        start_time = time.time()
         
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting stats: status code {response.status_code}")
-            return {
-                'feeds': {},
-                'campaigns': {}, 
-                'iocs': {'types': []}, 
-                'analyses': {}
-            }
-    except Exception as e:
-        logger.error(f"Error getting stats: {str(e)}")
-        return {
-            'feeds': {},
-            'campaigns': {}, 
-            'iocs': {'types': []}, 
-            'analyses': {}
-        }
-
-def get_feeds_data():
-    """Get feeds data from API"""
-    try:
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/feeds"
+        if method.upper() == 'GET':
+            response = requests.get(api_url, headers=headers, params=params, timeout=10)
+        else:  # POST
+            response = requests.post(api_url, headers=headers, json=data, timeout=10)
         
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
+        # Log response time
+        request_time = time.time() - start_time
+        if request_time > 1.0:
+            logger.info(f"Slow API request ({request_time:.2f}s): {method} {api_url}")
         
-        response = requests.get(api_url, headers=headers)
+        # Check for errors
+        response.raise_for_status()
         
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting feeds: status code {response.status_code}")
-            return {'feed_details': []}
-    except Exception as e:
-        logger.error(f"Error getting feeds: {str(e)}")
-        return {'feed_details': []}
-
-def get_iocs_data():
-    """Get IOCs data from API"""
-    try:
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/iocs"
+        # Parse and return JSON
+        if response.text:
+            try:
+                return response.json()
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON response: {response.text[:100]}")
+                return {"error": "Invalid JSON response"}
         
-        # Include query params if present
-        days = request.args.get('days', '30')
-        api_url = f"{api_url}?days={days}"
-        
-        ioc_type = request.args.get('type')
-        if ioc_type:
-            api_url = f"{api_url}&type={ioc_type}"
-        
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-            
-        response = requests.get(api_url, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting IOCs: status code {response.status_code}")
-            return {'records': []}
-    except Exception as e:
-        logger.error(f"Error getting IOCs: {str(e)}")
-        return {'records': []}
-
-def get_campaigns_data():
-    """Get campaigns data from API"""
-    try:
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/campaigns"
-        
-        # Include query params if present
-        days = request.args.get('days', '30')
-        api_url = f"{api_url}?days={days}"
-        
-        severity = request.args.get('severity')
-        if severity:
-            api_url = f"{api_url}&severity={severity}"
-        
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-            
-        response = requests.get(api_url, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting campaigns: status code {response.status_code}")
-            return {'campaigns': []}
-    except Exception as e:
-        logger.error(f"Error getting campaigns: {str(e)}")
-        return {'campaigns': []}
-
-def get_feed_stats(feed_name):
-    """Get feed stats from API"""
-    try:
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/feeds/{feed_name}/stats"
-        
-        days = request.args.get('days', '30')
-        api_url = f"{api_url}?days={days}"
-        
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-        
-        response = requests.get(api_url, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting feed stats: status code {response.status_code}")
-            return {}
-    except Exception as e:
-        logger.error(f"Error getting feed stats: {str(e)}")
         return {}
-
-def get_feed_data(feed_name):
-    """Get feed data from API"""
-    try:
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/feeds/{feed_name}/data"
+    
+    except requests.RequestException as e:
+        logger.error(f"API request error ({endpoint}): {str(e)}")
+        status_code = e.response.status_code if hasattr(e, 'response') and e.response else None
         
-        limit = request.args.get('limit', '100')
-        api_url = f"{api_url}?limit={limit}"
+        error_msg = f"API error: {str(e)}"
+        if status_code:
+            error_msg += f" (status code: {status_code})"
         
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-        
-        response = requests.get(api_url, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"Error getting feed data: status code {response.status_code}")
-            return {'records': []}
+        return {"error": error_msg, "status_code": status_code}
+    
     except Exception as e:
-        logger.error(f"Error getting feed data: {str(e)}")
-        return {'records': []}
+        logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
+        return {"error": f"Unexpected error: {str(e)}"}
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_stats_data(days=30):
+    """Get statistics data from API with caching"""
+    return _api_request(f"stats?days={days}")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_feeds_data():
+    """Get feeds data from API with caching"""
+    return _api_request("feeds")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_iocs_data(days=30, ioc_type=None, value=None):
+    """Get IOCs data from API with caching"""
+    params = {"days": days}
+    if ioc_type:
+        params["type"] = ioc_type
+    if value:
+        params["value"] = value
+    
+    param_str = "&".join(f"{k}={v}" for k, v in params.items())
+    return _api_request(f"iocs?{param_str}")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_campaigns_data(days=30, severity=None):
+    """Get campaigns data from API with caching"""
+    params = {"days": days}
+    if severity:
+        params["severity"] = severity
+    
+    param_str = "&".join(f"{k}={v}" for k, v in params.items())
+    return _api_request(f"campaigns?{param_str}")
+
+@api_cache(timeout=LONG_CACHE_TIMEOUT)
+def get_feed_stats(feed_name, days=30):
+    """Get feed stats from API with longer caching"""
+    return _api_request(f"feeds/{feed_name}/stats?days={days}")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_feed_data(feed_name, limit=100, offset=0):
+    """Get feed data from API with caching"""
+    return _api_request(f"feeds/{feed_name}/data?limit={limit}&offset={offset}")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_threat_summary(days=30):
+    """Get threat summary from API with caching"""
+    return _api_request(f"threat_summary?days={days}")
+
+@api_cache(timeout=CACHE_TIMEOUT)
+def get_ioc_geo_stats(days=30):
+    """Get geographic IOC statistics with caching"""
+    return _api_request(f"iocs/geo?days={days}")
+
+def trigger_ingestion(feed_name=None, force=False):
+    """Trigger data ingestion for a specific feed or all feeds"""
+    data = {"process_all": True}
+    if feed_name and feed_name != "all":
+        data["feed_name"] = feed_name
+    if force:
+        data["force"] = True
+    
+    result = _api_request("ingest_threat_data", method="POST", data=data)
+    
+    # Clear relevant caches on successful ingestion
+    if not result.get("error"):
+        clear_api_cache("get_feeds_data")
+        clear_api_cache("get_stats_data")
+        if feed_name:
+            clear_api_cache(f"get_feed_stats:{feed_name}")
+            clear_api_cache(f"get_feed_data:{feed_name}")
+        clear_api_cache("get_threat_summary")
+    
+    return result
+
+def upload_csv_file(csv_content, feed_name="csv_upload"):
+    """Upload CSV for threat analysis"""
+    data = {
+        "file_type": "csv",
+        "content": csv_content,
+        "feed_name": feed_name
+    }
+    
+    result = _api_request("upload_csv", method="POST", data=data)
+    
+    # Clear relevant caches on successful upload
+    if not result.get("error"):
+        clear_api_cache("get_feeds_data")
+        clear_api_cache("get_stats_data")
+    
+    return result
 
 # ====== Authentication Decorators ======
 
@@ -538,10 +582,10 @@ def dashboard(view=None):
         # Load statistics for all views
         try:
             # Get statistics using the helper function
-            stats_response = get_stats_data()
+            stats_response = get_stats_data(days=days)
             context['stats'] = stats_response
             
-            # Extract trends from statistics
+            # Extract trends from statistics - use real data if available
             context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
             context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
             context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
@@ -559,11 +603,11 @@ def dashboard(view=None):
                                                   for feed in context['feed_items']}
                 
             elif current_view == 'iocs':
-                iocs_response = get_iocs_data()
+                iocs_response = get_iocs_data(days=days)
                 context['ioc_items'] = iocs_response.get('records', [])
                 
             elif current_view == 'campaigns':
-                campaigns_response = get_campaigns_data()
+                campaigns_response = get_campaigns_data(days=days)
                 context['campaigns'] = campaigns_response.get('campaigns', [])
                 
             else:
@@ -588,12 +632,20 @@ def dashboard(view=None):
                     context['activity_counts'] = generate_trend_data(days)
                 
                 # Load campaigns for dashboard
-                campaigns_response = get_campaigns_data()
+                campaigns_response = get_campaigns_data(days=days)
                 context['campaigns'] = campaigns_response.get('campaigns', [])[:3]
                 
                 # Load IOCs for dashboard
-                iocs_response = get_iocs_data()
+                iocs_response = get_iocs_data(days=days)
                 context['top_iocs'] = iocs_response.get('records', [])[:4]
+                
+                # Load threat summary for dashboard
+                threat_summary = get_threat_summary(days=days)
+                context['threat_summary'] = threat_summary
+                
+                # Load geo data for map
+                geo_stats = get_ioc_geo_stats(days=days)
+                context['geo_stats'] = geo_stats.get('countries', [])
                 
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
@@ -623,6 +675,7 @@ def dashboard(view=None):
                 context['activity_counts'] = generate_trend_data(days)
                 context['campaigns'] = []
                 context['top_iocs'] = []
+                context['geo_stats'] = []
                 
             flash('Could not load all dashboard data. Some information may be missing.', 'warning')
         
@@ -633,6 +686,38 @@ def dashboard(view=None):
         safe_report_exception()
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('login'))
+
+@app.route('/refresh_feeds')
+@login_required
+def refresh_feeds():
+    """Trigger feed refresh and redirect back to feeds view"""
+    try:
+        # Log who triggered the refresh
+        username = session.get('username')
+        logger.info(f"Feed refresh triggered by: {username}")
+        
+        # Call API to trigger ingestion
+        result = trigger_ingestion(force=True)
+        
+        # Check result
+        if result.get('error'):
+            flash(f"Error refreshing feeds: {result['error']}", 'danger')
+        else:
+            # Clear all relevant caches
+            clear_api_cache('get_feeds')
+            clear_api_cache('get_stats')
+            
+            feeds_count = len(result.get('results', []))
+            success_count = sum(1 for r in result.get('results', []) if r.get('status') == 'success')
+            
+            flash(f'Successfully refreshed {success_count} of {feeds_count} feeds', 'success')
+        
+        # Redirect back to feeds view
+        return redirect(url_for('dashboard', view='feeds'))
+    except Exception as e:
+        logger.error(f"Error in refresh_feeds: {str(e)}")
+        flash(f'Error refreshing feeds: {str(e)}', 'danger')
+        return redirect(url_for('dashboard', view='feeds'))
 
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
@@ -834,27 +919,17 @@ def campaigns():
 def ingest_threat_data():
     """Trigger data ingestion manually"""
     try:
-        import requests
-        
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/ingest_threat_data"
-        
-        # Include API key in headers
-        api_key = get_api_key()
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-        
-        response = requests.post(api_url, json={"process_all": True}, headers=headers)
-        
         # Log operation
         username = session.get('username')
         logger.info(f"Manual ingestion triggered by {username}")
         
-        if response.status_code == 200:
-            result = response.json()
-            success_count = sum(1 for r in result.get('results', []) if r.get('status') == 'success')
-            total_count = len(result.get('results', []))
+        # Trigger ingestion
+        result = trigger_ingestion(force=True)
+        
+        # Process result
+        if isinstance(result, dict) and 'results' in result:
+            success_count = sum(1 for r in result['results'] if r.get('status') == 'success')
+            total_count = len(result['results'])
             
             if success_count == total_count and total_count > 0:
                 flash(f'Threat data refreshed successfully. Processed {total_count} feeds.', 'success')
@@ -863,7 +938,11 @@ def ingest_threat_data():
             else:
                 flash('Failed to refresh threat data. Please check logs for details.', 'danger')
         else:
-            flash('Failed to trigger data ingestion. API returned error.', 'danger')
+            # Handle single feed result
+            if result.get('status') == 'success':
+                flash(f'Successfully processed feed: {result.get("feed_name")}', 'success')
+            else:
+                flash(f'Error processing feed: {result.get("message", "Unknown error")}', 'danger')
             
     except Exception as e:
         logger.error(f"Error triggering threat data ingestion: {str(e)}")
@@ -876,13 +955,17 @@ def ingest_threat_data():
 @app.route('/dynamic_content_detail/<content_type>/<identifier>')
 @login_required
 def dynamic_content_detail(content_type, identifier):
-    """Dynamic content detail page for IOCs, campaigns, etc."""
+    """Dynamic content detail page for IOCs, campaigns, feeds, etc."""
     try:
         data = {}
         
         if content_type == 'ioc':
             # Split identifier
-            ioc_type, ioc_value = identifier.split('/', 1)
+            try:
+                ioc_type, ioc_value = identifier.split('/', 1)
+            except ValueError:
+                flash('Invalid IOC identifier format', 'danger')
+                return redirect(url_for('iocs'))
             
             # Get IOCs with matching type/value
             iocs_data = get_iocs_data()
@@ -934,7 +1017,7 @@ def dynamic_content_detail(content_type, identifier):
             # Combine data
             data = feed_stats or {}
             data['name'] = identifier
-            data['sample_data'] = feed_data.get('records', [])[:5]
+            data['sample_data'] = feed_data.get('records', [])[:10]
             
             # Add description if missing
             if 'description' not in data:
@@ -962,6 +1045,28 @@ def dynamic_content_detail(content_type, identifier):
         safe_report_exception()
         flash('Error loading content details.', 'danger')
         return redirect(url_for('dashboard'))
+
+# ====== API Passthrough ======
+@app.route('/api/refresh_feeds', methods=['POST'])
+@login_required
+def api_refresh_feeds():
+    """API endpoint to trigger feed refresh"""
+    try:
+        feed_name = request.json.get('feed_name', 'all')
+        force = request.json.get('force', False)
+        
+        # Log who triggered the refresh
+        username = session.get('username')
+        logger.info(f"Feed refresh API call by: {username}, feed: {feed_name}, force: {force}")
+        
+        # Call API to trigger ingestion
+        result = trigger_ingestion(feed_name=feed_name, force=force)
+        
+        # Return result
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error in API refresh_feeds: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 # ====== Template Filters ======
 
@@ -1018,20 +1123,6 @@ def inject_global_data():
         'project_id': config.project_id,
         'debug_mode': DEBUG_MODE
     }
-
-# Import requests at the end to avoid circular import issues
-try:
-    import requests
-except ImportError:
-    logger.error("Requests library not available - API interactions will fail")
-    # Create a dummy requests object with a reasonable error message
-    class DummyRequests:
-        def __getattr__(self, name):
-            def method(*args, **kwargs):
-                logger.error(f"Requests module not available, {name} called")
-                raise ImportError("The requests library is not installed")
-            return method
-    requests = DummyRequests()
 
 # Initialize the app
 if __name__ == "__main__":
