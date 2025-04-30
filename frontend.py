@@ -689,15 +689,23 @@ def dashboard(view=None):
                 campaigns_response = get_campaigns_data(days=days) or {}
                 campaigns_list = (campaigns_response.get('campaigns', []) 
                                  if isinstance(campaigns_response, dict) else [])
-                # Safely slice the list
-                context['campaigns'] = campaigns_list[:3] if campaigns_list else []
+                
+                # FIX: Use explicit if-else instead of conditional slicing to avoid unhashable type error
+                if campaigns_list:
+                    context['campaigns'] = campaigns_list[:3]
+                else:
+                    context['campaigns'] = []
                 
                 # Load IOCs for dashboard
                 iocs_response = get_iocs_data(days=days) or {}
                 iocs_list = (iocs_response.get('records', []) 
                             if isinstance(iocs_response, dict) else [])
-                # Safely slice the list
-                context['top_iocs'] = iocs_list[:4] if iocs_list else []
+                
+                # Also fix this similar pattern with the same approach
+                if iocs_list:
+                    context['top_iocs'] = iocs_list[:4]
+                else:
+                    context['top_iocs'] = []
                 
                 # Load threat summary for dashboard
                 threat_summary = get_threat_summary(days=days) or {}
@@ -1039,10 +1047,12 @@ def dynamic_content_detail(content_type, identifier):
             # Get related campaigns
             if data:
                 campaigns_data = get_campaigns_data()
-                data['campaigns'] = []
-                
-                for campaign in campaigns_data.get('campaigns', [])[:3]:
-                    data['campaigns'].append(campaign)
+                campaigns_list = campaigns_data.get('campaigns', [])
+                # Fix another potential slice issue here
+                if campaigns_list:
+                    data['campaigns'] = campaigns_list[:3]
+                else:
+                    data['campaigns'] = []
                     
                 # Set placeholders for missing fields
                 for field in ['first_seen', 'last_seen', 'sources', 'confidence', 'tags']:
@@ -1063,7 +1073,12 @@ def dynamic_content_detail(content_type, identifier):
             if data:
                 # Get IOCs related to this campaign
                 iocs_data = get_iocs_data()
-                data['iocs'] = iocs_data.get('records', [])[:5]
+                iocs_list = iocs_data.get('records', [])
+                # Fix another potential slice issue here
+                if iocs_list:
+                    data['iocs'] = iocs_list[:5]
+                else:
+                    data['iocs'] = []
                 
                 # Add description if missing
                 if 'description' not in data:
@@ -1077,7 +1092,12 @@ def dynamic_content_detail(content_type, identifier):
             # Combine data
             data = feed_stats or {}
             data['name'] = identifier
-            data['sample_data'] = feed_data.get('records', [])[:10]
+            sample_data = feed_data.get('records', [])
+            # Fix another potential slice issue here
+            if sample_data:
+                data['sample_data'] = sample_data[:10]
+            else:
+                data['sample_data'] = []
             
             # Add description if missing
             if 'description' not in data:
