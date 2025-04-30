@@ -11,7 +11,8 @@ import hashlib
 import base64
 import time
 import secrets
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Dict, List, Any, Optional, Tuple, Union
 
@@ -45,15 +46,28 @@ DEFAULT_AUTH_CONFIG = {
     "session_secret": secrets.token_hex(32)
 }
 
-# Lazy-loaded GCP clients (shared across modules)
-_gcp_clients = {}
-# Config cache with 30-minute TTL
+# Cache settings with automatic expiration
+# Config cache with expiration times
 _config_cache = {}
 _cache_timestamp = {}
 CACHE_TTL_SECONDS = 1800  # 30 minutes
 
+# Lazy-loaded GCP clients (shared across modules)
+_gcp_clients = {}
+
 # GCP services availability flag
 GCP_SERVICES_AVAILABLE = False
+
+# API client session for reuse
+_api_session = None
+
+# Service status tracking
+_service_status = {
+    "bigquery": {"available": False, "last_check": 0},
+    "storage": {"available": False, "last_check": 0},
+    "pubsub": {"available": False, "last_check": 0},
+    "secretmanager": {"available": False, "last_check": 0}
+}
 
 # ======== GCP Service Initialization ========
 
@@ -64,6 +78,7 @@ def initialize_gcp_services():
     try:
         # Try to authenticate with GCP
         import google.auth
+        from google.auth.exceptions import DefaultCredentialsError
         
         # Try to get credentials - will validate access
         try:
@@ -74,6 +89,10 @@ def initialize_gcp_services():
             logger.info(f"Successfully authenticated with GCP for project {PROJECT_ID}")
             GCP_SERVICES_AVAILABLE = True
             return True
+        except DefaultCredentialsError:
+            logger.warning("GCP default credentials not found")
+            GCP_SERVICES_AVAILABLE = False
+            return False
         except Exception as e:
             logger.warning(f"GCP authentication failed: {e}")
             GCP_SERVICES_AVAILABLE = False
@@ -126,21 +145,29 @@ def get_client(client_type: str):
             from google.cloud import bigquery
             _gcp_clients[client_type] = bigquery.Client(project=PROJECT_ID)
             logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            _service_status["bigquery"]["available"] = True
+            _service_status["bigquery"]["last_check"] = time.time()
             
         elif client_type == 'storage':
             from google.cloud import storage
             _gcp_clients[client_type] = storage.Client(project=PROJECT_ID)
             logger.info(f"Storage client initialized for project {PROJECT_ID}")
+            _service_status["storage"]["available"] = True
+            _service_status["storage"]["last_check"] = time.time()
             
         elif client_type == 'pubsub':
             from google.cloud import pubsub_v1
             _gcp_clients[client_type] = pubsub_v1.PublisherClient()
             logger.info("Pub/Sub publisher initialized")
+            _service_status["pubsub"]["available"] = True
+            _service_status["pubsub"]["last_check"] = time.time()
             
         elif client_type == 'secretmanager':
             from google.cloud import secretmanager
             _gcp_clients[client_type] = secretmanager.SecretManagerServiceClient()
             logger.info("Secret Manager client initialized")
+            _service_status["secretmanager"]["available"] = True
+            _service_status["secretmanager"]["last_check"] = time.time()
             
         elif client_type == 'error_reporting':
             from google.cloud import error_reporting
@@ -192,18 +219,38 @@ def get_cloud_status():
         "services": {}
     }
     
-    # Check each important service
-    for service in ['bigquery', 'storage', 'pubsub', 'secretmanager', 'monitoring', 'vertex']:
-        if service in _gcp_clients:
-            client = _gcp_clients[service]
-            status["services"][service] = {
+    # Update status of services that need checking
+    for service_name, service_info in _service_status.items():
+        current_time = time.time()
+        # Only check status every 5 minutes to reduce API calls
+        if current_time - service_info["last_check"] > 300:  # 5 minutes
+            try:
+                if service_name in _gcp_clients:
+                    client = _gcp_clients[service_name]
+                    service_info["available"] = not isinstance(client, DummyClient) and client is not False
+                else:
+                    # Try initializing if needed
+                    client = get_client(service_name)
+                    service_info["available"] = not isinstance(client, DummyClient) and client is not False
+                
+                service_info["last_check"] = current_time
+            except Exception as e:
+                logger.warning(f"Error checking {service_name} status: {e}")
+    
+    # Build current status for all services
+    for service_name, service_info in _service_status.items():
+        status["services"][service_name] = {
+            "available": service_info["available"],
+            "initialized": service_name in _gcp_clients
+        }
+    
+    # Add status for other initialized services
+    for service_name in _gcp_clients:
+        if service_name not in status["services"]:
+            client = _gcp_clients[service_name]
+            status["services"][service_name] = {
                 "available": not isinstance(client, DummyClient) and client is not False,
-                "initialized": service in _gcp_clients
-            }
-        else:
-            status["services"][service] = {
-                "available": False,
-                "initialized": False
+                "initialized": True
             }
     
     return status
@@ -255,6 +302,7 @@ def report_metric(metric_type, value=1):
             return
         
         from google.cloud import monitoring_v3
+        from google.protobuf import timestamp_pb2
         
         # Create full metric type
         metric_type = f"custom.googleapis.com/threat_intel/{metric_type}"
@@ -266,11 +314,19 @@ def report_metric(metric_type, value=1):
         series.metric.labels.update({"environment": ENVIRONMENT, "version": VERSION})
         
         # Create point
-        point = series.points.add()
-        point.value.double_value = float(value)
         now = time.time()
-        point.interval.end_time.seconds = int(now)
-        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
+        seconds = int(now)
+        nanos = int((now - seconds) * 10**9)
+        
+        interval = monitoring_v3.TimeInterval()
+        interval.end_time.seconds = seconds
+        interval.end_time.nanos = nanos
+        
+        point = monitoring_v3.Point()
+        point.interval = interval
+        point.value.double_value = float(value)
+        
+        series.points = [point]
         
         # Write metric
         client.create_time_series(name=project_name, time_series=[series])
@@ -293,6 +349,13 @@ def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
     Returns:
         Secret content or None if error
     """
+    # First check environment variables for secret
+    env_var_name = secret_id.upper().replace("-", "_")
+    if os.environ.get(env_var_name):
+        logger.debug(f"Using environment variable {env_var_name} instead of Secret Manager")
+        return os.environ.get(env_var_name)
+    
+    # Secret not in environment, try Secret Manager
     if not GCP_SERVICES_AVAILABLE:
         logger.warning(f"Secret Manager not available, cannot retrieve secret {secret_id}")
         return None
@@ -408,10 +471,10 @@ def get_config(config_name: str) -> Dict[str, Any]:
         Configuration dict
     """
     # Check cache first
-    now = datetime.now().timestamp()
-    if config_name in _config_cache:
+    now = time.time()
+    if config_name in _config_cache and config_name in _cache_timestamp:
         # Return cached value if it's not expired
-        if now - _cache_timestamp.get(config_name, 0) < CACHE_TTL_SECONDS:
+        if now - _cache_timestamp[config_name] < CACHE_TTL_SECONDS:
             return _config_cache[config_name]
     
     # Special handling for auth-config
@@ -560,7 +623,7 @@ def update_user(username: str, updates: Dict[str, Any]) -> bool:
     
     # First, update local cache
     _config_cache['auth-config'] = auth_config
-    _cache_timestamp['auth-config'] = datetime.now().timestamp()
+    _cache_timestamp['auth-config'] = time.time()
     
     # Then try to save to Secret Manager if available
     if not BYPASS_SECRET_MANAGER:
@@ -680,6 +743,7 @@ def init_app_config() -> Dict[str, Any]:
                 
                 if create_or_update_secret('api-keys', json.dumps(api_key_config)):
                     configs['api_keys'] = api_key_config
+                    global api_key
                     api_key = api_key_config['platform_api_key']
                     logger.info("Generated and stored new API key")
         
@@ -721,6 +785,11 @@ def secure_config_init() -> bool:
     # Initialize GCP services if not already done
     if not GCP_SERVICES_AVAILABLE:
         initialize_gcp_services()
+    
+    # Get API key from environment if available
+    global api_key
+    if not api_key and os.environ.get("API_KEY"):
+        api_key = os.environ.get("API_KEY")
     
     # Ensure required configuration is available
     try:
@@ -765,17 +834,42 @@ def secure_config_init() -> bool:
         logger.error(f"Error in secure config initialization: {e}")
         return False
 
-# Initialize secure configuration when module is imported
+# ======== Helpers & Utilities ========
+
+def get_memory_usage():
+    """Get current memory usage (for diagnostics)"""
+    try:
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        return {
+            "rss": memory_info.rss,  # Resident Set Size
+            "vms": memory_info.vms,  # Virtual Memory Size
+            "rss_mb": memory_info.rss / (1024 * 1024),  # RSS in MB
+            "percent": process.memory_percent()
+        }
+    except ImportError:
+        return {"error": "psutil not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# Initialize secure configuration when module is loaded
 if not DEBUG_MODE:
     secure_config_init()
 
 # Module version for version checks
 VERSION = "1.0.1"
 
-# Exported properties for other modules
-project_id = PROJECT_ID
-region = REGION
-gcs_bucket = GCS_BUCKET
-bigquery_dataset = BIGQUERY_DATASET
-environment = ENVIRONMENT
-api_url = API_URL
+# Ensure environment variables match the variables we defined in this module
+def ensure_environment_consistency():
+    """Make sure environment variables are consistent"""
+    global api_key
+    
+    # Ensure API key is set correctly
+    if not api_key and os.environ.get("API_KEY"):
+        api_key = os.environ.get("API_KEY")
+        return True
+    return False
+
+# Call to ensure consistency
+ensure_environment_consistency()
