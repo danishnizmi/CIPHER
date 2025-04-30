@@ -27,8 +27,6 @@ ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 PORT = int(os.environ.get('PORT', 8080))
 HOST = os.environ.get('HOST', '0.0.0.0')
 DEBUG_MODE = ENVIRONMENT != 'production'
-PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
-REGION = os.environ.get("GCP_REGION", "us-central1")
 
 # Track startup time for health metrics
 START_TIME = time.time()
@@ -44,118 +42,13 @@ available_modules = {
     'ingestion': False
 }
 
-# GCP service clients
-gcp_clients = {}
-
-# GCP service availability flag
-GCP_SERVICES_AVAILABLE = False
-try:
-    from google.cloud import secretmanager, logging as cloud_logging, error_reporting, monitoring_v3
-    import google.auth
-    import google.auth.exceptions
-    
-    GCP_SERVICES_AVAILABLE = True
-    logger.info("GCP libraries successfully imported")
-    
-    try:
-        # Get GCP credentials - will verify we have access
-        credentials, detected_project_id = google.auth.default()
-        if detected_project_id != PROJECT_ID and detected_project_id:
-            logger.warning(f"Detected project ID ({detected_project_id}) differs from configured PROJECT_ID ({PROJECT_ID})")
-            PROJECT_ID = detected_project_id
-        
-        logger.info(f"Successfully authenticated with GCP for project: {PROJECT_ID}")
-    except google.auth.exceptions.DefaultCredentialsError:
-        logger.warning("GCP credentials not available - running without GCP integration")
-        GCP_SERVICES_AVAILABLE = False
-except ImportError:
-    logger.warning("GCP libraries not available - reduced functionality")
-
-# Create a dummy error reporting client to avoid failures
-class DummyErrorClient:
-    def report_exception(self, *args, **kwargs):
-        logger.warning("Error reporting attempted but API not available")
-
-# Set up Cloud Logging if in production
-if GCP_SERVICES_AVAILABLE and ENVIRONMENT == 'production':
-    try:
-        # Configure Cloud Logging
-        logging_client = cloud_logging.Client()
-        cloud_handler = logging_client.get_default_handler()
-        logger.setLevel(logging.INFO)
-        cloud_logger = logging_client.logger('app')
-        logger.addHandler(cloud_handler)
-        
-        # Store client for later use
-        gcp_clients['logging'] = logging_client
-        
-        # Initialize Error Reporting with fallback
-        try:
-            error_client = error_reporting.Client(service="threat-intelligence-platform")
-            gcp_clients['error_reporting'] = error_client
-            logger.info("Error reporting client initialized")
-        except Exception as e:
-            logger.warning(f"Error reporting initialization failed: {e}")
-            gcp_clients['error_reporting'] = DummyErrorClient()
-        
-        # Create monitoring client
-        try:
-            monitoring_client = monitoring_v3.MetricServiceClient()
-            gcp_clients['monitoring'] = monitoring_client
-            logger.info("Monitoring client initialized")
-        except Exception as e:
-            logger.warning(f"Monitoring initialization failed: {e}")
-        
-        logger.info("GCP logging and monitoring initialized")
-    except Exception as e:
-        logger.error(f"Error setting up GCP logging: {str(e)}")
-        # Ensure we have a dummy error client for graceful fallback
-        gcp_clients['error_reporting'] = DummyErrorClient()
-
+# Define a metric reporting function that will be centralized later
 def report_metric(metric_type, value=1):
-    """Report a metric to Cloud Monitoring if available"""
-    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production' or 'monitoring' not in gcp_clients:
-        return
-    
-    try:
-        # Create full metric type
-        metric_type = f"custom.googleapis.com/threat_intel/{metric_type}"
-        
-        # Get client
-        client = gcp_clients['monitoring']
-        
-        # Define the metric
-        project_name = f"projects/{PROJECT_ID}"
-        series = monitoring_v3.TimeSeries()
-        series.metric.type = metric_type
-        series.metric.labels.update({"environment": ENVIRONMENT, "version": VERSION})
-        
-        # Create point
-        point = series.points.add()
-        point.value.double_value = float(value)
-        now = time.time()
-        point.interval.end_time.seconds = int(now)
-        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
-        
-        # Write metric
-        client.create_time_series(name=project_name, time_series=[series])
-        logger.debug(f"Reported metric {metric_type}: {value}")
-    except Exception as e:
-        logger.warning(f"Failed to report metric {metric_type}: {e}")
-
-def safe_report_exception():
-    """Safely report exception to Error Reporting if available"""
-    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production':
-        return
-    
-    error_client = gcp_clients.get('error_reporting')
-    if not error_client:
-        return
-    
-    try:
-        error_client.report_exception()
-    except Exception as e:
-        logger.warning(f"Failed to report exception: {e}")
+    """
+    Placeholder for reporting metrics - will be replaced with config module version
+    after initialization
+    """
+    pass
 
 # Main application initialization with robust error handling
 try:
@@ -167,8 +60,12 @@ try:
     import config
     logger.info("Initializing application configuration...")
     
-    # Initialize secure configuration first
+    # Initialize configuration (this now centralizes all GCP service initialization)
     config.secure_config_init()
+    
+    # Replace our placeholder function with the real one from config
+    if hasattr(config, 'report_metric'):
+        report_metric = config.report_metric
     
     # Then load app config 
     config_result = config.init_app_config()
@@ -229,11 +126,14 @@ try:
     # Add proxy fix for proper handling of forwarded headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     
-    # Share GCP clients with the app context
+    # Share GCP clients from config with the app context
     @app.before_request
-    def setup_gcp_clients():
-        g.gcp_clients = gcp_clients
-        g.gcp_services_available = GCP_SERVICES_AVAILABLE
+    def setup_app_context():
+        """Share config data with application context"""
+        g.gcp_clients = config.get_gcp_clients()
+        g.gcp_services_available = config.GCP_SERVICES_AVAILABLE
+        g.project_id = config.project_id
+        g.environment = config.environment
     
     # Step 7: Ensure all required routes exist (important routes if not in frontend)
     if not hasattr(app, 'view_functions') or 'login' not in app.view_functions:
@@ -265,7 +165,7 @@ try:
         logger.error(traceback.format_exc())
         
         # Safely report to Error Reporting
-        safe_report_exception()
+        config.report_exception()
                 
         if request.path.startswith('/api/'):
             return jsonify({
@@ -286,20 +186,11 @@ try:
         uptime_seconds = int(time.time() - START_TIME)
         uptime_text = str(timedelta(seconds=uptime_seconds))
         
-        # Check BigQuery connectivity if ingestion module is available
+        # Check database connectivity through config module
         db_status = "unknown"
-        if available_modules['ingestion']:
-            try:
-                from google.cloud import bigquery
-                client = bigquery.Client(project=PROJECT_ID)
-                # Simple query to check connection
-                query_job = client.query("SELECT 1")
-                query_job.result()  # Wait for query to complete
-                db_status = "ok"
-            except Exception as e:
-                logger.warning(f"Database connectivity check failed: {e}")
-                db_status = "error"
-                
+        if available_modules['config']:
+            db_status = config.check_database_connectivity()
+            
         status_data = {
             "status": "ok", 
             "components": available_modules,
@@ -308,8 +199,8 @@ try:
             "version": VERSION,
             "environment": ENVIRONMENT,
             "uptime": uptime_text,
-            "project_id": PROJECT_ID,
-            "region": REGION
+            "project_id": config.project_id,
+            "region": config.region
         }
         
         # If any core module failed, report degraded status
@@ -343,37 +234,34 @@ try:
             return jsonify({"error": "Unauthorized"}), 401
             
         import platform
-        import psutil
         
-        # System information
-        sys_info = {
-            "platform": platform.platform(),
-            "python_version": platform.python_version(),
-            "cpus": psutil.cpu_count(),
-            "memory": {
-                "total": psutil.virtual_memory().total,
-                "available": psutil.virtual_memory().available,
-                "used_percent": psutil.virtual_memory().percent
-            },
-            "process": {
-                "cpu_percent": psutil.Process().cpu_percent(),
-                "memory_percent": psutil.Process().memory_percent(),
-                "threads": len(psutil.Process().threads())
-            }
-        }
+        # Try to import psutil but don't fail if not available
+        sys_info = {"platform": platform.platform(), "python_version": platform.python_version()}
+        try:
+            import psutil
+            sys_info.update({
+                "cpus": psutil.cpu_count(),
+                "memory": {
+                    "total": psutil.virtual_memory().total,
+                    "available": psutil.virtual_memory().available,
+                    "used_percent": psutil.virtual_memory().percent
+                },
+                "process": {
+                    "cpu_percent": psutil.Process().cpu_percent(),
+                    "memory_percent": psutil.Process().memory_percent(),
+                    "threads": len(psutil.Process().threads())
+                }
+            })
+        except ImportError:
+            sys_info["resources"] = "psutil not available"
         
         # Module status with import times
         module_status = {
             name: {"available": status} for name, status in available_modules.items()
         }
         
-        # Cloud services status
-        cloud_status = {
-            "gcp_available": GCP_SERVICES_AVAILABLE,
-            "project_id": PROJECT_ID,
-            "region": REGION,
-            "environment": ENVIRONMENT
-        }
+        # Get cloud services status from config
+        cloud_status = config.get_cloud_status()
         
         # Configuration summary (no secrets)
         config_summary = {
@@ -407,11 +295,19 @@ except Exception as e:
     logger.error(f"ERROR during application initialization: {str(e)}")
     logger.error(f"Traceback: {error_tb}")
     
-    # Report initialization failure
-    report_metric("init_failure", 1)
+    # Report initialization failure - using direct approach since config might not be available
+    try:
+        if 'config' in sys.modules and hasattr(config, 'report_metric'):
+            config.report_metric("init_failure", 1)
+    except Exception:
+        pass  # Silently continue on error
     
     # Report to Error Reporting if available
-    safe_report_exception()
+    try:
+        if 'config' in sys.modules and hasattr(config, 'report_exception'):
+            config.report_exception()
+    except Exception:
+        pass  # Silently continue on error
     
     # Use fallback app instead
     app = fallback_app
@@ -521,12 +417,6 @@ if __name__ == '__main__':
                 logger.warning(f"Initial ingestion failed: {e}")
                 logger.warning(traceback.format_exc())
         
-        # Add psutil dependency if missing
-        try:
-            import psutil
-        except ImportError:
-            logger.warning("psutil library not available - some metrics will be limited")
-        
         # Start the application
         app.run(host=HOST, port=PORT, debug=DEBUG_MODE)
     except Exception as e:
@@ -534,7 +424,11 @@ if __name__ == '__main__':
         logger.error(traceback.format_exc())
         
         # Report application startup failure
-        safe_report_exception()
+        try:
+            if 'config' in sys.modules and hasattr(config, 'report_exception'):
+                config.report_exception()
+        except Exception:
+            pass  # Silently ignore if reporting fails
         
         # Exit with error code
         sys.exit(1)
