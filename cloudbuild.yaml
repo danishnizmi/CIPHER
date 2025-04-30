@@ -281,11 +281,26 @@ steps:
         --description="Hourly threat feed update" \
         --project=$PROJECT_ID || echo "Scheduler job update-threat-feeds already exists"
       
-      # Add service account to scheduler job
-      gcloud scheduler jobs update http update-threat-feeds \
-        --location=us-central1 \
-        --oauth-service-account-email=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --project=$PROJECT_ID || echo "Warning: Failed to update scheduler job service account"
+      # Instead of using OAuth token, use headers with API key authentication
+      API_KEY=$(gcloud secrets versions access latest --secret="api-keys" --project=$PROJECT_ID | python -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" 2>/dev/null || echo "")
+      
+      if [ -n "$API_KEY" ]; then
+        gcloud scheduler jobs update http update-threat-feeds \
+          --location=us-central1 \
+          --headers="X-API-Key=${API_KEY}" \
+          --project=$PROJECT_ID || echo "Warning: Failed to update scheduler job with API key"
+      else
+        # Fallback to using Pub/Sub directly if we can't get the API key
+        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
+        gcloud scheduler jobs create pubsub update-threat-feeds \
+          --location=us-central1 \
+          --schedule="0 * * * *" \
+          --topic="projects/$PROJECT_ID/topics/threat-data-ingestion" \
+          --message-body='{"process_all": true}' \
+          --time-zone="UTC" \
+          --description="Hourly threat feed update" \
+          --project=$PROJECT_ID || echo "Warning: Failed to create pub/sub scheduler job"
+      fi
 
 # Run post-deployment check
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
