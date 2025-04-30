@@ -1,7 +1,7 @@
 """
 Threat Intelligence Platform - Configuration Module
 Centralized configuration management with GCP Secret Manager integration.
-Provides secure secret handling, configuration caching, and user management.
+Provides secure secret handling, configuration caching, user management, and GCP service initialization.
 """
 
 import os
@@ -13,11 +13,13 @@ import time
 import secrets
 from datetime import datetime
 from functools import lru_cache
-from typing import Dict, Any, Optional, List, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 # Configure logging
-logging.basicConfig(level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Environment variables - read once at module load time
@@ -43,8 +45,8 @@ DEFAULT_AUTH_CONFIG = {
     "session_secret": secrets.token_hex(32)
 }
 
-# Lazy-loaded Secret Manager client
-_secret_client = None
+# Lazy-loaded GCP clients (shared across modules)
+_gcp_clients = {}
 # Config cache with 30-minute TTL
 _config_cache = {}
 _cache_timestamp = {}
@@ -52,57 +54,234 @@ CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 # GCP services availability flag
 GCP_SERVICES_AVAILABLE = False
-try:
-    from google.cloud import secretmanager
-    GCP_SERVICES_AVAILABLE = True
-    logger.info("GCP Secret Manager library available")
-except ImportError:
-    logger.warning("GCP Secret Manager library not available - will operate in degraded mode")
 
-# Create a dummy secret client to avoid failures
-class DummySecretClient:
-    def access_secret_version(self, request):
-        logger.warning(f"Secret access attempted but Secret Manager not available: {request}")
-        return None
-    
-    def add_secret_version(self, request):
-        logger.warning(f"Secret update attempted but Secret Manager not available: {request}")
-        return None
-    
-    def create_secret(self, request):
-        logger.warning(f"Secret creation attempted but Secret Manager not available: {request}")
-        return None
-    
-    def get_secret(self, request):
-        logger.warning(f"Secret retrieval attempted but Secret Manager not available: {request}")
-        return None
-    
-    def delete_secret(self, request):
-        logger.warning(f"Secret deletion attempted but Secret Manager not available: {request}")
-        return None
+# ======== GCP Service Initialization ========
 
-def get_secret_client():
-    """Get Secret Manager client (lazy initialization to save costs)"""
-    global _secret_client, GCP_SERVICES_AVAILABLE
+def initialize_gcp_services():
+    """Initialize and validate GCP services with comprehensive error handling"""
+    global GCP_SERVICES_AVAILABLE
     
-    if BYPASS_SECRET_MANAGER:
-        logger.info("Secret Manager bypassed due to BYPASS_SECRET_MANAGER flag")
-        return None
+    try:
+        # Try to authenticate with GCP
+        import google.auth
         
-    if not GCP_SERVICES_AVAILABLE:
-        logger.warning("Secret Manager library not available")
-        return DummySecretClient()
-        
-    if _secret_client is None:
+        # Try to get credentials - will validate access
         try:
-            from google.cloud import secretmanager
-            _secret_client = secretmanager.SecretManagerServiceClient()
-            logger.info("Secret Manager client initialized")
+            credentials, detected_project_id = google.auth.default()
+            if detected_project_id and detected_project_id != PROJECT_ID:
+                logger.warning(f"Detected project ID ({detected_project_id}) differs from configured PROJECT_ID ({PROJECT_ID})")
+            
+            logger.info(f"Successfully authenticated with GCP for project {PROJECT_ID}")
+            GCP_SERVICES_AVAILABLE = True
+            return True
         except Exception as e:
-            logger.warning(f"Failed to initialize Secret Manager client: {e}")
-            _secret_client = DummySecretClient()
+            logger.warning(f"GCP authentication failed: {e}")
+            GCP_SERVICES_AVAILABLE = False
+            return False
+    except ImportError as e:
+        logger.warning(f"GCP libraries not available: {e}")
+        GCP_SERVICES_AVAILABLE = False
+        return False
+
+# Initialize GCP services when module is loaded
+initialize_gcp_services()
+
+# Create a dummy client for graceful degradation
+class DummyClient:
+    """Dummy client to use when a service is unavailable"""
     
-    return _secret_client
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        logger.warning(f"{service_name} service unavailable, using dummy client")
+        
+    def __getattr__(self, name):
+        def dummy_method(*args, **kwargs):
+            logger.warning(f"{self.service_name} not available, {name} called but will return None")
+            return None
+        return dummy_method
+
+def get_client(client_type: str):
+    """Get or initialize a Google Cloud client with unified error handling
+    
+    Args:
+        client_type: Type of client to retrieve or initialize
+        
+    Returns:
+        Initialized client or DummyClient if service unavailable
+    """
+    global _gcp_clients
+    
+    # Return cached client if available
+    if client_type in _gcp_clients:
+        return _gcp_clients[client_type]
+    
+    if not GCP_SERVICES_AVAILABLE and client_type not in ['bigquery']:
+        # BigQuery can still work in some cases without full GCP integration
+        logger.warning(f"GCP services not available, returning dummy client for {client_type}")
+        _gcp_clients[client_type] = DummyClient(client_type)
+        return _gcp_clients[client_type]
+    
+    try:
+        if client_type == 'bigquery':
+            from google.cloud import bigquery
+            _gcp_clients[client_type] = bigquery.Client(project=PROJECT_ID)
+            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
+            
+        elif client_type == 'storage':
+            from google.cloud import storage
+            _gcp_clients[client_type] = storage.Client(project=PROJECT_ID)
+            logger.info(f"Storage client initialized for project {PROJECT_ID}")
+            
+        elif client_type == 'pubsub':
+            from google.cloud import pubsub_v1
+            _gcp_clients[client_type] = pubsub_v1.PublisherClient()
+            logger.info("Pub/Sub publisher initialized")
+            
+        elif client_type == 'secretmanager':
+            from google.cloud import secretmanager
+            _gcp_clients[client_type] = secretmanager.SecretManagerServiceClient()
+            logger.info("Secret Manager client initialized")
+            
+        elif client_type == 'error_reporting':
+            from google.cloud import error_reporting
+            _gcp_clients[client_type] = error_reporting.Client(service="threat-intelligence-platform")
+            logger.info("Error reporting client initialized")
+            
+        elif client_type == 'monitoring':
+            from google.cloud import monitoring_v3
+            _gcp_clients[client_type] = monitoring_v3.MetricServiceClient()
+            logger.info("Monitoring client initialized")
+            
+        elif client_type == 'vertex':
+            try:
+                import vertexai
+                vertexai.init(project=PROJECT_ID, location=REGION)
+                # Store True to indicate successful initialization
+                _gcp_clients[client_type] = True
+                logger.info("Vertex AI initialized successfully")
+            except Exception as e:
+                logger.warning(f"Vertex AI initialization failed: {e}")
+                _gcp_clients[client_type] = False
+            
+        else:
+            logger.error(f"Unknown client type: {client_type}")
+            _gcp_clients[client_type] = DummyClient(client_type)
+            
+        return _gcp_clients[client_type]
+        
+    except ImportError as e:
+        logger.warning(f"{client_type} library not available: {str(e)}")
+        _gcp_clients[client_type] = DummyClient(client_type)
+        return _gcp_clients[client_type]
+    except Exception as e:
+        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        _gcp_clients[client_type] = DummyClient(client_type)
+        return _gcp_clients[client_type]
+
+def get_gcp_clients():
+    """Get all initialized GCP clients (for sharing across modules)"""
+    return _gcp_clients
+
+def get_cloud_status():
+    """Get current GCP service status for monitoring"""
+    status = {
+        "gcp_available": GCP_SERVICES_AVAILABLE,
+        "project_id": PROJECT_ID,
+        "region": REGION,
+        "environment": ENVIRONMENT,
+        "services": {}
+    }
+    
+    # Check each important service
+    for service in ['bigquery', 'storage', 'pubsub', 'secretmanager', 'monitoring', 'vertex']:
+        if service in _gcp_clients:
+            client = _gcp_clients[service]
+            status["services"][service] = {
+                "available": not isinstance(client, DummyClient) and client is not False,
+                "initialized": service in _gcp_clients
+            }
+        else:
+            status["services"][service] = {
+                "available": False,
+                "initialized": False
+            }
+    
+    return status
+
+def check_database_connectivity():
+    """Check if BigQuery is accessible (for health checks)"""
+    client = get_client('bigquery')
+    if isinstance(client, DummyClient):
+        return "unavailable"
+    
+    try:
+        # Simple query to check connectivity
+        query_job = client.query("SELECT 1")
+        query_job.result()  # Wait for query to complete
+        return "ok"
+    except Exception as e:
+        logger.warning(f"Database connectivity check failed: {e}")
+        return "error"
+
+# ======== Monitoring Functions ========
+
+def report_exception():
+    """Report exception to Error Reporting if available"""
+    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production':
+        return
+    
+    error_client = get_client('error_reporting')
+    if isinstance(error_client, DummyClient):
+        return
+    
+    try:
+        error_client.report_exception()
+    except Exception as e:
+        logger.warning(f"Failed to report exception: {e}")
+
+def report_metric(metric_type, value=1):
+    """Report a metric to Cloud Monitoring with graceful degradation
+    
+    Args:
+        metric_type: Type of metric to report
+        value: Value to report (default: 1)
+    """
+    if not GCP_SERVICES_AVAILABLE or ENVIRONMENT != 'production':
+        return
+    
+    try:
+        client = get_client('monitoring')
+        if isinstance(client, DummyClient):
+            return
+        
+        from google.cloud import monitoring_v3
+        
+        # Create full metric type
+        metric_type = f"custom.googleapis.com/threat_intel/{metric_type}"
+        
+        # Define the metric
+        project_name = f"projects/{PROJECT_ID}"
+        series = monitoring_v3.TimeSeries()
+        series.metric.type = metric_type
+        series.metric.labels.update({"environment": ENVIRONMENT, "version": VERSION})
+        
+        # Create point
+        point = series.points.add()
+        point.value.double_value = float(value)
+        now = time.time()
+        point.interval.end_time.seconds = int(now)
+        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
+        
+        # Write metric
+        client.create_time_series(name=project_name, time_series=[series])
+        logger.debug(f"Reported metric {metric_type}: {value}")
+    except ImportError:
+        # Module not available, gracefully degrade
+        logger.debug(f"Monitoring module not available, metric {metric_type} not reported")
+    except Exception as e:
+        logger.warning(f"Failed to report metric {metric_type}: {e}")
+
+# ======== Secret Management ========
 
 def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
     """Get a secret from Secret Manager with error handling
@@ -118,8 +297,8 @@ def get_secret(secret_id: str, version_id: str = "latest") -> Optional[str]:
         logger.warning(f"Secret Manager not available, cannot retrieve secret {secret_id}")
         return None
         
-    client = get_secret_client()
-    if not client:
+    client = get_client('secretmanager')
+    if isinstance(client, DummyClient):
         logger.warning(f"Secret Manager client not available, cannot retrieve secret {secret_id}")
         return None
         
@@ -166,12 +345,14 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
         logger.warning(f"Secret Manager not available, cannot create/update secret {secret_id}")
         return False
         
-    client = get_secret_client()
-    if not client:
+    client = get_client('secretmanager')
+    if isinstance(client, DummyClient):
         logger.warning(f"Secret Manager client not available, cannot create/update secret {secret_id}")
         return False
         
     try:
+        from google.cloud import secretmanager
+        
         parent = f"projects/{PROJECT_ID}"
         
         # Check if secret exists
@@ -214,6 +395,8 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to update secret {secret_id}: {str(e)}")
         return False
+
+# ======== Configuration Management ========
 
 def get_config(config_name: str) -> Dict[str, Any]:
     """Get configuration from Secret Manager with caching
@@ -318,6 +501,8 @@ def load_configs(force_refresh: bool = False) -> Dict[str, Dict]:
         api_key = configs['api_keys']['platform_api_key']
     
     return configs
+
+# ======== User Management ========
 
 def generate_secure_password(length: int = 16) -> str:
     """Generate a cryptographically secure password
@@ -451,13 +636,15 @@ def set_initial_admin_password(force: bool = False) -> Optional[str]:
     finally:
         # Remove setup lock
         try:
-            client = get_secret_client()
-            if client:
+            client = get_client('secretmanager')
+            if not isinstance(client, DummyClient):
                 name = f"projects/{PROJECT_ID}/secrets/admin-setup-lock"
                 client.delete_secret(request={"name": name})
         except Exception as e:
             logger.warning(f"Failed to remove admin setup lock: {e}")
             # Let the lock expire naturally
+
+# ======== Main Initialization Functions ========
 
 def init_app_config() -> Dict[str, Any]:
     """Initialize application configuration
@@ -531,6 +718,10 @@ def secure_config_init() -> bool:
     Returns:
         Success status
     """
+    # Initialize GCP services if not already done
+    if not GCP_SERVICES_AVAILABLE:
+        initialize_gcp_services()
+    
     # Ensure required configuration is available
     try:
         # Initialize app configuration from Secret Manager
@@ -577,6 +768,9 @@ def secure_config_init() -> bool:
 # Initialize secure configuration when module is imported
 if not DEBUG_MODE:
     secure_config_init()
+
+# Module version for version checks
+VERSION = "1.0.1"
 
 # Exported properties for other modules
 project_id = PROJECT_ID
