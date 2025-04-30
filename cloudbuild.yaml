@@ -162,30 +162,48 @@ steps:
           --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/secretmanager.secretAccessor" || true
       done
+      
+      # Generate a secure API key and store it in api-keys secret
+      # First check if we already have a platform_api_key
+      CURRENT_API_KEYS=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null || echo "{}")
+      if ! echo "$CURRENT_API_KEYS" | grep -q "platform_api_key"; then
+        # Generate a random API key if one doesn't exist
+        NEW_API_KEY=$(head -c 16 /dev/urandom | xxd -p)
+        API_KEYS_JSON=$(echo "$CURRENT_API_KEYS" | python3 -c "import sys, json; data=json.load(sys.stdin); data['platform_api_key']='$NEW_API_KEY'; print(json.dumps(data))")
+        echo "$API_KEYS_JSON" | gcloud secrets versions add api-keys --data-file=-
+        echo "Generated and stored new API key"
+      else
+        echo "API key already exists"
+      fi
 
 # Deploy container image to Cloud Run
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
-  entrypoint: gcloud
+  entrypoint: 'bash'
   args:
-    - 'run'
-    - 'deploy'
-    - 'threat-intelligence-platform'
-    - '--image'
-    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
-    - '--region'
-    - 'us-central1'
-    - '--platform'
-    - 'managed'
-    - '--allow-unauthenticated'
-    - '--cpu'
-    - '2'
-    - '--memory'
-    - '2Gi'
-    - '--set-env-vars'
-    - 'ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID'
-    - '--service-account'
-    - 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
+    - '-c'
+    - |
+      # Get the API key from Secret Manager for passing to the deployment
+      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      
+      if [ -z "$API_KEY_VALUE" ]; then
+        echo "Warning: Could not retrieve API key, generating a random one"
+        API_KEY_VALUE=$(head -c 16 /dev/urandom | xxd -p)
+      fi
+      
+      # Generate a secret key for Flask sessions if needed
+      SECRET_KEY_VALUE=$(head -c 32 /dev/urandom | xxd -p)
+      
+      # Deploy to Cloud Run with environment variables
+      gcloud run deploy threat-intelligence-platform \
+        --image gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
+        --region us-central1 \
+        --platform managed \
+        --allow-unauthenticated \
+        --cpu 2 \
+        --memory 2Gi \
+        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,API_KEY=$API_KEY_VALUE,SECRET_KEY=$SECRET_KEY_VALUE,VERSION=1.0.1" \
+        --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
 
 # Create/update BigQuery dataset and tables
 - name: 'python:3.10'
@@ -228,6 +246,14 @@ steps:
   args:
     - '-c'
     - |
+      # Get the API key for the function environment
+      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      
+      if [ -z "$API_KEY_VALUE" ]; then
+        echo "Warning: Could not retrieve API key, using placeholder"
+        API_KEY_VALUE="placeholder_key"
+      fi
+      
       # Deploy the ingestion function
       cd functions/ingestion
       echo "Deploying ingestion function..."
@@ -240,7 +266,7 @@ steps:
         --allow-unauthenticated \
         --project=$PROJECT_ID \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1 || echo "Warning: Ingestion function deployment failed"
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$API_KEY_VALUE || echo "Warning: Ingestion function deployment failed"
 
 # Deploy Cloud Function for analysis
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -249,6 +275,14 @@ steps:
   args:
     - '-c'
     - |
+      # Get the API key for the function environment
+      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      
+      if [ -z "$API_KEY_VALUE" ]; then
+        echo "Warning: Could not retrieve API key, using placeholder"
+        API_KEY_VALUE="placeholder_key"
+      fi
+      
       # Deploy the analysis function
       cd functions/analysis
       echo "Deploying analysis function..."
@@ -260,7 +294,7 @@ steps:
         --trigger-topic=threat-data-ingestion \
         --project=$PROJECT_ID \
         --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1 || echo "Warning: Analysis function deployment failed"
+        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$API_KEY_VALUE || echo "Warning: Analysis function deployment failed"
 
 # Set up Cloud Scheduler jobs for periodic feed updates
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -269,29 +303,12 @@ steps:
   args:
     - '-c'
     - |
-      # Create scheduler job for feed updates (runs every hour)
-      gcloud scheduler jobs create http update-threat-feeds \
-        --location=us-central1 \
-        --schedule="0 * * * *" \
-        --uri="https://us-central1-$PROJECT_ID.cloudfunctions.net/ingest_threat_data" \
-        --http-method=POST \
-        --message-body='{"process_all": true}' \
-        --time-zone="UTC" \
-        --attempt-deadline=30m \
-        --description="Hourly threat feed update" \
-        --project=$PROJECT_ID || echo "Scheduler job update-threat-feeds already exists"
+      # Get the API key from Secret Manager
+      API_KEY_VALUE=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      # Instead of using OAuth token, use headers with API key authentication
-      API_KEY=$(gcloud secrets versions access latest --secret="api-keys" --project=$PROJECT_ID | python -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" 2>/dev/null || echo "")
-      
-      if [ -n "$API_KEY" ]; then
-        gcloud scheduler jobs update http update-threat-feeds \
-          --location=us-central1 \
-          --headers="X-API-Key=${API_KEY}" \
-          --project=$PROJECT_ID || echo "Warning: Failed to update scheduler job with API key"
-      else
-        # Fallback to using Pub/Sub directly if we can't get the API key
-        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
+      if [ -z "$API_KEY_VALUE" ]; then
+        echo "Warning: Could not retrieve API key, using Pub/Sub method instead"
+        # Use Pub/Sub approach if we can't get the API key
         gcloud scheduler jobs create pubsub update-threat-feeds \
           --location=us-central1 \
           --schedule="0 * * * *" \
@@ -299,7 +316,24 @@ steps:
           --message-body='{"process_all": true}' \
           --time-zone="UTC" \
           --description="Hourly threat feed update" \
-          --project=$PROJECT_ID || echo "Warning: Failed to create pub/sub scheduler job"
+          --project=$PROJECT_ID || echo "Scheduler job update-threat-feeds already exists"
+      else
+        # Create HTTP scheduler job with API key in header
+        # First delete any existing job to avoid conflicts
+        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
+        
+        # Create with API key in header
+        gcloud scheduler jobs create http update-threat-feeds \
+          --location=us-central1 \
+          --schedule="0 * * * *" \
+          --uri="https://us-central1-$PROJECT_ID.cloudfunctions.net/ingest_threat_data" \
+          --http-method=POST \
+          --headers="X-API-Key=$API_KEY_VALUE" \
+          --message-body='{"process_all": true}' \
+          --time-zone="UTC" \
+          --attempt-deadline=30m \
+          --description="Hourly threat feed update" \
+          --project=$PROJECT_ID || echo "Warning: Failed to create scheduler job"
       fi
 
 # Run post-deployment check
