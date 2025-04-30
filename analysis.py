@@ -13,29 +13,24 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Set, Tuple, Union
 from functools import lru_cache
 
-from google.cloud import bigquery
-from google.cloud import pubsub_v1
-import vertexai
-from vertexai.language_models import TextGenerationModel
-
 # Import config module for centralized configuration
 import config
 
-# Configure logging
+# Configure logging with consistent format across modules
 logging.basicConfig(
     level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Configuration from config module
+# Core configuration from config module (avoids hardcoding)
 PROJECT_ID = config.project_id
 REGION = config.region
 DATASET_ID = config.bigquery_dataset
 PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-analysis-events")
 MODEL_NAME = os.environ.get("VERTEX_MODEL", "text-bison")
 
-# Shared GCP clients
+# Shared service clients
 _clients = {}
 
 # IOC regex patterns
@@ -50,12 +45,18 @@ IOC_PATTERNS = {
     "cve": r'CVE-\d{4}-\d{4,7}',
 }
 
-# Create a dummy client for graceful degradation
+# Cached Vertex AI model instance
+_vertex_model = None
+
+# ======== GCP Service Management ========
+
+# Consistent dummy client for graceful degradation
 class DummyClient:
     """Dummy client to use when a service is unavailable"""
     
     def __init__(self, service_name: str):
         self.service_name = service_name
+        logger.warning(f"{service_name} service unavailable, using dummy client")
         
     def __getattr__(self, name):
         def dummy_method(*args, **kwargs):
@@ -63,49 +64,76 @@ class DummyClient:
             return None
         return dummy_method
 
-# ======== Client Management ========
-
-def get_client(client_type: str):
-    """Get or initialize a Google Cloud client (lazy initialization)"""
+def get_client(client_type: str) -> Any:
+    """Get or initialize a Google Cloud client with centralized error handling
+    
+    Args:
+        client_type: Type of client to initialize (bigquery, pubsub, etc.)
+        
+    Returns:
+        Initialized client or DummyClient if service unavailable
+    """
     global _clients
     
     if client_type in _clients:
         return _clients[client_type]
-    
+        
     try:
         if client_type == 'bigquery':
-            try:
-                _clients[client_type] = bigquery.Client(project=PROJECT_ID)
-                logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
-            except Exception as e:
-                logger.warning(f"BigQuery client initialization failed: {str(e)}")
-                _clients[client_type] = DummyClient("BigQuery")
+            from google.cloud import bigquery
+            _clients[client_type] = bigquery.Client(project=PROJECT_ID)
+            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
             
         elif client_type == 'pubsub':
-            try:
-                _clients[client_type] = pubsub_v1.PublisherClient()
-                logger.info("Pub/Sub publisher initialized")
-            except Exception as e:
-                logger.warning(f"Pub/Sub client initialization failed: {str(e)}")
-                _clients[client_type] = DummyClient("Pub/Sub")
+            from google.cloud import pubsub_v1
+            _clients[client_type] = pubsub_v1.PublisherClient()
+            logger.info("Pub/Sub publisher initialized")
             
         elif client_type == 'vertex':
+            # Initialize Vertex AI with proper error handling
             try:
+                import vertexai
                 vertexai.init(project=PROJECT_ID, location=REGION)
                 # Store True to indicate successful initialization
                 _clients[client_type] = True
                 logger.info("Vertex AI initialized successfully")
-            except Exception as e:
+            except (ImportError, Exception) as e:
                 logger.warning(f"Vertex AI initialization failed: {str(e)}")
-                _clients[client_type] = None
+                _clients[client_type] = False
                 
         else:
             logger.error(f"Unknown client type: {client_type}")
-            return None
+            _clients[client_type] = DummyClient(client_type)
             
+        return _clients[client_type]
+    except ImportError as e:
+        logger.warning(f"{client_type} library not available: {str(e)}")
+        _clients[client_type] = DummyClient(client_type)
         return _clients[client_type]
     except Exception as e:
         logger.error(f"Failed to initialize {client_type} client: {str(e)}")
+        _clients[client_type] = DummyClient(client_type)
+        return _clients[client_type]
+
+def get_vertex_model():
+    """Get Vertex AI model with proper caching and error handling"""
+    global _vertex_model
+    
+    if _vertex_model is not None:
+        return _vertex_model
+        
+    # Ensure Vertex AI is initialized
+    vertex_initialized = get_client('vertex')
+    if not vertex_initialized:
+        return None
+    
+    try:
+        from vertexai.language_models import TextGenerationModel
+        _vertex_model = TextGenerationModel.from_pretrained(MODEL_NAME)
+        logger.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
+        return _vertex_model
+    except Exception as e:
+        logger.error(f"Failed to load Vertex AI model: {str(e)}")
         return None
 
 # ======== Utility Functions ========
@@ -126,7 +154,7 @@ def extract_json_from_text(text: str) -> Optional[str]:
 def publish_event(data: Dict[str, Any]) -> bool:
     """Publish event to Pub/Sub with retry"""
     client = get_client('pubsub')
-    if not client:
+    if not client or isinstance(client, DummyClient):
         return False
     
     try:
@@ -153,12 +181,16 @@ def publish_event(data: Dict[str, Any]) -> bool:
 def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
     """Execute a BigQuery query with parameters"""
     client = get_client('bigquery')
-    if not client or isinstance(client, DummyClient):
+    if isinstance(client, DummyClient):
         return []
         
     try:
-        job_config = bigquery.QueryJobConfig()
+        job_config = None
         if params:
+            # Import locally to avoid global dependency
+            from google.cloud import bigquery
+            
+            job_config = bigquery.QueryJobConfig()
             # Create query parameters
             query_params = []
             for key, value in params.items():
@@ -182,12 +214,12 @@ def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
         return []
 
 def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
-    """Insert rows into BigQuery with optimized error handling"""
+    """Insert rows into BigQuery with schema validation"""
     if not rows:
         return True
         
     client = get_client('bigquery')
-    if not client or isinstance(client, DummyClient):
+    if isinstance(client, DummyClient):
         return False
     
     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
@@ -217,6 +249,9 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
         
         # Try to update schema
         try:
+            # Import locally to avoid global dependency
+            from google.cloud import bigquery
+            
             table = client.get_table(full_table_id)
             current_schema = {field.name: field for field in table.schema}
             
@@ -249,13 +284,15 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
 # ======== AI Analysis Functions ========
 
 def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Analyze threat data using Vertex AI LLM"""
-    if not get_client('vertex'):
-        logger.warning("Vertex AI not initialized")
-        return {}
-    
+    """Analyze threat data using Vertex AI LLM with efficient caching and error handling"""
     if not content:
         return {}
+    
+    # Get cached model or initialize
+    model = get_vertex_model()
+    if not model:
+        logger.warning("Vertex AI model not available")
+        return _generate_fallback_analysis(content, metadata)
     
     # Truncate content if it's too long (Vertex AI has context limits)
     if len(content) > 8000:
@@ -282,9 +319,6 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
     
     try:
         logger.info("Sending content to Vertex AI for analysis")
-        
-        # Get the model
-        model = TextGenerationModel.from_pretrained(MODEL_NAME)
         
         # Generate response with retry logic
         for attempt in range(3):
@@ -331,7 +365,64 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
                     raise
     except Exception as e:
         logger.error(f"Error analyzing with Vertex AI: {str(e)}")
-        return {}
+        return _generate_fallback_analysis(content, metadata)
+
+def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Generate fallback analysis when Vertex AI is unavailable"""
+    logger.info("Using fallback analysis method (rule-based)")
+    
+    # Extract basic indicators from content using regex
+    severity = "Medium"  # Default severity
+    confidence = "Low"   # Low confidence for fallback analysis
+    
+    # Simple keyword-based severity assessment
+    critical_keywords = ["critical", "ransomware", "backdoor", "zero-day", "0day"]
+    high_keywords = ["high", "exploit", "leaked", "vulnerability", "trojan"]
+    
+    content_lower = content.lower()
+    if any(word in content_lower for word in critical_keywords):
+        severity = "Critical"
+    elif any(word in content_lower for word in high_keywords):
+        severity = "High"
+    
+    # Extract threat actors using simple pattern matching
+    threat_actor = "Unknown"
+    actor_patterns = [
+        r'(?:threat|threat\s+actor|actor|group|apt):\s*([A-Za-z0-9\s\-_]+)',
+        r'attributed\s+to\s+([A-Za-z0-9\s\-_]+)',
+        r'(?:APT|group)\s*([0-9]+)'
+    ]
+    
+    for pattern in actor_patterns:
+        matches = re.search(pattern, content, re.IGNORECASE)
+        if matches:
+            threat_actor = matches.group(1).strip()
+            break
+    
+    # Basic summary extraction - first 1-2 sentences
+    sentences = re.split(r'(?<=[.!?])\s+', content)
+    summary = " ".join(sentences[:min(2, len(sentences))])
+    
+    # Create analysis object
+    source_id = "unknown"
+    source_type = "unknown"
+    if metadata:
+        source_id = metadata.get("id", "unknown")
+        source_type = metadata.get("type", "unknown")
+    
+    return {
+        "summary": summary[:500],
+        "threat_actor": threat_actor,
+        "targets": "Unknown",
+        "techniques": "Unknown",
+        "malware": "Unknown",
+        "severity": severity,
+        "confidence": confidence,
+        "analysis_timestamp": datetime.utcnow().isoformat(),
+        "source_id": source_id,
+        "source_type": source_type,
+        "fallback": True  # Indicates this was generated by fallback system
+    }
 
 # ======== IOC Processing Functions ========
 
@@ -490,17 +581,21 @@ class ThreatAnalyzer:
     def _ensure_tables(self):
         """Ensure required BigQuery tables exist"""
         client = get_client('bigquery')
-        if not client or isinstance(client, DummyClient):
+        if isinstance(client, DummyClient):
             logger.warning("BigQuery not available, cannot ensure tables")
             return
             
         try:
+            # Import locally to avoid global dependency
+            from google.cloud import bigquery
+            from google.cloud.exceptions import NotFound
+            
             # Check/create analysis table
             analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
             try:
                 client.get_table(analysis_table_id)
                 logger.info("Analysis table already exists")
-            except Exception:
+            except NotFound:
                 # Create analysis table
                 schema = [
                     bigquery.SchemaField("source_id", "STRING"),
@@ -518,7 +613,7 @@ class ThreatAnalyzer:
             try:
                 client.get_table(campaigns_table_id)
                 logger.info("Campaigns table already exists")
-            except Exception:
+            except NotFound:
                 # Create campaigns table
                 schema = [
                     bigquery.SchemaField("campaign_id", "STRING"),
@@ -889,8 +984,6 @@ def analyze_threat_data(event, context):
 
 # For direct execution
 if __name__ == "__main__":
-    import itertools  # Needed for CSV analysis
-    
     analyzer = ThreatAnalyzer()
     
     # Process default feeds
