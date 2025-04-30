@@ -1,7 +1,7 @@
 """
 Threat Intelligence Platform - Analysis Module
 Processes threat data, extracts IOCs, and generates insights using Vertex AI.
-Streamlined implementation with optimized GCP integration.
+Optimized implementation with efficient GCP integration and resource usage.
 """
 
 import os
@@ -9,6 +9,7 @@ import re
 import json
 import logging
 import hashlib
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Set, Tuple, Union
 from functools import lru_cache
@@ -16,22 +17,25 @@ from functools import lru_cache
 # Import config module for centralized configuration
 import config
 
-# Configure logging with consistent format across modules
+# Configure logging with consistent format
 logging.basicConfig(
     level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Core configuration from config module (avoids hardcoding)
+# Core configuration from config module
 PROJECT_ID = config.project_id
 REGION = config.region
 DATASET_ID = config.bigquery_dataset
 PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-analysis-events")
 MODEL_NAME = os.environ.get("VERTEX_MODEL", "text-bison")
 
-# Shared service clients
-_clients = {}
+# AI usage limits
+MAX_AI_REQUESTS_PER_HOUR = 100
+MAX_AI_CONTENT_LENGTH = 8000  # Maximum content length to send to Vertex AI
+AI_REQUEST_COUNT = 0
+LAST_AI_RESET_TIME = time.time()
 
 # IOC regex patterns
 IOC_PATTERNS = {
@@ -48,95 +52,11 @@ IOC_PATTERNS = {
 # Cached Vertex AI model instance
 _vertex_model = None
 
-# ======== GCP Service Management ========
-
-# Consistent dummy client for graceful degradation
-class DummyClient:
-    """Dummy client to use when a service is unavailable"""
-    
-    def __init__(self, service_name: str):
-        self.service_name = service_name
-        logger.warning(f"{service_name} service unavailable, using dummy client")
-        
-    def __getattr__(self, name):
-        def dummy_method(*args, **kwargs):
-            logger.warning(f"{self.service_name} not available, {name} called but will return None")
-            return None
-        return dummy_method
+# ======== Utility Functions ========
 
 def get_client(client_type: str) -> Any:
-    """Get or initialize a Google Cloud client with centralized error handling
-    
-    Args:
-        client_type: Type of client to initialize (bigquery, pubsub, etc.)
-        
-    Returns:
-        Initialized client or DummyClient if service unavailable
-    """
-    global _clients
-    
-    if client_type in _clients:
-        return _clients[client_type]
-        
-    try:
-        if client_type == 'bigquery':
-            from google.cloud import bigquery
-            _clients[client_type] = bigquery.Client(project=PROJECT_ID)
-            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
-            
-        elif client_type == 'pubsub':
-            from google.cloud import pubsub_v1
-            _clients[client_type] = pubsub_v1.PublisherClient()
-            logger.info("Pub/Sub publisher initialized")
-            
-        elif client_type == 'vertex':
-            # Initialize Vertex AI with proper error handling
-            try:
-                import vertexai
-                vertexai.init(project=PROJECT_ID, location=REGION)
-                # Store True to indicate successful initialization
-                _clients[client_type] = True
-                logger.info("Vertex AI initialized successfully")
-            except (ImportError, Exception) as e:
-                logger.warning(f"Vertex AI initialization failed: {str(e)}")
-                _clients[client_type] = False
-                
-        else:
-            logger.error(f"Unknown client type: {client_type}")
-            _clients[client_type] = DummyClient(client_type)
-            
-        return _clients[client_type]
-    except ImportError as e:
-        logger.warning(f"{client_type} library not available: {str(e)}")
-        _clients[client_type] = DummyClient(client_type)
-        return _clients[client_type]
-    except Exception as e:
-        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-        _clients[client_type] = DummyClient(client_type)
-        return _clients[client_type]
-
-def get_vertex_model():
-    """Get Vertex AI model with proper caching and error handling"""
-    global _vertex_model
-    
-    if _vertex_model is not None:
-        return _vertex_model
-        
-    # Ensure Vertex AI is initialized
-    vertex_initialized = get_client('vertex')
-    if not vertex_initialized:
-        return None
-    
-    try:
-        from vertexai.language_models import TextGenerationModel
-        _vertex_model = TextGenerationModel.from_pretrained(MODEL_NAME)
-        logger.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
-        return _vertex_model
-    except Exception as e:
-        logger.error(f"Failed to load Vertex AI model: {str(e)}")
-        return None
-
-# ======== Utility Functions ========
+    """Get a Google Cloud client from the config module"""
+    return config.get_client(client_type)
 
 def extract_json_from_text(text: str) -> Optional[str]:
     """Extract JSON object from text response"""
@@ -152,36 +72,19 @@ def extract_json_from_text(text: str) -> Optional[str]:
     return None
 
 def publish_event(data: Dict[str, Any]) -> bool:
-    """Publish event to Pub/Sub with retry"""
-    client = get_client('pubsub')
-    if not client or isinstance(client, DummyClient):
-        return False
-    
+    """Publish event to Pub/Sub with retry logic"""
+    # Use the config module for publish_event
     try:
-        topic_path = client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
-        json_data = json.dumps(data).encode("utf-8")
-        
-        # Publish with retry
-        for attempt in range(3):
-            try:
-                future = client.publish(topic_path, data=json_data)
-                message_id = future.result(timeout=30)
-                logger.info(f"Published event {message_id} to {PUBSUB_TOPIC}")
-                return True
-            except Exception as e:
-                if attempt == 2:  # Last attempt
-                    raise
-                logger.warning(f"Publish attempt {attempt+1} failed: {str(e)}, retrying...")
-                
-        return False
+        topic_path = f"projects/{PROJECT_ID}/topics/{PUBSUB_TOPIC}"
+        return config.publish_event(PUBSUB_TOPIC, data)
     except Exception as e:
-        logger.error(f"Error publishing message: {str(e)}")
+        logger.error(f"Error publishing event: {str(e)}")
         return False
 
 def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
     """Execute a BigQuery query with parameters"""
     client = get_client('bigquery')
-    if isinstance(client, DummyClient):
+    if isinstance(client, config.DummyClient):
         return []
         
     try:
@@ -219,7 +122,7 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
         return True
         
     client = get_client('bigquery')
-    if isinstance(client, DummyClient):
+    if isinstance(client, config.DummyClient):
         return False
     
     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
@@ -281,150 +184,39 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
         logger.error(f"BigQuery insert error: {str(e)}")
         return False
 
-# ======== AI Analysis Functions ========
-
-def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Analyze threat data using Vertex AI LLM with efficient caching and error handling"""
-    if not content:
-        return {}
+def get_vertex_model():
+    """Get Vertex AI model with proper caching and rate limiting"""
+    global _vertex_model, AI_REQUEST_COUNT, LAST_AI_RESET_TIME
     
-    # Get cached model or initialize
-    model = get_vertex_model()
-    if not model:
-        logger.warning("Vertex AI model not available")
-        return _generate_fallback_analysis(content, metadata)
+    # Reset the count if an hour has passed
+    current_time = time.time()
+    if current_time - LAST_AI_RESET_TIME > 3600:  # 1 hour in seconds
+        AI_REQUEST_COUNT = 0
+        LAST_AI_RESET_TIME = current_time
     
-    # Truncate content if it's too long (Vertex AI has context limits)
-    if len(content) > 8000:
-        logger.info(f"Truncating content from {len(content)} to 8000 chars")
-        content = content[:8000]
+    # Check if we've exceeded the limit
+    if AI_REQUEST_COUNT >= MAX_AI_REQUESTS_PER_HOUR:
+        logger.warning(f"AI request limit reached ({MAX_AI_REQUESTS_PER_HOUR}/hour)")
+        return None
     
-    # Construct prompt for threat analysis
-    prompt = f"""
-    You are a threat intelligence analyst. Analyze the following threat intelligence data and extract key information:
-    
-    {content}
-    
-    Provide a structured analysis with the following information:
-    1. A brief summary of the threat (2-3 sentences)
-    2. The threat actor or group responsible (if mentioned)
-    3. Targeted sectors or regions (if mentioned)
-    4. Attack techniques used (MITRE ATT&CK techniques if possible)
-    5. Malware families involved (if mentioned)
-    6. Severity assessment (Low, Medium, High, Critical)
-    7. Confidence level in this analysis (Low, Medium, High)
-    
-    Format your response as JSON with these keys: summary, threat_actor, targets, techniques, malware, severity, confidence
-    """
+    if _vertex_model is not None:
+        return _vertex_model
+        
+    # Ensure Vertex AI is initialized
+    vertex_initialized = get_client('vertex')
+    if not vertex_initialized:
+        return None
     
     try:
-        logger.info("Sending content to Vertex AI for analysis")
-        
-        # Generate response with retry logic
-        for attempt in range(3):
-            try:
-                response = model.predict(prompt, temperature=0.1, max_output_tokens=1024)
-                
-                # Extract JSON from response
-                json_str = extract_json_from_text(response.text)
-                
-                if json_str:
-                    analysis = json.loads(json_str)
-                    
-                    # Add metadata
-                    source_id = "unknown"
-                    source_type = "unknown"
-                    if metadata:
-                        source_id = metadata.get("id", "unknown")
-                        source_type = metadata.get("type", "unknown")
-                        
-                    analysis["source_id"] = source_id
-                    analysis["source_type"] = source_type
-                    analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
-                    
-                    logger.info(f"Successfully extracted structured analysis from Vertex AI")
-                    return analysis
-                else:
-                    if attempt < 2:
-                        logger.warning(f"Could not find JSON in Vertex AI response (attempt {attempt+1}), retrying...")
-                    else:
-                        logger.warning("Could not find JSON in Vertex AI response after retries")
-                        # Return partial results based on text response
-                        return {
-                            "summary": response.text[:500],
-                            "confidence": "Low",
-                            "severity": "Medium",
-                            "analysis_timestamp": datetime.utcnow().isoformat(),
-                            "source_id": metadata.get("id", "unknown") if metadata else "unknown",
-                            "source_type": metadata.get("type", "unknown") if metadata else "unknown"
-                        }
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning(f"Vertex AI error (attempt {attempt+1}): {str(e)}, retrying...")
-                else:
-                    raise
+        from vertexai.language_models import TextGenerationModel
+        _vertex_model = TextGenerationModel.from_pretrained(MODEL_NAME)
+        logger.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
+        return _vertex_model
     except Exception as e:
-        logger.error(f"Error analyzing with Vertex AI: {str(e)}")
-        return _generate_fallback_analysis(content, metadata)
+        logger.error(f"Failed to load Vertex AI model: {str(e)}")
+        return None
 
-def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Generate fallback analysis when Vertex AI is unavailable"""
-    logger.info("Using fallback analysis method (rule-based)")
-    
-    # Extract basic indicators from content using regex
-    severity = "Medium"  # Default severity
-    confidence = "Low"   # Low confidence for fallback analysis
-    
-    # Simple keyword-based severity assessment
-    critical_keywords = ["critical", "ransomware", "backdoor", "zero-day", "0day"]
-    high_keywords = ["high", "exploit", "leaked", "vulnerability", "trojan"]
-    
-    content_lower = content.lower()
-    if any(word in content_lower for word in critical_keywords):
-        severity = "Critical"
-    elif any(word in content_lower for word in high_keywords):
-        severity = "High"
-    
-    # Extract threat actors using simple pattern matching
-    threat_actor = "Unknown"
-    actor_patterns = [
-        r'(?:threat|threat\s+actor|actor|group|apt):\s*([A-Za-z0-9\s\-_]+)',
-        r'attributed\s+to\s+([A-Za-z0-9\s\-_]+)',
-        r'(?:APT|group)\s*([0-9]+)'
-    ]
-    
-    for pattern in actor_patterns:
-        matches = re.search(pattern, content, re.IGNORECASE)
-        if matches:
-            threat_actor = matches.group(1).strip()
-            break
-    
-    # Basic summary extraction - first 1-2 sentences
-    sentences = re.split(r'(?<=[.!?])\s+', content)
-    summary = " ".join(sentences[:min(2, len(sentences))])
-    
-    # Create analysis object
-    source_id = "unknown"
-    source_type = "unknown"
-    if metadata:
-        source_id = metadata.get("id", "unknown")
-        source_type = metadata.get("type", "unknown")
-    
-    return {
-        "summary": summary[:500],
-        "threat_actor": threat_actor,
-        "targets": "Unknown",
-        "techniques": "Unknown",
-        "malware": "Unknown",
-        "severity": severity,
-        "confidence": confidence,
-        "analysis_timestamp": datetime.utcnow().isoformat(),
-        "source_id": source_id,
-        "source_type": source_type,
-        "fallback": True  # Indicates this was generated by fallback system
-    }
-
-# ======== IOC Processing Functions ========
+# ======== IOC Extraction Functions ========
 
 def extract_iocs(content: Union[str, Dict], content_type: str = "text") -> List[Dict]:
     """Extract IOCs from different content types"""
@@ -538,23 +330,14 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
     ioc_type = ioc["type"]
     ioc_value = ioc["value"]
     
-    # Perform enrichment based on IOC type
+    # Do basic IP geolocation (simplified for this version)
     if ioc_type == "ip":
-        # Use cached geolocation data if available
-        geo_data = query_bigquery(
-            f"""
-            SELECT geo FROM `{PROJECT_ID}.{DATASET_ID}.ioc_enrichment`
-            WHERE type = 'ip' AND value = @value
-            LIMIT 1
-            """,
-            {"value": ioc_value}
-        )
+        enriched["geo"] = {"country": "Unknown", "city": "Unknown"}
         
-        if geo_data:
-            try:
-                enriched["geo"] = json.loads(geo_data[0]["geo"])
-            except (KeyError, json.JSONDecodeError):
-                pass
+        # Add some basic classification
+        if ioc_value.startswith("10.") or ioc_value.startswith("192.168.") or ioc_value.startswith("172."):
+            enriched["geo"]["country"] = "Private"
+            enriched["geo"]["city"] = "Internal"
     
     # Add severity assessment based on context
     if "context" in enriched and isinstance(enriched["context"], dict):
@@ -566,10 +349,171 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
             enriched["severity"] = "medium"
         else:
             enriched["severity"] = "low"
+    else:
+        # Default severity based on type
+        if ioc_type in ["md5", "sha256", "sha1"]:
+            enriched["severity"] = "medium"  # Hashes are medium by default
+        elif ioc_type == "ip":
+            enriched["severity"] = "low"     # IPs are low by default
+        else:
+            enriched["severity"] = "low"
     
     return enriched
 
-# ======== Main Analysis Class ========
+# ======== AI Analysis Functions ========
+
+def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Analyze threat data using Vertex AI LLM with efficient rate limiting"""
+    global AI_REQUEST_COUNT
+    
+    if not content:
+        return {}
+    
+    # Increment the request counter
+    AI_REQUEST_COUNT += 1
+    
+    # Get cached model or initialize
+    model = get_vertex_model()
+    if not model:
+        logger.warning("Vertex AI model not available")
+        return _generate_fallback_analysis(content, metadata)
+    
+    # Truncate content if it's too long (Vertex AI has context limits)
+    if len(content) > MAX_AI_CONTENT_LENGTH:
+        logger.info(f"Truncating content from {len(content)} to {MAX_AI_CONTENT_LENGTH} chars")
+        content = content[:MAX_AI_CONTENT_LENGTH]
+    
+    # Construct prompt for threat analysis
+    prompt = f"""
+    You are a threat intelligence analyst. Analyze the following threat intelligence data and extract key information:
+    
+    {content}
+    
+    Provide a structured analysis with the following information:
+    1. A brief summary of the threat (2-3 sentences)
+    2. The threat actor or group responsible (if mentioned)
+    3. Targeted sectors or regions (if mentioned)
+    4. Attack techniques used (MITRE ATT&CK techniques if possible)
+    5. Malware families involved (if mentioned)
+    6. Severity assessment (Low, Medium, High, Critical)
+    7. Confidence level in this analysis (Low, Medium, High)
+    
+    Format your response as JSON with these keys: summary, threat_actor, targets, techniques, malware, severity, confidence
+    """
+    
+    try:
+        logger.info("Sending content to Vertex AI for analysis")
+        
+        # Generate response with retry logic
+        for attempt in range(3):
+            try:
+                start_time = time.time()
+                response = model.predict(prompt, temperature=0.1, max_output_tokens=1024)
+                duration = time.time() - start_time
+                logger.info(f"Vertex AI analysis completed in {duration:.2f} seconds")
+                
+                # Extract JSON from response
+                json_str = extract_json_from_text(response.text)
+                
+                if json_str:
+                    analysis = json.loads(json_str)
+                    
+                    # Add metadata
+                    source_id = "unknown"
+                    source_type = "unknown"
+                    if metadata:
+                        source_id = metadata.get("id", "unknown")
+                        source_type = metadata.get("type", "unknown")
+                        
+                    analysis["source_id"] = source_id
+                    analysis["source_type"] = source_type
+                    analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
+                    
+                    logger.info(f"Successfully extracted structured analysis from Vertex AI")
+                    return analysis
+                else:
+                    if attempt < 2:
+                        logger.warning(f"Could not find JSON in Vertex AI response (attempt {attempt+1}), retrying...")
+                        time.sleep(2)  # Brief delay before retry
+                    else:
+                        logger.warning("Could not find JSON in Vertex AI response after retries")
+                        # Return partial results based on text response
+                        return {
+                            "summary": response.text[:500],
+                            "confidence": "Low",
+                            "severity": "Medium",
+                            "analysis_timestamp": datetime.utcnow().isoformat(),
+                            "source_id": metadata.get("id", "unknown") if metadata else "unknown",
+                            "source_type": metadata.get("type", "unknown") if metadata else "unknown"
+                        }
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(f"Vertex AI error (attempt {attempt+1}): {str(e)}, retrying...")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    raise
+    except Exception as e:
+        logger.error(f"Error analyzing with Vertex AI: {str(e)}")
+        return _generate_fallback_analysis(content, metadata)
+
+def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Generate fallback analysis when Vertex AI is unavailable"""
+    logger.info("Using fallback analysis method (rule-based)")
+    
+    # Extract basic indicators from content using regex
+    severity = "Medium"  # Default severity
+    confidence = "Low"   # Low confidence for fallback analysis
+    
+    # Simple keyword-based severity assessment
+    critical_keywords = ["critical", "ransomware", "backdoor", "zero-day", "0day"]
+    high_keywords = ["high", "exploit", "leaked", "vulnerability", "trojan"]
+    
+    content_lower = content.lower()
+    if any(word in content_lower for word in critical_keywords):
+        severity = "Critical"
+    elif any(word in content_lower for word in high_keywords):
+        severity = "High"
+    
+    # Extract threat actors using simple pattern matching
+    threat_actor = "Unknown"
+    actor_patterns = [
+        r'(?:threat|threat\s+actor|actor|group|apt):\s*([A-Za-z0-9\s\-_]+)',
+        r'attributed\s+to\s+([A-Za-z0-9\s\-_]+)',
+        r'(?:APT|group)\s*([0-9]+)'
+    ]
+    
+    for pattern in actor_patterns:
+        matches = re.search(pattern, content, re.IGNORECASE)
+        if matches:
+            threat_actor = matches.group(1).strip()
+            break
+    
+    # Basic summary extraction - first 1-2 sentences
+    sentences = re.split(r'(?<=[.!?])\s+', content)
+    summary = " ".join(sentences[:min(2, len(sentences))])
+    
+    # Create analysis object
+    source_id = "unknown"
+    source_type = "unknown"
+    if metadata:
+        source_id = metadata.get("id", "unknown")
+        source_type = metadata.get("type", "unknown")
+    
+    return {
+        "summary": summary[:500],
+        "threat_actor": threat_actor,
+        "targets": "Unknown",
+        "techniques": "Unknown",
+        "malware": "Unknown",
+        "severity": severity,
+        "confidence": confidence,
+        "analysis_timestamp": datetime.utcnow().isoformat(),
+        "source_id": source_id,
+        "source_type": source_type,
+        "fallback": True  # Indicates this was generated by fallback system
+    }
+
+# ======== Campaign Detection Class ========
 
 class ThreatAnalyzer:
     """Unified threat analysis with optimized GCP integration"""
@@ -581,7 +525,7 @@ class ThreatAnalyzer:
     def _ensure_tables(self):
         """Ensure required BigQuery tables exist"""
         client = get_client('bigquery')
-        if isinstance(client, DummyClient):
+        if isinstance(client, config.DummyClient):
             logger.warning("BigQuery not available, cannot ensure tables")
             return
             
@@ -594,7 +538,7 @@ class ThreatAnalyzer:
             analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
             try:
                 client.get_table(analysis_table_id)
-                logger.info("Analysis table already exists")
+                logger.debug("Analysis table already exists")
             except NotFound:
                 # Create analysis table
                 schema = [
@@ -612,7 +556,7 @@ class ThreatAnalyzer:
             campaigns_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
             try:
                 client.get_table(campaigns_table_id)
-                logger.info("Campaigns table already exists")
+                logger.debug("Campaigns table already exists")
             except NotFound:
                 # Create campaigns table
                 schema = [
@@ -685,16 +629,23 @@ class ThreatAnalyzer:
             enriched_iocs = [enrich_ioc(ioc) for ioc in iocs]
             ioc_count += len(enriched_iocs)
             
-            # Analyze with Vertex AI
+            # Analyze with Vertex AI - only if we have a reasonable amount of content
+            # and haven't exceeded AI usage limits
             metadata = {"id": row_id, "type": feed_name}
-            vertex_analysis = analyze_with_vertex_ai(content, metadata)
+            
+            # Only use AI for rows with sufficient content
+            if len(content) > 100 and AI_REQUEST_COUNT < MAX_AI_REQUESTS_PER_HOUR:
+                vertex_analysis = analyze_with_vertex_ai(content, metadata)
+            else:
+                # Use fallback for less substantial content or when AI quota is exhausted
+                vertex_analysis = _generate_fallback_analysis(content, metadata)
             
             # Combine results
             analysis_result = {
                 "source_id": row_id,
                 "source_type": feed_name,
-                "iocs": enriched_iocs,
-                "vertex_analysis": vertex_analysis,
+                "iocs": json.dumps(enriched_iocs),
+                "vertex_analysis": json.dumps(vertex_analysis),
                 "analysis_timestamp": datetime.utcnow()
             }
             
@@ -706,7 +657,7 @@ class ThreatAnalyzer:
             
             # Log progress periodically
             if processed_count % 10 == 0:
-                logger.info(f"Processed {processed_count} items from {feed_name}")
+                logger.info(f"Processed {processed_count}/{len(rows)} items from {feed_name}")
         
         # Log completion
         logger.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
@@ -720,8 +671,9 @@ class ThreatAnalyzer:
             "event_type": "analysis_complete"
         })
         
-        # Run campaign detection
-        self.detect_campaigns(30)
+        # Run campaign detection periodically - not on every analysis
+        if processed_count > 0 and ioc_count > 10:
+            self.detect_campaigns(30)
         
         return {
             "feed_name": feed_name,
@@ -770,10 +722,10 @@ class ThreatAnalyzer:
             # Generate campaign identifiers
             campaign_identifiers = []
             
-            if threat_actor and len(threat_actor) > 3:
+            if threat_actor and len(threat_actor) > 3 and threat_actor != "unknown":
                 campaign_identifiers.append(f"actor:{threat_actor}")
             
-            if malware and len(malware) > 3:
+            if malware and len(malware) > 3 and malware != "unknown":
                 campaign_identifiers.append(f"malware:{malware}")
             
             # Skip if no strong identifiers
@@ -826,9 +778,9 @@ class ThreatAnalyzer:
             last_seen = max(timestamps) if timestamps else datetime.utcnow()
             
             # Generate campaign name
-            if group["threat_actor"]:
+            if group["threat_actor"] and group["threat_actor"] != "unknown":
                 prefix = group["threat_actor"].split()[0].title()
-            elif group["malware"]:
+            elif group["malware"] and group["malware"] != "unknown":
                 prefix = group["malware"].split()[0].title()
             else:
                 prefix = "Campaign"
@@ -845,8 +797,8 @@ class ThreatAnalyzer:
                 "techniques": group["techniques"],
                 "targets": group["targets"],
                 "severity": group["severity"],
-                "sources": group["analyses"],
-                "iocs": list(unique_iocs.values()),
+                "sources": json.dumps(group["analyses"]),
+                "iocs": json.dumps(list(unique_iocs.values())),
                 "source_count": len(group["analyses"]),
                 "ioc_count": len(unique_iocs),
                 "first_seen": first_seen.isoformat() if isinstance(first_seen, datetime) else first_seen,
@@ -901,16 +853,20 @@ class ThreatAnalyzer:
             for ioc_type, count in ioc_types.items():
                 content += f"- {ioc_type}: {count}\n"
             
-            # Analyze with Vertex AI
+            # Analyze with Vertex AI if we haven't exceeded request limits
             metadata = {"id": analysis_id, "type": feed_name}
-            vertex_analysis = analyze_with_vertex_ai(content, metadata)
+            
+            if AI_REQUEST_COUNT < MAX_AI_REQUESTS_PER_HOUR and len(content) > 100:
+                vertex_analysis = analyze_with_vertex_ai(content, metadata)
+            else:
+                vertex_analysis = _generate_fallback_analysis(content, metadata)
             
             # Store result
             analysis_result = {
                 "source_id": analysis_id,
                 "source_type": feed_name,
-                "iocs": enriched_iocs,
-                "vertex_analysis": vertex_analysis,
+                "iocs": json.dumps(enriched_iocs),
+                "vertex_analysis": json.dumps(vertex_analysis),
                 "analysis_timestamp": datetime.utcnow()
             }
             
@@ -982,7 +938,7 @@ def analyze_threat_data(event, context):
     
     return {"results": results, "campaign_count": len(campaigns)}
 
-# For direct execution
+# Main execution entry point
 if __name__ == "__main__":
     analyzer = ThreatAnalyzer()
     
