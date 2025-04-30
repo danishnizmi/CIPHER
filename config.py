@@ -32,6 +32,13 @@ GCS_BUCKET = os.environ.get("GCS_BUCKET", f"{PROJECT_ID}-threat-data")
 BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
 api_key = os.environ.get("API_KEY", "")
 
+# Add lowercase aliases to maintain compatibility with other modules
+project_id = PROJECT_ID
+environment = ENVIRONMENT
+region = REGION
+bigquery_dataset = BIGQUERY_DATASET
+gcs_bucket = GCS_BUCKET
+
 # Overrides from environment variables
 AUTH_CONFIG_ENV = os.environ.get("AUTH_CONFIG", "")
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
