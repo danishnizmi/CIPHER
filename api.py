@@ -16,25 +16,26 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 from functools import wraps
 
 from flask import Blueprint, request, jsonify, current_app, g, Response, abort
-from google.cloud import bigquery, storage, pubsub_v1
 import traceback
 
-# Import config module
+# Import config module for centralized GCP service management
 import config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO if os.environ.get('ENVIRONMENT', 'development') != 'production' else logging.WARNING,
-                   format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+logging.basicConfig(
+    level=logging.INFO if os.environ.get('ENVIRONMENT', 'development') != 'production' else logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Core configuration
+# Core configuration from config module
 PROJECT_ID = config.project_id
 DATASET_ID = config.bigquery_dataset
 REGION = config.region
 BUCKET_NAME = config.gcs_bucket
 MAX_RESULTS = 1000
 CACHE_TIMEOUT = 300  # 5 minutes
-ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
+ENVIRONMENT = config.environment
 
 # Create Blueprint
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -43,44 +44,11 @@ api_bp = Blueprint('api', __name__, url_prefix='/api')
 query_cache = {}
 cache_timestamps = {}
 
-# GCP service availability flag - initialize as True and then validate
-GCP_SERVICES_AVAILABLE = True
-
 # API request counter for metrics
 request_counter = 0
 last_metrics_time = time.time()
 
 # ======== Shared Utilities ========
-
-def initialize_gcp_services():
-    """Initialize GCP services and validate availability"""
-    global GCP_SERVICES_AVAILABLE
-    
-    try:
-        # Try to authenticate with GCP
-        from google.cloud import bigquery, storage, pubsub_v1
-        import google.auth
-        
-        # Try to get credentials - will validate access
-        try:
-            credentials, detected_project_id = google.auth.default()
-            if detected_project_id and detected_project_id != PROJECT_ID:
-                logger.warning(f"Detected project ID ({detected_project_id}) differs from configured PROJECT_ID ({PROJECT_ID})")
-            
-            logger.info(f"Successfully authenticated with GCP")
-            GCP_SERVICES_AVAILABLE = True
-        except Exception as e:
-            logger.warning(f"GCP authentication failed: {e}")
-            GCP_SERVICES_AVAILABLE = False
-            
-        return GCP_SERVICES_AVAILABLE
-    except ImportError as e:
-        logger.warning(f"GCP libraries not available: {e}")
-        GCP_SERVICES_AVAILABLE = False
-        return False
-
-# Initialize on module load
-initialize_gcp_services()
 
 def get_api_key():
     """Get API key with enhanced security and validation"""
@@ -108,112 +76,15 @@ def get_api_key():
         
     return platform_key  # Return whatever we have, even if it's empty
 
-# Create a dummy client for graceful degradation
-class DummyClient:
-    """Dummy client to use when a service is unavailable"""
-    
-    def __init__(self, service_name: str):
-        self.service_name = service_name
-        
-    def __getattr__(self, name):
-        def dummy_method(*args, **kwargs):
-            logger.warning(f"{self.service_name} not available, {name} called but will return None")
-            return None
-        return dummy_method
-
 def get_client(client_type):
-    """Get or create GCP client on demand with enhanced connection handling"""
-    # Use Flask app context to store clients
-    if not hasattr(g, 'gcp_clients'):
-        g.gcp_clients = {}
-    
-    # Return cached client if available
-    if client_type in g.gcp_clients and g.gcp_clients[client_type] is not None:
-        return g.gcp_clients[client_type]
-    
-    # If GCP services are not available, return a dummy client
-    if not GCP_SERVICES_AVAILABLE and client_type not in ['bigquery']:
-        logger.warning(f"GCP services not available, returning dummy client for {client_type}")
-        g.gcp_clients[client_type] = DummyClient(client_type)
-        return g.gcp_clients[client_type]
-    
-    # Create new client with robust error handling
-    try:
-        if client_type == 'bigquery':
-            client = bigquery.Client(project=PROJECT_ID)
-            g.gcp_clients[client_type] = client
-            logger.info(f"BigQuery client initialized for project {PROJECT_ID}")
-            
-        elif client_type == 'storage':
-            client = storage.Client(project=PROJECT_ID)
-            g.gcp_clients[client_type] = client
-            logger.info(f"Storage client initialized for project {PROJECT_ID}")
-            
-        elif client_type == 'pubsub':
-            client = pubsub_v1.PublisherClient()
-            g.gcp_clients[client_type] = client
-            logger.info("Pub/Sub publisher initialized")
-            
-        elif client_type == 'error_reporting':
-            from google.cloud import error_reporting
-            client = error_reporting.Client(service="threat-intel-api")
-            g.gcp_clients[client_type] = client
-            logger.info("Error reporting client initialized")
-            
-        elif client_type == 'monitoring':
-            from google.cloud import monitoring_v3
-            client = monitoring_v3.MetricServiceClient()
-            g.gcp_clients[client_type] = client
-            logger.info("Monitoring client initialized")
-            
-        else:
-            logger.error(f"Unknown client type: {client_type}")
-            g.gcp_clients[client_type] = DummyClient(client_type)
-            return g.gcp_clients[client_type]
-            
-        return g.gcp_clients[client_type]
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-        g.gcp_clients[client_type] = DummyClient(client_type)
-        return g.gcp_clients[client_type]
+    """Get GCP client using the centralized config module"""
+    # Use the centralized client management from config
+    return config.get_client(client_type)
 
 def report_metric(metric_type, value=1):
     """Report a metric to Cloud Monitoring with graceful degradation"""
-    if ENVIRONMENT != 'production':
-        return
-    
-    try:
-        from google.cloud import monitoring_v3
-        
-        client = get_client('monitoring')
-        if isinstance(client, DummyClient):
-            return
-        
-        # Create full metric type
-        metric_type = f"custom.googleapis.com/threat_intel/api/{metric_type}"
-        
-        # Define the metric
-        project_name = f"projects/{PROJECT_ID}"
-        series = monitoring_v3.TimeSeries()
-        series.metric.type = metric_type
-        series.metric.labels.update({"environment": ENVIRONMENT, "version": "1.0.0"})
-        
-        # Create point
-        point = series.points.add()
-        point.value.double_value = float(value)
-        now = time.time()
-        point.interval.end_time.seconds = int(now)
-        point.interval.end_time.nanos = int((now - int(now)) * 10**9)
-        
-        # Write metric
-        client.create_time_series(name=project_name, time_series=[series])
-        logger.debug(f"Reported metric {metric_type}: {value}")
-    except ImportError:
-        # Module not available, gracefully degrade
-        logger.debug(f"Monitoring module not available, metric {metric_type} not reported")
-    except Exception as e:
-        logger.warning(f"Failed to report metric {metric_type}: {e}")
+    # Use centralized metric reporting from config
+    config.report_metric(metric_type, value)
 
 def report_api_metrics():
     """Report aggregated API metrics"""
@@ -284,9 +155,7 @@ def handle_exceptions(f):
             logger.error(traceback.format_exc())
             
             # Report to Error Reporting if available
-            error_client = get_client('error_reporting')
-            if not isinstance(error_client, DummyClient):
-                error_client.report_exception()
+            config.report_exception()
             
             # Track error for metrics
             report_metric("error")
@@ -386,7 +255,7 @@ def cache_result(ttl=CACHE_TIMEOUT):
 def query_bigquery(query, params=None):
     """Execute BigQuery query with enhanced security and error handling"""
     client = get_client('bigquery')
-    if isinstance(client, DummyClient):
+    if client is None or isinstance(client, config.DummyClient):
         return [], "BigQuery client not available"
     
     try:
@@ -410,7 +279,10 @@ def query_bigquery(query, params=None):
         query = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
         query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
         
-        # Create job configuration without the timeout_ms parameter
+        # Import locally to avoid global dependency
+        from google.cloud import bigquery
+        
+        # Create job configuration
         job_config = bigquery.QueryJobConfig()
         
         # Set query parameters
@@ -497,17 +369,21 @@ def validate_table_name(name):
 def ensure_tables_exist():
     """Ensure required BigQuery tables exist"""
     client = get_client('bigquery')
-    if isinstance(client, DummyClient):
+    if client is None or isinstance(client, config.DummyClient):
         logger.warning("BigQuery client not available, cannot ensure tables")
         return False
         
     try:
+        # Import locally to avoid global dependency
+        from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
+        
         # Check if dataset exists
         dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
         try:
             client.get_dataset(dataset_ref)
             logger.info(f"Dataset {DATASET_ID} exists")
-        except Exception:
+        except NotFound:
             # Create dataset
             dataset = bigquery.Dataset(dataset_ref)
             dataset.location = "US"
@@ -529,7 +405,7 @@ def ensure_tables_exist():
             try:
                 client.get_table(full_table_id)
                 logger.info(f"Table {table_id} exists")
-            except Exception:
+            except NotFound:
                 # Create table with basic schema
                 if table_id == "threat_analysis":
                     schema = [
@@ -586,12 +462,11 @@ def health_check():
     """Health check endpoint"""
     version = os.environ.get("VERSION", "1.0.0")
     
-    # Check BigQuery connectivity
-    client = get_client('bigquery')
-    db_status = "ok" if not isinstance(client, DummyClient) else "error"
+    # Check BigQuery connectivity through config
+    db_status = config.check_database_connectivity()
     
-    # Check GCP services
-    gcp_status = "available" if GCP_SERVICES_AVAILABLE else "unavailable"
+    # Check GCP services through config
+    gcp_status = "available" if config.GCP_SERVICES_AVAILABLE else "unavailable"
     
     # Include unique instance ID for debugging
     instance_id = os.environ.get("K_REVISION", "local-" + str(uuid.uuid4())[:8])
@@ -1295,7 +1170,10 @@ def handle_ingest_data():
             
             # Ensure threat_analysis table exists
             client = get_client('bigquery')
-            if not isinstance(client, DummyClient):
+            if client and not isinstance(client, config.DummyClient):
+                # Get imports locally
+                from google.cloud import bigquery
+                
                 # Create sample data row
                 sample_row = {
                     "source_id": f"sample-{uuid.uuid4().hex[:8]}",
@@ -1438,7 +1316,7 @@ def upload_csv():
         except ImportError:
             # Upload to GCS if ingestion not available
             storage_client = get_client('storage')
-            if not isinstance(storage_client, DummyClient):
+            if storage_client and not isinstance(storage_client, config.DummyClient):
                 try:
                     bucket = storage_client.bucket(BUCKET_NAME)
                     blob_name = f"uploads/{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
@@ -1458,8 +1336,11 @@ def upload_csv():
                     
             # Create a minimal implementation that insets data directly to BigQuery
             client = get_client('bigquery')
-            if not isinstance(client, DummyClient):
+            if client and not isinstance(client, config.DummyClient):
                 try:
+                    # Import locally
+                    from google.cloud import bigquery
+                    
                     # Create a table for this upload if it doesn't exist
                     table_id = f"upload_{feed_name}"
                     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
@@ -1647,19 +1528,8 @@ def get_threat_summary():
 @api_bp.route('/status', methods=['GET'])
 def api_status():
     """Enhanced API status endpoint with detailed metrics"""
-    # Get BigQuery client status
-    try:
-        bq_client = get_client('bigquery')
-        bq_status = "available" if not isinstance(bq_client, DummyClient) else "unavailable"
-    except Exception:
-        bq_status = "error"
-    
-    # Get storage client status
-    try:
-        storage_client = get_client('storage')
-        storage_status = "available" if not isinstance(storage_client, DummyClient) else "unavailable"
-    except Exception:
-        storage_status = "error"
+    # Get GCP service status from config module
+    cloud_status = config.get_cloud_status()
     
     # Get cache stats
     cache_stats = {
@@ -1694,11 +1564,7 @@ def api_status():
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "bigquery": bq_status,
-            "storage": storage_status,
-            "gcp_available": GCP_SERVICES_AVAILABLE
-        },
+        "services": cloud_status.get("services", {}),
         "cache": cache_stats,
         "environment": env_info,
         "system": system_info
