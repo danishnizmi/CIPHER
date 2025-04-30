@@ -68,7 +68,7 @@ steps:
       import os
       from google.cloud import bigquery
       
-      PROJECT_ID = os.environ.get("GCP_PROJECT", "primal-chariot-382610")
+      PROJECT_ID = os.environ.get("GCP_PROJECT", "${PROJECT_ID}")
       DATASET_ID = os.environ.get("BIGQUERY_DATASET", "threat_intelligence")
       
       def create_dataset():
@@ -245,9 +245,9 @@ steps:
   args:
     - 'build'
     - '-t'
-    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
     - '-t'
-    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
     - '.'
 
 # Push the container image to Container Registry
@@ -255,7 +255,7 @@ steps:
   id: 'push-container'
   args:
     - 'push'
-    - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
 
 # Add required secrets to Secret Manager
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -293,7 +293,7 @@ steps:
       
       # Database credentials (empty defaults)
       if ! gcloud secrets describe database-credentials 2>/dev/null; then
-        db_config="{\"project_id\":\"$PROJECT_ID\",\"dataset_id\":\"threat_intelligence\"}"
+        db_config="{\"project_id\":\"${PROJECT_ID}\",\"dataset_id\":\"threat_intelligence\"}"
         echo "$db_config" | gcloud secrets create database-credentials \
           --replication-policy="automatic" \
           --data-file=-
@@ -326,9 +326,9 @@ steps:
       fi
       
       # Grant the service account access to the secrets
-      for SECRET in api-keys database-credentials feed-config auth-config admin-initial-password; do
-        gcloud secrets add-iam-policy-binding $SECRET \
-          --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+      for SECRET_NAME in api-keys database-credentials feed-config auth-config admin-initial-password; do
+        gcloud secrets add-iam-policy-binding $SECRET_NAME \
+          --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
           --role="roles/secretmanager.secretAccessor"
       done
 
@@ -362,14 +362,14 @@ steps:
       
       # Deploy to Cloud Run with proper environment variables
       gcloud run deploy threat-intelligence-platform \
-        --image gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
-        --region us-central1 \
+        --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA} \
+        --region ${_REGION} \
         --platform managed \
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2" \
-        --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
+        --set-env-vars "ENVIRONMENT=${_ENVIRONMENT},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2" \
+        --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
 # Create/update BigQuery dataset and tables
 - name: 'python:3.10'
@@ -383,7 +383,7 @@ steps:
       pip install -r requirements.txt
       
       # Set environment variables
-      export GCP_PROJECT=$PROJECT_ID
+      export GCP_PROJECT=${PROJECT_ID}
       export BIGQUERY_DATASET=threat_intelligence
       
       # Run the script
@@ -401,23 +401,23 @@ steps:
       echo "Setting up Pub/Sub topics and subscriptions..."
       
       # Create topics
-      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID 2>/dev/null || \
+      gcloud pubsub topics create threat-data-ingestion --project=${PROJECT_ID} 2>/dev/null || \
         echo "Topic threat-data-ingestion already exists"
       
-      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID 2>/dev/null || \
+      gcloud pubsub topics create threat-analysis-events --project=${PROJECT_ID} 2>/dev/null || \
         echo "Topic threat-analysis-events already exists"
       
       # Create subscriptions with 7-day message retention
       gcloud pubsub subscriptions create threat-data-ingestion-sub \
         --topic=threat-data-ingestion \
-        --project=$PROJECT_ID \
+        --project=${PROJECT_ID} \
         --message-retention-duration=7d \
         --ack-deadline=60s 2>/dev/null || \
         echo "Subscription threat-data-ingestion-sub already exists"
       
       gcloud pubsub subscriptions create threat-analysis-events-sub \
         --topic=threat-analysis-events \
-        --project=$PROJECT_ID \
+        --project=${PROJECT_ID} \
         --message-retention-duration=7d \
         --ack-deadline=60s 2>/dev/null || \
         echo "Subscription threat-analysis-events-sub already exists"
@@ -445,16 +445,16 @@ steps:
       echo "Deploying ingestion function..."
       
       gcloud functions deploy ingest_threat_data \
-        --region=us-central1 \
+        --region=${_REGION} \
         --runtime=python310 \
         --trigger-http \
         --no-gen2 \
         --allow-unauthenticated \
         --timeout=540s \
         --memory=1024MB \
-        --project=$PROJECT_ID \
-        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$api_key_value,ENVIRONMENT=production
+        --project=${PROJECT_ID} \
+        --service-account=cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
+        --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},API_KEY=$api_key_value,ENVIRONMENT=${_ENVIRONMENT}
 
 # Fix IAM policy for ingestion function (with improved error handling)
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -466,13 +466,13 @@ steps:
       echo "Setting IAM policy for ingestion function..."
       
       # Try to grant the service account cloudfunctions.admin role
-      gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member=serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
+      gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+        --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
         --role=roles/cloudfunctions.admin 2>/dev/null || echo "Note: Could not grant cloudfunctions.admin role"
       
       # Try to set allUsers invoker access
       gcloud functions add-iam-policy-binding ingest_threat_data \
-        --region=us-central1 \
+        --region=${_REGION} \
         --member=allUsers \
         --role=roles/cloudfunctions.invoker || {
           echo "Notice: Could not set IAM policy for ingestion function."
@@ -494,15 +494,15 @@ steps:
       echo "Deploying analysis function..."
       
       gcloud functions deploy analyze_threat_data \
-        --region=us-central1 \
+        --region=${_REGION} \
         --runtime=python310 \
         --no-gen2 \
         --trigger-topic=threat-data-ingestion \
         --timeout=540s \
         --memory=2048MB \
-        --project=$PROJECT_ID \
-        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars=GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,API_KEY=$api_key_value,ENVIRONMENT=production
+        --project=${PROJECT_ID} \
+        --service-account=cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
+        --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},API_KEY=$api_key_value,ENVIRONMENT=${_ENVIRONMENT}
 
 # Set up Cloud Scheduler jobs for periodic feed updates
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -515,32 +515,32 @@ steps:
       api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
       # Delete any existing job to avoid conflicts
-      gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || true
+      gcloud scheduler jobs delete update-threat-feeds --location=${_REGION} --quiet 2>/dev/null || true
       
       if [ -z "$api_key_value" ]; then
         echo "Warning: Could not retrieve API key, using Pub/Sub method instead"
         # Use Pub/Sub approach if we can't get the API key
         gcloud scheduler jobs create pubsub update-threat-feeds \
-          --location=us-central1 \
+          --location=${_REGION} \
           --schedule="0 */3 * * *" \
-          --topic="projects/$PROJECT_ID/topics/threat-data-ingestion" \
+          --topic="projects/${PROJECT_ID}/topics/threat-data-ingestion" \
           --message-body='{"process_all": true}' \
           --time-zone="UTC" \
           --description="Update threat feeds every 3 hours" \
-          --project=$PROJECT_ID
+          --project=${PROJECT_ID}
       else
         # Create with API key in header
         gcloud scheduler jobs create http update-threat-feeds \
-          --location=us-central1 \
+          --location=${_REGION} \
           --schedule="0 */3 * * *" \
-          --uri="https://us-central1-$PROJECT_ID.cloudfunctions.net/ingest_threat_data" \
+          --uri="https://${_REGION}-${PROJECT_ID}.cloudfunctions.net/ingest_threat_data" \
           --http-method=POST \
           --headers="X-API-Key=$api_key_value" \
           --message-body='{"process_all": true}' \
           --time-zone="UTC" \
           --attempt-deadline=30m \
           --description="Update threat feeds every 3 hours" \
-          --project=$PROJECT_ID
+          --project=${PROJECT_ID}
       fi
 
 # Run post-deployment check
@@ -555,7 +555,7 @@ steps:
       sleep 30
       
       # Get service URL
-      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=$PROJECT_ID --format='value(status.url)')
+      service_url=$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
       echo "Service deployed at: ${service_url}"
       
       # Check if the service is responding
@@ -582,7 +582,7 @@ steps:
       
       if [ "$success" = false ]; then
         echo "⚠️ Health check did not succeed after $max_attempts attempts."
-        echo "For troubleshooting, check the logs at: https://console.cloud.google.com/run/detail/us-central1/threat-intelligence-platform/logs?project=$PROJECT_ID"
+        echo "For troubleshooting, check the logs at: https://console.cloud.google.com/run/detail/${_REGION}/threat-intelligence-platform/logs?project=${PROJECT_ID}"
       fi
       
       echo "✨ Deployment completed! ✨"
@@ -598,24 +598,24 @@ steps:
       # Keep only the 5 most recent images
       echo "Cleaning up old container images..."
       # Use || true to prevent build failure if cleanup fails
-      gcloud container images list-tags gcr.io/$PROJECT_ID/threat-intelligence-platform \
+      gcloud container images list-tags gcr.io/${PROJECT_ID}/threat-intelligence-platform \
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
-        --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} --force-delete-tags || true
+        --quiet gcr.io/${PROJECT_ID}/threat-intelligence-platform@{} --force-delete-tags || true
 
 # Add the required logging configuration
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
 
-# Add any required substitutions
+# Add required substitutions
 substitutions:
   _ENVIRONMENT: 'production'
   _REGION: 'us-central1'
 
 # Specify the images that will be preserved as outputs of this build
 images:
-  - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+  - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
+  - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
 
 # Configure build timeout
 timeout: '2700s'
