@@ -140,7 +140,7 @@ def generate_trend_data(days: int, base: int = 50, variance: int = 15) -> List[i
     for i in range(days):
         # Combine base, cyclical component, and random noise
         cycle_component = sin(i * 2 * pi / cycle) * 20
-        value = max(5, int(base + cycle_component + random.randint(-variance, variance)))
+        value = max(5, int(base + cycle_component + (random.randint(-variance, variance))))
         trend.append(value)
         
         # Adjust base for next iteration (slight upward trend)
@@ -235,7 +235,7 @@ def get_api_key() -> str:
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
-    """Make an internal API request with caching and error handling"""
+    """Make an internal API request with caching and enhanced error handling"""
     try:
         # Construct base URL
         base_url = request.url_root.rstrip('/')
@@ -250,10 +250,33 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         logger.debug(f"API request: {method} {api_url}")
         start_time = time.time()
         
-        if method.upper() == 'GET':
-            response = requests.get(api_url, headers=headers, params=params, timeout=10)
-        else:  # POST
-            response = requests.post(api_url, headers=headers, json=data, timeout=10)
+        # Add retry logic for resilience
+        max_retries = 3
+        retry_count = 0
+        response = None
+        
+        while retry_count < max_retries:
+            try:
+                if method.upper() == 'GET':
+                    response = requests.get(api_url, headers=headers, params=params, timeout=10)
+                else:  # POST
+                    response = requests.post(api_url, headers=headers, json=data, timeout=10)
+                
+                # Break if successful
+                if response.status_code < 500:
+                    break
+                    
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                logger.warning(f"Attempt {retry_count+1}/{max_retries} failed: {str(e)}")
+                
+            # Exponential backoff
+            wait_time = 0.5 * (2 ** retry_count)
+            time.sleep(wait_time)
+            retry_count += 1
+        
+        if response is None:
+            # All retries failed
+            return {"error": "Failed to connect to API after multiple retries"}
         
         # Log response time
         request_time = time.time() - start_time
@@ -261,7 +284,12 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             logger.info(f"Slow API request ({request_time:.2f}s): {method} {api_url}")
         
         # Check for errors
-        response.raise_for_status()
+        if response.status_code != 200:
+            logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
+            return {
+                "error": f"API request failed with status {response.status_code}",
+                "status_code": response.status_code
+            }
         
         # Parse and return JSON
         if response.text:
@@ -269,13 +297,13 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
                 return response.json()
             except json.JSONDecodeError:
                 logger.warning(f"Invalid JSON response: {response.text[:100]}")
-                return {"error": "Invalid JSON response"}
+                return {"error": "Invalid JSON response", "raw_response": response.text[:500]}
         
         return {}
     
     except requests.RequestException as e:
         logger.error(f"API request error ({endpoint}): {str(e)}")
-        status_code = e.response.status_code if hasattr(e, 'response') and e.response else None
+        status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
         
         error_msg = f"API error: {str(e)}"
         if status_code:
@@ -311,13 +339,22 @@ def get_iocs_data(days=30, ioc_type=None, value=None):
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_campaigns_data(days=30, severity=None):
-    """Get campaigns data from API with caching"""
+    """Get campaigns data from API with caching and better error handling"""
     params = {"days": days}
     if severity:
         params["severity"] = severity
     
     param_str = "&".join(f"{k}={v}" for k, v in params.items())
-    return _api_request(f"campaigns?{param_str}")
+    response = _api_request(f"campaigns?{param_str}")
+    
+    # Ensure 'campaigns' is always a list even if not present in the response
+    if isinstance(response, dict) and 'campaigns' not in response:
+        response['campaigns'] = []
+    elif not isinstance(response, dict):
+        # Return a properly formatted empty result
+        return {"campaigns": [], "count": 0, "total": 0, "has_more": False}
+    
+    return response
 
 @api_cache(timeout=LONG_CACHE_TIMEOUT)
 def get_feed_stats(feed_name, days=30):
@@ -579,51 +616,68 @@ def dashboard(view=None):
                 'page_icon': 'tachometer-alt'
             })
         
-        # Load statistics for all views
+        # Load statistics for all views with safety checks
         try:
             # Get statistics using the helper function
-            stats_response = get_stats_data(days=days)
+            stats_response = get_stats_data(days=days) or {}
             context['stats'] = stats_response
             
-            # Extract trends from statistics - use real data if available
-            context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
-            context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
-            context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
-            context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
+            # Extract trends from statistics - use real data if available or defaults if not
+            if isinstance(stats_response, dict):
+                context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
+                context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
+                context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
+                context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
+                
+                # Extract IOC type data for charts
+                context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
+                context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+            else:
+                # Set defaults if stats_response is not a dict
+                context['feed_trend'] = 0
+                context['ioc_trend'] = 0
+                context['campaign_trend'] = 0
+                context['analysis_trend'] = 0
+                context['ioc_type_labels'] = []
+                context['ioc_type_values'] = []
             
-            # Extract IOC type data for charts
-            context['ioc_type_labels'] = [item['type'] for item in stats_response.get('iocs', {}).get('types', [])]
-            context['ioc_type_values'] = [item['count'] for item in stats_response.get('iocs', {}).get('types', [])]
-            
-            # Load view-specific data
+            # Load view-specific data with safety checks
             if current_view == 'feeds':
-                feeds_response = get_feeds_data()
-                context['feed_items'] = feeds_response.get('feed_details', [])
-                context['feed_type_descriptions'] = {feed['name']: feed.get('description', 'Threat Intelligence Feed') 
-                                                  for feed in context['feed_items']}
+                feeds_response = get_feeds_data() or {}
+                context['feed_items'] = (feeds_response.get('feed_details', []) 
+                                        if isinstance(feeds_response, dict) else [])
+                context['feed_type_descriptions'] = {
+                    feed.get('name', ''): feed.get('description', 'Threat Intelligence Feed') 
+                    for feed in context['feed_items'] if isinstance(feed, dict) and 'name' in feed
+                }
                 
             elif current_view == 'iocs':
-                iocs_response = get_iocs_data(days=days)
-                context['ioc_items'] = iocs_response.get('records', [])
+                iocs_response = get_iocs_data(days=days) or {}
+                context['ioc_items'] = (iocs_response.get('records', []) 
+                                       if isinstance(iocs_response, dict) else [])
                 
             elif current_view == 'campaigns':
-                campaigns_response = get_campaigns_data(days=days)
-                context['campaigns'] = campaigns_response.get('campaigns', [])
+                campaigns_response = get_campaigns_data(days=days) or {}
+                context['campaigns'] = (campaigns_response.get('campaigns', []) 
+                                       if isinstance(campaigns_response, dict) else [])
                 
             else:
-                # Dashboard view - load additional data
+                # Dashboard view - load additional data with safety checks
                 # Get date range for activity chart
                 today = datetime.now().date()
                 date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
                 context['activity_dates'] = date_range
                 
                 # Get activity counts from stats if available
-                if 'visualization_data' in stats_response and 'daily_counts' in stats_response['visualization_data']:
+                if (isinstance(stats_response, dict) and 
+                    'visualization_data' in stats_response and 
+                    'daily_counts' in stats_response['visualization_data']):
+                    
                     counts = [0] * len(date_range)
                     date_to_index = {date: idx for idx, date in enumerate(date_range)}
                     
                     for entry in stats_response['visualization_data']['daily_counts']:
-                        if entry.get('date') in date_to_index:
+                        if isinstance(entry, dict) and 'date' in entry and entry.get('date') in date_to_index:
                             counts[date_to_index[entry['date']]] = entry.get('count', 0)
                     
                     context['activity_counts'] = counts
@@ -631,21 +685,27 @@ def dashboard(view=None):
                     # Generate a basic trend if no visualization data
                     context['activity_counts'] = generate_trend_data(days)
                 
-                # Load campaigns for dashboard
-                campaigns_response = get_campaigns_data(days=days)
-                context['campaigns'] = campaigns_response.get('campaigns', [])[:3]
+                # Load campaigns for dashboard - safely handle list slicing
+                campaigns_response = get_campaigns_data(days=days) or {}
+                campaigns_list = (campaigns_response.get('campaigns', []) 
+                                 if isinstance(campaigns_response, dict) else [])
+                # Safely slice the list
+                context['campaigns'] = campaigns_list[:3] if campaigns_list else []
                 
                 # Load IOCs for dashboard
-                iocs_response = get_iocs_data(days=days)
-                context['top_iocs'] = iocs_response.get('records', [])[:4]
+                iocs_response = get_iocs_data(days=days) or {}
+                iocs_list = (iocs_response.get('records', []) 
+                            if isinstance(iocs_response, dict) else [])
+                # Safely slice the list
+                context['top_iocs'] = iocs_list[:4] if iocs_list else []
                 
                 # Load threat summary for dashboard
-                threat_summary = get_threat_summary(days=days)
+                threat_summary = get_threat_summary(days=days) or {}
                 context['threat_summary'] = threat_summary
                 
                 # Load geo data for map
-                geo_stats = get_ioc_geo_stats(days=days)
-                context['geo_stats'] = geo_stats.get('countries', [])
+                geo_stats = get_ioc_geo_stats(days=days) or {}
+                context['geo_stats'] = geo_stats.get('countries', []) if isinstance(geo_stats, dict) else []
                 
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
@@ -1066,6 +1126,49 @@ def api_refresh_feeds():
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in API refresh_feeds: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/upload_csv', methods=['POST'])
+@login_required
+def api_upload_csv():
+    """API endpoint to upload CSV data"""
+    try:
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({"error": "No file selected"}), 400
+                
+            # Read CSV content
+            try:
+                csv_content = file.read().decode('utf-8')
+            except UnicodeDecodeError:
+                # Try alternative encodings
+                file.seek(0)
+                content = file.read()
+                for encoding in ['latin-1', 'iso-8859-1', 'windows-1252']:
+                    try:
+                        csv_content = content.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    return jsonify({"error": "Unable to decode CSV file"}), 400
+                    
+            feed_name = request.form.get('feed_name', os.path.splitext(file.filename)[0])
+        else:
+            # Get from JSON payload
+            data = request.json
+            if not data or 'content' not in data:
+                return jsonify({"error": "No CSV content provided"}), 400
+                
+            csv_content = data['content']
+            feed_name = data.get('feed_name', 'csv_upload')
+            
+        # Process the CSV data
+        result = upload_csv_file(csv_content, feed_name)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error in API upload_csv: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # ====== Template Filters ======
