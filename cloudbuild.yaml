@@ -130,23 +130,23 @@ steps:
     - |
       # Check and create secrets with meaningful initial values if they don't exist
       if ! gcloud secrets describe api-keys 2>/dev/null; then
-        platform_api_key=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-        api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
+        platform_api_key=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$platform_api_key\",\"created_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
       fi
       
-      for SECRET in auth-config database-credentials feed-config admin-initial-password; do
-        if ! gcloud secrets describe $SECRET 2>/dev/null; then
-          if [ "$SECRET" = "admin-initial-password" ]; then
-            admin_password=$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits + '!@#$%^&*()'; print(''.join(secrets.choice(chars) for i in range(12)))")
-            echo "$admin_password" | gcloud secrets create $SECRET --replication-policy="automatic" --data-file=-
+      for SECRET_NAME in auth-config database-credentials feed-config admin-initial-password; do
+        if ! gcloud secrets describe $$SECRET_NAME 2>/dev/null; then
+          if [ "$$SECRET_NAME" = "admin-initial-password" ]; then
+            admin_password=$$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits + '!@#\$%^&*()'; print(''.join(secrets.choice(chars) for i in range(12)))")
+            echo "$$admin_password" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
           else
-            echo "{}" | gcloud secrets create $SECRET --replication-policy="automatic" --data-file=-
+            echo "{}" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
           fi
         fi
         
         # Grant access
-        gcloud secrets add-iam-policy-binding $SECRET --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
+        gcloud secrets add-iam-policy-binding $$SECRET_NAME --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
       done
 
 # Deploy to Cloud Run 
@@ -157,17 +157,17 @@ steps:
     - '-c'
     - |
       # Get API key from Secret Manager
-      api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
-      if [ -z "$api_key_value" ]; then
-        api_key_value=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-        api_keys_json="{\"platform_api_key\":\"$api_key_value\",\"updated_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
+      api_key_value=$$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      if [ -z "$$api_key_value" ]; then
+        api_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$api_key_value\",\"updated_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
       fi
       
       # Get session key
-      secret_key_value=$(gcloud secrets versions access latest --secret=auth-config | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
-      if [ -z "$secret_key_value" ]; then
-        secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+      secret_key_value=$$(gcloud secrets versions access latest --secret=auth-config | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
+      if [ -z "$$secret_key_value" ]; then
+        secret_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
       # Deploy to Cloud Run
@@ -178,7 +178,7 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars "ENVIRONMENT=${_ENVIRONMENT},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2" \
+        --set-env-vars "ENVIRONMENT=${_ENVIRONMENT},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.2" \
         --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
 # Deploy functions and services in parallel
@@ -200,7 +200,7 @@ steps:
         --schedule="0 */3 * * *" \
         --uri="https://${_REGION}-${PROJECT_ID}.cloudfunctions.net/ingest_threat_data" \
         --http-method=POST \
-        --headers="X-API-Key=$api_key_value" \
+        --headers="X-API-Key=$$api_key_value" \
         --message-body='{"process_all": true}' \
         --time-zone="UTC" \
         --description="Update threat feeds every 3 hours" \
@@ -215,18 +215,18 @@ steps:
     - |
       echo "Waiting for service to be ready..."
       sleep 30
-      service_url=$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
-      echo "Service deployed at: $service_url"
+      service_url=$$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
+      echo "Service deployed at: $$service_url"
       
       # Check if service is responding
       for attempt in {1..5}; do
-        echo "Health check attempt $attempt of 5..."
-        response_code=$(curl -s -o /dev/null -w "%{http_code}" "$service_url/health" || echo "failed")
-        if [ "$response_code" = "200" ]; then
+        echo "Health check attempt $$attempt of 5..."
+        response_code=$$(curl -s -o /dev/null -w "%{http_code}" "$$service_url/health" || echo "failed")
+        if [ "$$response_code" = "200" ]; then
           echo "✅ Health check successful!"
           break
         else
-          echo "⚠️ Health check returned: $response_code - waiting 30s..."
+          echo "⚠️ Health check returned: $$response_code - waiting 30s..."
           sleep 30
         fi
       done
@@ -247,8 +247,6 @@ steps:
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
-  pool: 
-    name: 'projects/${PROJECT_ID}/locations/${_REGION}/workerPools/default-pool'
 
 substitutions:
   _ENVIRONMENT: 'production'
@@ -258,4 +256,4 @@ images:
   - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
   - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
 
-timeout: '1800s'
+timeout: '2700s'
