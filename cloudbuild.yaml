@@ -237,7 +237,7 @@ steps:
       fi\n\
       \n\
       # Set PYTHONPATH\n\
-      export PYTHONPATH=/app:$$PYTHONPATH\n\
+      export PYTHONPATH=/app:$PYTHONPATH\n\
       \n\
       # Verify numpy and pandas compatibility before starting\n\
       python -c "import numpy; import pandas; print(f\"NumPy version: {numpy.__version__}, Pandas version: {pandas.__version__}\")"\n\
@@ -249,19 +249,19 @@ steps:
       # Start the Go ingestion service in the background\n\
       echo "Starting Go Threat Ingestion service..."\n\
       /app/bin/threat_ingestion > /app/logs/go_ingestion.log 2>&1 &\n\
-      INGESTION_PID=$$!\n\
-      echo "Go ingestion service started with PID: $$INGESTION_PID"\n\
+      INGESTION_PID=$!\n\
+      echo "Go ingestion service started with PID: $INGESTION_PID"\n\
       \n\
       # Wait for Go service to be ready\n\
       echo "Waiting for Go service to be ready..."\n\
       for i in {1..10}; do\n\
-        if nc -z localhost $$GO_INGESTION_PORT; then\n\
+        if nc -z localhost $GO_INGESTION_PORT; then\n\
           echo "Go service is ready!"\n\
           break\n\
         fi\n\
         echo "Waiting for Go service..."\n\
         sleep 1\n\
-        if [ $$i -eq 10 ]; then\n\
+        if [ $i -eq 10 ]; then\n\
           echo "WARNING: Go service did not start in time."\n\
           exit 1\n\
         fi\n\
@@ -270,9 +270,9 @@ steps:
       # Setup cleanup on exit\n\
       cleanup() {\n\
         echo "Shutting down services..."\n\
-        if [ -n "$$INGESTION_PID" ]; then\n\
-          kill -TERM $$INGESTION_PID 2>/dev/null || true\n\
-          wait $$INGESTION_PID 2>/dev/null || true\n\
+        if [ -n "$INGESTION_PID" ]; then\n\
+          kill -TERM $INGESTION_PID 2>/dev/null || true\n\
+          wait $INGESTION_PID 2>/dev/null || true\n\
         fi\n\
         echo "Cleanup complete"\n\
         exit 0\n\
@@ -282,7 +282,7 @@ steps:
       # Start gunicorn in the foreground\n\
       echo "Starting gunicorn..."\n\
       cd /app && exec gunicorn \\\n\
-        --bind :$$PORT \\\n\
+        --bind :$PORT \\\n\
         --workers 2 \\\n\
         --threads 8 \\\n\
         --timeout 300 \\\n\
@@ -296,8 +296,8 @@ steps:
       USER appuser
 
       # Expose ports
-      EXPOSE $PORT
-      EXPOSE $GO_INGESTION_PORT
+      EXPOSE 8080
+      EXPOSE 8081
 
       # Set entrypoint
       ENTRYPOINT ["/app/docker-entrypoint.sh"]
@@ -457,6 +457,7 @@ options:
 substitutions:
   _ENVIRONMENT: 'production'
   _REGION: 'us-central1'
+  _PORT: '8080'
 
 images:
   - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
