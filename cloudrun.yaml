@@ -61,9 +61,9 @@ spec:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 20
+          initialDelaySeconds: 20  # Increased from 10 to give more startup time
           periodSeconds: 10
-          failureThreshold: 5
+          failureThreshold: 5      # Increased from 3 to allow more retry attempts
         livenessProbe:
           httpGet:
             path: /health
