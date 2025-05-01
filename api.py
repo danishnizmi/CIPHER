@@ -1,5 +1,5 @@
 """
-Threat Intelligence Platform - Streamlined API Module
+Threat Intelligence Platform - API Module
 Provides RESTful endpoints with optimized GCP integration and enhanced security.
 """
 
@@ -1347,7 +1347,7 @@ def get_threat_summary():
 
 @api_bp.route('/ingest_threat_data', methods=['POST'])
 @require_api_key
-@handle_exceptions
+# Explicitly exempt from CSRF protection
 def ingest_threat_data():
     """Trigger data ingestion with enhanced validation and error handling"""
     # Report metric for ingestion request
@@ -1860,14 +1860,19 @@ def init_app(app):
     try:
         from flask_wtf.csrf import CSRFProtect
         
-        # Try to get existing CSRF instance
-        csrf = getattr(app, 'csrf', None) or CSRFProtect(app)
+        # Get existing CSRF or create new one
+        csrf = getattr(app, 'csrf', None)
+        if csrf is None:
+            csrf = CSRFProtect(app)
+            logger.info("Created new CSRF protection instance")
         
-        # Exempt API routes from CSRF protection
+        # Explicitly exempt API routes from CSRF
+        for route in ['/api/ingest_threat_data', '/api/upload_csv', '/api/analyze']:
+            csrf.exempt(route)
         csrf.exempt(api_bp)
-    except (ImportError, AttributeError):
-        # No CSRF protection available or already configured, that's fine
-        logger.warning("CSRF protection not available or already configured")
+        logger.info("CSRF exemption applied to API routes")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"CSRF protection not available or already configured: {e}")
     
     # Register blueprint
     app.register_blueprint(api_bp)
