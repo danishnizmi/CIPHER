@@ -8,16 +8,14 @@ RUN apk add --no-cache git gcc musl-dev
 # Set working directory
 WORKDIR /go/src/app
 
-# Copy Go module files
+# Copy Go module files first for better caching
 COPY go.mod ./
-# Copy the Go source code
+
+# Ensure go.sum is generated and dependencies are downloaded
+RUN go mod download && go mod tidy
+
+# Copy the Go source code after dependency download
 COPY threat_ingestion.go ./
-
-# Fix the unused variable issue in the Go code
-RUN sed -i '916s/v :=/_ :=/' threat_ingestion.go
-
-# Download dependencies
-RUN go mod download
 
 # Build the Go binary
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o threat_ingestion .
