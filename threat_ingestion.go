@@ -1191,6 +1191,8 @@ func extractIOCs(records []map[string]interface{}, feedName string) ([]ThreatIOC
 
 			// Extract using regex patterns
 			for iocType, pattern := range IOCPatterns {
+				// FIX: Line 916 - changed from "v :=" to "_ ="
+				_ = pattern.FindAllString(content, -1)
 				matches := pattern.FindAllString(content, -1)
 				for _, match := range matches {
 					// Skip standard metadata fields
