@@ -109,6 +109,7 @@ steps:
     - '-c'
     - |
       echo "Testing Go compilation..."
+      go mod download
       go mod tidy
       go build -o /tmp/threat_ingestion threat_ingestion.go
       echo "Go compilation successful"
