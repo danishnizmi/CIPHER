@@ -42,8 +42,12 @@ RUN touch __init__.py \
 # Copy application code
 COPY . .
 
-# Ensure template files exist
-RUN for template in base.html login.html dashboard.html 404.html 500.html content.html detail.html auth.html; do \
+# Ensure template directory exists and create it if needed
+RUN mkdir -p /app/templates
+
+# Ensure all required template files exist
+# This includes both files in your project and those referenced in the code
+RUN for template in auth.html base.html content.html dashboard.html 404.html 500.html login.html detail.html; do \
     if [ ! -f "/app/templates/$template" ]; then \
         echo "<!DOCTYPE html><html><head><title>Placeholder for $template</title></head><body><h1>Placeholder for $template</h1></body></html>" > "/app/templates/$template"; \
     fi; \
@@ -86,7 +90,7 @@ mkdir -p static/dist\n\
 \n\
 # Ensure templates exist\n\
 mkdir -p templates\n\
-for template in login.html dashboard.html 404.html 500.html base.html content.html detail.html auth.html; do\n\
+for template in auth.html base.html content.html dashboard.html 404.html 500.html login.html detail.html; do\n\
   if [ ! -f "templates/$template" ]; then\n\
     echo "WARNING: Creating placeholder for $template"\n\
     echo "<!DOCTYPE html><html><head><title>$template</title></head><body><h1>$template</h1></body></html>" > "templates/$template"\n\
