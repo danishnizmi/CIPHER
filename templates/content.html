@@ -89,10 +89,10 @@
                                             {% endif %}
                                         </td>
                                         <td class="px-6 py-4 text-sm text-gray-500">
-                                            {{ user.last_login|default('Never')|datetime if user.last_login else 'Never' }}
+                                            {{ user.last_login|default('Never')|datetime }}
                                         </td>
                                         <td class="px-6 py-4 text-sm text-gray-500">
-                                            {{ user.created_at|default('Unknown')|datetime if user.created_at else 'Unknown' }}
+                                            {{ user.created_at|default('Unknown')|datetime }}
                                         </td>
                                         <td class="px-6 py-4 text-right text-sm font-medium">
                                             <a href="{{ url_for('edit_user', username=username) }}" class="text-blue-600 hover:text-blue-900 mr-4">
@@ -166,7 +166,6 @@
                 </div>
             </div>
         </div>
-        
     {% endif %}
 {% endblock %}
 
