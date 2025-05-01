@@ -1,6 +1,7 @@
 """
 Threat Intelligence Platform - API Module
-Provides RESTful endpoints with optimized GCP integration and enhanced security.
+Provides RESTful endpoints with optimized GCP integration, enhanced security,
+and direct integration with Go-based threat ingestion service.
 """
 
 import os
@@ -11,6 +12,7 @@ import hashlib
 import secrets
 import re
 import uuid
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple, Union
 from functools import wraps
@@ -36,6 +38,10 @@ BUCKET_NAME = config.gcs_bucket
 MAX_RESULTS = 1000
 CACHE_TIMEOUT = 300  # 5 minutes
 ENVIRONMENT = config.environment
+
+# Go Ingestion Service URL
+GO_INGESTION_URL = os.environ.get("GO_INGESTION_URL", "http://localhost:8081/ingest_threat_data")
+GO_INGESTION_TIMEOUT = 120  # seconds
 
 # Create Blueprint
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -541,6 +547,48 @@ def ensure_tables_exist():
 # Make sure tables exist on module initialization
 ensure_tables_exist()
 
+# ======== Integration with Go Ingestion Service ========
+
+def call_go_ingestion_service(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Call the Go-based ingestion service with request forwarding
+    
+    Args:
+        data: Request data to send to the Go service
+    
+    Returns:
+        Response data from the Go service
+    """
+    api_key = get_api_key()
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    if api_key:
+        headers["X-API-Key"] = api_key
+    
+    try:
+        response = requests.post(
+            GO_INGESTION_URL,
+            json=data,
+            headers=headers,
+            timeout=GO_INGESTION_TIMEOUT
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            error_msg = f"Go ingestion service returned error status: {response.status_code}"
+            logger.error(error_msg)
+            logger.error(f"Response: {response.text[:500]}")
+            return {"error": error_msg, "status_code": response.status_code}
+            
+    except requests.RequestException as e:
+        error_msg = f"Error connecting to Go ingestion service: {str(e)}"
+        logger.error(error_msg)
+        return {"error": error_msg}
+
 # ======== API Endpoints ========
 
 @api_bp.route('/health', methods=['GET'])
@@ -552,6 +600,21 @@ def health_check():
     # Check BigQuery connectivity through config
     db_status = config.check_database_connectivity()
     
+    # Check Go ingestion service
+    go_ingestion_status = "unknown"
+    try:
+        response = requests.post(
+            GO_INGESTION_URL,
+            json={"command": "health"},
+            timeout=5
+        )
+        if response.status_code == 200:
+            go_ingestion_status = "available"
+        else:
+            go_ingestion_status = "error"
+    except requests.RequestException:
+        go_ingestion_status = "unavailable"
+    
     # Check GCP services through config
     gcp_status = "available" if config.GCP_SERVICES_AVAILABLE else "unavailable"
     
@@ -562,6 +625,7 @@ def health_check():
         "status": "ok",
         "database": db_status,
         "gcp_services": gcp_status,
+        "go_ingestion": go_ingestion_status,
         "timestamp": datetime.utcnow().isoformat(),
         "version": version,
         "environment": ENVIRONMENT,
@@ -697,24 +761,16 @@ def list_feeds():
     
     rows, error = query_bigquery(query)
     
-    # Get feed descriptions from ingestion module if possible
-    feed_descriptions = {}
-    try:
-        from ingestion import FEED_SOURCES
-        for name, info in FEED_SOURCES.items():
-            table_id = info.get("table_id")
-            if table_id:
-                feed_descriptions[table_id] = info.get("description", "Threat Intelligence Feed")
-    except ImportError:
-        # Fallback descriptions
-        feed_descriptions = {
-            "threatfox_iocs": "ThreatFox IOCs - Malware indicators database",
-            "phishtank_urls": "PhishTank - Community-verified phishing URLs",
-            "urlhaus_malware": "URLhaus - Database of malicious URLs",
-            "feodotracker_c2": "Feodo Tracker - Botnet C2 IP Blocklist",
-            "cisa_vulnerabilities": "CISA Known Exploited Vulnerabilities Catalog",
-            "tor_exit_nodes": "Tor Exit Node List"
-        }
+    # Get feed descriptions
+    feed_descriptions = {
+        "threatfox_iocs": "ThreatFox IOCs - Malware indicators database",
+        "phishtank_urls": "PhishTank - Community-verified phishing URLs",
+        "urlhaus_malware": "URLhaus - Database of malicious URLs",
+        "feodotracker_c2": "Feodo Tracker - Botnet C2 IP Blocklist",
+        "cisa_vulnerabilities": "CISA Known Exploited Vulnerabilities Catalog",
+        "tor_exit_nodes": "Tor Exit Node List",
+        "otx_alienvault": "OTX AlienVault - Threat intelligence platform"
+    }
     
     # Process results
     feeds = []
@@ -1349,7 +1405,7 @@ def get_threat_summary():
 @require_api_key
 # Explicitly exempt from CSRF protection
 def ingest_threat_data():
-    """Trigger data ingestion with enhanced validation and error handling"""
+    """Trigger data ingestion via Go service with enhanced validation and error handling"""
     # Report metric for ingestion request
     report_metric("ingestion_request")
     
@@ -1364,48 +1420,43 @@ def ingest_threat_data():
         return jsonify({"error": "Request body too large"}), 413
     
     try:
-        # Import ingestion module
+        # Validate request body if present
+        payload = None
+        if request.data:
+            try:
+                # Limit parse depth and disable duplicate keys
+                payload = json.loads(request.data.decode('utf-8'))
+                
+                # Prevent command injection in feed names
+                if 'feed_name' in payload and payload['feed_name']:
+                    feed_name = payload['feed_name']
+                    if not re.match(r'^[a-zA-Z0-9_-]+$', feed_name):
+                        return jsonify({"error": "Invalid feed name format"}), 400
+                
+                # Limit content size for parsing
+                if 'content' in payload and isinstance(payload['content'], str):
+                    if len(payload['content']) > 50 * 1024 * 1024:  # 50MB limit
+                        return jsonify({"error": "Content too large"}), 413
+            except json.JSONDecodeError:
+                return jsonify({"error": "Invalid JSON in request body"}), 400
+        
+        # Forward request to Go ingestion service
+        if payload is None:
+            payload = {"process_all": True}
+            
         try:
-            from ingestion import ThreatDataIngestion
+            # Call Go ingestion service
+            result = call_go_ingestion_service(payload)
             
-            # Validate request body if present
-            payload = None
-            if request.data:
-                try:
-                    # Limit parse depth and disable duplicate keys
-                    payload = json.loads(request.data.decode('utf-8'))
-                    
-                    # Prevent command injection in feed names
-                    if 'feed_name' in payload and payload['feed_name']:
-                        feed_name = payload['feed_name']
-                        if not re.match(r'^[a-zA-Z0-9_-]+$', feed_name):
-                            return jsonify({"error": "Invalid feed name format"}), 400
-                    
-                    # Limit content size for parsing
-                    if 'content' in payload and isinstance(payload['content'], str):
-                        if len(payload['content']) > 50 * 1024 * 1024:  # 50MB limit
-                            return jsonify({"error": "Content too large"}), 413
-                except json.JSONDecodeError:
-                    return jsonify({"error": "Invalid JSON in request body"}), 400
-            
-            # Initialize ingestion engine
-            ingestion = ThreatDataIngestion()
-            
-            # Process specific feed or all feeds
-            if payload and 'feed_name' in payload and payload['feed_name'] != 'all':
-                feed_name = payload['feed_name']
-                logger.info(f"Ingesting data for feed: {feed_name}")
-                result = ingestion.process_feed(feed_name)
-            elif payload and payload.get('file_type') == 'csv' and 'content' in payload:
-                # Handle CSV content
-                feed_name = payload.get('feed_name', 'csv_upload')
-                logger.info(f"Analyzing CSV data for feed: {feed_name}")
-                result = ingestion.analyze_csv_file(payload['content'], feed_name)
-            else:
-                # Process all feeds
-                logger.info("Ingesting data for all feeds")
-                result = {"results": ingestion.process_all_feeds(), "timestamp": datetime.utcnow().isoformat()}
-            
+            # Check for errors
+            if result.get("error"):
+                logger.error(f"Error from Go ingestion service: {result.get('error')}")
+                return jsonify({
+                    "status": "error", 
+                    "message": result.get("error"),
+                    "timestamp": datetime.utcnow().isoformat()
+                }), result.get("status_code", 500)
+                
             # Clear API cache for related endpoints
             clear_api_cache("get_feeds")
             clear_api_cache("get_stats")
@@ -1415,162 +1466,21 @@ def ingest_threat_data():
             # Report success metric
             report_metric("ingestion_success")
             return jsonify(result)
-        except ImportError:
-            # If ingestion module not available, provide minimal functionality
-            logger.warning("Ingestion module not available, using minimal implementation")
             
-            # Create sample data for testing
-            now = datetime.utcnow()
+        except Exception as e:
+            logger.error(f"Error calling Go ingestion service: {str(e)}")
+            logger.error(traceback.format_exc())
             
-            # Ensure threat_analysis table exists
-            client = get_client('bigquery')
-            if client and not isinstance(client, config.DummyClient):
-                # Get imports locally
-                from google.cloud import bigquery
-                from google.cloud.exceptions import NotFound
-                
-                # Check if table exists
-                try:
-                    table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
-                    client.get_table(table_id)
-                except NotFound:
-                    # Create the table with minimal schema
-                    schema = [
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ]
-                    table = bigquery.Table(table_id, schema=schema)
-                    client.create_table(table, exists_ok=True)
-                    logger.info(f"Created table threat_analysis")
-                
-                # Create sample data row
-                sample_row = {
-                    "source_id": f"sample-{uuid.uuid4().hex[:8]}",
-                    "source_type": "sample",
-                    "iocs": json.dumps([
-                        {"type": "ip", "value": "192.168.1.1", "sources": 3},
-                        {"type": "domain", "value": "example.com", "sources": 2}
-                    ]),
-                    "vertex_analysis": json.dumps({
-                        "summary": "Sample threat analysis",
-                        "threat_actor": "SampleActor",
-                        "targets": "Sample targets",
-                        "techniques": "Sample techniques",
-                        "malware": "SampleMalware",
-                        "severity": "medium",
-                        "confidence": "medium"
-                    }),
-                    "analysis_timestamp": now.isoformat(),
-                    "severity": "medium",
-                    "confidence": "medium"
-                }
-                
-                # Insert into table
-                try:
-                    errors = client.insert_rows_json(table_id, [sample_row])
-                    
-                    if not errors:
-                        logger.info("Successfully inserted sample data for testing")
-                        
-                        # Also create campaign table if it doesn't exist
-                        try:
-                            campaign_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
-                            client.get_table(campaign_table_id)
-                        except NotFound:
-                            # Create the table with schema
-                            campaign_schema = [
-                                bigquery.SchemaField("campaign_id", "STRING"),
-                                bigquery.SchemaField("campaign_name", "STRING"),
-                                bigquery.SchemaField("threat_actor", "STRING"),
-                                bigquery.SchemaField("malware", "STRING"),
-                                bigquery.SchemaField("techniques", "STRING"),
-                                bigquery.SchemaField("targets", "STRING"),
-                                bigquery.SchemaField("severity", "STRING"),
-                                bigquery.SchemaField("sources", "STRING"),
-                                bigquery.SchemaField("iocs", "STRING"),
-                                bigquery.SchemaField("source_count", "INTEGER"),
-                                bigquery.SchemaField("ioc_count", "INTEGER"),
-                                bigquery.SchemaField("first_seen", "STRING"),
-                                bigquery.SchemaField("last_seen", "STRING"),
-                                bigquery.SchemaField("detection_timestamp", "STRING")
-                            ]
-                            table = bigquery.Table(campaign_table_id, campaign_schema)
-                            client.create_table(table, exists_ok=True)
-                            logger.info(f"Created table threat_campaigns")
-                        
-                        # Create a sample campaign too
-                        campaign_row = {
-                            "campaign_id": f"campaign-{uuid.uuid4().hex[:8]}",
-                            "campaign_name": "SampleCampaign",
-                            "threat_actor": "SampleActor",
-                            "malware": "SampleMalware",
-                            "techniques": "Sample techniques",
-                            "targets": "Sample targets",
-                            "severity": "medium",
-                            "sources": json.dumps(["sample1", "sample2"]),
-                            "iocs": json.dumps([
-                                {"type": "ip", "value": "192.168.1.1"},
-                                {"type": "domain", "value": "example.com"}
-                            ]),
-                            "source_count": 2,
-                            "ioc_count": 2,
-                            "first_seen": (now - timedelta(days=7)).isoformat(),
-                            "last_seen": now.isoformat(),
-                            "detection_timestamp": now.isoformat()
-                        }
-                        
-                        client.insert_rows_json(campaign_table_id, [campaign_row])
-                        
-                        # Create feed tables if they don't exist
-                        for feed_name in ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]:
-                            try:
-                                feed_table_id = f"{PROJECT_ID}.{DATASET_ID}.{feed_name}"
-                                client.get_table(feed_table_id)
-                            except NotFound:
-                                # Create table with basic schema
-                                feed_schema = [
-                                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                                    bigquery.SchemaField("_ingestion_id", "STRING"),
-                                    bigquery.SchemaField("_source", "STRING"),
-                                    bigquery.SchemaField("_feed_type", "STRING"),
-                                    bigquery.SchemaField("value", "STRING"),
-                                    bigquery.SchemaField("type", "STRING")
-                                ]
-                                table = bigquery.Table(feed_table_id, feed_schema)
-                                client.create_table(table, exists_ok=True)
-                                logger.info(f"Created table {feed_name}")
-                                
-                                # Add a sample row
-                                feed_row = {
-                                    "_ingestion_timestamp": now.isoformat(),
-                                    "_ingestion_id": f"sample-{uuid.uuid4().hex[:8]}",
-                                    "_source": feed_name,
-                                    "_feed_type": f"Sample {feed_name} data",
-                                    "value": "example.com" if "domain" in feed_name else "192.168.1.1",
-                                    "type": "domain" if "domain" in feed_name else "ip"
-                                }
-                                client.insert_rows_json(feed_table_id, [feed_row])
-                        
-                        report_metric("ingestion_success")
-                        return jsonify({
-                            "status": "success",
-                            "message": "Created sample data for testing (ingestion module not available)",
-                            "timestamp": now.isoformat()
-                        })
-                    else:
-                        logger.error(f"Errors inserting sample data: {errors}")
-                except Exception as e:
-                    logger.error(f"Error creating sample data: {e}")
+            # Provide fallback response with error
+            return jsonify({
+                "status": "error", 
+                "message": f"Failed to call Go ingestion service: {str(e)}",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 500
             
-            report_metric("ingestion_module_missing")
-            return jsonify({"error": "Ingestion module not available, but created minimal test data"}), 200
     except Exception as e:
         logger.error(f"Ingestion error: {str(e)}")
+        logger.error(traceback.format_exc())
         report_metric("ingestion_error")
         return jsonify({"error": f"Ingestion error: {str(e)}"}), 500
 
@@ -1632,108 +1542,32 @@ def upload_csv():
         # Clean feed name to ensure it's valid for table naming
         feed_name = re.sub(r'[^a-zA-Z0-9_]', '_', feed_name.lower())
         
-        # Use ingestion module if available
-        try:
-            from ingestion import ThreatDataIngestion
+        # Call Go ingestion service to analyze CSV
+        payload = {
+            "file_type": "csv",
+            "content": csv_content,
+            "feed_name": feed_name
+        }
+        
+        result = call_go_ingestion_service(payload)
+        
+        # Check for error
+        if result.get("error"):
+            logger.error(f"Error analyzing CSV: {result.get('error')}")
+            return jsonify({"error": result.get("error")}), 500
             
-            # Initialize ingestion engine
-            ingestion = ThreatDataIngestion()
-            
-            # Process the CSV file
-            result = ingestion.analyze_csv_file(csv_content, feed_name)
-            
-            # Clear relevant caches on successful upload
-            if not result.get("error"):
-                clear_api_cache("get_feeds")
-                clear_api_cache("get_stats")
-            
-            return jsonify(result)
-            
-        except ImportError:
-            logger.warning("Ingestion module not available, using minimal implementation")
-            
-            # Create a minimal implementation that inserts data directly to BigQuery
-            client = get_client('bigquery')
-            if client and not isinstance(client, config.DummyClient):
-                try:
-                    # Import locally
-                    from google.cloud import bigquery
-                    
-                    # Create a table for this upload if it doesn't exist
-                    table_id = f"upload_{feed_name}"
-                    full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
-                    
-                    try:
-                        client.get_table(full_table_id)
-                        logger.info(f"Table {full_table_id} already exists")
-                    except Exception:
-                        # Create table
-                        schema = [
-                            bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                            bigquery.SchemaField("_ingestion_id", "STRING"),
-                            bigquery.SchemaField("_source", "STRING"),
-                            bigquery.SchemaField("_feed_type", "STRING"),
-                            bigquery.SchemaField("csv_content", "STRING")
-                        ]
-                        table = bigquery.Table(full_table_id, schema=schema)
-                        client.create_table(table, exists_ok=True)
-                        logger.info(f"Created table {table_id}")
-                    
-                    # Parse CSV to find headers
-                    import csv
-                    from io import StringIO
-                    
-                    try:
-                        csv_file = StringIO(csv_content)
-                        reader = csv.reader(csv_file)
-                        headers = next(reader, [])
-                        
-                        # Create record
-                        ingestion_id = f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        row = {
-                            "_ingestion_timestamp": datetime.utcnow().isoformat(),
-                            "_ingestion_id": ingestion_id,
-                            "_source": "csv_upload",
-                            "_feed_type": f"Uploaded CSV: {feed_name}",
-                            "csv_content": csv_content
-                        }
-                        
-                        # Insert into BQ
-                        errors = client.insert_rows_json(full_table_id, [row])
-                        
-                        if not errors:
-                            logger.info(f"Successfully uploaded CSV to table {table_id}")
-                            report_metric("csv_upload_direct_to_bq")
-                            
-                            # Clear API cache for related endpoints
-                            clear_api_cache("get_feeds")
-                            clear_api_cache("get_stats")
-                            
-                            return jsonify({
-                                "status": "success",
-                                "message": "CSV uploaded directly to BigQuery",
-                                "feed_name": feed_name,
-                                "table": table_id,
-                                "record_count": sum(1 for _ in reader),  # Count remaining rows
-                                "headers": headers
-                            })
-                        else:
-                            logger.error(f"Errors inserting CSV data: {errors}")
-                            return jsonify({"error": f"BigQuery insert errors: {errors}"}), 500
-                    except Exception as e:
-                        logger.error(f"CSV parsing error: {str(e)}")
-                        return jsonify({"error": f"CSV parsing error: {str(e)}"}), 400
-                except Exception as e:
-                    logger.error(f"Error uploading to BigQuery: {e}")
-                    return jsonify({"error": f"BigQuery error: {str(e)}"}), 500
-            
-            report_metric("csv_upload_storage_unavailable")
-            return jsonify({"error": "Storage not available"}), 500
+        # Clear relevant caches on successful upload
+        clear_api_cache("get_feeds")
+        clear_api_cache("get_stats")
+        
+        return jsonify(result)
+        
     except UnicodeDecodeError:
         report_metric("csv_upload_encoding_error")
         return jsonify({"error": "Invalid CSV file encoding"}), 400
     except Exception as e:
         logger.error(f"CSV upload error: {str(e)}")
+        logger.error(traceback.format_exc())
         report_metric("csv_upload_error")
         return jsonify({"error": f"Upload error: {str(e)}"}), 500
 
@@ -1741,7 +1575,7 @@ def upload_csv():
 @require_api_key
 @handle_exceptions
 def analyze():
-    """Handle various analysis requests"""
+    """Handle various analysis requests by forwarding to Go service"""
     # Check content type
     content_type = request.headers.get('Content-Type', '')
     if 'application/json' not in content_type:
@@ -1753,58 +1587,19 @@ def analyze():
         if not data:
             return jsonify({"error": "Invalid JSON in request body"}), 400
             
-        command = data.get("command", "")
+        # Forward to Go service
+        result = call_go_ingestion_service(data)
         
-        # Import analysis module
-        try:
-            from analysis import ThreatAnalyzer
+        # Check for errors
+        if result.get("error"):
+            logger.error(f"Error from Go ingestion service: {result.get('error')}")
+            return jsonify({"error": result.get("error")}), 500
             
-            # Initialize the analyzer
-            analyzer = ThreatAnalyzer()
-            
-            if command == "summarize_recent":
-                days = data.get("days", 7)
-                return jsonify(analyzer.get_recent_summary(days))
-                
-            elif command == "analyze_batch":
-                iocs = data.get("iocs", [])
-                if not iocs:
-                    return jsonify({"error": "No IOCs provided"}), 400
-                return jsonify(analyzer.analyze_ioc_batch(iocs))
-                
-            elif command == "analyze_feed":
-                feed_name = data.get("feed_name")
-                days = data.get("days", 7)
-                if not feed_name:
-                    return jsonify({"error": "No feed name provided"}), 400
-                return jsonify(analyzer.analyze_feed_data(feed_name, days))
-                
-            elif command == "analyze_csv":
-                content = data.get("content")
-                feed_name = data.get("feed_name", "csv_upload")
-                if not content:
-                    return jsonify({"error": "No CSV content provided"}), 400
-                return jsonify(analyzer.analyze_csv_file(content, feed_name))
-                
-            else:
-                return jsonify({"error": f"Unknown command: {command}"}), 400
-                
-        except ImportError:
-            logger.warning("Analysis module not available")
-            
-            # Create minimal mock response
-            mock_response = {
-                "summary": "Analysis module not available. This is a mock response.",
-                "severity": "medium",
-                "confidence": "low",
-                "timestamp": datetime.utcnow().isoformat(),
-                "mock": True
-            }
-            
-            return jsonify(mock_response)
+        return jsonify(result)
             
     except Exception as e:
         logger.error(f"Error in analysis endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({"error": f"Analysis error: {str(e)}"}), 500
 
 @api_bp.route('/status', methods=['GET'])
@@ -1842,11 +1637,31 @@ def api_status():
     except ImportError:
         system_info = {"status": "psutil not available"}
     
+    # Check Go ingestion service
+    go_service_info = {"status": "unknown"}
+    try:
+        response = requests.post(
+            GO_INGESTION_URL,
+            json={"command": "health"},
+            timeout=5
+        )
+        if response.status_code == 200:
+            go_service_info = {"status": "available"}
+            try:
+                go_service_info.update(response.json())
+            except:
+                pass
+        else:
+            go_service_info = {"status": "error", "code": response.status_code}
+    except requests.RequestException as e:
+        go_service_info = {"status": "unavailable", "error": str(e)}
+    
     # Return comprehensive status
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
         "services": cloud_status.get("services", {}),
+        "go_ingestion": go_service_info,
         "cache": cache_stats,
         "environment": env_info,
         "system": system_info
@@ -1919,5 +1734,5 @@ def init_app(app):
         return response
     
     # Log initialization
-    logger.info("API routes initialized with enhanced security")
+    logger.info("API routes initialized with enhanced security and Go ingestion service integration")
     return app
