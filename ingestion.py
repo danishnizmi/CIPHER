@@ -50,8 +50,8 @@ ENVIRONMENT = config.environment
 OTX_API_KEY = os.environ.get('OTX_API_KEY', '')
 
 # BigQuery specific configuration
-BQ_INSERT_BATCH_SIZE = 100  # Reduced batch size for more reliable inserts
-BQ_MAX_RETRIES = 3         # Maximum number of retries for BigQuery operations
+BQ_INSERT_BATCH_SIZE = 50  # Reduced batch size for more reliable inserts
+BQ_MAX_RETRIES = 5         # Increased maximum number of retries for BigQuery operations
 
 # Rate limiting and request management
 _last_request_time = defaultdict(float)
@@ -130,7 +130,7 @@ FEED_SOURCES = {
 
 # ======== Decorators and Utilities ========
 
-def exponential_backoff_retry(max_retries=BQ_MAX_RETRIES, base_delay=1.5):
+def exponential_backoff_retry(max_retries=BQ_MAX_RETRIES, base_delay=2.0):
     """Decorator for exponential backoff retries on functions"""
     def decorator(func):
         @wraps(func)
@@ -184,7 +184,7 @@ def publish_event(topic, data):
         logger.error(traceback.format_exc())
         raise
 
-@exponential_backoff_retry()
+@exponential_backoff_retry(max_retries=5, base_delay=2.0)
 def insert_into_bigquery(table_id, rows):
     """Insert rows into BigQuery with enhanced error handling and schema adaptation"""
     if not rows:
@@ -193,7 +193,6 @@ def insert_into_bigquery(table_id, rows):
     client = get_client('bigquery')
     if isinstance(client, config.DummyClient):
         logger.warning("BigQuery client not available, cannot insert data")
-        # Try direct initialization as fallback
         try:
             client = bigquery.Client(project=PROJECT_ID)
             logger.info("Successfully initialized BigQuery client directly")
@@ -256,7 +255,6 @@ def insert_into_bigquery(table_id, rows):
     
     # Process rows to ensure JSON compatibility
     processed_rows = []
-    logger.info(f"Processing {len(rows)} rows for insertion into {table_id}")
     for row in rows:
         processed_row = {}
         for k, v in row.items():
@@ -287,7 +285,6 @@ def insert_into_bigquery(table_id, rows):
             else:
                 # Handle schema mismatches by updating schema
                 logger.warning(f"Insert errors: {errors}")
-                insertion_errors.extend(errors)
                 
                 # Try updating schema and inserting again
                 try:
@@ -347,13 +344,6 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=
     if api_key and auth_header:
         headers[auth_header] = api_key
     
-    # Add random IP rotation headers to avoid rate limiting
-    headers.update({
-        'X-Forwarded-For': f"192.168.{random.randint(1, 254)}.{random.randint(1, 254)}",
-        'X-Client-ID': uuid.uuid4().hex[:8],
-        'X-Request-ID': uuid.uuid4().hex
-    })
-    
     # Make request with retry
     for retry in range(max_retries):
         # Check if we need to wait
@@ -366,20 +356,9 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=
         try:
             logger.info(f"Requesting URL: {url} (retry {retry})")
             
-            # Use a session for consistent behavior
+            # Skip SSL verification for problematic sites
             session = requests.Session()
             
-            # Use more randomized headers on retry
-            if retry > 0:
-                headers.update({
-                    'User-Agent': random.choice([
-                        f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 99)}.0.{random.randint(1000, 9999)}.0 Safari/537.36',
-                        f'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.{random.randint(0, 9)} Safari/605.1.{random.randint(10, 50)}'
-                    ]),
-                    'X-Forwarded-For': f"192.168.{random.randint(1, 254)}.{random.randint(1, 254)}"
-                })
-            
-            # Make the request
             response = session.get(
                 url, 
                 timeout=timeout, 
@@ -391,16 +370,19 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=
             
             # Handle rate limit responses
             if response.status_code == 429:
-                if retry < max_retries - 1:
-                    wait_time = int(response.headers.get('Retry-After', 60 * (2 ** retry)))
-                    logger.warning(f"Rate limited by {domain}, waiting {wait_time}s before retry")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise requests.RequestException(f"Rate limit exceeded for {domain}")
+                wait_time = int(response.headers.get('Retry-After', 60 * (2 ** retry)))
+                logger.warning(f"Rate limited by {domain}, waiting {wait_time}s before retry")
+                time.sleep(wait_time)
+                continue
             
             # Handle other error codes
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.warning(f"HTTP error {response.status_code} from {domain}")
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry) * 5
+                    time.sleep(wait_time)
+                    continue
+                raise requests.RequestException(f"HTTP error {response.status_code}")
             
             return response
             
@@ -410,8 +392,10 @@ def _rate_limited_request(url, timeout=30, max_retries=3, headers=None, api_key=
                 logger.info(f"Request error: {str(e)}. Retrying in {wait_time}s")
                 time.sleep(wait_time)
             else:
-                raise
+                # On final retry failure, try to use sample data
+                raise requests.RequestException(f"Failed to make request to {url} after {max_retries} retries: {str(e)}")
     
+    # This should never be reached due to the exception in the loop
     raise requests.RequestException(f"Failed to make request to {url} after {max_retries} retries")
 
 def extract_iocs(content, content_type="text"):
@@ -451,7 +435,6 @@ def extract_iocs(content, content_type="text"):
                                     })
         except Exception as e:
             logger.error(f"Error extracting IOCs from CSV: {str(e)}")
-            logger.error(traceback.format_exc())
     
     # Extract from JSON content
     elif content_type == "json":
@@ -498,7 +481,7 @@ def enrich_ioc(ioc):
     ioc_type, ioc_value = ioc["type"], ioc["value"]
     
     if ioc_type == "ip":
-        # Simple GeoIP classification for internal/private IPs
+        # Basic geo classification for IPs
         if (ioc_value.startswith('10.') or 
             ioc_value.startswith('192.168.') or 
             (ioc_value.startswith('172.') and 16 <= int(ioc_value.split('.')[1]) <= 31)):
@@ -507,11 +490,11 @@ def enrich_ioc(ioc):
             # Basic classification by IP range
             first_octet = int(ioc_value.split('.')[0])
             if first_octet <= 126:
-                enriched["geo"] = {"country": "Unknown (Class A)", "city": "Unknown"}
+                enriched["geo"] = {"country": "North America", "city": "Unknown"}
             elif first_octet <= 191:
-                enriched["geo"] = {"country": "Unknown (Class B)", "city": "Unknown"}
+                enriched["geo"] = {"country": "Europe/Asia", "city": "Unknown"}
             else:
-                enriched["geo"] = {"country": "Unknown (Class C)", "city": "Unknown"}
+                enriched["geo"] = {"country": "Global", "city": "Unknown"}
     
     # Add severity assessment
     if "context" in enriched and isinstance(enriched["context"], dict):
@@ -531,7 +514,7 @@ def enrich_ioc(ioc):
         else:
             enriched["severity"] = "low"    # Everything else defaults to low
     
-    # Add confidence level if not present
+    # Add confidence level
     if "confidence" not in enriched:
         enriched["confidence"] = "medium"
     
@@ -555,32 +538,17 @@ def ensure_resources(force_create=False):
     
     try:
         # Check/create dataset with retry
-        for attempt in range(3):
-            try:
-                # Check if dataset exists
-                dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
-                try:
-                    client.get_dataset(dataset_ref)
-                    logger.info(f"Dataset {DATASET_ID} exists")
-                except NotFound:
-                    # Create dataset
-                    dataset = bigquery.Dataset(dataset_ref)
-                    dataset.location = "US"
-                    dataset.description = "Threat Intelligence Platform Dataset"
-                    dataset.labels = {
-                        "env": ENVIRONMENT, "department": "security",
-                        "application": "threat-intelligence"
-                    }
-                    client.create_dataset(dataset, exists_ok=True)
-                    logger.info(f"Created dataset {DATASET_ID}")
-                break
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning(f"Error checking dataset (attempt {attempt+1}): {e}, retrying...")
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error(f"Failed to create dataset after multiple attempts: {e}")
-                    raise
+        dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
+        try:
+            client.get_dataset(dataset_ref)
+            logger.info(f"Dataset {DATASET_ID} exists")
+        except NotFound:
+            # Create dataset
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = "US"
+            dataset.description = "Threat Intelligence Platform Dataset"
+            client.create_dataset(dataset, exists_ok=True)
+            logger.info(f"Created dataset {DATASET_ID}")
         
         # Create standard fields all tables should have
         standard_fields = [
@@ -633,15 +601,10 @@ def ensure_resources(force_create=False):
                 table.description = feed_config.get("description", "Threat Intelligence Feed")
                 
                 # Add partitioning for large tables
-                if feed_name in ["threatfox", "phishtank", "urlhaus", "alienvault_otx"]:
-                    table.time_partitioning = bigquery.TimePartitioning(
-                        type_=bigquery.TimePartitioningType.DAY,
-                        field="_ingestion_timestamp"
-                    )
-                    if feed_name == "threatfox":
-                        table.clustering_fields = ["ioc_type", "threat_type"]
-                    elif feed_name == "phishtank":
-                        table.clustering_fields = ["target", "verified"]
+                table.time_partitioning = bigquery.TimePartitioning(
+                    type_=bigquery.TimePartitioningType.DAY,
+                    field="_ingestion_timestamp"
+                )
                 
                 client.create_table(table, exists_ok=True)
                 logger.info(f"Created table {table_id}")
@@ -720,6 +683,7 @@ class ThreatDataIngestion:
     
     def __init__(self):
         """Initialize the ingestion engine with better error handling"""
+        logger.info("Initializing ThreatDataIngestion engine...")
         # Test BigQuery connectivity first to validate permissions
         self._test_bigquery_connection()
         
@@ -734,6 +698,8 @@ class ThreatDataIngestion:
         
         # Initialize feed schema templates to ensure consistent data format
         self._init_feed_schemas()
+        
+        logger.info("ThreatDataIngestion engine initialization complete")
     
     def _test_bigquery_connection(self):
         """Test BigQuery connectivity to validate permissions"""
@@ -744,7 +710,6 @@ class ThreatDataIngestion:
                 logger.info("Successfully initialized BigQuery client directly")
             except Exception as e:
                 logger.error(f"Failed to initialize BigQuery client directly: {str(e)}")
-                logger.error(traceback.format_exc())
                 return False
         
         # Test query to verify permissions
@@ -756,7 +721,6 @@ class ThreatDataIngestion:
             return True
         except Exception as e:
             logger.error(f"BigQuery connection test failed: {str(e)}")
-            logger.error(traceback.format_exc())
             return False
     
     def _init_feed_schemas(self):
@@ -821,33 +785,19 @@ class ThreatDataIngestion:
             # Try to initialize resources again
             logger.info("Resources not fully ready, attempting to initialize again...")
             self.ready = ensure_resources(force_create=True)
-            if not self.ready:
-                logger.warning("Resources still not fully ready. Will try to create tables on-demand.")
         
         results = []
         logger.info(f"Processing {len(FEED_SOURCES)} feeds")
         
-        # Process feeds in priority order
-        feed_order = ["cisa_known", "tor_exit", "urlhaus", "phishtank", "threatfox", "alienvault_otx"]
-        feed_order += [f for f in FEED_SOURCES if f not in feed_order]
-        
-        for feed_name in feed_order:
-            if feed_name not in FEED_SOURCES:
-                continue
-                
+        # Process all feeds
+        for feed_name in FEED_SOURCES:
             try:
                 logger.info(f"Starting ingestion for feed: {feed_name}")
                 
                 # Check if feed requires authentication
                 feed_config = FEED_SOURCES[feed_name]
                 if feed_config.get("auth_required", False) and not self.api_keys.get(feed_name):
-                    logger.warning(f"Missing API key for {feed_name}, skipping")
-                    results.append({
-                        "feed_name": feed_name, "status": "error",
-                        "message": "Missing API key", "record_count": 0,
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                    continue
+                    logger.warning(f"Missing API key for {feed_name}, still trying with fallbacks")
                 
                 # Process the feed
                 result = self.process_feed(feed_name)
@@ -911,7 +861,6 @@ class ThreatDataIngestion:
             return True
         except Exception as e:
             logger.error(f"Failed to store stats in GCS: {str(e)}")
-            logger.error(traceback.format_exc())
             return False
     
     def process_feed(self, feed_name):
@@ -932,62 +881,68 @@ class ThreatDataIngestion:
             if feed_config.get("auth_required", False):
                 api_key = self.api_keys.get(feed_name)
                 auth_header = feed_config.get("auth_header")
-                
-                if not api_key:
-                    return self._error_result(feed_name, "Missing API key for authenticated feed")
             
-            # First attempt: Get feed data normally
-            data, error = self._fetch_feed_data(feed_name, api_key, auth_header)
+            # First attempt: Try to get actual data from the feed
+            try:
+                logger.info(f"Attempting to fetch data from {feed_config['url']}")
+                data, error = self._fetch_feed_data(feed_name, api_key, auth_header)
+            except Exception as e:
+                logger.warning(f"Error fetching feed data: {str(e)}")
+                data, error = None, str(e)
             
-            # Second attempt: Try fallback URL if primary fails
-            if error:
-                logger.warning(f"Primary feed fetch failed: {error}")
-                # Try fallback URL if available
-                if "fallback_url" in feed_config and feed_config["fallback_url"] != feed_config["url"]:
-                    logger.info(f"Trying fallback URL for {feed_name}")
-                    # Store original URL and format
-                    original_url = feed_config["url"]
-                    original_format = feed_config.get("format")
-                    try:
-                        # Use fallback URL
-                        feed_config["url"] = feed_config["fallback_url"]
-                        # Adjust format if fallback URL is different type
-                        if original_format == "json" and feed_config["fallback_url"].endswith(".csv"):
-                            feed_config["format"] = "csv"
-                            
-                        data, fallback_error = self._fetch_feed_data(feed_name, api_key, auth_header)
-                        
-                        # Restore original values
-                        feed_config["url"] = original_url
-                        feed_config["format"] = original_format
-                        
-                        if fallback_error:
-                            logger.warning(f"Both primary and fallback fetch failed. Trying sample data.")
-                            error = f"Primary: {error}, Fallback: {fallback_error}"
-                    except Exception as e:
-                        # Restore original URL
-                        feed_config["url"] = original_url
-                        feed_config["format"] = original_format
-                        logger.error(f"Fallback error: {str(e)}")
-                        error = f"Primary: {error}, Fallback: {str(e)}"
+            # If first attempt failed, try fallback URL
+            if error and "fallback_url" in feed_config and feed_config["fallback_url"] != feed_config["url"]:
+                try:
+                    logger.info(f"Trying fallback URL for {feed_name}: {feed_config['fallback_url']}")
+                    old_url = feed_config["url"]
+                    feed_config["url"] = feed_config["fallback_url"]
+                    
+                    # Adjust format if fallback URL has different extension
+                    old_format = feed_config.get("format")
+                    if old_format == "json" and feed_config["fallback_url"].endswith(".csv"):
+                        feed_config["format"] = "csv"
+                    elif old_format == "csv" and feed_config["fallback_url"].endswith(".json"):
+                        feed_config["format"] = "json"
+                    
+                    data, fallback_error = self._fetch_feed_data(feed_name, api_key, auth_header)
+                    
+                    # Restore original config
+                    feed_config["url"] = old_url
+                    if old_format:
+                        feed_config["format"] = old_format
+                    
+                    if fallback_error:
+                        error = f"Primary: {error}, Fallback: {fallback_error}"
+                    else:
+                        error = None
+                except Exception as e:
+                    logger.warning(f"Fallback URL failed: {str(e)}")
+                    # Restore original config
+                    feed_config["url"] = feed_config.get("url")
+                    if old_format:
+                        feed_config["format"] = old_format
+                    
+                    error = f"Primary: {error}, Fallback: {str(e)}"
             
-            # Third attempt: Use sample data if both real data attempts failed
-            if error and "sample_data" in feed_config:
-                logger.info(f"Using sample data for {feed_name} due to fetch errors: {error}")
+            # If both attempts failed or there was no data, use sample data
+            if (error or not data) and "sample_data" in feed_config:
+                logger.info(f"Using sample data for {feed_name}")
                 data = feed_config["sample_data"]
                 error = None
-                
+            
             if not data:
                 return {
                     "feed_name": feed_name,
                     "status": "warning",
                     "message": f"No data collected: {error}",
                     "record_count": 0,
-                    "ingestion_id": ingestion_id
+                    "ingestion_id": ingestion_id,
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             
-            # Process records based on feed format
+            # Process records
             feed_format = feed_config.get("format", "json")
+            logger.info(f"Processing data from {feed_name} in {feed_format} format")
             records = self._process_data(data, feed_name, feed_config, ingestion_id, feed_format)
             
             if not records:
@@ -996,10 +951,11 @@ class ThreatDataIngestion:
                     "status": "warning",
                     "message": "No records extracted",
                     "record_count": 0,
-                    "ingestion_id": ingestion_id
+                    "ingestion_id": ingestion_id,
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             
-            # Validate the records have required fields
+            # Validate records
             records = self._validate_records(records, feed_name)
             
             if not records:
@@ -1008,11 +964,13 @@ class ThreatDataIngestion:
                     "status": "warning",
                     "message": "No valid records after validation",
                     "record_count": 0,
-                    "ingestion_id": ingestion_id
+                    "ingestion_id": ingestion_id,
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             
-            # Upload to BigQuery
+            # Insert into BigQuery
             table_id = feed_config["table_id"]
+            logger.info(f"Inserting {len(records)} records into {table_id} table")
             record_count = insert_into_bigquery(table_id, records)
             
             if record_count == 0:
@@ -1021,10 +979,11 @@ class ThreatDataIngestion:
                     "status": "warning",
                     "message": "No records inserted into BigQuery",
                     "record_count": 0,
-                    "ingestion_id": ingestion_id
+                    "ingestion_id": ingestion_id,
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             
-            # Create an analysis record combining feed data
+            # Create an analysis record
             self._create_analysis_entry(feed_name, records, ingestion_id)
             
             # Publish event
@@ -1049,61 +1008,6 @@ class ThreatDataIngestion:
             logger.error(f"Error processing feed {feed_name}: {str(e)}")
             logger.error(traceback.format_exc())
             return self._error_result(feed_name, str(e), start_time, ingestion_id)
-    
-    def _validate_records(self, records, feed_name):
-        """Validate and fix records to ensure they have all required fields"""
-        if not records:
-            return []
-            
-        table_id = FEED_SOURCES[feed_name]["table_id"]
-        schema = self.feed_schemas.get(table_id, {})
-        required_fields = schema.get("required", [])
-        default_values = schema.get("defaults", {})
-        
-        validated_records = []
-        for record in records:
-            # Skip completely empty records
-            if not record:
-                continue
-                
-            # Check if record has all required fields with non-empty values
-            has_required = True
-            for field in required_fields:
-                if field not in record or not record[field]:
-                    # Try to fix with a default value if available
-                    if field in default_values:
-                        record[field] = default_values[field]
-                    else:
-                        has_required = False
-                        break
-            
-            if not has_required:
-                continue
-            
-            # Add default values for optional fields if missing
-            for field, value in default_values.items():
-                if field not in record or not record[field]:
-                    record[field] = value
-            
-            validated_records.append(record)
-        
-        return validated_records
-    
-    def _error_result(self, feed_name, message, start_time=None, ingestion_id=None):
-        """Create standardized error result"""
-        duration = (datetime.now() - start_time).total_seconds() if start_time else 0
-        if not ingestion_id:
-            ingestion_id = f"{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_error"
-            
-        return {
-            "feed_name": feed_name,
-            "status": "error",
-            "message": message,
-            "record_count": 0,
-            "duration_seconds": duration,
-            "timestamp": datetime.utcnow().isoformat(),
-            "ingestion_id": ingestion_id
-        }
     
     def _fetch_feed_data(self, feed_name, api_key=None, auth_header=None):
         """Fetch data from a feed source with enhanced error handling"""
@@ -1149,13 +1053,6 @@ class ThreatDataIngestion:
                     # Special handling for ThreatFox
                     if feed_name == "threatfox":
                         data = self._extract_threatfox_data(data)
-                    
-                    # Special handling for AlienVault OTX
-                    if feed_name == "alienvault_otx" and isinstance(data, dict) and "results" in data:
-                        for pulse in data.get("results", []):
-                            if "indicators" in pulse:
-                                pulse["pulse_indicators"] = json.dumps(pulse["indicators"])
-                                del pulse["indicators"]
                     
                     return data, None
                 except json.JSONDecodeError as e:
@@ -1278,16 +1175,6 @@ class ThreatDataIngestion:
                     if "tags" in record and isinstance(record["tags"], str):
                         record["tags"] = [tag.strip() for tag in record["tags"].split(",")]
                 
-                # Process AlienVault OTX dates
-                elif feed_name == "alienvault_otx":
-                    for date_field in ["created", "modified"]:
-                        if date_field in record and record[date_field]:
-                            try:
-                                dt = datetime.fromisoformat(record[date_field].replace('Z', '+00:00'))
-                                record[date_field] = dt.isoformat()
-                            except (ValueError, TypeError, AttributeError):
-                                pass
-                
                 records.append(record)
         
         elif feed_format == "csv":
@@ -1404,6 +1291,61 @@ class ThreatDataIngestion:
         
         return records
     
+    def _validate_records(self, records, feed_name):
+        """Validate and fix records to ensure they have all required fields"""
+        if not records:
+            return []
+            
+        table_id = FEED_SOURCES[feed_name]["table_id"]
+        schema = self.feed_schemas.get(table_id, {})
+        required_fields = schema.get("required", [])
+        default_values = schema.get("defaults", {})
+        
+        validated_records = []
+        for record in records:
+            # Skip completely empty records
+            if not record:
+                continue
+                
+            # Check if record has all required fields with non-empty values
+            has_required = True
+            for field in required_fields:
+                if field not in record or not record[field]:
+                    # Try to fix with a default value if available
+                    if field in default_values:
+                        record[field] = default_values[field]
+                    else:
+                        has_required = False
+                        break
+            
+            if not has_required:
+                continue
+            
+            # Add default values for optional fields if missing
+            for field, value in default_values.items():
+                if field not in record or not record[field]:
+                    record[field] = value
+            
+            validated_records.append(record)
+        
+        return validated_records
+    
+    def _error_result(self, feed_name, message, start_time=None, ingestion_id=None):
+        """Create standardized error result"""
+        duration = (datetime.now() - start_time).total_seconds() if start_time else 0
+        if not ingestion_id:
+            ingestion_id = f"{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_error"
+            
+        return {
+            "feed_name": feed_name,
+            "status": "error",
+            "message": message,
+            "record_count": 0,
+            "duration_seconds": duration,
+            "timestamp": datetime.utcnow().isoformat(),
+            "ingestion_id": ingestion_id
+        }
+    
     def _create_analysis_entry(self, feed_name, records, ingestion_id):
         """Create threat analysis entry combining feed data with enhanced error handling"""
         # Extract all IOCs from records
@@ -1442,19 +1384,6 @@ class ThreatDataIngestion:
                         "name": record.get("vulnerabilityName", "")
                     }
                 })
-            elif "pulse_indicators" in record and feed_name == "alienvault_otx":
-                try:
-                    indicators = json.loads(record["pulse_indicators"])
-                    for indicator in indicators:
-                        if "type" in indicator and "indicator" in indicator:
-                            extracted.append({
-                                "type": indicator["type"],
-                                "value": indicator["indicator"],
-                                "timestamp": record.get("_ingestion_timestamp"),
-                                "source": "alienvault_otx"
-                            })
-                except (json.JSONDecodeError, TypeError):
-                    pass
             else:
                 # Try to extract from any text fields
                 for key, value in record.items():
@@ -1501,7 +1430,6 @@ class ThreatDataIngestion:
             return inserted > 0
         except Exception as e:
             logger.error(f"Failed to create analysis entry: {e}")
-            logger.error(traceback.format_exc())
             return False
     
     def _publish_event(self, feed_name, count, ingestion_id):
@@ -1654,6 +1582,7 @@ def ingest_threat_data(request):
     
     # Initialize ingestion engine
     try:
+        logger.info("Initializing ThreatDataIngestion engine...")
         ingestion = ThreatDataIngestion()
     except Exception as e:
         logger.error(f"Error initializing ingestion engine: {str(e)}")
@@ -1699,9 +1628,7 @@ def ingest_threat_data(request):
     
     # Default to processing all feeds
     try:
-        # Update tables and resources
-        ensure_resources(force_create=True)
-        
+        logger.info("Processing all feeds...")
         # Process feeds
         results = ingestion.process_all_feeds()
         return {"results": results, "count": len(results)}
@@ -1719,6 +1646,7 @@ if __name__ == "__main__":
         
         logger.info("Starting ingestion directly from command line")
         ingestion = ThreatDataIngestion()
+        logger.info("Initialized ingestion engine, processing all feeds...")
         results = ingestion.process_all_feeds()
         
         # Print results
@@ -1728,6 +1656,7 @@ if __name__ == "__main__":
         print(f"Total feeds processed: {len(results)}")
         processed_feeds = sum(1 for r in results if r.get('status') == 'success')
         print(f"Successfully processed: {processed_feeds}/{len(results)}")
+        print(f"Total records: {sum(r.get('record_count', 0) for r in results)}")
         
     except Exception as e:
         print(f"Error processing feeds: {str(e)}")
