@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV GO_INGESTION_PORT=8081
 
-# Install dependencies
+# Install dependencies - Fixed netcat package name to use netcat-openbsd instead of the virtual package
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     git \
     procps \
-    netcat \
+    netcat-openbsd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,10 +33,14 @@ COPY . .
 
 # Create a simple startup script
 RUN echo '#!/bin/bash' > /app/start.sh && \
-    echo 'cd /app && gunicorn --bind :8080 --workers 2 --threads 8 app:app' >> /app/start.sh && \
+    echo 'cd /app && gunicorn --bind :${PORT:-8080} --workers 2 --threads 8 --timeout 120 app:app' >> /app/start.sh && \
     chmod +x /app/start.sh
 
 EXPOSE 8080
 EXPOSE 8081
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 CMD ["/app/start.sh"]
