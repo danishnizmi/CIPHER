@@ -49,7 +49,7 @@ steps:
       google-cloud-secret-manager==2.17.0
       google-cloud-logging==3.8.0
       google-cloud-error-reporting==1.9.1
-      vertexai==1.36.0
+      vertexai==1.43.0
       google-auth==2.23.0
       requests==2.31.0
       python-dateutil==2.8.2
