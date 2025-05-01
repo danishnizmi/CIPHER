@@ -31,7 +31,7 @@ COPY requirements.txt .
 
 # Install dependencies in single layer with optimized flags
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir --no-deps-solver=backtracking -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt
 
 # Create Python package structure
 RUN touch __init__.py \
