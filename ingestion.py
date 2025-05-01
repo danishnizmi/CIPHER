@@ -164,8 +164,10 @@ class ThreatDataIngestion:
                         bigquery.SchemaField("dateadded", "STRING"),
                         bigquery.SchemaField("url", "STRING"),
                         bigquery.SchemaField("url_status", "STRING"),
+                        bigquery.SchemaField("last_online", "STRING"),
                         bigquery.SchemaField("threat", "STRING"),
                         bigquery.SchemaField("tags", "STRING"),
+                        bigquery.SchemaField("urlhaus_link", "STRING"),
                         bigquery.SchemaField("reporter", "STRING")
                     ])
                 
@@ -393,33 +395,81 @@ class ThreatDataIngestion:
         timestamp = datetime.now().isoformat()
         
         try:
-            # Handle skip lines if specified
-            skip_lines = feed_config.get("skip_lines", 0)
-            lines = content.split('\n')
-            
-            if skip_lines > 0 and len(lines) > skip_lines:
-                content = '\n'.join(lines[skip_lines:])
-            
-            # Parse CSV
-            csv_file = StringIO(content)
-            csv_reader = csv.DictReader(csv_file)
-            
-            for row in csv_reader:
-                if not row or not any(row.values()):
-                    continue
+            # Special handling for URLhaus
+            if feed_name == "urlhaus":
+                # URLhaus CSV has a comment header that starts with #
+                # Find the actual CSV header line (first non-comment line)
+                lines = content.split('\n')
+                header_line_index = None
                 
-                # Clean up the record
-                record = {k: v.strip() if isinstance(v, str) else v for k, v in row.items() if k}
+                for i, line in enumerate(lines):
+                    if line and not line.startswith('#'):
+                        header_line_index = i
+                        break
                 
-                # Add standard metadata
-                record.update({
-                    "_ingestion_timestamp": timestamp,
-                    "_ingestion_id": ingestion_id,
-                    "_source": feed_name,
-                    "_feed_type": FEED_SOURCES[feed_name].get("description", "Threat Feed")
-                })
+                if header_line_index is not None:
+                    # Use only the content from the header line onwards
+                    content = '\n'.join(lines[header_line_index:])
+                    
+                    # Parse CSV
+                    csv_file = StringIO(content)
+                    csv_reader = csv.DictReader(csv_file)
+                    
+                    expected_columns = ["id", "dateadded", "url", "url_status", "last_online", "threat", "tags", "urlhaus_link", "reporter"]
+                    
+                    for row in csv_reader:
+                        if not row or not any(row.values()):
+                            continue
+                        
+                        # Verify we have the URL field which is most important
+                        if "url" not in row or not row["url"]:
+                            continue
+                            
+                        # Create clean record
+                        record = {}
+                        
+                        # Map fields we care about
+                        for column in expected_columns:
+                            if column in row:
+                                record[column] = row[column].strip() if isinstance(row[column], str) else row[column]
+                        
+                        # Add standard metadata
+                        record.update({
+                            "_ingestion_timestamp": timestamp,
+                            "_ingestion_id": ingestion_id,
+                            "_source": feed_name,
+                            "_feed_type": FEED_SOURCES[feed_name].get("description", "Threat Feed")
+                        })
+                        
+                        records.append(record)
+            else:
+                # Handle skip lines if specified for other CSV feeds
+                skip_lines = feed_config.get("skip_lines", 0)
+                lines = content.split('\n')
                 
-                records.append(record)
+                if skip_lines > 0 and len(lines) > skip_lines:
+                    content = '\n'.join(lines[skip_lines:])
+                
+                # Parse CSV
+                csv_file = StringIO(content)
+                csv_reader = csv.DictReader(csv_file)
+                
+                for row in csv_reader:
+                    if not row or not any(row.values()):
+                        continue
+                    
+                    # Clean up the record
+                    record = {k: v.strip() if isinstance(v, str) else v for k, v in row.items() if k}
+                    
+                    # Add standard metadata
+                    record.update({
+                        "_ingestion_timestamp": timestamp,
+                        "_ingestion_id": ingestion_id,
+                        "_source": feed_name,
+                        "_feed_type": FEED_SOURCES[feed_name].get("description", "Threat Feed")
+                    })
+                    
+                    records.append(record)
         
         except Exception as e:
             logger.error(f"Error processing CSV feed {feed_name}: {str(e)}")
