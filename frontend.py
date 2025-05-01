@@ -185,8 +185,13 @@ def api_cache(timeout: int = CACHE_TIMEOUT):
             # Clean up old cache entries if too many
             if len(API_CACHE) > 100:
                 # Find 10 oldest entries
-                old_keys = sorted(API_CACHE_TIMESTAMP, key=API_CACHE_TIMESTAMP.get)[:10]
-                for k in old_keys:
+                oldest_keys = sorted(
+                    API_CACHE_TIMESTAMP, 
+                    key=API_CACHE_TIMESTAMP.get
+                )[:10]
+                
+                # Remove them
+                for k in oldest_keys:
                     if k in API_CACHE:
                         del API_CACHE[k]
                         del API_CACHE_TIMESTAMP[k]
@@ -690,7 +695,7 @@ def dashboard(view=None):
                 campaigns_list = (campaigns_response.get('campaigns', []) 
                                  if isinstance(campaigns_response, dict) else [])
                 
-                # FIX: Use explicit if-else instead of conditional slicing to avoid unhashable type error
+                # FIX: Safely handle list slicing by checking if list exists first
                 if campaigns_list:
                     context['campaigns'] = campaigns_list[:3]
                 else:
@@ -701,7 +706,7 @@ def dashboard(view=None):
                 iocs_list = (iocs_response.get('records', []) 
                             if isinstance(iocs_response, dict) else [])
                 
-                # Also fix this similar pattern with the same approach
+                # FIX: Safely handle list slicing here too
                 if iocs_list:
                     context['top_iocs'] = iocs_list[:4]
                 else:
@@ -1048,7 +1053,8 @@ def dynamic_content_detail(content_type, identifier):
             if data:
                 campaigns_data = get_campaigns_data()
                 campaigns_list = campaigns_data.get('campaigns', [])
-                # Fix another potential slice issue here
+                
+                # Fix potential slicing issue here too
                 if campaigns_list:
                     data['campaigns'] = campaigns_list[:3]
                 else:
@@ -1074,7 +1080,8 @@ def dynamic_content_detail(content_type, identifier):
                 # Get IOCs related to this campaign
                 iocs_data = get_iocs_data()
                 iocs_list = iocs_data.get('records', [])
-                # Fix another potential slice issue here
+                
+                # Fix potential slicing issue here too
                 if iocs_list:
                     data['iocs'] = iocs_list[:5]
                 else:
@@ -1093,7 +1100,8 @@ def dynamic_content_detail(content_type, identifier):
             data = feed_stats or {}
             data['name'] = identifier
             sample_data = feed_data.get('records', [])
-            # Fix another potential slice issue here
+            
+            # Fix potential slicing issue here too
             if sample_data:
                 data['sample_data'] = sample_data[:10]
             else:
