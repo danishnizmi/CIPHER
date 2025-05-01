@@ -8,7 +8,7 @@ steps:
     - |
       echo "Installing dependencies with optimized settings..."
       pip install --upgrade pip
-      pip install --no-cache-dir --no-deps-solver=backtracking -r requirements.txt --user
+      pip install --no-cache-dir -r requirements.txt --user
 
 # Prepare function directories with minimal requirements
 - name: 'python:3.10'
