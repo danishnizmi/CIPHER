@@ -3,7 +3,7 @@ steps:
 - name: 'gcr.io/cloud-builders/docker'
   id: 'build-image'
   args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
-  timeout: '900s'  # Increased timeout for Go compilation
+  timeout: '1200s'  # Increased timeout for Go module download and compilation
 
 # Push to Container Registry
 - name: 'gcr.io/cloud-builders/docker'
