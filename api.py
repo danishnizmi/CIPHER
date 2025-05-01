@@ -39,8 +39,8 @@ MAX_RESULTS = 1000
 CACHE_TIMEOUT = 300  # 5 minutes
 ENVIRONMENT = config.environment
 
-# Go Ingestion Service URL
-GO_INGESTION_URL = os.environ.get("GO_INGESTION_URL", "http://localhost:8081/ingest_threat_data")
+# Go Ingestion Service URL - use environment variable or default to localhost
+GO_INGESTION_URL = os.environ.get("GO_INGESTION_URL", f"http://localhost:{os.environ.get('GO_INGESTION_PORT', '8081')}/ingest_threat_data")
 GO_INGESTION_TIMEOUT = 120  # seconds
 
 # Create Blueprint
@@ -82,9 +82,7 @@ def get_client(client_type):
     return config.get_client(client_type)
 
 def report_metric(metric_type, value=1):
-    """
-    Report a metric to Cloud Monitoring with graceful degradation
-    """
+    """Report a metric to Cloud Monitoring with graceful degradation"""
     # Use centralized metric reporting from config
     config.report_metric(metric_type, value)
 
@@ -302,7 +300,6 @@ def query_bigquery(query, params=None):
         
         # Import locally to avoid global dependency
         from google.cloud import bigquery
-        from google.cloud.exceptions import NotFound
         
         # Create job configuration
         job_config = bigquery.QueryJobConfig()
@@ -328,64 +325,6 @@ def query_bigquery(query, params=None):
                 query_params.append(bigquery.ScalarQueryParameter(k, param_type, v))
             job_config.query_parameters = query_params
         
-        # Check if tables exist first and create them if needed
-        table_names = []
-        table_pattern = re.compile(r'FROM\s+`?([^`\s.]+)\.([^`\s.]+)\.([^`\s.]+)`?', re.IGNORECASE)
-        for match in table_pattern.findall(query):
-            project, dataset, table = match
-            if project == PROJECT_ID and dataset == DATASET_ID:
-                table_names.append(table)
-        
-        # Check if tables exist and create them if they don't
-        for table_name in table_names:
-            try:
-                table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-                client.get_table(table_id)
-            except NotFound:
-                logger.warning(f"Table {table_id} not found, creating it")
-                
-                # Create a minimal schema based on standard fields
-                schema = [
-                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                    bigquery.SchemaField("_ingestion_id", "STRING"),
-                    bigquery.SchemaField("_source", "STRING"),
-                    bigquery.SchemaField("_feed_type", "STRING")
-                ]
-                
-                # Add specific fields for known tables
-                if table_name == "threat_analysis":
-                    schema.extend([
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ])
-                elif table_name == "threat_campaigns":
-                    schema.extend([
-                        bigquery.SchemaField("campaign_id", "STRING"),
-                        bigquery.SchemaField("campaign_name", "STRING"),
-                        bigquery.SchemaField("threat_actor", "STRING"),
-                        bigquery.SchemaField("malware", "STRING"),
-                        bigquery.SchemaField("techniques", "STRING"),
-                        bigquery.SchemaField("targets", "STRING"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("sources", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("source_count", "INTEGER"),
-                        bigquery.SchemaField("ioc_count", "INTEGER"),
-                        bigquery.SchemaField("first_seen", "STRING"),
-                        bigquery.SchemaField("last_seen", "STRING"),
-                        bigquery.SchemaField("detection_timestamp", "STRING")
-                    ])
-                
-                # Create the table
-                table = bigquery.Table(table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
-        
         # Execute query with retry logic
         max_retries = 3
         retry_delay = 1.0
@@ -408,16 +347,7 @@ def query_bigquery(query, params=None):
                 return rows, None
                 
             except Exception as e:
-                if "Not found: Table" in str(e) and attempt == 0:
-                    # Table doesn't exist, let's create empty tables for common queries
-                    logger.warning(f"Table not found: {str(e)}")
-                    if attempt < max_retries - 1:
-                        # Try to create the table and retry
-                        wait_time = retry_delay * (2 ** attempt)
-                        logger.info(f"Waiting {wait_time:.2f}s before retrying...")
-                        time.sleep(wait_time)
-                        continue
-                elif attempt < max_retries - 1:
+                if attempt < max_retries - 1:
                     # On failure, retry with exponential backoff
                     wait_time = retry_delay * (2 ** attempt)
                     logger.warning(f"Query error, retrying in {wait_time:.2f}s: {str(e)}")
@@ -456,96 +386,6 @@ def validate_table_name(name):
         return False
         
     return True
-
-def ensure_tables_exist():
-    """Ensure required BigQuery tables exist"""
-    client = get_client('bigquery')
-    if client is None or isinstance(client, config.DummyClient):
-        logger.warning("BigQuery client not available, cannot ensure tables")
-        return False
-        
-    try:
-        # Import locally to avoid global dependency
-        from google.cloud import bigquery
-        from google.cloud.exceptions import NotFound
-        
-        # Check if dataset exists
-        dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
-        try:
-            client.get_dataset(dataset_ref)
-            logger.info(f"Dataset {DATASET_ID} exists")
-        except NotFound:
-            # Create dataset
-            dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = "US"
-            client.create_dataset(dataset, exists_ok=True)
-            logger.info(f"Created dataset {DATASET_ID}")
-        
-        # Define tables to check
-        tables_to_check = [
-            "threat_analysis",
-            "threat_campaigns",
-            "threatfox_iocs",
-            "phishtank_urls",
-            "urlhaus_malware"
-        ]
-        
-        # Check each table
-        for table_id in tables_to_check:
-            full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
-            try:
-                client.get_table(full_table_id)
-                logger.info(f"Table {table_id} exists")
-            except NotFound:
-                # Create table with basic schema
-                if table_id == "threat_analysis":
-                    schema = [
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ]
-                elif table_id == "threat_campaigns":
-                    schema = [
-                        bigquery.SchemaField("campaign_id", "STRING"),
-                        bigquery.SchemaField("campaign_name", "STRING"),
-                        bigquery.SchemaField("threat_actor", "STRING"),
-                        bigquery.SchemaField("malware", "STRING"),
-                        bigquery.SchemaField("techniques", "STRING"),
-                        bigquery.SchemaField("targets", "STRING"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("sources", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("source_count", "INTEGER"),
-                        bigquery.SchemaField("ioc_count", "INTEGER"),
-                        bigquery.SchemaField("first_seen", "STRING"),
-                        bigquery.SchemaField("last_seen", "STRING"),
-                        bigquery.SchemaField("detection_timestamp", "STRING")
-                    ]
-                else:
-                    # Generic schema for feed tables
-                    schema = [
-                        bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("_ingestion_id", "STRING"),
-                        bigquery.SchemaField("_source", "STRING"),
-                        bigquery.SchemaField("_feed_type", "STRING")
-                    ]
-                
-                # Create the table
-                table = bigquery.Table(full_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error ensuring tables: {str(e)}")
-        return False
-
-# Make sure tables exist on module initialization
-ensure_tables_exist()
 
 # ======== Integration with Go Ingestion Service ========
 
@@ -644,15 +484,6 @@ def get_stats():
     # Validate days parameter for security
     if days < 1 or days > 365:
         return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    
-    # Use mock data if requested
-    if request.args.get('mock', 'false').lower() == 'true':
-        # Try to import from frontend for consistency
-        try:
-            from frontend import MOCK_DATA
-            return jsonify(MOCK_DATA["stats"])
-        except (ImportError, KeyError):
-            pass
 
     # Query BigQuery for stats with SQL injection protection
     feed_query = f"""
@@ -793,17 +624,6 @@ def list_feeds():
                 
             feeds.append(feed)
     
-    # Return sample data if no results
-    if not feeds:
-        feeds = [
-            {"name": "threatfox_iocs", "record_count": 0, "last_updated": None, 
-             "description": "ThreatFox IOCs - Malware indicators database"},
-            {"name": "phishtank_urls", "record_count": 0, "last_updated": None,
-             "description": "PhishTank - Community-verified phishing URLs"},
-            {"name": "urlhaus_malware", "record_count": 0, "last_updated": None,
-             "description": "URLhaus - Database of malicious URLs"}
-        ]
-    
     return jsonify({
         "feeds": [feed["name"] for feed in feeds],
         "feed_details": feeds,
@@ -825,9 +645,6 @@ def feed_stats(feed_name):
     # Validate days parameter for security
     if days < 1 or days > 365:
         return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
     
     # Check if table exists and get stats
     query = f"""
@@ -882,14 +699,6 @@ def feed_stats(feed_name):
                 "count": row["record_count"]
             })
     
-    # If we don't have daily counts, provide sample data
-    if not daily_counts:
-        today = datetime.now().date()
-        daily_counts = [{
-            "date": (today - timedelta(days=i)).isoformat(),
-            "count": 0
-        } for i in range(days)]
-    
     stats["daily_counts"] = daily_counts
     
     return jsonify(stats)
@@ -924,9 +733,6 @@ def feed_data(feed_name):
         # Prevent SQL injection in search terms
         search = re.sub(r'[\'";]', '', search)  # Remove potentially dangerous characters
         search = '%' + search + '%'  # Add wildcards for LIKE
-    
-    # Ensure table exists
-    ensure_tables_exist()
     
     # Build query with parameters (safer than string interpolation)
     conditions = ["_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
@@ -979,7 +785,6 @@ def feed_data(feed_name):
     
     total_count = count_rows[0]["count"] if not count_error and count_rows else len(processed_rows) + offset
     
-    # If no results, return empty array with metadata instead of sample data for consistency
     return jsonify({
         "records": processed_rows,
         "total": total_count,
@@ -1015,9 +820,6 @@ def list_campaigns():
     # Validate severity
     if severity and severity not in ['low', 'medium', 'high', 'critical']:
         return jsonify({"error": "Invalid severity value"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
     
     # Build conditions
     conditions = ["last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
@@ -1108,9 +910,6 @@ def search_iocs():
         value_filter = re.sub(r'[\'";]', '', value_filter)
         value_filter = '%' + value_filter + '%'
     
-    # Ensure table exists
-    ensure_tables_exist()
-    
     # Build query
     conditions = ["analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
     params = {"days": days, "limit": limit, "offset": offset}
@@ -1198,84 +997,6 @@ def search_iocs():
         "filters": {"days": days, "type": ioc_type, "value": value_filter}
     })
 
-@api_bp.route('/iocs/geo', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=3600)  # Cache for 1 hour
-def get_ioc_geo_stats():
-    """Get geographic distribution of IP-based IOCs"""
-    try:
-        days = int(request.args.get('days', '30'))
-        
-        # Security validation
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid days parameter"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    query = f"""
-    WITH ip_iocs AS (
-      SELECT
-        JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ip,
-        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.country') AS country,
-        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.city') AS city
-      FROM
-        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-      WHERE
-        JSON_EXTRACT_SCALAR(ioc_item, '$.type') = 'ip'
-        AND analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    )
-    SELECT
-      country,
-      COUNT(*) as count,
-      ARRAY_AGG(STRUCT(city, ip) LIMIT 10) as cities
-    FROM ip_iocs
-    WHERE country IS NOT NULL
-    GROUP BY country
-    ORDER BY count DESC
-    LIMIT 50
-    """
-    
-    rows, error = query_bigquery(query, {"days": days})
-    
-    # Check for errors
-    if error:
-        # Return empty result set with error message
-        return jsonify({
-            "countries": [],
-            "total_countries": 0,
-            "timestamp": datetime.utcnow().isoformat(),
-            "error": f"Query error: {error}"
-        })
-    
-    # Process results
-    countries = []
-    if rows:
-        for row in rows:
-            country = {
-                "country": row["country"].strip('"') if row["country"] else "Unknown",
-                "count": row["count"],
-                "cities": []
-            }
-            
-            for city in row["cities"] or []:
-                country["cities"].append({
-                    "name": city.city.strip('"') if city.city else "Unknown",
-                    "ip": city.ip.strip('"') if city.ip else "0.0.0.0"
-                })
-                
-            countries.append(country)
-    
-    return jsonify({
-        "countries": countries,
-        "total_countries": len(countries),
-        "timestamp": datetime.utcnow().isoformat()
-    })
-
 @api_bp.route('/threat_summary', methods=['GET'])
 @require_api_key
 @handle_exceptions
@@ -1290,9 +1011,6 @@ def get_threat_summary():
             return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
     except ValueError:
         return jsonify({"error": "Invalid days parameter"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
     
     # Query for recent threat campaigns
     campaign_query = f"""
@@ -1424,7 +1142,6 @@ def ingest_threat_data():
         payload = None
         if request.data:
             try:
-                # Limit parse depth and disable duplicate keys
                 payload = json.loads(request.data.decode('utf-8'))
                 
                 # Prevent command injection in feed names
@@ -1444,45 +1161,38 @@ def ingest_threat_data():
         if payload is None:
             payload = {"process_all": True}
             
-        try:
-            # Call Go ingestion service
-            result = call_go_ingestion_service(payload)
-            
-            # Check for errors
-            if result.get("error"):
-                logger.error(f"Error from Go ingestion service: {result.get('error')}")
-                return jsonify({
-                    "status": "error", 
-                    "message": result.get("error"),
-                    "timestamp": datetime.utcnow().isoformat()
-                }), result.get("status_code", 500)
-                
-            # Clear API cache for related endpoints
-            clear_api_cache("get_feeds")
-            clear_api_cache("get_stats")
-            clear_api_cache("get_iocs")
-            clear_api_cache("get_campaigns")
-            
-            # Report success metric
-            report_metric("ingestion_success")
-            return jsonify(result)
-            
-        except Exception as e:
-            logger.error(f"Error calling Go ingestion service: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Provide fallback response with error
+        # Call Go ingestion service
+        result = call_go_ingestion_service(payload)
+        
+        # Check for errors
+        if result.get("error"):
+            logger.error(f"Error from Go ingestion service: {result.get('error')}")
             return jsonify({
                 "status": "error", 
-                "message": f"Failed to call Go ingestion service: {str(e)}",
+                "message": result.get("error"),
                 "timestamp": datetime.utcnow().isoformat()
-            }), 500
+            }), result.get("status_code", 500)
+            
+        # Clear API cache for related endpoints
+        clear_api_cache("get_feeds")
+        clear_api_cache("get_stats")
+        clear_api_cache("get_iocs")
+        clear_api_cache("get_campaigns")
+        
+        # Report success metric
+        report_metric("ingestion_success")
+        return jsonify(result)
             
     except Exception as e:
-        logger.error(f"Ingestion error: {str(e)}")
+        logger.error(f"Error calling Go ingestion service: {str(e)}")
         logger.error(traceback.format_exc())
-        report_metric("ingestion_error")
-        return jsonify({"error": f"Ingestion error: {str(e)}"}), 500
+        
+        # Provide fallback response with error
+        return jsonify({
+            "status": "error", 
+            "message": f"Failed to call Go ingestion service: {str(e)}",
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
 
 @api_bp.route('/upload_csv', methods=['POST'])
 @require_api_key
@@ -1625,18 +1335,6 @@ def api_status():
         "dataset_id": DATASET_ID
     }
     
-    # System resource info if available
-    system_info = {}
-    try:
-        import psutil
-        system_info = {
-            "cpu_percent": psutil.cpu_percent(interval=None),
-            "memory_percent": psutil.virtual_memory().percent,
-            "thread_count": len(psutil.Process().threads())
-        }
-    except ImportError:
-        system_info = {"status": "psutil not available"}
-    
     # Check Go ingestion service
     go_service_info = {"status": "unknown"}
     try:
@@ -1663,8 +1361,7 @@ def api_status():
         "services": cloud_status.get("services", {}),
         "go_ingestion": go_service_info,
         "cache": cache_stats,
-        "environment": env_info,
-        "system": system_info
+        "environment": env_info
     })
 
 def init_app(app):
