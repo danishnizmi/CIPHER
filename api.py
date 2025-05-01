@@ -48,6 +48,9 @@ cache_timestamps = {}
 request_counter = 0
 last_metrics_time = time.time()
 
+# CSRF protection instance - will be initialized in init_app
+csrf = None
+
 # ======== Shared Utilities ========
 
 def get_api_key():
@@ -73,7 +76,9 @@ def get_client(client_type):
     return config.get_client(client_type)
 
 def report_metric(metric_type, value=1):
-    """Report a metric to Cloud Monitoring with graceful degradation"""
+    """
+    Report a metric to Cloud Monitoring with graceful degradation
+    """
     # Use centralized metric reporting from config
     config.report_metric(metric_type, value)
 
@@ -418,7 +423,7 @@ def query_bigquery(query, params=None):
                     return [], str(e)
                     
     except Exception as e:
-        logger.error(f"BigQuery error: {str(e)}")
+        logger.error(f"BigQuery query error: {str(e)}")
         # Report query failure
         report_metric("query_error")
         return [], str(e)
@@ -523,7 +528,7 @@ def ensure_tables_exist():
                         bigquery.SchemaField("_feed_type", "STRING")
                     ]
                 
-                # Create table
+                # Create the table
                 table = bigquery.Table(full_table_id, schema=schema)
                 client.create_table(table, exists_ok=True)
                 logger.info(f"Created table {table_id}")
@@ -1732,6 +1737,76 @@ def upload_csv():
         report_metric("csv_upload_error")
         return jsonify({"error": f"Upload error: {str(e)}"}), 500
 
+@api_bp.route('/analyze', methods=['POST'])
+@require_api_key
+@handle_exceptions
+def analyze():
+    """Handle various analysis requests"""
+    # Check content type
+    content_type = request.headers.get('Content-Type', '')
+    if 'application/json' not in content_type:
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    
+    # Parse request
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON in request body"}), 400
+            
+        command = data.get("command", "")
+        
+        # Import analysis module
+        try:
+            from analysis import ThreatAnalyzer
+            
+            # Initialize the analyzer
+            analyzer = ThreatAnalyzer()
+            
+            if command == "summarize_recent":
+                days = data.get("days", 7)
+                return jsonify(analyzer.get_recent_summary(days))
+                
+            elif command == "analyze_batch":
+                iocs = data.get("iocs", [])
+                if not iocs:
+                    return jsonify({"error": "No IOCs provided"}), 400
+                return jsonify(analyzer.analyze_ioc_batch(iocs))
+                
+            elif command == "analyze_feed":
+                feed_name = data.get("feed_name")
+                days = data.get("days", 7)
+                if not feed_name:
+                    return jsonify({"error": "No feed name provided"}), 400
+                return jsonify(analyzer.analyze_feed_data(feed_name, days))
+                
+            elif command == "analyze_csv":
+                content = data.get("content")
+                feed_name = data.get("feed_name", "csv_upload")
+                if not content:
+                    return jsonify({"error": "No CSV content provided"}), 400
+                return jsonify(analyzer.analyze_csv_file(content, feed_name))
+                
+            else:
+                return jsonify({"error": f"Unknown command: {command}"}), 400
+                
+        except ImportError:
+            logger.warning("Analysis module not available")
+            
+            # Create minimal mock response
+            mock_response = {
+                "summary": "Analysis module not available. This is a mock response.",
+                "severity": "medium",
+                "confidence": "low",
+                "timestamp": datetime.utcnow().isoformat(),
+                "mock": True
+            }
+            
+            return jsonify(mock_response)
+            
+    except Exception as e:
+        logger.error(f"Error in analysis endpoint: {str(e)}")
+        return jsonify({"error": f"Analysis error: {str(e)}"}), 500
+
 @api_bp.route('/status', methods=['GET'])
 def api_status():
     """Enhanced API status endpoint with detailed metrics"""
@@ -1779,6 +1854,21 @@ def api_status():
 
 def init_app(app):
     """Initialize API routes with the main app"""
+    global csrf
+    
+    # Try to get CSRF from app
+    try:
+        from flask_wtf.csrf import CSRFProtect
+        
+        # Try to get existing CSRF instance
+        csrf = getattr(app, 'csrf', None) or CSRFProtect(app)
+        
+        # Exempt API routes from CSRF protection
+        csrf.exempt(api_bp)
+    except (ImportError, AttributeError):
+        # No CSRF protection available or already configured, that's fine
+        logger.warning("CSRF protection not available or already configured")
+    
     # Register blueprint
     app.register_blueprint(api_bp)
     
@@ -1818,7 +1908,7 @@ def init_app(app):
         response.headers['X-XSS-Protection'] = '1; mode=block'
         
         # Don't cache API responses by default
-        if request.path.startswith('/api/') and not 'Cache-Control' in response.headers:
+        if request.path.startswith('/api/') and 'Cache-Control' not in response.headers:
             response.headers['Cache-Control'] = 'no-store, max-age=0'
         
         return response
