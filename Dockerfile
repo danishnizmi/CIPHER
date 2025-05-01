@@ -26,12 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create necessary directories
 RUN mkdir -p scripts static/src static/dist templates functions/ingestion functions/analysis
 
-# Copy requirements.txt first to leverage Docker caching
-COPY requirements.txt .
-
-# Install dependencies in single layer with optimized flags
+# Install numpy and pandas first to ensure compatibility
+# This is the key fix for the binary incompatibility error
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install numpy==1.23.5 && \
+    pip install pandas==2.1.0
+
+# Copy requirements.txt and install remaining dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create Python package structure
 RUN touch __init__.py \
@@ -46,7 +49,6 @@ COPY . .
 RUN mkdir -p /app/templates
 
 # Ensure all required template files exist
-# This includes both files in your project and those referenced in the code
 RUN for template in auth.html base.html content.html dashboard.html 404.html 500.html login.html detail.html; do \
     if [ ! -f "/app/templates/$template" ]; then \
         echo "<!DOCTYPE html><html><head><title>Placeholder for $template</title></head><body><h1>Placeholder for $template</h1></body></html>" > "/app/templates/$template"; \
@@ -96,6 +98,9 @@ for template in auth.html base.html content.html dashboard.html 404.html 500.htm
     echo "<!DOCTYPE html><html><head><title>$template</title></head><body><h1>$template</h1></body></html>" > "templates/$template"\n\
   fi\n\
 done\n\
+\n\
+# Verify numpy and pandas compatibility before starting\n\
+python -c "import numpy; import pandas; print(f\"NumPy version: {numpy.__version__}, Pandas version: {pandas.__version__}\")"\n\
 \n\
 # Verify imports\n\
 python -c "import flask; print(\"flask module found\")" || echo "WARNING: flask module not found"\n\
