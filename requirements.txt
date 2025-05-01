@@ -16,7 +16,7 @@ google-cloud-language==2.11.1
 google-cloud-secret-manager==2.17.0
 google-cloud-logging==3.8.0
 google-cloud-error-reporting==1.9.1
-vertexai==1.36.0
+vertexai==1.43.0  # Updated from 1.36.0 to compatible version
 
 # Data processing with pinned versions
 pandas==2.1.0
