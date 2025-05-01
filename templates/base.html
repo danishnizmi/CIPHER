@@ -167,6 +167,13 @@
                 </div>
                 {% endif %}
                 
+                <!-- Feed Refresh -->
+                <div class="border-t border-gray-200 my-4 pt-4">
+                    <a href="{{ url_for('refresh_feeds') }}" class="btn btn-primary w-full flex justify-center items-center">
+                        <i class="fas fa-sync-alt mr-2"></i> Refresh Feeds
+                    </a>
+                </div>
+                
                 <!-- System Status -->
                 <div class="mt-auto pt-4">
                     <div class="bg-gray-50 rounded-lg p-3 mt-4">
