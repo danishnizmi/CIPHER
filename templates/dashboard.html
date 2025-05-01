@@ -3,10 +3,10 @@
 {% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
 {% block content %}
-<div class="page-header">
+<div class="page-header flex justify-between items-center mb-6">
     <div>
-        <h1 class="page-title">
-            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} page-icon"></i>
+        <h1 class="text-2xl font-bold flex items-center">
+            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} text-blue-600 mr-3"></i>
             {{ page_title }}
         </h1>
         <p class="text-gray-600">{{ page_subtitle }}</p>
@@ -110,125 +110,10 @@
 </div>
 
 {% if current_view == 'dashboard' %}
-<!-- Main Visualization Sections for Dashboard View -->
+<!-- Dashboard View -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-    <!-- Threat Map -->
+    <!-- Intelligence Collection Trends -->
     <div class="lg:col-span-2 panel">
-        <div class="panel-header">
-            <h3 class="panel-title">
-                <i class="fas fa-globe panel-icon"></i>
-                Threat Geographic Distribution
-            </h3>
-            <div class="flex items-center">
-                <span class="mr-2 text-sm">Live Updates</span>
-                <label class="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" id="liveUpdateSwitch" class="sr-only peer" checked>
-                    <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                </label>
-            </div>
-        </div>
-        <div class="p-0">
-            <div id="threatMap" class="h-96 relative">
-                <div class="absolute inset-0 flex items-center justify-center bg-gray-50">
-                    <div class="text-center">
-                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mb-2"></div>
-                        <p class="text-gray-500">Loading threat map data...</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Quick Actions and Alerts -->
-    <div class="lg:col-span-1">
-        <!-- Quick Actions -->
-        <div class="panel mb-6">
-            <div class="panel-header">
-                <h3 class="panel-title">
-                    <i class="fas fa-bolt text-yellow-500 mr-2"></i>
-                    Quick Actions
-                </h3>
-            </div>
-            <div class="p-4 space-y-2">
-                <a href="{{ url_for('iocs') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
-                    <i class="fas fa-search text-blue-600 mr-3"></i>
-                    <span>Search IOCs</span>
-                </a>
-                <a href="{{ url_for('ingest_threat_data') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
-                    <i class="fas fa-sync text-green-600 mr-3"></i>
-                    <span>Refresh Threat Data</span>
-                </a>
-                <a href="{{ url_for('campaigns') }}" class="flex items-center p-3 border rounded-lg hover:bg-gray-50 transition">
-                    <i class="fas fa-project-diagram text-purple-600 mr-3"></i>
-                    <span>View Campaigns</span>
-                </a>
-            </div>
-        </div>
-        
-        <!-- Recent Alerts -->
-        <div class="panel">
-            <div class="panel-header">
-                <h3 class="panel-title">
-                    <i class="fas fa-info-circle text-blue-500 mr-2"></i>
-                    System Status
-                </h3>
-            </div>
-            <div class="divide-y">
-                <div class="block p-4">
-                    <div class="flex justify-between mb-1">
-                        <h6 class="font-medium flex items-center">
-                            <span class="severity-badge high mr-2">Active</span>
-                            Threat Data
-                        </h6>
-                        <small class="text-gray-500">{{ stats.timestamp|datetime }}</small>
-                    </div>
-                    <p class="text-sm text-gray-600">{{ stats.feeds.total_sources|default(0) }} active feeds with {{ stats.iocs.total|default(0) }} total indicators</p>
-                </div>
-                <div class="block p-4">
-                    <div class="flex justify-between mb-1">
-                        <h6 class="font-medium flex items-center">
-                            <span class="severity-badge low mr-2">Healthy</span>
-                            System Status
-                        </h6>
-                        <small class="text-gray-500">Now</small>
-                    </div>
-                    <p class="text-sm text-gray-600">All components operational</p>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Charts Section -->
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    <!-- IOC Types Distribution Chart -->
-    <div class="panel" id="iocTypesPanel">
-        <div class="panel-header">
-            <h3 class="panel-title">
-                <i class="fas fa-chart-pie panel-icon"></i>
-                IOC Types Distribution
-            </h3>
-            <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
-        </div>
-        <div class="p-4">
-            <div id="iocTypesChart" class="h-80 relative">
-                {% if not ioc_type_values or ioc_type_values|length == 0 %}
-                <div class="flex items-center justify-center h-full text-gray-400">
-                    <div class="text-center">
-                        <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
-                        <p>No IOC type data available</p>
-                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
-                            <i class="fas fa-sync mr-1"></i> Refresh Data
-                        </a>
-                    </div>
-                </div>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-    
-    <!-- Intelligence Collection Trends Chart -->
-    <div class="panel" id="activityPanel">
         <div class="panel-header">
             <h3 class="panel-title">
                 <i class="fas fa-chart-line panel-icon"></i>
@@ -243,6 +128,32 @@
                     <div class="text-center">
                         <i class="fas fa-chart-line text-gray-300 text-4xl mb-3"></i>
                         <p>No activity data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- IOC Types Distribution Chart -->
+    <div class="lg:col-span-1 panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-pie panel-icon"></i>
+                IOC Types
+            </h3>
+            <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
+        </div>
+        <div class="p-4">
+            <div id="iocTypesChart" class="h-80 relative">
+                {% if not ioc_type_values or ioc_type_values|length == 0 %}
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
+                        <p>No IOC type data available</p>
                         <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
                             <i class="fas fa-sync mr-1"></i> Refresh Data
                         </a>
@@ -278,7 +189,7 @@
                 </thead>
                 <tbody class="table-body">
                     {% if campaigns and campaigns|length > 0 %}
-                        {% for campaign in campaigns[:3] %}
+                        {% for campaign in campaigns %}
                         <tr>
                             <td>
                                 {% if campaign is mapping and campaign.campaign_id is defined and campaign.campaign_name is defined %}
@@ -340,7 +251,7 @@
                 </thead>
                 <tbody class="table-body">
                     {% if top_iocs and top_iocs|length > 0 %}
-                        {% for ioc in top_iocs[:4] %}
+                        {% for ioc in top_iocs %}
                         <tr>
                             <td>
                                 {% if ioc is mapping and ioc.type is defined %}
@@ -414,7 +325,7 @@
             <i class="fas fa-rss panel-icon"></i>
             Threat Intelligence Feeds
         </h3>
-        <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary btn-sm">
+        <a href="{{ url_for('refresh_feeds') }}" class="btn btn-primary btn-sm">
             <i class="fas fa-sync-alt mr-1"></i> Refresh Feeds
         </a>
     </div>
@@ -688,7 +599,7 @@
         values: {{ ioc_type_values|default('[]')|tojson }}
     };
     
-    // Only create chart if we have data
+    // Only create chart if we have data and the element exists
     if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
         Plotly.newPlot('iocTypesChart', [{
             labels: iocTypesData.labels,
@@ -712,7 +623,7 @@
         counts: {{ activity_counts|default('[]')|tojson }}
     };
     
-    // Only create chart if we have data
+    // Only create chart if we have data and the element exists
     if (document.getElementById('activityChart') && activityData.dates.length > 0 && activityData.counts.length > 0) {
         Plotly.newPlot('activityChart', [{
             x: activityData.dates,
@@ -765,64 +676,7 @@
     createSparkline('campaignTrendChart', {{ campaign_trend|default(0) }}, '#10b981');
     createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#06b6d4');
     
-    // Threat Map
-    if (document.getElementById('threatMap') && typeof Plotly !== 'undefined') {
-        // Simple world map with sample data (replace with API data in production)
-        const locations = ['USA', 'RUS', 'CHN', 'IND', 'BRA', 'DEU', 'GBR', 'FRA', 'ITA', 'CAN'];
-        const sizes = [30, 25, 20, 15, 10, 8, 7, 6, 5, 4];
-        const colors = ['#ef4444', '#ef4444', '#f97316', '#f97316', '#fbbf24', '#fbbf24', '#4ade80', '#4ade80', '#4ade80', '#4ade80'];
-        
-        const mapData = [{
-            type: 'scattergeo',
-            mode: 'markers',
-            locations: locations,
-            marker: {
-                size: sizes,
-                color: colors,
-                opacity: 0.7,
-                line: {
-                    color: 'black',
-                    width: 1
-                }
-            },
-            text: locations.map((loc, i) => `${loc}: ${sizes[i]} threats`),
-            hoverinfo: 'text'
-        }];
-
-        const mapLayout = {
-            geo: {
-                scope: 'world',
-                showland: true,
-                landcolor: '#F5F5F5',
-                countrycolor: '#D3D3D3',
-                showocean: true,
-                oceancolor: '#E0F7FA',
-                showlakes: true,
-                lakecolor: '#E0F7FA',
-                showrivers: true,
-                rivercolor: '#E0F7FA',
-                showframe: false,
-                showcountries: true,
-                resolution: 50,
-                projection: {
-                    type: 'natural earth'
-                }
-            },
-            margin: {
-                l: 0,
-                r: 0,
-                t: 0,
-                b: 0
-            }
-        };
-
-        Plotly.newPlot('threatMap', mapData, mapLayout);
-        
-        // Remove loading indicator
-        document.querySelector('#threatMap > div:first-child').style.display = 'none';
-    }
-    
-    // IOC type filter
+    // IOC filter functionality
     if (document.getElementById('iocTypeFilter')) {
         const iocTypeFilter = document.getElementById('iocTypeFilter');
         const iocTable = document.getElementById('iocTable');
@@ -836,28 +690,6 @@
             rows.forEach(row => {
                 const rowType = row.getAttribute('data-type');
                 if (!selectedType || rowType === selectedType) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
-            });
-        });
-    }
-    
-    // Campaign severity filter
-    if (document.getElementById('severityFilter')) {
-        const severityFilter = document.getElementById('severityFilter');
-        const campaignTable = document.getElementById('campaignTable');
-        
-        severityFilter.addEventListener('change', function() {
-            const selectedSeverity = this.value;
-            if (!campaignTable) return;
-            
-            const rows = campaignTable.querySelectorAll('tr');
-            
-            rows.forEach(row => {
-                const rowSeverity = row.getAttribute('data-severity');
-                if (!selectedSeverity || rowSeverity === selectedSeverity) {
                     row.style.display = '';
                 } else {
                     row.style.display = 'none';
@@ -880,6 +712,28 @@
             rows.forEach(row => {
                 const text = row.textContent.toLowerCase();
                 if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Campaign severity filter
+    if (document.getElementById('severityFilter')) {
+        const severityFilter = document.getElementById('severityFilter');
+        const campaignTable = document.getElementById('campaignTable');
+        
+        severityFilter.addEventListener('change', function() {
+            const selectedSeverity = this.value;
+            if (!campaignTable) return;
+            
+            const rows = campaignTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const rowSeverity = row.getAttribute('data-severity');
+                if (!selectedSeverity || rowSeverity === selectedSeverity) {
                     row.style.display = '';
                 } else {
                     row.style.display = 'none';
