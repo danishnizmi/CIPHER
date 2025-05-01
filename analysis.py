@@ -1,7 +1,7 @@
 """
 Threat Intelligence Platform - Analysis Module
 Processes threat data, extracts IOCs, and generates insights using Vertex AI.
-Streamlined implementation with optimized GCP integration.
+Streamlined implementation with efficient batching and cost controls.
 """
 
 import os
@@ -32,11 +32,15 @@ PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-analysis-events")
 MODEL_NAME = os.environ.get("VERTEX_MODEL", "text-bison")
 
 # AI rate limiting to avoid excessive costs
-AI_ANALYSIS_RATE_LIMIT = 10  # Max analyses per minute
-AI_MIN_TIME_BETWEEN_CALLS = 6  # Seconds between AI calls
+# Reduced limits to control costs
+AI_DAILY_QUOTA = int(os.environ.get("AI_DAILY_QUOTA", "50"))  # Max AI requests per day
+AI_ANALYSIS_RATE_LIMIT = 5  # Max analyses per minute
+AI_MIN_TIME_BETWEEN_CALLS = 12  # Increased seconds between AI calls
 _last_ai_call_time = 0
 _ai_calls_in_minute = 0
 _ai_minute_start = 0
+_ai_daily_calls = 0
+_ai_day_start = 0
 
 # IOC regex patterns
 IOC_PATTERNS = {
@@ -53,14 +57,29 @@ IOC_PATTERNS = {
 # ======== Utility Functions ========
 
 def rate_limited_ai(func):
-    """Decorator for rate limiting AI analysis calls"""
+    """Decorator for rate limiting AI analysis calls with daily quota"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         global _last_ai_call_time, _ai_calls_in_minute, _ai_minute_start
+        global _ai_daily_calls, _ai_day_start
         
         current_time = time.time()
+        current_date = datetime.now().date()
         
-        # Reset counter if a minute has passed
+        # Reset daily counter if day has changed
+        current_day_timestamp = datetime.combine(current_date, datetime.min.time()).timestamp()
+        if current_day_timestamp != _ai_day_start:
+            _ai_day_start = current_day_timestamp
+            _ai_daily_calls = 0
+        
+        # Check daily quota
+        if _ai_daily_calls >= AI_DAILY_QUOTA:
+            logging.warning(f"AI analysis daily quota reached ({AI_DAILY_QUOTA}/day). Using fallback.")
+            content = kwargs.get('content', args[0] if len(args) > 0 else "")
+            metadata = kwargs.get('metadata', args[1] if len(args) > 1 else {})
+            return _generate_fallback_analysis(content, metadata)
+        
+        # Reset minute counter if a minute has passed
         if current_time - _ai_minute_start > 60:
             _ai_minute_start = current_time
             _ai_calls_in_minute = 0
@@ -68,8 +87,8 @@ def rate_limited_ai(func):
         # Check rate limit
         if _ai_calls_in_minute >= AI_ANALYSIS_RATE_LIMIT:
             logging.warning(f"AI analysis rate limit reached ({AI_ANALYSIS_RATE_LIMIT}/minute). Using fallback.")
-            content = args[0] if len(args) > 0 else ""
-            metadata = args[1] if len(args) > 1 else {}
+            content = kwargs.get('content', args[0] if len(args) > 0 else "")
+            metadata = kwargs.get('metadata', args[1] if len(args) > 1 else {})
             return _generate_fallback_analysis(content, metadata)
         
         # Check time between calls
@@ -82,6 +101,10 @@ def rate_limited_ai(func):
         # Update tracking variables
         _last_ai_call_time = time.time()
         _ai_calls_in_minute += 1
+        _ai_daily_calls += 1
+        
+        # Log AI usage metrics
+        logging.info(f"AI usage - Daily: {_ai_daily_calls}/{AI_DAILY_QUOTA}, Minute: {_ai_calls_in_minute}/{AI_ANALYSIS_RATE_LIMIT}")
         
         # Call the function
         return func(*args, **kwargs)
@@ -187,47 +210,58 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
     
     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
     
-    # Process rows to ensure JSON compatibility
-    processed_rows = [{k: (v.isoformat() if isinstance(v, datetime) else 
-                         json.dumps(v) if isinstance(v, (dict, list)) else v) 
-                      for k, v in row.items()} for row in rows]
-            
-    # Try to insert rows
-    errors = client.insert_rows_json(full_table_id, processed_rows)
-    
-    if not errors:
-        return True
-        
-    # Handle schema mismatches
-    logging.warning(f"Insert errors: {errors}")
-    
-    # Try to update schema
     try:
-        from google.cloud import bigquery
+        # Process rows to ensure JSON compatibility
+        processed_rows = []
+        for row in rows:
+            processed_row = {}
+            for k, v in row.items():
+                # Format datetime fields
+                if isinstance(v, datetime):
+                    processed_row[k] = v.isoformat()
+                # Serialize JSON fields
+                elif isinstance(v, (dict, list)):
+                    processed_row[k] = json.dumps(v)
+                else:
+                    processed_row[k] = v
+            processed_rows.append(processed_row)
         
-        table = client.get_table(full_table_id)
-        current_schema = {field.name: field for field in table.schema}
+        # Insert rows
+        errors = client.insert_rows_json(full_table_id, processed_rows)
         
-        # Find missing fields
-        missing_fields = []
-        for row in processed_rows:
-            for field in row:
-                if field not in current_schema:
-                    missing_fields.append(bigquery.SchemaField(field, "STRING"))
-        
-        if missing_fields:
-            # Update schema
-            new_schema = list(table.schema) + missing_fields
-            table.schema = new_schema
-            client.update_table(table, ["schema"])
-            logging.info(f"Updated schema for {full_table_id}")
+        if not errors:
+            return True
+        else:
+            logging.error(f"Errors inserting rows: {errors}")
             
-            # Try insert again
-            errors = client.insert_rows_json(full_table_id, processed_rows)
-            return not errors
-    except Exception as e:
-        logging.error(f"Schema update error: {str(e)}")
+            # Try to update schema and insert again
+            try:
+                table = client.get_table(full_table_id)
+                current_schema = {field.name: field for field in table.schema}
+                
+                # Find missing fields
+                missing_fields = []
+                for row in processed_rows:
+                    for field in row:
+                        if field not in current_schema:
+                            missing_fields.append(bigquery.SchemaField(field, "STRING"))
+                
+                if missing_fields:
+                    # Update schema
+                    new_schema = list(table.schema) + missing_fields
+                    table.schema = new_schema
+                    client.update_table(table, ["schema"])
+                    logging.info(f"Updated schema for {full_table_id}")
+                    
+                    # Try insert again
+                    errors = client.insert_rows_json(full_table_id, processed_rows)
+                    return not errors
+            except Exception as e:
+                logging.error(f"Schema update error: {str(e)}")
         
+    except Exception as e:
+        logging.error(f"Error inserting into BigQuery: {str(e)}")
+    
     return False
 
 # ======== IOC Processing Functions ========
@@ -326,7 +360,7 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
         else:
             enriched["geo"] = {"country": "Unknown", "city": "Unknown"}
     
-    # Add severity assessment
+    # Add severity assessment based on a simplified model
     if "context" in enriched and isinstance(enriched["context"], dict):
         context_str = str(enriched["context"]).lower()
         if any(kw in context_str for kw in ["critical", "ransomware", "backdoor", "exploit"]):
@@ -352,7 +386,7 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
 
 # ======== AI Analysis Functions ========
 
-@lru_cache(maxsize=100)
+@lru_cache(maxsize=5)
 def get_vertex_model():
     """Get Vertex AI model with proper caching and error handling"""
     try:
@@ -378,13 +412,13 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
     # Get cached model or initialize
     model = get_vertex_model()
     if not model:
-        logging.warning("Vertex AI model not available")
+        logging.warning("Vertex AI model not available, using fallback")
         return _generate_fallback_analysis(content, metadata)
     
-    # Truncate content if it's too long (Vertex AI has context limits)
-    if len(content) > 8000:
-        logging.info(f"Truncating content from {len(content)} to 8000 chars")
-        content = content[:8000]
+    # Truncate content to reduce token usage and costs
+    if len(content) > 4000:
+        logging.info(f"Truncating content from {len(content)} to 4000 chars to reduce costs")
+        content = content[:4000]
     
     # Construct prompt for threat analysis
     prompt = f"""
@@ -407,8 +441,8 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
     try:
         logging.info("Sending content to Vertex AI for analysis")
         
-        # Generate response
-        response = model.predict(prompt, temperature=0.1, max_output_tokens=1024)
+        # Generate response with controlled temperature and token limit
+        response = model.predict(prompt, temperature=0.1, max_output_tokens=800)
         
         # Extract JSON from response
         json_str = extract_json_from_text(response.text)
@@ -442,6 +476,173 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
         logging.error(f"Error analyzing with Vertex AI: {str(e)}")
         return _generate_fallback_analysis(content, metadata)
 
+@rate_limited_ai
+def batch_summarize_iocs(iocs: List[Dict], max_batch_size: int = 100) -> Dict[str, Any]:
+    """Analyze a batch of IOCs to provide a summarized intelligence report"""
+    if not iocs or len(iocs) == 0:
+        return {"summary": "No IOCs provided for analysis", "confidence": "Low"}
+
+    # Limit the batch size to control costs
+    batch_size = min(len(iocs), max_batch_size)
+    if len(iocs) > max_batch_size:
+        logging.info(f"Truncating IOC batch from {len(iocs)} to {max_batch_size} to control costs")
+        iocs = iocs[:max_batch_size]
+    
+    # Get model
+    model = get_vertex_model()
+    if not model:
+        logging.warning("Vertex AI model not available, using fallback for batch summary")
+        return {
+            "summary": f"Analysis of {batch_size} indicators of compromise",
+            "top_types": ", ".join(set(ioc.get("type", "unknown") for ioc in iocs[:10])),
+            "confidence": "Low",
+            "severity": "Medium",
+            "ioc_count": batch_size,
+            "analysis_timestamp": datetime.utcnow().isoformat()
+        }
+    
+    # Prepare IOC content for analysis
+    ioc_content = "\n".join([
+        f"- Type: {ioc.get('type', 'unknown')}, Value: {ioc.get('value', 'unknown')}" 
+        for ioc in iocs[:batch_size]
+    ])
+    
+    # Construct a focused prompt
+    prompt = f"""
+    You are a threat intelligence analyst. Analyze this batch of {batch_size} indicators of compromise (IOCs):
+    
+    {ioc_content}
+    
+    Provide a concise intelligence summary that includes:
+    1. Overall threat patterns and trends visible in these IOCs (2-3 sentences)
+    2. Most common IOC types and their significance
+    3. Any notable threat groups or campaigns that might be associated
+    4. Any inferred attack vectors or techniques
+    5. Overall threat severity assessment (Low, Medium, High, Critical)
+    
+    Format your response as JSON with these keys: summary, common_types, possible_actors, attack_vectors, severity, confidence
+    """
+    
+    try:
+        logging.info(f"Sending batch of {batch_size} IOCs to Vertex AI for summarization")
+        
+        # Generate response with controlled parameters to reduce costs
+        response = model.predict(prompt, temperature=0.1, max_output_tokens=800)
+        
+        # Extract JSON from response
+        json_str = extract_json_from_text(response.text)
+        
+        if json_str:
+            analysis = json.loads(json_str)
+            
+            # Add metadata
+            analysis.update({
+                "ioc_count": batch_size,
+                "analysis_timestamp": datetime.utcnow().isoformat()
+            })
+            
+            return analysis
+        else:
+            logging.warning("Could not find JSON in Vertex AI batch summary response")
+            # Return partial results
+            return {
+                "summary": response.text[:500],
+                "ioc_count": batch_size,
+                "confidence": "Low",
+                "severity": "Medium",
+                "analysis_timestamp": datetime.utcnow().isoformat()
+            }
+    except Exception as e:
+        logging.error(f"Error in batch IOC summarization: {str(e)}")
+        return {
+            "summary": f"Analysis of {batch_size} indicators of compromise",
+            "top_types": ", ".join(set(ioc.get("type", "unknown") for ioc in iocs[:10])),
+            "confidence": "Low",
+            "severity": "Medium",
+            "ioc_count": batch_size,
+            "analysis_timestamp": datetime.utcnow().isoformat(),
+            "error": str(e)
+        }
+
+@rate_limited_ai
+def summarize_recent_intel(days: int = 7) -> Dict[str, Any]:
+    """Summarize recent threat intelligence data"""
+    # Query for recent IOCs
+    query = f"""
+    WITH recent_iocs AS (
+        SELECT
+            JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
+            JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS value,
+            source_type,
+            analysis_timestamp
+        FROM
+            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+        WHERE 
+            analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+    )
+    SELECT * FROM recent_iocs
+    ORDER BY analysis_timestamp DESC
+    LIMIT 100
+    """
+    
+    try:
+        rows = query_bigquery(query)
+        
+        if not rows or len(rows) == 0:
+            return {
+                "summary": f"No recent threat intelligence data found in the past {days} days.",
+                "ioc_count": 0,
+                "period_days": days,
+                "analysis_timestamp": datetime.utcnow().isoformat()
+            }
+        
+        # Convert rows to IOC format
+        iocs = []
+        for row in rows:
+            iocs.append({
+                "type": row.get("type"),
+                "value": row.get("value"),
+                "source": row.get("source_type")
+            })
+        
+        # Use batch summarize function to analyze
+        result = batch_summarize_iocs(iocs)
+        
+        # Add period information
+        result["period_days"] = days
+        
+        # Query for some key statistics
+        stats_query = f"""
+        SELECT
+            COUNT(DISTINCT JSON_EXTRACT_SCALAR(ioc_item, '$.value')) as unique_iocs,
+            COUNT(DISTINCT source_id) as sources,
+            COUNT(DISTINCT source_type) as feed_types
+        FROM
+            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
+            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
+        WHERE 
+            analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        stats_rows = query_bigquery(stats_query)
+        if stats_rows and len(stats_rows) > 0:
+            result["total_iocs"] = stats_rows[0].get("unique_iocs", 0)
+            result["total_sources"] = stats_rows[0].get("sources", 0)
+            result["feed_types"] = stats_rows[0].get("feed_types", 0)
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"Error summarizing recent intel: {str(e)}")
+        return {
+            "summary": f"Error summarizing recent threat intelligence from the past {days} days: {str(e)}",
+            "ioc_count": 0,
+            "period_days": days, 
+            "analysis_timestamp": datetime.utcnow().isoformat(),
+            "error": str(e)
+        }
+
 def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
     """Generate fallback analysis when Vertex AI is unavailable"""
     logging.info("Using fallback analysis method (rule-based)")
@@ -449,7 +650,7 @@ def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -
     # Simple keyword-based severity assessment
     severity = "Medium"  # Default severity
     
-    content_lower = content.lower()
+    content_lower = content.lower() if content else ""
     if any(word in content_lower for word in ["critical", "ransomware", "backdoor", "zero-day", "0day"]):
         severity = "Critical"
     elif any(word in content_lower for word in ["high", "exploit", "leaked", "vulnerability", "trojan"]):
@@ -464,21 +665,23 @@ def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -
     ]
     
     for pattern in actor_patterns:
-        matches = re.search(pattern, content, re.IGNORECASE)
+        matches = re.search(pattern, content, re.IGNORECASE) if content else None
         if matches:
             threat_actor = matches.group(1).strip()
             break
     
     # Basic summary extraction - first 1-2 sentences
-    sentences = re.split(r'(?<=[.!?])\s+', content)
-    summary = " ".join(sentences[:min(2, len(sentences))])
+    summary = ""
+    if content:
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+        summary = " ".join(sentences[:min(2, len(sentences))])
     
     # Create analysis object
     source_id = metadata.get("id", "unknown") if metadata else "unknown"
     source_type = metadata.get("type", "unknown") if metadata else "unknown"
     
     return {
-        "summary": summary[:500],
+        "summary": summary[:500] if summary else "No content provided for analysis",
         "threat_actor": threat_actor,
         "targets": "Unknown",
         "techniques": "Unknown",
@@ -522,6 +725,17 @@ class ThreatAnalyzer:
                     bigquery.SchemaField("severity", "STRING"),
                     bigquery.SchemaField("confidence", "STRING")
                 ],
+                "threat_summaries": [
+                    bigquery.SchemaField("summary_id", "STRING"),
+                    bigquery.SchemaField("summary_type", "STRING"),
+                    bigquery.SchemaField("summary", "STRING"),
+                    bigquery.SchemaField("data", "STRING"),
+                    bigquery.SchemaField("period_days", "INTEGER"),
+                    bigquery.SchemaField("ioc_count", "INTEGER"),
+                    bigquery.SchemaField("severity", "STRING"),
+                    bigquery.SchemaField("confidence", "STRING"),
+                    bigquery.SchemaField("timestamp", "TIMESTAMP")
+                ],
                 "threat_campaigns": [
                     bigquery.SchemaField("campaign_id", "STRING"),
                     bigquery.SchemaField("campaign_name", "STRING"),
@@ -562,6 +776,7 @@ class ThreatAnalyzer:
         SELECT *
         FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
         WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
+        LIMIT 100
         """
         
         rows = query_bigquery(query)
@@ -577,6 +792,7 @@ class ThreatAnalyzer:
         # Process each row
         processed_count = 0
         ioc_count = 0
+        all_iocs = []
         
         for row in rows:
             # Create a unique ID for this analysis
@@ -597,29 +813,52 @@ class ThreatAnalyzer:
             # Enrich IOCs
             enriched_iocs = [enrich_ioc(ioc) for ioc in iocs]
             ioc_count += len(enriched_iocs)
+            all_iocs.extend(enriched_iocs)
             
-            # Analyze with Vertex AI
-            metadata = {"id": row_id, "type": feed_name}
-            vertex_analysis = analyze_with_vertex_ai(content, metadata)
+            # Only perform full analysis on a sample of records to control costs
+            if processed_count < 3:  # Analyze only first 3 records with Vertex AI
+                # Analyze with Vertex AI
+                metadata = {"id": row_id, "type": feed_name}
+                vertex_analysis = analyze_with_vertex_ai(content, metadata)
+                
+                # Combine results
+                analysis_result = {
+                    "source_id": row_id,
+                    "source_type": feed_name,
+                    "iocs": json.dumps(enriched_iocs),
+                    "vertex_analysis": json.dumps(vertex_analysis),
+                    "analysis_timestamp": datetime.utcnow(),
+                    "severity": vertex_analysis.get("severity", "Medium"),
+                    "confidence": vertex_analysis.get("confidence", "Medium")
+                }
+                
+                # Store in BigQuery
+                insert_into_bigquery("threat_analysis", [analysis_result])
             
-            # Combine results
-            analysis_result = {
-                "source_id": row_id,
-                "source_type": feed_name,
-                "iocs": json.dumps(enriched_iocs),
-                "vertex_analysis": json.dumps(vertex_analysis),
-                "analysis_timestamp": datetime.utcnow(),
-                "severity": vertex_analysis.get("severity", "Medium"),
-                "confidence": vertex_analysis.get("confidence", "Medium")
-            }
-            
-            # Store in BigQuery
-            insert_into_bigquery("threat_analysis", [analysis_result])
             processed_count += 1
             
             # Log progress periodically
             if processed_count % 10 == 0:
                 logging.info(f"Processed {processed_count} items from {feed_name}")
+        
+        # Create a batch summary if we have enough IOCs
+        if len(all_iocs) >= 5:
+            summary = batch_summarize_iocs(all_iocs)
+            
+            # Store the summary
+            summary_record = {
+                "summary_id": f"{feed_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "summary_type": "feed",
+                "summary": summary.get("summary", ""),
+                "data": json.dumps(summary),
+                "period_days": days_back,
+                "ioc_count": len(all_iocs),
+                "severity": summary.get("severity", "Medium"),
+                "confidence": summary.get("confidence", "Medium"),
+                "timestamp": datetime.utcnow()
+            }
+            
+            insert_into_bigquery("threat_summaries", [summary_record])
         
         # Log completion
         logging.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
@@ -633,147 +872,88 @@ class ThreatAnalyzer:
             "event_type": "analysis_complete"
         })
         
-        # Run campaign detection
-        self.detect_campaigns(30)
-        
         return {
             "feed_name": feed_name,
             "processed_count": processed_count,
             "ioc_count": ioc_count
         }
     
-    def detect_campaigns(self, days_back: int = 30) -> List[Dict[str, Any]]:
-        """Detect threat campaigns by clustering related IOCs and analyses"""
-        logging.info(f"Detecting campaigns for past {days_back} days")
-        
-        # Query to get recent analyses
+    def get_recent_summary(self, days: int = 7) -> Dict[str, Any]:
+        """Get recent summary or generate if none exists"""
+        # First check if we have a recent summary in the database
         query = f"""
         SELECT *
-        FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-        WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
+        FROM `{PROJECT_ID}.{DATASET_ID}.threat_summaries`
+        WHERE period_days = {days} AND summary_type = 'recent'
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+        ORDER BY timestamp DESC
+        LIMIT 1
         """
         
         rows = query_bigquery(query)
         
-        if not rows:
-            logging.warning("No analysis data found for campaign detection")
-            return []
-        
-        # Group analyses by potential campaigns
-        analysis_groups = {}
-        
-        for row in rows:
-            # Parse JSON fields
+        if rows and len(rows) > 0:
+            # Use cached summary to avoid excessive AI costs
+            row = rows[0]
             try:
-                vertex_analysis = json.loads(row.get("vertex_analysis", "{}")) if isinstance(row.get("vertex_analysis"), str) else row.get("vertex_analysis", {})
-                iocs = json.loads(row.get("iocs", "[]")) if isinstance(row.get("iocs"), str) else row.get("iocs", [])
+                data = json.loads(row.get("data", "{}"))
+                return data
             except json.JSONDecodeError:
-                vertex_analysis = {}
-                iocs = []
-            
-            # Skip if missing key information
-            if not vertex_analysis or not iocs:
-                continue
-            
-            # Extract key campaign identifiers
-            threat_actor = vertex_analysis.get("threat_actor", "").lower()
-            malware = vertex_analysis.get("malware", "").lower()
-            
-            # Generate campaign identifiers
-            campaign_identifiers = []
-            
-            if threat_actor and threat_actor.lower() != "unknown" and len(threat_actor) > 3:
-                campaign_identifiers.append(f"actor:{threat_actor}")
-            
-            if malware and malware.lower() != "unknown" and len(malware) > 3:
-                campaign_identifiers.append(f"malware:{malware}")
-            
-            # Skip if no strong identifiers
-            if not campaign_identifiers:
-                continue
-            
-            # Create a hash key for the campaign
-            campaign_key = hashlib.md5(
-                "|".join(sorted(campaign_identifiers)).encode()
-            ).hexdigest()
-            
-            # Add to campaign group
-            if campaign_key not in analysis_groups:
-                analysis_groups[campaign_key] = {
-                    "analyses": [],
-                    "iocs": [],
-                    "identifiers": campaign_identifiers,
-                    "threat_actor": threat_actor if threat_actor.lower() != "unknown" else "",
-                    "malware": malware if malware.lower() != "unknown" else "",
-                    "techniques": vertex_analysis.get("techniques", ""),
-                    "targets": vertex_analysis.get("targets", ""),
-                    "severity": vertex_analysis.get("severity", "medium"),
-                    "timestamps": []
-                }
-            
-            analysis_groups[campaign_key]["analyses"].append(row["source_id"])
-            analysis_groups[campaign_key]["iocs"].extend(iocs)
-            
-            # Track timestamps
-            if "analysis_timestamp" in row:
-                timestamp = row["analysis_timestamp"]
-                if isinstance(timestamp, datetime):
-                    analysis_groups[campaign_key]["timestamps"].append(timestamp)
+                pass
         
-        # Convert groups to campaigns
-        campaigns = []
-        for key, group in analysis_groups.items():
-            # Skip small groups (likely false positives)
-            if len(group["analyses"]) < 2:
-                continue
-            
-            # Unique IOCs
-            unique_iocs = {}
-            for ioc in group["iocs"]:
-                ioc_key = f"{ioc.get('type')}:{ioc.get('value')}"
-                unique_iocs[ioc_key] = ioc
-            
-            # Calculate first and last seen
-            timestamps = group["timestamps"]
-            first_seen = min(timestamps) if timestamps else datetime.utcnow()
-            last_seen = max(timestamps) if timestamps else datetime.utcnow()
-            
-            # Generate campaign name
-            if group["threat_actor"]:
-                prefix = group["threat_actor"].split()[0].title()
-            elif group["malware"]:
-                prefix = group["malware"].split()[0].title()
-            else:
-                prefix = "Campaign"
-            
-            suffix = key[:6]  # Use first 6 chars of hash
-            campaign_name = f"{prefix}-{suffix}"
-            
-            # Create campaign
-            campaign = {
-                "campaign_id": key,
-                "campaign_name": campaign_name,
-                "threat_actor": group["threat_actor"],
-                "malware": group["malware"],
-                "techniques": group["techniques"],
-                "targets": group["targets"],
-                "severity": group["severity"],
-                "sources": json.dumps(group["analyses"]),
-                "iocs": json.dumps(list(unique_iocs.values())),
-                "source_count": len(group["analyses"]),
-                "ioc_count": len(unique_iocs),
-                "first_seen": first_seen.isoformat() if isinstance(first_seen, datetime) else first_seen,
-                "last_seen": last_seen.isoformat() if isinstance(last_seen, datetime) else last_seen,
-                "detection_timestamp": datetime.utcnow().isoformat()
+        # No recent summary found, generate one
+        summary = summarize_recent_intel(days)
+        
+        # Store the summary
+        summary_record = {
+            "summary_id": f"recent_{days}days_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "summary_type": "recent",
+            "summary": summary.get("summary", ""),
+            "data": json.dumps(summary),
+            "period_days": days,
+            "ioc_count": summary.get("ioc_count", 0),
+            "severity": summary.get("severity", "Medium"),
+            "confidence": summary.get("confidence", "Medium"),
+            "timestamp": datetime.utcnow()
+        }
+        
+        insert_into_bigquery("threat_summaries", [summary_record])
+        
+        return summary
+    
+    def analyze_ioc_batch(self, iocs: List[Dict]) -> Dict[str, Any]:
+        """Analyze a batch of IOCs to provide a summarized report"""
+        if not iocs or len(iocs) == 0:
+            return {
+                "error": "No IOCs provided for analysis",
+                "ioc_count": 0
             }
-            
-            campaigns.append(campaign)
-            
-            # Store campaign in BigQuery
-            insert_into_bigquery("threat_campaigns", [campaign])
         
-        logging.info(f"Detected {len(campaigns)} threat campaigns")
-        return campaigns
+        # Limit batch size
+        max_batch = 100
+        if len(iocs) > max_batch:
+            logging.info(f"Limiting IOC batch from {len(iocs)} to {max_batch}")
+            iocs = iocs[:max_batch]
+        
+        # Get batch summary
+        summary = batch_summarize_iocs(iocs)
+        
+        # Store the summary
+        summary_record = {
+            "summary_id": f"batch_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "summary_type": "batch",
+            "summary": summary.get("summary", ""),
+            "data": json.dumps(summary),
+            "period_days": 0,
+            "ioc_count": len(iocs),
+            "severity": summary.get("severity", "Medium"),
+            "confidence": summary.get("confidence", "Medium"),
+            "timestamp": datetime.utcnow()
+        }
+        
+        insert_into_bigquery("threat_summaries", [summary_record])
+        
+        return summary
     
     def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
         """Analyze uploaded CSV for threat intelligence"""
@@ -830,6 +1010,11 @@ class ThreatAnalyzer:
             
             insert_into_bigquery("threat_analysis", [analysis_result])
             
+            # Get batch summary for all IOCs if there are enough
+            batch_summary = {}
+            if len(enriched_iocs) >= 5:
+                batch_summary = self.analyze_ioc_batch(enriched_iocs)
+            
             # Create response
             result = {
                 "analysis_id": analysis_id,
@@ -837,6 +1022,7 @@ class ThreatAnalyzer:
                 "iocs": enriched_iocs,
                 "ioc_count": len(enriched_iocs),
                 "vertex_analysis": vertex_analysis,
+                "batch_summary": batch_summary,
                 "analysis_timestamp": datetime.utcnow().isoformat()
             }
             
@@ -853,28 +1039,61 @@ def analyze_threat_data(event, context):
     analyzer = ThreatAnalyzer()
     
     # Parse message
-    if 'data' in event:
+    if hasattr(event, 'get') and event.get('data'):
         import base64
         try:
             data = json.loads(base64.b64decode(event['data']).decode('utf-8'))
             logging.info(f"Received analysis event: {data}")
             
-            feed_name = data.get("feed_name")
+            # Check command type
+            command = data.get("command")
             
-            # Check if this is a CSV analysis request
-            if data.get("file_type") == "csv" and "content" in data:
+            # Handle different commands
+            if command == "summarize_recent":
+                days = data.get("days", 7)
+                return analyzer.get_recent_summary(days)
+            elif command == "analyze_batch":
+                iocs = data.get("iocs", [])
+                return analyzer.analyze_ioc_batch(iocs)
+            elif command == "analyze_feed":
+                feed_name = data.get("feed_name")
+                days = data.get("days", 7)
+                if feed_name:
+                    return analyzer.analyze_feed_data(feed_name, days)
+            elif data.get("file_type") == "csv" and "content" in data:
                 return analyzer.analyze_csv_file(data["content"], data.get("feed_name", "csv_upload"))
-            elif feed_name:
+            elif data.get("feed_name"):
                 # Analyze feed data
-                result = analyzer.analyze_feed_data(feed_name)
-                
-                # Detect campaigns periodically
-                if hash(feed_name) % 10 == 0:
-                    analyzer.detect_campaigns()
-                
-                return result
+                feed_name = data.get("feed_name")
+                days = data.get("days", 7)
+                return analyzer.analyze_feed_data(feed_name, days)
         except Exception as e:
             logging.error(f"Error processing event: {str(e)}")
+            return {"error": str(e)}
+    
+    # Handle direct HTTP request (likely from frontend)
+    if hasattr(event, 'get') and event.get('path'):
+        request_json = event.get('json', {})
+        
+        # Get command type
+        command = request_json.get("command", "recent_summary")
+        
+        # Process different commands
+        if command == "recent_summary":
+            days = request_json.get("days", 7)
+            return analyzer.get_recent_summary(days)
+        elif command == "analyze_batch":
+            iocs = request_json.get("iocs", [])
+            return analyzer.analyze_ioc_batch(iocs)
+        elif command == "analyze_feed":
+            feed_name = request_json.get("feed_name")
+            days = request_json.get("days", 7)
+            if feed_name:
+                return analyzer.analyze_feed_data(feed_name, days)
+        elif command == "analyze_csv":
+            content = request_json.get("content", "")
+            feed_name = request_json.get("feed_name", "csv_upload")
+            return analyzer.analyze_csv_file(content, feed_name)
     
     # Fallback to analyzing a few default feeds
     feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]
@@ -891,10 +1110,13 @@ def analyze_threat_data(event, context):
                 "error": str(e)
             })
     
-    # Run campaign detection
-    campaigns = analyzer.detect_campaigns()
-    
-    return {"results": results, "campaign_count": len(campaigns)}
+    # Generate a recent summary
+    try:
+        summary = analyzer.get_recent_summary(7)
+        return {"results": results, "summary": summary}
+    except Exception as e:
+        logging.error(f"Error generating summary: {str(e)}")
+        return {"results": results, "error": str(e)}
 
 # For direct execution
 if __name__ == "__main__":
@@ -903,13 +1125,16 @@ if __name__ == "__main__":
     # Process default feeds
     feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]
     
-    for feed in feeds:
+    for feed in feeds[:1]:  # Only process first feed to save costs when testing
         try:
             result = analyzer.analyze_feed_data(feed)
             print(f"Analyzed {feed}: {result}")
         except Exception as e:
             print(f"Error analyzing {feed}: {str(e)}")
     
-    # Detect campaigns
-    campaigns = analyzer.detect_campaigns()
-    print(f"Detected {len(campaigns)} campaigns")
+    # Generate recent summary
+    try:
+        summary = analyzer.get_recent_summary(7)
+        print(f"Recent summary: {summary.get('summary')}")
+    except Exception as e:
+        print(f"Error generating summary: {str(e)}")
