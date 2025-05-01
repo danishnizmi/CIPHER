@@ -17,14 +17,14 @@ from functools import lru_cache, wraps
 # Import config module for centralized configuration
 import config
 
-# Configure logging with consistent format across modules
+# Configure logging with consistent format
+logging = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
 
-# Core configuration from config module (avoids hardcoding)
+# Core configuration from config module
 PROJECT_ID = config.project_id
 REGION = config.region
 DATASET_ID = config.bigquery_dataset
@@ -67,17 +67,16 @@ def rate_limited_ai(func):
         
         # Check rate limit
         if _ai_calls_in_minute >= AI_ANALYSIS_RATE_LIMIT:
-            logger.warning(f"AI analysis rate limit reached ({AI_ANALYSIS_RATE_LIMIT}/minute). Using fallback.")
-            # Use first arg as content and second as metadata (standard for our AI functions)
-            if len(args) >= 2:
-                return _generate_fallback_analysis(args[0], args[1])
-            return _generate_fallback_analysis("", {})
+            logging.warning(f"AI analysis rate limit reached ({AI_ANALYSIS_RATE_LIMIT}/minute). Using fallback.")
+            content = args[0] if len(args) > 0 else ""
+            metadata = args[1] if len(args) > 1 else {}
+            return _generate_fallback_analysis(content, metadata)
         
         # Check time between calls
         time_since_last = current_time - _last_ai_call_time
         if time_since_last < AI_MIN_TIME_BETWEEN_CALLS:
             sleep_time = AI_MIN_TIME_BETWEEN_CALLS - time_since_last
-            logger.info(f"Rate limiting AI call: sleeping for {sleep_time:.2f}s")
+            logging.info(f"Rate limiting AI call: sleeping for {sleep_time:.2f}s")
             time.sleep(sleep_time)
         
         # Update tracking variables
@@ -94,18 +93,16 @@ def exponential_backoff_retry(max_retries=3, base_delay=1.0):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            retries = 0
-            while retries < max_retries:
+            for retry in range(max_retries):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    retries += 1
-                    if retries >= max_retries:
-                        logger.error(f"Failed after {retries} retries: {str(e)}")
+                    if retry >= max_retries - 1:
+                        logging.error(f"Failed after {retry+1} retries: {str(e)}")
                         raise
                     
-                    wait_time = base_delay * (2 ** (retries - 1))
-                    logger.warning(f"Retry {retries}/{max_retries} after error: {str(e)}, waiting {wait_time:.2f}s")
+                    wait_time = base_delay * (2 ** retry)
+                    logging.warning(f"Retry {retry+1}/{max_retries} after error: {str(e)}, waiting {wait_time:.2f}s")
                     time.sleep(wait_time)
         return wrapper
     return decorator
@@ -131,20 +128,16 @@ def extract_json_from_text(text: str) -> Optional[str]:
 def publish_event(data: Dict[str, Any]) -> bool:
     """Publish event to Pub/Sub with retry"""
     pubsub_client = get_client('pubsub')
-    if not pubsub_client or isinstance(pubsub_client, config.DummyClient):
+    if isinstance(pubsub_client, config.DummyClient):
         return False
     
-    try:
-        topic_path = pubsub_client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
-        json_data = json.dumps(data).encode("utf-8")
-        
-        future = pubsub_client.publish(topic_path, data=json_data)
-        message_id = future.result(timeout=30)
-        logger.info(f"Published event {message_id} to {PUBSUB_TOPIC}")
-        return True
-    except Exception as e:
-        logger.error(f"Error publishing message: {str(e)}")
-        raise  # Let the retry decorator handle it
+    topic_path = pubsub_client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
+    json_data = json.dumps(data).encode("utf-8")
+    
+    future = pubsub_client.publish(topic_path, data=json_data)
+    message_id = future.result(timeout=30)
+    logging.info(f"Published event {message_id} to {PUBSUB_TOPIC}")
+    return True
 
 @exponential_backoff_retry(max_retries=3, base_delay=2.0)
 def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
@@ -154,11 +147,11 @@ def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
         return []
         
     try:
+        # Import locally to avoid global dependency
+        from google.cloud import bigquery
+        
         job_config = None
         if params:
-            # Import locally to avoid global dependency
-            from google.cloud import bigquery
-            
             job_config = bigquery.QueryJobConfig()
             # Create query parameters
             query_params = []
@@ -179,8 +172,8 @@ def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
         query_job = client.query(query, job_config=job_config)
         return [dict(row) for row in query_job.result()]
     except Exception as e:
-        logger.error(f"BigQuery query error: {str(e)}")
-        raise  # Let the retry decorator handle it
+        logging.error(f"BigQuery query error: {str(e)}")
+        raise
 
 @exponential_backoff_retry(max_retries=3, base_delay=2.0)
 def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
@@ -194,62 +187,48 @@ def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
     
     full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
     
+    # Process rows to ensure JSON compatibility
+    processed_rows = [{k: (v.isoformat() if isinstance(v, datetime) else 
+                         json.dumps(v) if isinstance(v, (dict, list)) else v) 
+                      for k, v in row.items()} for row in rows]
+            
+    # Try to insert rows
+    errors = client.insert_rows_json(full_table_id, processed_rows)
+    
+    if not errors:
+        return True
+        
+    # Handle schema mismatches
+    logging.warning(f"Insert errors: {errors}")
+    
+    # Try to update schema
     try:
-        # Process rows to ensure JSON compatibility
-        processed_rows = []
-        for row in rows:
-            processed_row = {}
-            for key, value in row.items():
-                if isinstance(value, datetime):
-                    processed_row[key] = value.isoformat()
-                elif isinstance(value, (dict, list)):
-                    processed_row[key] = json.dumps(value)
-                else:
-                    processed_row[key] = value
-            processed_rows.append(processed_row)
-            
-        # Try to insert rows
-        errors = client.insert_rows_json(full_table_id, processed_rows)
+        from google.cloud import bigquery
         
-        if not errors:
-            return True
-            
-        # Handle schema mismatches
-        logger.warning(f"Insert errors: {errors}")
+        table = client.get_table(full_table_id)
+        current_schema = {field.name: field for field in table.schema}
         
-        # Try to update schema
-        try:
-            # Import locally to avoid global dependency
-            from google.cloud import bigquery
+        # Find missing fields
+        missing_fields = []
+        for row in processed_rows:
+            for field in row:
+                if field not in current_schema:
+                    missing_fields.append(bigquery.SchemaField(field, "STRING"))
+        
+        if missing_fields:
+            # Update schema
+            new_schema = list(table.schema) + missing_fields
+            table.schema = new_schema
+            client.update_table(table, ["schema"])
+            logging.info(f"Updated schema for {full_table_id}")
             
-            table = client.get_table(full_table_id)
-            current_schema = {field.name: field for field in table.schema}
-            
-            # Find missing fields
-            missing_fields = []
-            for row in processed_rows:
-                for field in row:
-                    if field not in current_schema:
-                        field_type = "STRING"  # Default to string for new fields
-                        missing_fields.append(bigquery.SchemaField(field, field_type))
-            
-            if missing_fields:
-                # Update schema
-                new_schema = list(table.schema) + missing_fields
-                table.schema = new_schema
-                client.update_table(table, ["schema"])
-                logger.info(f"Updated schema for {full_table_id}")
-                
-                # Try insert again
-                errors = client.insert_rows_json(full_table_id, processed_rows)
-                return not errors
-        except Exception as e:
-            logger.error(f"Schema update error: {str(e)}")
-            
-        return False
+            # Try insert again
+            errors = client.insert_rows_json(full_table_id, processed_rows)
+            return not errors
     except Exception as e:
-        logger.error(f"BigQuery insert error: {str(e)}")
-        raise  # Let the retry decorator handle it
+        logging.error(f"Schema update error: {str(e)}")
+        
+    return False
 
 # ======== IOC Processing Functions ========
 
@@ -266,53 +245,33 @@ def extract_iocs(content: Union[str, Dict], content_type: str = "text") -> List[
         for ioc_type, pattern in IOC_PATTERNS.items():
             matches = re.findall(pattern, content)
             for value in matches:
-                results.append({
-                    "value": value,
-                    "type": ioc_type,
-                    "timestamp": timestamp
-                })
+                results.append({"value": value, "type": ioc_type, "timestamp": timestamp})
     
     # Extract from CSV content
     elif content_type == "csv":
         import csv
         import io
         
-        # Parse CSV and extract potential IOCs
         try:
-            # Basic CSV parsing
             csv_reader = csv.reader(io.StringIO(content))
             headers = next(csv_reader, [])
             
-            if not headers:
-                return []
-            
-            # Map headers to indices
-            header_map = {header: i for i, header in enumerate(headers)}
-            
-            # Process each row
-            for row_idx, row in enumerate(csv_reader, start=2):
-                if not row or len(row) == 0:
-                    continue
-                    
-                # Check each cell for potential IOCs
-                for col_idx, cell in enumerate(row):
-                    if not cell:
+            if headers:
+                for row_idx, row in enumerate(csv_reader, start=2):
+                    if not row or len(row) == 0:
                         continue
                         
-                    # Check each IOC pattern
-                    for ioc_type, pattern in IOC_PATTERNS.items():
-                        if re.match(pattern, cell):
-                            col_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
-                            
-                            results.append({
-                                "value": cell,
-                                "type": ioc_type,
-                                "source_row": row_idx,
-                                "source_column": col_name,
-                                "timestamp": timestamp
-                            })
+                    for col_idx, cell in enumerate(row):
+                        if cell:
+                            for ioc_type, pattern in IOC_PATTERNS.items():
+                                if re.match(pattern, cell):
+                                    col_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
+                                    results.append({
+                                        "value": cell, "type": ioc_type, "source_row": row_idx,
+                                        "source_column": col_name, "timestamp": timestamp
+                                    })
         except Exception as e:
-            logger.error(f"Error extracting IOCs from CSV: {str(e)}")
+            logging.error(f"Error extracting IOCs from CSV: {str(e)}")
     
     # Extract from JSON content
     elif content_type == "json":
@@ -323,19 +282,15 @@ def extract_iocs(content: Union[str, Dict], content_type: str = "text") -> List[
                     if isinstance(value, (dict, list)):
                         process_json_item(value, current_path)
                     elif isinstance(value, str):
-                        # Check for IOCs in string values
                         for ioc_type, pattern in IOC_PATTERNS.items():
                             if re.match(pattern, value):
                                 results.append({
-                                    "value": value,
-                                    "type": ioc_type,
-                                    "path": current_path,
-                                    "timestamp": timestamp
+                                    "value": value, "type": ioc_type,
+                                    "path": current_path, "timestamp": timestamp
                                 })
             elif isinstance(item, list):
                 for i, value in enumerate(item):
-                    current_path = f"{path}[{i}]"
-                    process_json_item(value, current_path)
+                    process_json_item(value, f"{path}[{i}]")
                     
         process_json_item(content)
     
@@ -356,58 +311,27 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
         return ioc
         
     enriched = ioc.copy()
-    
-    # Add timestamp if missing
     if "timestamp" not in enriched:
         enriched["timestamp"] = datetime.utcnow().isoformat()
     
-    # Enrichment differs based on IOC type
-    ioc_type = ioc["type"]
-    ioc_value = ioc["value"]
-    
     # Perform enrichment based on IOC type
+    ioc_type, ioc_value = ioc["type"], ioc["value"]
+    
     if ioc_type == "ip":
-        # Try to get geo data from existing enrichments first
-        geo_data = query_bigquery(
-            f"""
-            SELECT geo FROM `{PROJECT_ID}.{DATASET_ID}.ioc_enrichment`
-            WHERE type = 'ip' AND value = @value
-            LIMIT 1
-            """,
-            {"value": ioc_value}
-        )
-        
-        if geo_data and len(geo_data) > 0:
-            try:
-                enriched["geo"] = json.loads(geo_data[0]["geo"]) if isinstance(geo_data[0]["geo"], str) else geo_data[0]["geo"]
-            except (KeyError, json.JSONDecodeError):
-                # Default geo data if we can't parse it
-                enriched["geo"] = {
-                    "country": "Unknown",
-                    "city": "Unknown"
-                }
+        # Basic geo classification for IPs
+        if (ioc_value.startswith('10.') or 
+            ioc_value.startswith('192.168.') or 
+            (ioc_value.startswith('172.') and 16 <= int(ioc_value.split('.')[1]) <= 31)):
+            enriched["geo"] = {"country": "Private", "city": "Internal"}
         else:
-            # Default geo for private IPs
-            if (ioc_value.startswith('10.') or 
-                ioc_value.startswith('192.168.') or 
-                (ioc_value.startswith('172.') and 16 <= int(ioc_value.split('.')[1]) <= 31)):
-                enriched["geo"] = {
-                    "country": "Private",
-                    "city": "Internal"
-                }
-            else:
-                enriched["geo"] = {
-                    "country": "Unknown",
-                    "city": "Unknown"
-                }
+            enriched["geo"] = {"country": "Unknown", "city": "Unknown"}
     
     # Add severity assessment
     if "context" in enriched and isinstance(enriched["context"], dict):
-        if any(keyword in str(enriched["context"]).lower() 
-               for keyword in ["critical", "ransomware", "backdoor", "exploit"]):
+        context_str = str(enriched["context"]).lower()
+        if any(kw in context_str for kw in ["critical", "ransomware", "backdoor", "exploit"]):
             enriched["severity"] = "high"
-        elif any(keyword in str(enriched["context"]).lower() 
-                for keyword in ["suspicious", "malware", "trojan"]):
+        elif any(kw in context_str for kw in ["suspicious", "malware", "trojan"]):
             enriched["severity"] = "medium"
         else:
             enriched["severity"] = "low"
@@ -415,14 +339,13 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
         # Default severity based on IOC type
         if ioc_type in ["md5", "sha1", "sha256"]:
             enriched["severity"] = "medium"  # Hash-based IOCs default to medium
-        elif ioc_type == "url" and any(keyword in ioc_value.lower() for keyword in ["malware", "trojan", "hack", "phish"]):
+        elif ioc_type == "url" and any(kw in ioc_value.lower() for kw in ["malware", "trojan", "hack", "phish"]):
             enriched["severity"] = "high"   # Suspicious URLs
         else:
             enriched["severity"] = "low"    # Everything else defaults to low
     
     # Add confidence level
     if "confidence" not in enriched:
-        # For now, use medium confidence for all enriched IOCs
         enriched["confidence"] = "medium"
     
     return enriched
@@ -433,18 +356,17 @@ def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
 def get_vertex_model():
     """Get Vertex AI model with proper caching and error handling"""
     try:
-        # Ensure Vertex AI is initialized
         vertex_initialized = get_client('vertex')
         if not vertex_initialized:
-            logger.warning("Vertex AI not available")
+            logging.warning("Vertex AI not available")
             return None
         
         from vertexai.language_models import TextGenerationModel
         model = TextGenerationModel.from_pretrained(MODEL_NAME)
-        logger.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
+        logging.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
         return model
     except Exception as e:
-        logger.error(f"Failed to load Vertex AI model: {str(e)}")
+        logging.error(f"Failed to load Vertex AI model: {str(e)}")
         return None
 
 @rate_limited_ai
@@ -456,12 +378,12 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
     # Get cached model or initialize
     model = get_vertex_model()
     if not model:
-        logger.warning("Vertex AI model not available")
+        logging.warning("Vertex AI model not available")
         return _generate_fallback_analysis(content, metadata)
     
     # Truncate content if it's too long (Vertex AI has context limits)
     if len(content) > 8000:
-        logger.info(f"Truncating content from {len(content)} to 8000 chars")
+        logging.info(f"Truncating content from {len(content)} to 8000 chars")
         content = content[:8000]
     
     # Construct prompt for threat analysis
@@ -483,7 +405,7 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
     """
     
     try:
-        logger.info("Sending content to Vertex AI for analysis")
+        logging.info("Sending content to Vertex AI for analysis")
         
         # Generate response
         response = model.predict(prompt, temperature=0.1, max_output_tokens=1024)
@@ -495,20 +417,18 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
             analysis = json.loads(json_str)
             
             # Add metadata
-            source_id = "unknown"
-            source_type = "unknown"
-            if metadata:
-                source_id = metadata.get("id", "unknown")
-                source_type = metadata.get("type", "unknown")
+            source_id = metadata.get("id", "unknown") if metadata else "unknown"
+            source_type = metadata.get("type", "unknown") if metadata else "unknown"
                 
-            analysis["source_id"] = source_id
-            analysis["source_type"] = source_type
-            analysis["analysis_timestamp"] = datetime.utcnow().isoformat()
+            analysis.update({
+                "source_id": source_id,
+                "source_type": source_type,
+                "analysis_timestamp": datetime.utcnow().isoformat()
+            })
             
-            logger.info(f"Successfully extracted structured analysis from Vertex AI")
             return analysis
         else:
-            logger.warning("Could not find JSON in Vertex AI response")
+            logging.warning("Could not find JSON in Vertex AI response")
             # Return partial results based on text response
             return {
                 "summary": response.text[:500],
@@ -519,25 +439,20 @@ def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dic
                 "source_type": metadata.get("type", "unknown") if metadata else "unknown"
             }
     except Exception as e:
-        logger.error(f"Error analyzing with Vertex AI: {str(e)}")
+        logging.error(f"Error analyzing with Vertex AI: {str(e)}")
         return _generate_fallback_analysis(content, metadata)
 
 def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
     """Generate fallback analysis when Vertex AI is unavailable"""
-    logger.info("Using fallback analysis method (rule-based)")
-    
-    # Extract basic indicators from content using regex
-    severity = "Medium"  # Default severity
-    confidence = "Low"   # Low confidence for fallback analysis
+    logging.info("Using fallback analysis method (rule-based)")
     
     # Simple keyword-based severity assessment
-    critical_keywords = ["critical", "ransomware", "backdoor", "zero-day", "0day"]
-    high_keywords = ["high", "exploit", "leaked", "vulnerability", "trojan"]
+    severity = "Medium"  # Default severity
     
     content_lower = content.lower()
-    if any(word in content_lower for word in critical_keywords):
+    if any(word in content_lower for word in ["critical", "ransomware", "backdoor", "zero-day", "0day"]):
         severity = "Critical"
-    elif any(word in content_lower for word in high_keywords):
+    elif any(word in content_lower for word in ["high", "exploit", "leaked", "vulnerability", "trojan"]):
         severity = "High"
     
     # Extract threat actors using simple pattern matching
@@ -559,11 +474,8 @@ def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -
     summary = " ".join(sentences[:min(2, len(sentences))])
     
     # Create analysis object
-    source_id = "unknown"
-    source_type = "unknown"
-    if metadata:
-        source_id = metadata.get("id", "unknown")
-        source_type = metadata.get("type", "unknown")
+    source_id = metadata.get("id", "unknown") if metadata else "unknown"
+    source_type = metadata.get("type", "unknown") if metadata else "unknown"
     
     return {
         "summary": summary[:500],
@@ -572,11 +484,11 @@ def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -
         "techniques": "Unknown",
         "malware": "Unknown",
         "severity": severity,
-        "confidence": confidence,
+        "confidence": "Low",
         "analysis_timestamp": datetime.utcnow().isoformat(),
         "source_id": source_id,
         "source_type": source_type,
-        "fallback": True  # Indicates this was generated by fallback system
+        "fallback": True
     }
 
 # ======== Main Analysis Class ========
@@ -592,22 +504,16 @@ class ThreatAnalyzer:
         """Ensure required BigQuery tables exist"""
         client = get_client('bigquery')
         if isinstance(client, config.DummyClient):
-            logger.warning("BigQuery not available, cannot ensure tables")
+            logging.warning("BigQuery not available, cannot ensure tables")
             return
             
         try:
-            # Import locally to avoid global dependency
             from google.cloud import bigquery
             from google.cloud.exceptions import NotFound
             
-            # Check/create analysis table
-            analysis_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
-            try:
-                client.get_table(analysis_table_id)
-                logger.info("Analysis table already exists")
-            except NotFound:
-                # Create analysis table
-                schema = [
+            # Define tables to create if they don't exist
+            tables = {
+                "threat_analysis": [
                     bigquery.SchemaField("source_id", "STRING"),
                     bigquery.SchemaField("source_type", "STRING"),
                     bigquery.SchemaField("iocs", "STRING"),
@@ -615,19 +521,8 @@ class ThreatAnalyzer:
                     bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
                     bigquery.SchemaField("severity", "STRING"),
                     bigquery.SchemaField("confidence", "STRING")
-                ]
-                table = bigquery.Table(analysis_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info("Created analysis table")
-                
-            # Check/create campaigns table
-            campaigns_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
-            try:
-                client.get_table(campaigns_table_id)
-                logger.info("Campaigns table already exists")
-            except NotFound:
-                # Create campaigns table
-                schema = [
+                ],
+                "threat_campaigns": [
                     bigquery.SchemaField("campaign_id", "STRING"),
                     bigquery.SchemaField("campaign_name", "STRING"),
                     bigquery.SchemaField("threat_actor", "STRING"),
@@ -643,15 +538,24 @@ class ThreatAnalyzer:
                     bigquery.SchemaField("last_seen", "STRING"),
                     bigquery.SchemaField("detection_timestamp", "STRING")
                 ]
-                table = bigquery.Table(campaigns_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info("Created campaigns table")
+            }
+            
+            # Check and create tables as needed
+            for table_name, schema in tables.items():
+                full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                try:
+                    client.get_table(full_table_id)
+                    logging.info(f"Table {table_name} already exists")
+                except NotFound:
+                    table = bigquery.Table(full_table_id, schema=schema)
+                    client.create_table(table, exists_ok=True)
+                    logging.info(f"Created table {table_name}")
         except Exception as e:
-            logger.error(f"Error ensuring tables: {str(e)}")
+            logging.error(f"Error ensuring tables: {str(e)}")
     
     def analyze_feed_data(self, feed_name: str, days_back: int = 7) -> Dict[str, Any]:
         """Analyze threat data from a specific feed"""
-        logger.info(f"Analyzing feed {feed_name} for past {days_back} days")
+        logging.info(f"Analyzing feed {feed_name} for past {days_back} days")
         
         # Query to get recent data from the feed
         query = f"""
@@ -663,7 +567,7 @@ class ThreatAnalyzer:
         rows = query_bigquery(query)
         
         if not rows:
-            logger.warning(f"No data found for feed {feed_name}")
+            logging.warning(f"No data found for feed {feed_name}")
             return {
                 "feed_name": feed_name,
                 "processed_count": 0,
@@ -673,17 +577,14 @@ class ThreatAnalyzer:
         # Process each row
         processed_count = 0
         ioc_count = 0
-        analysis_results = []
         
         for row in rows:
             # Create a unique ID for this analysis
             row_id = row.get("id", str(hash(str(row))))
             
-            # Convert row to text representation for IOC extraction
-            content = ""
-            for key, value in row.items():
-                if key != "_ingestion_timestamp" and value:
-                    content += f"{key}: {value}\n"
+            # Convert row to text for IOC extraction
+            content = "\n".join(f"{k}: {v}" for k, v in row.items() 
+                              if k != "_ingestion_timestamp" and v)
             
             # Skip if no content
             if not content:
@@ -714,16 +615,14 @@ class ThreatAnalyzer:
             
             # Store in BigQuery
             insert_into_bigquery("threat_analysis", [analysis_result])
-            analysis_results.append(analysis_result)
-            
             processed_count += 1
             
             # Log progress periodically
             if processed_count % 10 == 0:
-                logger.info(f"Processed {processed_count} items from {feed_name}")
+                logging.info(f"Processed {processed_count} items from {feed_name}")
         
         # Log completion
-        logger.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
+        logging.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
         
         # Publish event
         publish_event({
@@ -745,7 +644,7 @@ class ThreatAnalyzer:
     
     def detect_campaigns(self, days_back: int = 30) -> List[Dict[str, Any]]:
         """Detect threat campaigns by clustering related IOCs and analyses"""
-        logger.info(f"Detecting campaigns for past {days_back} days")
+        logging.info(f"Detecting campaigns for past {days_back} days")
         
         # Query to get recent analyses
         query = f"""
@@ -757,11 +656,10 @@ class ThreatAnalyzer:
         rows = query_bigquery(query)
         
         if not rows:
-            logger.warning("No analysis data found for campaign detection")
+            logging.warning("No analysis data found for campaign detection")
             return []
         
         # Group analyses by potential campaigns
-        campaigns = []
         analysis_groups = {}
         
         for row in rows:
@@ -823,6 +721,7 @@ class ThreatAnalyzer:
                     analysis_groups[campaign_key]["timestamps"].append(timestamp)
         
         # Convert groups to campaigns
+        campaigns = []
         for key, group in analysis_groups.items():
             # Skip small groups (likely false positives)
             if len(group["analyses"]) < 2:
@@ -873,7 +772,7 @@ class ThreatAnalyzer:
             # Store campaign in BigQuery
             insert_into_bigquery("threat_campaigns", [campaign])
         
-        logger.info(f"Detected {len(campaigns)} threat campaigns")
+        logging.info(f"Detected {len(campaigns)} threat campaigns")
         return campaigns
     
     def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
@@ -894,11 +793,10 @@ class ThreatAnalyzer:
             # Get sample rows for AI analysis
             import csv
             import io
-            import itertools
             
             csv_reader = csv.reader(io.StringIO(csv_content))
             headers = next(csv_reader, [])
-            sample_rows = list(itertools.islice(csv_reader, 5))
+            sample_rows = list(row for _, row in zip(range(5), csv_reader))
             
             # Create content for analysis
             content = f"CSV File Analysis: {feed_name}\n\nHeaders: {headers}\n\n"
@@ -942,10 +840,10 @@ class ThreatAnalyzer:
                 "analysis_timestamp": datetime.utcnow().isoformat()
             }
             
-            logger.info(f"Analyzed CSV with {len(enriched_iocs)} IOCs extracted")
+            logging.info(f"Analyzed CSV with {len(enriched_iocs)} IOCs extracted")
             return result
         except Exception as e:
-            logger.error(f"Error analyzing CSV: {str(e)}")
+            logging.error(f"Error analyzing CSV: {str(e)}")
             return {"error": f"Analysis failed: {str(e)}"}
 
 # ======== Main Function ========
@@ -959,7 +857,7 @@ def analyze_threat_data(event, context):
         import base64
         try:
             data = json.loads(base64.b64decode(event['data']).decode('utf-8'))
-            logger.info(f"Received analysis event: {data}")
+            logging.info(f"Received analysis event: {data}")
             
             feed_name = data.get("feed_name")
             
@@ -976,7 +874,7 @@ def analyze_threat_data(event, context):
                 
                 return result
         except Exception as e:
-            logger.error(f"Error processing event: {str(e)}")
+            logging.error(f"Error processing event: {str(e)}")
     
     # Fallback to analyzing a few default feeds
     feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]
@@ -987,7 +885,7 @@ def analyze_threat_data(event, context):
             result = analyzer.analyze_feed_data(feed)
             results.append(result)
         except Exception as e:
-            logger.error(f"Error analyzing {feed}: {str(e)}")
+            logging.error(f"Error analyzing {feed}: {str(e)}")
             results.append({
                 "feed_name": feed,
                 "error": str(e)
