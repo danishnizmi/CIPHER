@@ -1,7 +1,7 @@
 """
 Threat Intelligence Platform - Frontend Module
 Handles web interface, user authentication, and dashboard views.
-Production-ready implementation with full GCP integration.
+Streamlined implementation with Vertex AI summarization capabilities.
 """
 
 import os
@@ -28,9 +28,9 @@ VERSION = os.environ.get("VERSION", "1.0.1")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
-# Cache settings
-CACHE_TIMEOUT = 300  # Cache for 5 minutes
-LONG_CACHE_TIMEOUT = 1800  # Cache for 30 minutes
+# Cache settings - longer cache for cost control
+CACHE_TIMEOUT = 900  # Cache for 15 minutes to reduce API calls
+LONG_CACHE_TIMEOUT = 3600  # Cache for 60 minutes for expensive operations
 API_CACHE = {}
 API_CACHE_TIMESTAMP = {}
 
@@ -399,6 +399,18 @@ def get_sample_data(data_type):
                 "daily_counts": [{"date": (datetime.now() - timedelta(days=i)).date().isoformat(), "count": int(20 + i * 0.5 + (i % 3))} for i in range(30)]
             }
         }
+    elif data_type == 'intel_summary':
+        return {
+            "summary": "Recent threat intelligence shows a surge in ransomware activity targeting healthcare and financial sectors. Multiple APT groups are leveraging phishing campaigns to deliver initial payloads.",
+            "common_types": ["ip", "domain", "url"],
+            "possible_actors": ["APT29", "Lazarus"],
+            "attack_vectors": ["Phishing", "Vulnerability Exploitation"],
+            "severity": "High",
+            "confidence": "Medium",
+            "ioc_count": 45,
+            "period_days": 7,
+            "analysis_timestamp": current_time
+        }
     return {}
 
 @api_cache(timeout=CACHE_TIMEOUT)
@@ -452,6 +464,23 @@ def get_campaigns_data(days=30, severity=None):
     return response
 
 @api_cache(timeout=LONG_CACHE_TIMEOUT)
+def get_recent_intel_summary(days=7):
+    """Get recent threat intelligence summary with longer caching"""
+    # Make request to the analysis endpoint
+    data = {
+        "command": "summarize_recent",
+        "days": days
+    }
+    
+    response = _api_request("analyze", method="POST", data=data)
+    
+    # If error or empty response, return sample data
+    if not response or 'error' in response or not response.get('summary'):
+        return get_sample_data('intel_summary')
+    
+    return response
+
+@api_cache(timeout=LONG_CACHE_TIMEOUT)
 def get_feed_stats(feed_name, days=30):
     """Get feed stats from API with longer caching"""
     return _api_request(f"feeds/{feed_name}/stats?days={days}")
@@ -485,12 +514,22 @@ def trigger_ingestion(feed_name=None, force=False):
     if not result.get("error"):
         clear_api_cache("get_feeds_data")
         clear_api_cache("get_stats_data")
+        clear_api_cache("get_recent_intel_summary")
         if feed_name:
             clear_api_cache(f"get_feed_stats:{feed_name}")
             clear_api_cache(f"get_feed_data:{feed_name}")
         clear_api_cache("get_threat_summary")
     
     return result
+
+def analyze_ioc_batch(iocs):
+    """Analyze a batch of IOCs and get a summary"""
+    data = {
+        "command": "analyze_batch",
+        "iocs": iocs
+    }
+    
+    return _api_request("analyze", method="POST", data=data)
 
 def upload_csv_file(csv_content, feed_name="csv_upload"):
     """Upload CSV for threat analysis"""
@@ -506,6 +545,7 @@ def upload_csv_file(csv_content, feed_name="csv_upload"):
     if not result.get("error"):
         clear_api_cache("get_feeds_data")
         clear_api_cache("get_stats_data")
+        clear_api_cache("get_recent_intel_summary")
     
     return result
 
@@ -711,6 +751,15 @@ def dashboard(view=None):
                 'page_icon': 'tachometer-alt'
             })
         
+        # Get Intel Summary for dashboard
+        if current_view == 'dashboard':
+            try:
+                intel_summary = get_recent_intel_summary(days=7)
+                context['intel_summary'] = intel_summary
+            except Exception as e:
+                logger.error(f"Error getting intel summary: {str(e)}")
+                context['intel_summary'] = get_sample_data('intel_summary')
+        
         # Load statistics for all views with safety checks
         try:
             # Get statistics using the helper function
@@ -776,7 +825,7 @@ def dashboard(view=None):
                 campaigns_response = get_campaigns_data(days=days)
                 campaigns_list = campaigns_response.get('campaigns', []) if isinstance(campaigns_response, dict) else []
                 
-                # FIX: Safely handle list slicing by checking if list exists and is non-empty
+                # Safely handle list slicing by checking if list exists and is non-empty
                 if isinstance(campaigns_list, list) and campaigns_list:
                     if len(campaigns_list) > 3:
                         context['campaigns'] = campaigns_list[0:3]  # Explicit slice using indices
@@ -789,7 +838,7 @@ def dashboard(view=None):
                 iocs_response = get_iocs_data(days=days)
                 iocs_list = iocs_response.get('records', []) if isinstance(iocs_response, dict) else []
                 
-                # FIX: Safely handle list slicing here too
+                # Safely handle list slicing here too
                 if isinstance(iocs_list, list) and iocs_list:
                     if len(iocs_list) > 4:
                         context['top_iocs'] = iocs_list[0:4]  # Explicit slice using indices
@@ -835,6 +884,7 @@ def dashboard(view=None):
                 context['campaigns'] = []
                 context['top_iocs'] = []
                 context['geo_stats'] = []
+                context['intel_summary'] = get_sample_data('intel_summary')
                 
             flash('Could not load all dashboard data. Some information may be missing.', 'warning')
         
@@ -865,6 +915,7 @@ def refresh_feeds():
             # Clear all relevant caches
             clear_api_cache('get_feeds')
             clear_api_cache('get_stats')
+            clear_api_cache('get_recent_intel_summary')
             
             feeds_count = len(result.get('results', []))
             success_count = sum(1 for r in result.get('results', []) if r.get('status') == 'success')
@@ -877,6 +928,54 @@ def refresh_feeds():
         logger.error(f"Error in refresh_feeds: {str(e)}")
         flash(f'Error refreshing feeds: {str(e)}', 'danger')
         return redirect(url_for('dashboard', view='feeds'))
+
+@app.route('/intel_summary', methods=['GET'])
+@login_required
+def intel_summary():
+    """Generate an intelligence summary for display"""
+    days = int(request.args.get('days', '7'))
+    
+    try:
+        # Get or generate an intel summary
+        summary = get_recent_intel_summary(days=days)
+        
+        # Return JSON if requested
+        if request.args.get('format') == 'json':
+            return jsonify(summary)
+        
+        # Otherwise render a template
+        return render_template('content.html', 
+                              page_type='intel_summary', 
+                              summary=summary,
+                              days=days)
+    except Exception as e:
+        logger.error(f"Error generating intel summary: {str(e)}")
+        
+        if request.args.get('format') == 'json':
+            return jsonify({"error": str(e)}), 500
+            
+        flash(f'Error generating intelligence summary: {str(e)}', 'danger')
+        return redirect(url_for('dashboard'))
+
+@app.route('/analyze_iocs', methods=['POST'])
+@login_required
+def analyze_ioc_batch_endpoint():
+    """Submit IOCs for batch analysis"""
+    try:
+        # Get IOCs from form
+        data = request.json
+        iocs = data.get('iocs', [])
+        
+        if not iocs:
+            return jsonify({"error": "No IOCs provided"}), 400
+            
+        # Call the analysis function
+        result = analyze_ioc_batch(iocs)
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error analyzing IOCs: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
@@ -1140,7 +1239,6 @@ def dynamic_content_detail(content_type, identifier):
                 campaigns_data = get_campaigns_data()
                 campaigns_list = campaigns_data.get('campaigns', [])
                 
-                # FIX: Safely handle list slicing here too
                 if isinstance(campaigns_list, list) and campaigns_list:
                     if len(campaigns_list) > 3:
                         data['campaigns'] = campaigns_list[0:3]  # Explicit slice
@@ -1153,6 +1251,15 @@ def dynamic_content_detail(content_type, identifier):
                 for field in ['first_seen', 'last_seen', 'sources', 'confidence', 'tags']:
                     if field not in data:
                         data[field] = [] if field in ['sources', 'tags'] else None
+                
+                # Try to get an AI analysis of this individual IOC
+                try:
+                    ioc_analysis = analyze_ioc_batch([data])
+                    if ioc_analysis and not ioc_analysis.get('error'):
+                        data['ai_analysis'] = ioc_analysis
+                except Exception as e:
+                    logger.error(f"Error getting IOC analysis: {str(e)}")
+                    # Continue without AI analysis
                 
         elif content_type == 'campaign':
             # Get campaign details
@@ -1170,7 +1277,6 @@ def dynamic_content_detail(content_type, identifier):
                 iocs_data = get_iocs_data()
                 iocs_list = iocs_data.get('records', [])
                 
-                # FIX: Safely handle list slicing here too
                 if isinstance(iocs_list, list) and iocs_list:
                     if len(iocs_list) > 5:
                         data['iocs'] = iocs_list[0:5]  # Explicit slice
@@ -1193,7 +1299,6 @@ def dynamic_content_detail(content_type, identifier):
             data['name'] = identifier
             sample_data = feed_data.get('records', [])
             
-            # FIX: Safely handle list slicing here too
             if isinstance(sample_data, list) and sample_data:
                 if len(sample_data) > 10:
                     data['sample_data'] = sample_data[0:10]  # Explicit slice
@@ -1292,6 +1397,49 @@ def api_upload_csv():
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in API upload_csv: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/analyze', methods=['POST'])
+@login_required
+def api_analyze():
+    """API endpoint for various analysis functions"""
+    try:
+        data = request.json
+        command = data.get('command', 'summarize_recent')
+        
+        if command == 'summarize_recent':
+            days = data.get('days', 7)
+            result = get_recent_intel_summary(days=days)
+            return jsonify(result)
+            
+        elif command == 'analyze_batch':
+            iocs = data.get('iocs', [])
+            if not iocs:
+                return jsonify({"error": "No IOCs provided"}), 400
+                
+            result = analyze_ioc_batch(iocs)
+            return jsonify(result)
+            
+        elif command == 'analyze_feed':
+            feed_name = data.get('feed_name')
+            if not feed_name:
+                return jsonify({"error": "No feed name provided"}), 400
+                
+            # Forward to the analysis service
+            analyze_data = {
+                "command": "analyze_feed",
+                "feed_name": feed_name,
+                "days": data.get('days', 7)
+            }
+            
+            result = _api_request("analyze", method="POST", data=analyze_data)
+            return jsonify(result)
+            
+        else:
+            return jsonify({"error": f"Unknown command: {command}"}), 400
+            
+    except Exception as e:
+        logger.error(f"Error in API analyze: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # ====== Admin-only diagnostic endpoint ======
