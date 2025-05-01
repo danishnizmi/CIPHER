@@ -71,6 +71,13 @@ var FeedSources = map[string]FeedSource{
 		SkipLines:   8,
 		Description: "URLhaus - Database of malicious URLs",
 	},
+	"feodotracker": {
+		URL:         "https://feodotracker.abuse.ch/downloads/ipblocklist.csv",
+		TableID:     "feodotracker_c2",
+		Format:      "csv",
+		SkipLines:   8,
+		Description: "Feodo Tracker - Botnet C2 IP Blocklist",
+	},
 }
 
 // IOCPatterns contains regex patterns for extracting IOCs
@@ -267,10 +274,27 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		Command    string `json:"command"`
 	}
 
-	err := json.NewDecoder(r.Body).Decode(&requestData)
-	if err != nil {
-		log.Printf("Error decoding request: %v", err)
-		requestData.ProcessAll = true // Default to processing all if parsing fails
+	// Check if it's a health check command
+	if r.Method == http.MethodPost && r.ContentLength > 0 {
+		err := json.NewDecoder(r.Body).Decode(&requestData)
+		if err != nil {
+			log.Printf("Error decoding request: %v", err)
+			requestData.ProcessAll = true // Default to processing all if parsing fails
+		}
+		
+		// Handle health check command
+		if requestData.Command == "health" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":      "ok",
+				"version":     "1.0.0",
+				"environment": Environment,
+				"project_id":  ProjectID,
+				"region":      Region,
+				"timestamp":   time.Now().Format(time.RFC3339),
+			})
+			return
+		}
 	}
 
 	// Log request duration at the end
@@ -321,21 +345,26 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, result)
 	} else {
-		results, err = processAllFeeds(requestData.Force)
+		results, err := processAllFeeds(requestData.Force)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error processing feeds: %v", err), http.StatusInternalServerError)
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": results,
+			"count":   len(results),
+		})
+		return
 	}
 
 	// Return results
-	response := map[string]interface{}{
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"results": results,
 		"count":   len(results),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
 // canRefreshFeed checks if enough time has passed since the last refresh
@@ -704,7 +733,7 @@ func processCSVFeed(feedName string, content string, ingestionID string, feedCon
 	timestamp := time.Now().Format(time.RFC3339)
 
 	// Handle special feed processing
-	if feedName == "urlhaus" {
+	if feedName == "urlhaus" || feedName == "feodotracker" {
 		// URLhaus CSV has a comment header that starts with #
 		// Find the actual CSV header line (first non-comment line)
 		lines := strings.Split(content, "\n")
@@ -923,7 +952,12 @@ func inferSchemaFromRecords(records []map[string]interface{}) (schema bigquery.S
 				case time.Time:
 					fieldType = bigquery.TimestampFieldType
 				default:
-					fieldType = bigquery.StringFieldType
+					// Set default field type based on standard fields
+					if name == "_ingestion_timestamp" {
+						fieldType = bigquery.TimestampFieldType
+					} else {
+						fieldType = bigquery.StringFieldType
+					}
 				}
 				break
 			}
@@ -1114,6 +1148,36 @@ func extractIOCs(records []map[string]interface{}, feedName string) ([]ThreatIOC
 				iocs = append(iocs, ioc)
 			}
 		}
+		
+	case "feodotracker":
+		for _, record := range records {
+			if ip, ok := record["ip_address"].(string); ok {
+				ioc := ThreatIOC{
+					Type:       "ip",
+					Value:      ip,
+					Source:     feedName,
+					Confidence: 75,
+					FirstSeen:  timeNow,
+					Metadata:   make(map[string]interface{}),
+				}
+
+				if malware, ok := record["malware"].(string); ok {
+					ioc.Metadata["malware"] = malware
+				}
+				
+				// Handle additional fields available in Feodo
+				for key, value := range record {
+					if key != "ip_address" && key != "malware" && !strings.HasPrefix(key, "_") {
+						strValue, ok := value.(string)
+						if ok && strValue != "" {
+							ioc.Metadata[key] = strValue
+						}
+					}
+				}
+
+				iocs = append(iocs, ioc)
+			}
+		}
 
 	default:
 		// Generic IOC extraction from all records
@@ -1153,7 +1217,14 @@ func extractIOCs(records []map[string]interface{}, feedName string) ([]ThreatIOC
 	uniqueIOCs := make(map[string]ThreatIOC)
 	for _, ioc := range iocs {
 		key := fmt.Sprintf("%s:%s", ioc.Type, ioc.Value)
-		uniqueIOCs[key] = ioc
+		// Keep the one with higher confidence if duplicate
+		if existing, found := uniqueIOCs[key]; found {
+			if ioc.Confidence > existing.Confidence {
+				uniqueIOCs[key] = ioc
+			}
+		} else {
+			uniqueIOCs[key] = ioc
+		}
 	}
 
 	// Convert back to slice
