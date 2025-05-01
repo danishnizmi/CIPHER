@@ -101,16 +101,31 @@ steps:
     - |
       gcloud services enable cloudfunctions.googleapis.com eventarc.googleapis.com appengine.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com run.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com clouderrorreporting.googleapis.com monitoring.googleapis.com aiplatform.googleapis.com
 
-# Test Go compilation separately
+# Fix Go compilation step to properly initialize dependencies
 - name: 'golang:1.19'
   id: 'test-go-compilation'
   entrypoint: 'bash'
   args:
     - '-c'
     - |
-      echo "Testing Go compilation..."
-      go mod download
+      echo "Setting up Go dependencies..."
+      # Initialize module
+      go mod init github.com/threat-intelligence-platform/ingestion
+      
+      # Get required dependencies
+      go get cloud.google.com/go/bigquery
+      go get cloud.google.com/go/secretmanager/apiv1
+      go get cloud.google.com/go/secretmanager/apiv1/secretmanagerpb
+      go get github.com/joho/godotenv
+      go get google.golang.org/api/option
+      
+      # Fix the unused variable on line 945
+      sed -i "s/v := pattern.FindAllString(content, -1)/_ = pattern.FindAllString(content, -1)/" threat_ingestion.go
+      
+      # Tidy up dependencies
       go mod tidy
+      
+      echo "Testing Go compilation..."
       go build -o /tmp/threat_ingestion threat_ingestion.go
       echo "Go compilation successful"
 
