@@ -33,12 +33,12 @@ steps:
       from analysis import analyze_threat_data
       EOF
       
-      # Create function requirements
+      # Create function requirements - With proper package name (google-cloud-secret-manager)
       cat > functions/ingestion/requirements.txt << 'EOF'
       google-cloud-bigquery>=3.3.5
       google-cloud-storage>=2.7.0
       google-cloud-pubsub>=2.13.11
-      google-cloud-secretmanager
+      google-cloud-secret-manager>=2.0.0
       google-cloud-logging>=3.2.5
       google-cloud-error-reporting>=1.6.0
       google-auth>=2.15.0
@@ -51,7 +51,7 @@ steps:
       google-cloud-storage>=2.7.0
       google-cloud-pubsub>=2.13.11
       google-cloud-language>=2.6.1
-      google-cloud-secretmanager
+      google-cloud-secret-manager>=2.0.0
       google-cloud-logging>=3.2.5
       google-cloud-error-reporting>=1.6.0
       vertexai>=1.0.0
@@ -172,7 +172,7 @@ steps:
       
       echo "Test phase completed"
 
-# Build frontend static files - FIXED VERSION
+# Build frontend static files
 - name: 'node:16'
   id: 'build-frontend'
   entrypoint: 'bash'
@@ -481,7 +481,7 @@ steps:
         --service-account=cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
         --set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},API_KEY=$$api_key_value,ENVIRONMENT=${_ENVIRONMENT},OTX_API_KEY=a86c2d20623de217e13dda7687e91eb657fde2442ce82aa44df5cba24ad4e90d
 
-# Fix IAM policy for ingestion function (with improved error handling)
+# Fix IAM policy for ingestion function
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'fix-ingestion-iam'
   entrypoint: 'bash'
