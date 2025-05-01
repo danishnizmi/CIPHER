@@ -5,11 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Threat Intelligence Platform{% endblock %}</title>
     
-    <!-- Tailwind CSS and Font Awesome -->
+    <!-- Core resources -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     
+    <!-- Tailwind Configuration -->
     <script>
         tailwind.config = {
             theme: {
@@ -27,6 +28,7 @@
         }
     </script>
     
+    <!-- Component Styles -->
     <style type="text/tailwindcss">
         @layer components {
             .badge-ioc { @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block; }
@@ -70,14 +72,11 @@
             .table-body tr { @apply hover:bg-gray-50; }
             .table-body td { @apply px-6 py-4 whitespace-nowrap; }
             
-            /* User dropdown */
             .user-dropdown {
                 @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-50;
                 display: none;
             }
-            .user-dropdown.active {
-                display: block;
-            }
+            .user-dropdown.active { display: block; }
         }
     </style>
     
@@ -167,13 +166,6 @@
                 </div>
                 {% endif %}
                 
-                <!-- Feed Refresh -->
-                <div class="border-t border-gray-200 my-4 pt-4">
-                    <a href="{{ url_for('refresh_feeds') }}" class="btn btn-primary w-full flex justify-center items-center">
-                        <i class="fas fa-sync-alt mr-2"></i> Refresh Feeds
-                    </a>
-                </div>
-                
                 <!-- System Status -->
                 <div class="mt-auto pt-4">
                     <div class="bg-gray-50 rounded-lg p-3 mt-4">
@@ -222,7 +214,7 @@
                 {% endif %}
             {% endwith %}
             
-            <!-- CSRF Token for forms -->
+            <!-- CSRF Token -->
             {% if csrf_token %}
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {% endif %}
@@ -253,7 +245,6 @@
                     userDropdown.classList.toggle('active');
                 });
                 
-                // Close dropdown when clicking elsewhere
                 document.addEventListener('click', function(e) {
                     if (userDropdown.classList.contains('active') && 
                         !userDropdownButton.contains(e.target) && 
@@ -277,7 +268,6 @@
                     sidebar.classList.toggle('p-4');
                     sidebar.classList.toggle('overflow-y-auto');
                     
-                    // Toggle icon
                     const icon = mobileNavToggle.querySelector('i');
                     icon.classList.toggle('fa-bars');
                     icon.classList.toggle('fa-times');
@@ -292,7 +282,7 @@
                 }, 5000);
             });
             
-            // Helper functions for formatting
+            // Helper functions
             window.formatNumber = function(num) {
                 return num ? num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0";
             };
@@ -309,7 +299,6 @@
         });
     </script>
     
-    <!-- Page-specific scripts -->
     {% block scripts %}{% endblock %}
 </body>
 </html>
