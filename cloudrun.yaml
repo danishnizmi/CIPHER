@@ -39,6 +39,8 @@ spec:
           value: "threat_intelligence"
         - name: PORT
           value: "8080"
+        - name: GO_INGESTION_PORT
+          value: "8081"
         - name: API_URL
           value: "https://api-production.primal-chariot-382610.cloudfunctions.net"
         - name: GCS_BUCKET
@@ -51,14 +53,14 @@ spec:
           value: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         startupProbe:
           httpGet:
-            path: /api/health
+            path: /health
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 5
           failureThreshold: 3
         livenessProbe:
           httpGet:
-            path: /api/health
+            path: /health
             port: 8080
           periodSeconds: 30
           timeoutSeconds: 5
