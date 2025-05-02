@@ -1,915 +1,1248 @@
-"""
-Threat Intelligence Platform - Analysis Module
-Processes threat data, extracts IOCs, and generates insights using Vertex AI.
-Streamlined implementation with optimized GCP integration.
-"""
-
 import os
-import re
 import json
+import uuid
 import logging
 import hashlib
-import time
+import re
+import ipaddress
+import socket
+from typing import Dict, List, Any, Union, Optional, Tuple
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Set, Tuple, Union
-from functools import lru_cache, wraps
+import traceback
 
-# Import config module for centralized configuration
-import config
+import requests
+from google.cloud import bigquery, storage, pubsub_v1
+from google.cloud.exceptions import NotFound
+from google.api_core.exceptions import GoogleAPIError
+import vertexai
+from vertexai.language_models import TextGenerationModel
 
-# Configure logging with consistent format
-logging = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO if os.environ.get('ENVIRONMENT') != 'production' else logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Import configuration
+from config import Config, initialize_bigquery, initialize_storage, initialize_pubsub, report_error
 
-# Core configuration from config module
-PROJECT_ID = config.project_id
-REGION = config.region
-DATASET_ID = config.bigquery_dataset
-PUBSUB_TOPIC = config.get("PUBSUB_TOPIC", "threat-analysis-events")
-MODEL_NAME = os.environ.get("VERTEX_MODEL", "text-bison")
+# Initialize logging
+logger = logging.getLogger(__name__)
 
-# AI rate limiting to avoid excessive costs
-AI_ANALYSIS_RATE_LIMIT = 10  # Max analyses per minute
-AI_MIN_TIME_BETWEEN_CALLS = 6  # Seconds between AI calls
-_last_ai_call_time = 0
-_ai_calls_in_minute = 0
-_ai_minute_start = 0
+# Initialize GCP clients
+bq_client = initialize_bigquery()
+storage_client = initialize_storage()
+publisher, subscriber = initialize_pubsub()
 
-# IOC regex patterns
-IOC_PATTERNS = {
-    "ip": r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b',
-    "domain": r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]\b',
-    "url": r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+(/[-\w%/.]*)*',
-    "md5": r'\b[a-fA-F0-9]{32}\b',
-    "sha1": r'\b[a-fA-F0-9]{40}\b',
-    "sha256": r'\b[a-fA-F0-9]{64}\b',
-    "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-    "cve": r'CVE-\d{4}-\d{4,7}',
-}
+# Initialize Vertex AI for NLP analysis if enabled
+if Config.NLP_ENABLED:
+    try:
+        vertexai.init(project=Config.GCP_PROJECT, location=Config.VERTEXAI_LOCATION)
+        text_model = TextGenerationModel.from_pretrained(Config.VERTEXAI_MODEL)
+        logger.info(f"Initialized Vertex AI Text Generation Model: {Config.VERTEXAI_MODEL}")
+    except Exception as e:
+        logger.error(f"Error initializing Vertex AI: {str(e)}")
+        text_model = None
+else:
+    text_model = None
 
-# ======== Utility Functions ========
+# -------------------- Helper Functions --------------------
 
-def rate_limited_ai(func):
-    """Decorator for rate limiting AI analysis calls"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global _last_ai_call_time, _ai_calls_in_minute, _ai_minute_start
-        
-        current_time = time.time()
-        
-        # Reset counter if a minute has passed
-        if current_time - _ai_minute_start > 60:
-            _ai_minute_start = current_time
-            _ai_calls_in_minute = 0
-        
-        # Check rate limit
-        if _ai_calls_in_minute >= AI_ANALYSIS_RATE_LIMIT:
-            logging.warning(f"AI analysis rate limit reached ({AI_ANALYSIS_RATE_LIMIT}/minute). Using fallback.")
-            content = args[0] if len(args) > 0 else ""
-            metadata = args[1] if len(args) > 1 else {}
-            return _generate_fallback_analysis(content, metadata)
-        
-        # Check time between calls
-        time_since_last = current_time - _last_ai_call_time
-        if time_since_last < AI_MIN_TIME_BETWEEN_CALLS:
-            sleep_time = AI_MIN_TIME_BETWEEN_CALLS - time_since_last
-            logging.info(f"Rate limiting AI call: sleeping for {sleep_time:.2f}s")
-            time.sleep(sleep_time)
-        
-        # Update tracking variables
-        _last_ai_call_time = time.time()
-        _ai_calls_in_minute += 1
-        
-        # Call the function
-        return func(*args, **kwargs)
+def extract_ioc_type(value: str) -> str:
+    """
+    Identify the type of indicator based on its format.
     
-    return wrapper
+    Args:
+        value: The indicator value to analyze
+    
+    Returns:
+        String representing the IOC type (ip, domain, url, hash, etc.)
+    """
+    value = value.strip().lower()
+    
+    # Check for IP address
+    try:
+        ipaddress.ip_address(value)
+        return "ip"
+    except ValueError:
+        pass
+    
+    # Check for domain
+    domain_pattern = r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+    if re.match(domain_pattern, value):
+        return "domain"
+    
+    # Check for URL
+    url_pattern = r'^(http|https|ftp)://[^\s/$.?#].[^\s]*$'
+    if re.match(url_pattern, value):
+        return "url"
+    
+    # Check for file hash
+    md5_pattern = r'^[a-f0-9]{32}$'
+    sha1_pattern = r'^[a-f0-9]{40}$'
+    sha256_pattern = r'^[a-f0-9]{64}$'
+    
+    if re.match(md5_pattern, value):
+        return "md5"
+    elif re.match(sha1_pattern, value):
+        return "sha1"
+    elif re.match(sha256_pattern, value):
+        return "sha256"
+    
+    # Check for email
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if re.match(email_pattern, value):
+        return "email"
+    
+    # Default type
+    return "unknown"
 
-def exponential_backoff_retry(max_retries=3, base_delay=1.0):
-    """Decorator for exponential backoff retry"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for retry in range(max_retries):
+def compute_confidence_score(indicator: Dict[str, Any]) -> int:
+    """
+    Compute a confidence score for an indicator based on multiple factors.
+    
+    Args:
+        indicator: The indicator data
+    
+    Returns:
+        Confidence score (0-100)
+    """
+    base_score = indicator.get('confidence', 50)
+    
+    # Factors that can increase confidence
+    boost_factors = 0
+    
+    # Multiple sources reporting the same IOC
+    sources = indicator.get('sources', [])
+    if isinstance(sources, list) and len(sources) > 1:
+        boost_factors += min(len(sources) * 5, 20)  # Up to 20 points for multiple sources
+    
+    # Recent activity
+    created_at = indicator.get('created_at')
+    if isinstance(created_at, datetime):
+        age_days = (datetime.utcnow() - created_at).days
+        if age_days < 7:
+            boost_factors += 10  # Very recent indicators get a boost
+        elif age_days > 90:
+            boost_factors -= 10  # Older indicators get reduced confidence
+    
+    # Associated with known threat actors
+    if indicator.get('related_threat_actors'):
+        boost_factors += 10
+    
+    # Associated with active campaigns
+    if indicator.get('related_campaigns'):
+        boost_factors += 10
+    
+    # Final score calculation
+    final_score = base_score + boost_factors
+    
+    # Ensure within bounds
+    return max(0, min(final_score, 100))
+
+def enrich_with_geo_data(ip_address: str) -> Dict[str, Any]:
+    """
+    Enrich IP indicators with geolocation data.
+    
+    Args:
+        ip_address: The IP address to enrich
+    
+    Returns:
+        Dictionary containing geolocation data
+    """
+    geo_data = {
+        "country": None,
+        "city": None,
+        "asn": None,
+        "asn_org": None,
+        "latitude": None,
+        "longitude": None
+    }
+    
+    try:
+        # Check if IP is private
+        ip = ipaddress.ip_address(ip_address)
+        if ip.is_private:
+            geo_data["country"] = "Private"
+            return geo_data
+        
+        # Make API request to free geolocation service
+        response = requests.get(f"https://ipinfo.io/{ip_address}/json", timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            geo_data["country"] = data.get("country")
+            geo_data["city"] = data.get("city")
+            geo_data["asn"] = data.get("org", "").split()[0] if data.get("org") else None
+            geo_data["asn_org"] = " ".join(data.get("org", "").split()[1:]) if data.get("org") else None
+            
+            # Parse location coordinates
+            if data.get("loc"):
                 try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if retry >= max_retries - 1:
-                        logging.error(f"Failed after {retry+1} retries: {str(e)}")
-                        raise
-                    
-                    wait_time = base_delay * (2 ** retry)
-                    logging.warning(f"Retry {retry+1}/{max_retries} after error: {str(e)}, waiting {wait_time:.2f}s")
-                    time.sleep(wait_time)
-        return wrapper
-    return decorator
-
-def get_client(client_type: str) -> Any:
-    """Get or initialize a Google Cloud client from config module."""
-    return config.get_client(client_type)
-
-def extract_json_from_text(text: str) -> Optional[str]:
-    """Extract JSON object from text response"""
-    if not text:
-        return None
-        
-    text = text.strip()
-    start_idx = text.find('{')
-    end_idx = text.rfind('}') + 1
+                    lat, lng = data.get("loc").split(",")
+                    geo_data["latitude"] = float(lat)
+                    geo_data["longitude"] = float(lng)
+                except (ValueError, TypeError):
+                    pass
     
-    if start_idx >= 0 and end_idx > start_idx:
-        return text[start_idx:end_idx]
-    return None
-
-@exponential_backoff_retry(max_retries=3, base_delay=2.0)
-def publish_event(data: Dict[str, Any]) -> bool:
-    """Publish event to Pub/Sub with retry"""
-    pubsub_client = get_client('pubsub')
-    if isinstance(pubsub_client, config.DummyClient):
-        return False
-    
-    topic_path = pubsub_client.topic_path(PROJECT_ID, PUBSUB_TOPIC)
-    json_data = json.dumps(data).encode("utf-8")
-    
-    future = pubsub_client.publish(topic_path, data=json_data)
-    message_id = future.result(timeout=30)
-    logging.info(f"Published event {message_id} to {PUBSUB_TOPIC}")
-    return True
-
-@exponential_backoff_retry(max_retries=3, base_delay=2.0)
-def query_bigquery(query: str, params: Optional[Dict] = None) -> List[Dict]:
-    """Execute a BigQuery query with parameters"""
-    client = get_client('bigquery')
-    if isinstance(client, config.DummyClient):
-        return []
-        
-    try:
-        # Import locally to avoid global dependency
-        from google.cloud import bigquery
-        
-        job_config = None
-        if params:
-            job_config = bigquery.QueryJobConfig()
-            # Create query parameters
-            query_params = []
-            for key, value in params.items():
-                if isinstance(value, int):
-                    query_params.append(bigquery.ScalarQueryParameter(key, "INT64", value))
-                elif isinstance(value, float):
-                    query_params.append(bigquery.ScalarQueryParameter(key, "FLOAT64", value))
-                elif isinstance(value, bool):
-                    query_params.append(bigquery.ScalarQueryParameter(key, "BOOL", value))
-                elif isinstance(value, datetime):
-                    query_params.append(bigquery.ScalarQueryParameter(key, "TIMESTAMP", value))
-                else:
-                    query_params.append(bigquery.ScalarQueryParameter(key, "STRING", value))
-            
-            job_config.query_parameters = query_params
-            
-        query_job = client.query(query, job_config=job_config)
-        return [dict(row) for row in query_job.result()]
     except Exception as e:
-        logging.error(f"BigQuery query error: {str(e)}")
-        raise
+        logger.warning(f"Error enriching IP with geo data: {str(e)}")
+    
+    return geo_data
 
-@exponential_backoff_retry(max_retries=3, base_delay=2.0)
-def insert_into_bigquery(table_id: str, rows: List[Dict]) -> bool:
-    """Insert rows into BigQuery with schema validation"""
-    if not rows:
-        return True
-        
-    client = get_client('bigquery')
-    if isinstance(client, config.DummyClient):
-        return False
+def enrich_with_dns_data(domain: str) -> Dict[str, Any]:
+    """
+    Enrich domain indicators with DNS resolution data.
     
-    full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
+    Args:
+        domain: The domain to enrich
     
-    # Process rows to ensure JSON compatibility
-    processed_rows = [{k: (v.isoformat() if isinstance(v, datetime) else 
-                         json.dumps(v) if isinstance(v, (dict, list)) else v) 
-                      for k, v in row.items()} for row in rows]
-            
-    # Try to insert rows
-    errors = client.insert_rows_json(full_table_id, processed_rows)
+    Returns:
+        Dictionary containing DNS data
+    """
+    dns_data = {
+        "resolved_ips": [],
+        "has_mx": False,
+        "nameservers": []
+    }
     
-    if not errors:
-        return True
-        
-    # Handle schema mismatches
-    logging.warning(f"Insert errors: {errors}")
-    
-    # Try to update schema
     try:
-        from google.cloud import bigquery
-        
-        table = client.get_table(full_table_id)
-        current_schema = {field.name: field for field in table.schema}
-        
-        # Find missing fields
-        missing_fields = []
-        for row in processed_rows:
-            for field in row:
-                if field not in current_schema:
-                    missing_fields.append(bigquery.SchemaField(field, "STRING"))
-        
-        if missing_fields:
-            # Update schema
-            new_schema = list(table.schema) + missing_fields
-            table.schema = new_schema
-            client.update_table(table, ["schema"])
-            logging.info(f"Updated schema for {full_table_id}")
-            
-            # Try insert again
-            errors = client.insert_rows_json(full_table_id, processed_rows)
-            return not errors
-    except Exception as e:
-        logging.error(f"Schema update error: {str(e)}")
-        
-    return False
-
-# ======== IOC Processing Functions ========
-
-def extract_iocs(content: Union[str, Dict], content_type: str = "text") -> List[Dict]:
-    """Extract IOCs from different content types"""
-    if not content:
-        return []
-        
-    results = []
-    timestamp = datetime.utcnow().isoformat()
-    
-    # Extract from text content
-    if content_type == "text":
-        for ioc_type, pattern in IOC_PATTERNS.items():
-            matches = re.findall(pattern, content)
-            for value in matches:
-                results.append({"value": value, "type": ioc_type, "timestamp": timestamp})
-    
-    # Extract from CSV content
-    elif content_type == "csv":
-        import csv
-        import io
-        
+        # Get A records
         try:
-            csv_reader = csv.reader(io.StringIO(content))
-            headers = next(csv_reader, [])
-            
-            if headers:
-                for row_idx, row in enumerate(csv_reader, start=2):
-                    if not row or len(row) == 0:
-                        continue
-                        
-                    for col_idx, cell in enumerate(row):
-                        if cell:
-                            for ioc_type, pattern in IOC_PATTERNS.items():
-                                if re.match(pattern, cell):
-                                    col_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
-                                    results.append({
-                                        "value": cell, "type": ioc_type, "source_row": row_idx,
-                                        "source_column": col_name, "timestamp": timestamp
-                                    })
-        except Exception as e:
-            logging.error(f"Error extracting IOCs from CSV: {str(e)}")
-    
-    # Extract from JSON content
-    elif content_type == "json":
-        def process_json_item(item, path=""):
-            if isinstance(item, dict):
-                for key, value in item.items():
-                    current_path = f"{path}.{key}" if path else key
-                    if isinstance(value, (dict, list)):
-                        process_json_item(value, current_path)
-                    elif isinstance(value, str):
-                        for ioc_type, pattern in IOC_PATTERNS.items():
-                            if re.match(pattern, value):
-                                results.append({
-                                    "value": value, "type": ioc_type,
-                                    "path": current_path, "timestamp": timestamp
-                                })
-            elif isinstance(item, list):
-                for i, value in enumerate(item):
-                    process_json_item(value, f"{path}[{i}]")
-                    
-        process_json_item(content)
-    
-    # Remove duplicates while preserving order
-    unique_results = []
-    seen = set()
-    for ioc in results:
-        key = (ioc["type"], ioc["value"])
-        if key not in seen:
-            seen.add(key)
-            unique_results.append(ioc)
-    
-    return unique_results
-
-def enrich_ioc(ioc: Dict[str, Any]) -> Dict[str, Any]:
-    """Enrich an IOC with additional context"""
-    if not ioc or "value" not in ioc or "type" not in ioc:
-        return ioc
+            ips = socket.gethostbyname_ex(domain)[2]
+            dns_data["resolved_ips"] = ips
+        except socket.gaierror:
+            pass
         
-    enriched = ioc.copy()
-    if "timestamp" not in enriched:
-        enriched["timestamp"] = datetime.utcnow().isoformat()
-    
-    # Perform enrichment based on IOC type
-    ioc_type, ioc_value = ioc["type"], ioc["value"]
-    
-    if ioc_type == "ip":
-        # Basic geo classification for IPs
-        if (ioc_value.startswith('10.') or 
-            ioc_value.startswith('192.168.') or 
-            (ioc_value.startswith('172.') and 16 <= int(ioc_value.split('.')[1]) <= 31)):
-            enriched["geo"] = {"country": "Private", "city": "Internal"}
-        else:
-            enriched["geo"] = {"country": "Unknown", "city": "Unknown"}
-    
-    # Add severity assessment
-    if "context" in enriched and isinstance(enriched["context"], dict):
-        context_str = str(enriched["context"]).lower()
-        if any(kw in context_str for kw in ["critical", "ransomware", "backdoor", "exploit"]):
-            enriched["severity"] = "high"
-        elif any(kw in context_str for kw in ["suspicious", "malware", "trojan"]):
-            enriched["severity"] = "medium"
-        else:
-            enriched["severity"] = "low"
-    else:
-        # Default severity based on IOC type
-        if ioc_type in ["md5", "sha1", "sha256"]:
-            enriched["severity"] = "medium"  # Hash-based IOCs default to medium
-        elif ioc_type == "url" and any(kw in ioc_value.lower() for kw in ["malware", "trojan", "hack", "phish"]):
-            enriched["severity"] = "high"   # Suspicious URLs
-        else:
-            enriched["severity"] = "low"    # Everything else defaults to low
-    
-    # Add confidence level
-    if "confidence" not in enriched:
-        enriched["confidence"] = "medium"
-    
-    return enriched
-
-# ======== AI Analysis Functions ========
-
-@lru_cache(maxsize=100)
-def get_vertex_model():
-    """Get Vertex AI model with proper caching and error handling"""
-    try:
-        vertex_initialized = get_client('vertex')
-        if not vertex_initialized:
-            logging.warning("Vertex AI not available")
-            return None
+        # Check for MX records
+        try:
+            import dns.resolver
+            mx_records = dns.resolver.resolve(domain, 'MX')
+            dns_data["has_mx"] = len(mx_records) > 0
+        except:
+            # Fall back to simple check
+            dns_data["has_mx"] = len(dns_data["resolved_ips"]) > 0
         
-        from vertexai.language_models import TextGenerationModel
-        model = TextGenerationModel.from_pretrained(MODEL_NAME)
-        logging.info(f"Vertex AI model {MODEL_NAME} loaded successfully")
-        return model
+        # Get nameservers
+        try:
+            import dns.resolver
+            ns_records = dns.resolver.resolve(domain, 'NS')
+            dns_data["nameservers"] = [ns.target.to_text() for ns in ns_records]
+        except:
+            pass
+    
     except Exception as e:
-        logging.error(f"Failed to load Vertex AI model: {str(e)}")
-        return None
+        logger.warning(f"Error enriching domain with DNS data: {str(e)}")
+    
+    return dns_data
 
-@rate_limited_ai
-def analyze_with_vertex_ai(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Analyze threat data using Vertex AI LLM with efficient caching and error handling"""
-    if not content:
+def analyze_text_with_ai(text: str, prompt_type: str) -> Dict[str, Any]:
+    """
+    Analyze text using Vertex AI to extract threat intelligence insights.
+    
+    Args:
+        text: The text to analyze
+        prompt_type: Type of analysis to perform
+    
+    Returns:
+        Dictionary containing analysis results
+    """
+    if not text_model:
+        logger.warning("Vertex AI text model not initialized, skipping text analysis")
+        return {"error": "AI analysis not available"}
+    
+    result = {
+        "processed": False,
+        "entities": [],
+        "sentiment": None,
+        "categories": [],
+        "summary": None
+    }
+    
+    try:
+        # Build prompts based on analysis type
+        if prompt_type == "extract_iocs":
+            prompt = f"""
+            Extract all indicators of compromise (IOCs) from the following text. 
+            Return a JSON array of objects with 'type' and 'value' for each IOC.
+            Only include valid IOCs like IP addresses, domains, URLs, file hashes, and email addresses.
+            
+            Text to analyze: {text}
+            
+            JSON Response:
+            """
+        elif prompt_type == "threat_assessment":
+            prompt = f"""
+            Analyze the following potential threat information and provide an assessment.
+            Return a JSON object with:
+            - threat_level (low, medium, high, critical)
+            - confidence (0-100)
+            - tactics (MITRE ATT&CK tactics if applicable)
+            - techniques (MITRE ATT&CK techniques if applicable)
+            - summary (brief assessment)
+            
+            Text to analyze: {text}
+            
+            JSON Response:
+            """
+        elif prompt_type == "summarize":
+            prompt = f"""
+            Summarize the following threat intelligence information in 2-3 sentences.
+            Focus on the key threat actors, targets, methods, and indicators.
+            
+            Text to analyze: {text}
+            
+            Summary:
+            """
+        else:
+            return {"error": "Unknown prompt type"}
+        
+        # Get response from Vertex AI
+        response = text_model.predict(
+            prompt=prompt,
+            temperature=0.2,  # Low temperature for consistent outputs
+            max_output_tokens=1024,
+            top_p=0.8,
+            top_k=40
+        )
+        
+        # Process response based on prompt type
+        if prompt_type in ["extract_iocs", "threat_assessment"]:
+            try:
+                # Find JSON in response
+                json_pattern = r'({[\s\S]*}|\[[\s\S]*\])'
+                json_match = re.search(json_pattern, response.text)
+                
+                if json_match:
+                    json_str = json_match.group(0)
+                    result = json.loads(json_str)
+                    result["processed"] = True
+                else:
+                    result["error"] = "Failed to parse JSON from response"
+            except json.JSONDecodeError:
+                result["error"] = "Failed to parse JSON from response"
+        elif prompt_type == "summarize":
+            result["summary"] = response.text.strip()
+            result["processed"] = True
+    
+    except Exception as e:
+        logger.error(f"Error analyzing text with AI: {str(e)}")
+        result["error"] = str(e)
+    
+    return result
+
+def calculate_risk_score(indicator: Dict[str, Any]) -> int:
+    """
+    Calculate a risk score for an indicator based on multiple factors.
+    
+    Args:
+        indicator: The indicator data
+    
+    Returns:
+        Risk score (0-100)
+    """
+    # Base score determined by indicator confidence
+    base_score = indicator.get('confidence', 50)
+    
+    # Risk modifiers
+    risk_modifiers = 0
+    
+    # Higher risk for indicators associated with active campaigns
+    if indicator.get('related_campaigns'):
+        risk_modifiers += 15
+    
+    # Higher risk for indicators associated with high-profile threat actors
+    if indicator.get('related_threat_actors'):
+        risk_modifiers += 10
+    
+    # Higher risk for recently observed indicators
+    created_at = indicator.get('created_at')
+    if isinstance(created_at, datetime):
+        age_days = (datetime.utcnow() - created_at).days
+        if age_days < 7:
+            risk_modifiers += 20  # Very recent indicators are higher risk
+        elif age_days < 30:
+            risk_modifiers += 10  # Recent indicators are higher risk
+        elif age_days > 180:
+            risk_modifiers -= 20  # Older indicators are lower risk
+    
+    # Adjust risk based on indicator type
+    indicator_type = indicator.get('type', '').lower()
+    if indicator_type in ['md5', 'sha1', 'sha256']:
+        risk_modifiers += 5  # File hashes are slightly higher risk
+    elif indicator_type == 'ip':
+        # Look for IP reputation data
+        if indicator.get('tags') and any(tag in indicator.get('tags', []) for tag in ['c2', 'botnet', 'ransomware']):
+            risk_modifiers += 25  # IPs associated with serious threats
+    
+    # Adjust for reported false positives
+    if 'false_positive' in indicator.get('tags', []):
+        risk_modifiers -= 50
+    
+    # Calculate final score
+    final_score = base_score + risk_modifiers
+    
+    # Ensure within bounds
+    return max(0, min(final_score, 100))
+
+def store_analysis_result(indicator_id: str, analysis_data: Dict[str, Any]) -> bool:
+    """
+    Store analysis results in BigQuery.
+    
+    Args:
+        indicator_id: The ID of the indicator
+        analysis_data: The analysis data to store
+    
+    Returns:
+        Boolean indicating success
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return False
+    
+    try:
+        # Get the indicators table
+        table_id = Config.get_table_name('indicators')
+        table = bq_client.get_table(table_id)
+        
+        # Prepare update data
+        update_fields = {
+            'last_analyzed': datetime.utcnow(),
+            'confidence': analysis_data.get('confidence'),
+            'risk_score': analysis_data.get('risk_score'),
+            'analysis_summary': analysis_data.get('summary')
+        }
+        
+        # Add enrichment data if present
+        if 'enrichment' in analysis_data:
+            for key, value in analysis_data['enrichment'].items():
+                update_fields[f'enrichment_{key}'] = value
+        
+        # Prepare the query
+        query = f"""
+        UPDATE `{table_id}`
+        SET
+            last_analyzed = @last_analyzed,
+            confidence = @confidence,
+            risk_score = @risk_score,
+            analysis_summary = @analysis_summary
+        """
+        
+        # Add enrichment fields to query if present
+        if 'enrichment' in analysis_data:
+            for key in analysis_data['enrichment'].keys():
+                update_fields[f'enrichment_{key}'] = analysis_data['enrichment'].get(key)
+                query += f",\n    enrichment_{key} = @enrichment_{key}"
+        
+        # Add tags if present (append to existing tags)
+        if 'tags' in analysis_data and analysis_data['tags']:
+            query += f"""
+            , tags = ARRAY_CONCAT(
+                IFNULL(tags, []),
+                ARRAY(SELECT DISTINCT x FROM UNNEST(@new_tags) x WHERE x NOT IN (SELECT y FROM UNNEST(IFNULL(tags, [])) y))
+            )
+            """
+            update_fields['new_tags'] = analysis_data.get('tags', [])
+        
+        # Add where clause
+        query += f"\nWHERE id = @indicator_id"
+        update_fields['indicator_id'] = indicator_id
+        
+        # Create query parameters
+        query_params = []
+        for key, value in update_fields.items():
+            # Skip None values
+            if value is None:
+                continue
+                
+            # Determine parameter type
+            if isinstance(value, datetime):
+                query_params.append(bigquery.ScalarQueryParameter(key, "TIMESTAMP", value))
+            elif isinstance(value, int):
+                query_params.append(bigquery.ScalarQueryParameter(key, "INT64", value))
+            elif isinstance(value, float):
+                query_params.append(bigquery.ScalarQueryParameter(key, "FLOAT64", value))
+            elif isinstance(value, list):
+                query_params.append(bigquery.ArrayQueryParameter(key, "STRING", value))
+            else:
+                query_params.append(bigquery.ScalarQueryParameter(key, "STRING", str(value)))
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        query_job = bq_client.query(query, job_config=job_config)
+        query_job.result()  # Wait for the query to complete
+        
+        logger.info(f"Successfully stored analysis results for indicator {indicator_id}")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error storing analysis results: {str(e)}")
+        report_error(e)
+        return False
+
+def get_indicator_data(indicator_id: str) -> Dict[str, Any]:
+    """
+    Retrieve indicator data from BigQuery.
+    
+    Args:
+        indicator_id: The ID of the indicator
+    
+    Returns:
+        Dictionary containing indicator data
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
         return {}
     
-    # Get cached model or initialize
-    model = get_vertex_model()
-    if not model:
-        logging.warning("Vertex AI model not available")
-        return _generate_fallback_analysis(content, metadata)
+    try:
+        # Prepare query
+        query = f"""
+        SELECT * FROM `{Config.get_table_name('indicators')}`
+        WHERE id = @indicator_id
+        """
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("indicator_id", "STRING", indicator_id)
+            ]
+        )
+        query_job = bq_client.query(query, job_config=job_config)
+        results = list(query_job)
+        
+        if not results:
+            logger.warning(f"Indicator {indicator_id} not found")
+            return {}
+        
+        # Convert to dictionary and handle datetime fields
+        indicator = dict(results[0])
+        for key, value in indicator.items():
+            if isinstance(value, datetime):
+                indicator[key] = value.isoformat()
+        
+        return indicator
     
-    # Truncate content if it's too long (Vertex AI has context limits)
-    if len(content) > 8000:
-        logging.info(f"Truncating content from {len(content)} to 8000 chars")
-        content = content[:8000]
-    
-    # Construct prompt for threat analysis
-    prompt = f"""
-    You are a threat intelligence analyst. Analyze the following threat intelligence data and extract key information:
-    
-    {content}
-    
-    Provide a structured analysis with the following information:
-    1. A brief summary of the threat (2-3 sentences)
-    2. The threat actor or group responsible (if mentioned)
-    3. Targeted sectors or regions (if mentioned)
-    4. Attack techniques used (MITRE ATT&CK techniques if possible)
-    5. Malware families involved (if mentioned)
-    6. Severity assessment (Low, Medium, High, Critical)
-    7. Confidence level in this analysis (Low, Medium, High)
-    
-    Format your response as JSON with these keys: summary, threat_actor, targets, techniques, malware, severity, confidence
+    except Exception as e:
+        logger.error(f"Error retrieving indicator data: {str(e)}")
+        report_error(e)
+        return {}
+
+def get_related_indicators(indicator_value: str, indicator_type: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
+    Find indicators related to the given indicator.
+    
+    Args:
+        indicator_value: The value of the indicator
+        indicator_type: The type of the indicator
+        limit: Maximum number of related indicators to return
+    
+    Returns:
+        List of related indicators
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return []
+    
+    related_indicators = []
     
     try:
-        logging.info("Sending content to Vertex AI for analysis")
-        
-        # Generate response
-        response = model.predict(prompt, temperature=0.1, max_output_tokens=1024)
-        
-        # Extract JSON from response
-        json_str = extract_json_from_text(response.text)
-        
-        if json_str:
-            analysis = json.loads(json_str)
-            
-            # Add metadata
-            source_id = metadata.get("id", "unknown") if metadata else "unknown"
-            source_type = metadata.get("type", "unknown") if metadata else "unknown"
-                
-            analysis.update({
-                "source_id": source_id,
-                "source_type": source_type,
-                "analysis_timestamp": datetime.utcnow().isoformat()
-            })
-            
-            return analysis
+        # Build query based on indicator type
+        if indicator_type in ['ip', 'domain', 'url']:
+            # For network indicators, look for other indicators observed with the same IP/domain
+            query = f"""
+            WITH original AS (
+                SELECT * FROM `{Config.get_table_name('indicators')}`
+                WHERE (type = @indicator_type AND value = @indicator_value)
+            )
+            SELECT i.* FROM `{Config.get_table_name('indicators')}` i
+            JOIN original o ON (
+                i.source = o.source OR
+                i.campaign_id = o.campaign_id OR
+                i.report_id = o.report_id
+            )
+            WHERE i.value != @indicator_value
+            ORDER BY i.confidence DESC
+            LIMIT @limit
+            """
+        elif indicator_type in ['md5', 'sha1', 'sha256']:
+            # For file hash indicators, look for other hashes of the same file or related malware
+            query = f"""
+            WITH original AS (
+                SELECT * FROM `{Config.get_table_name('indicators')}`
+                WHERE (type = @indicator_type AND value = @indicator_value)
+            )
+            SELECT i.* FROM `{Config.get_table_name('indicators')}` i
+            JOIN original o ON (
+                i.related_malware_ids = o.related_malware_ids OR
+                i.campaign_id = o.campaign_id OR
+                i.report_id = o.report_id
+            )
+            WHERE i.value != @indicator_value
+            ORDER BY i.confidence DESC
+            LIMIT @limit
+            """
         else:
-            logging.warning("Could not find JSON in Vertex AI response")
-            # Return partial results based on text response
-            return {
-                "summary": response.text[:500],
-                "confidence": "Low",
-                "severity": "Medium",
-                "analysis_timestamp": datetime.utcnow().isoformat(),
-                "source_id": metadata.get("id", "unknown") if metadata else "unknown",
-                "source_type": metadata.get("type", "unknown") if metadata else "unknown"
-            }
+            # For other indicators, use a more generic approach
+            query = f"""
+            WITH original AS (
+                SELECT * FROM `{Config.get_table_name('indicators')}`
+                WHERE (type = @indicator_type AND value = @indicator_value)
+            )
+            SELECT i.* FROM `{Config.get_table_name('indicators')}` i
+            JOIN original o ON (
+                i.source = o.source OR
+                i.campaign_id = o.campaign_id OR
+                i.report_id = o.report_id
+            )
+            WHERE i.value != @indicator_value
+            ORDER BY i.created_at DESC
+            LIMIT @limit
+            """
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("indicator_type", "STRING", indicator_type),
+                bigquery.ScalarQueryParameter("indicator_value", "STRING", indicator_value),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit)
+            ]
+        )
+        query_job = bq_client.query(query, job_config=job_config)
+        
+        # Process results
+        for row in query_job:
+            indicator = dict(row)
+            for key, value in indicator.items():
+                if isinstance(value, datetime):
+                    indicator[key] = value.isoformat()
+            related_indicators.append(indicator)
+        
+        logger.info(f"Found {len(related_indicators)} indicators related to {indicator_type}:{indicator_value}")
+    
     except Exception as e:
-        logging.error(f"Error analyzing with Vertex AI: {str(e)}")
-        return _generate_fallback_analysis(content, metadata)
+        logger.error(f"Error finding related indicators: {str(e)}")
+        report_error(e)
+    
+    return related_indicators
 
-def _generate_fallback_analysis(content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Generate fallback analysis when Vertex AI is unavailable"""
-    logging.info("Using fallback analysis method (rule-based)")
+def upload_analysis_to_gcs(analysis_data: Dict[str, Any], indicator_id: str) -> Optional[str]:
+    """
+    Upload analysis results to Google Cloud Storage.
     
-    # Simple keyword-based severity assessment
-    severity = "Medium"  # Default severity
+    Args:
+        analysis_data: The analysis data to upload
+        indicator_id: The ID of the indicator
     
-    content_lower = content.lower()
-    if any(word in content_lower for word in ["critical", "ransomware", "backdoor", "zero-day", "0day"]):
-        severity = "Critical"
-    elif any(word in content_lower for word in ["high", "exploit", "leaked", "vulnerability", "trojan"]):
-        severity = "High"
+    Returns:
+        GCS URI of the uploaded file or None if failed
+    """
+    if not storage_client:
+        logger.error("Storage client not initialized")
+        return None
     
-    # Extract threat actors using simple pattern matching
-    threat_actor = "Unknown"
-    actor_patterns = [
-        r'(?:threat|threat\s+actor|actor|group|apt):\s*([A-Za-z0-9\s\-_]+)',
-        r'attributed\s+to\s+([A-Za-z0-9\s\-_]+)',
-        r'(?:APT|group)\s*([0-9]+)'
-    ]
+    try:
+        # Generate a unique filename
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        filename = f"analysis/{indicator_id}/{timestamp}.json"
+        
+        # Get bucket
+        bucket = storage_client.bucket(Config.GCS_BUCKET)
+        blob = bucket.blob(filename)
+        
+        # Upload the file
+        blob.upload_from_string(
+            json.dumps(analysis_data, default=str),
+            content_type="application/json"
+        )
+        
+        # Return the GCS URI
+        return f"gs://{Config.GCS_BUCKET}/{filename}"
     
-    for pattern in actor_patterns:
-        matches = re.search(pattern, content, re.IGNORECASE)
-        if matches:
-            threat_actor = matches.group(1).strip()
-            break
-    
-    # Basic summary extraction - first 1-2 sentences
-    sentences = re.split(r'(?<=[.!?])\s+', content)
-    summary = " ".join(sentences[:min(2, len(sentences))])
-    
-    # Create analysis object
-    source_id = metadata.get("id", "unknown") if metadata else "unknown"
-    source_type = metadata.get("type", "unknown") if metadata else "unknown"
-    
-    return {
-        "summary": summary[:500],
-        "threat_actor": threat_actor,
-        "targets": "Unknown",
-        "techniques": "Unknown",
-        "malware": "Unknown",
-        "severity": severity,
-        "confidence": "Low",
-        "analysis_timestamp": datetime.utcnow().isoformat(),
-        "source_id": source_id,
-        "source_type": source_type,
-        "fallback": True
-    }
+    except Exception as e:
+        logger.error(f"Error uploading analysis to GCS: {str(e)}")
+        report_error(e)
+        return None
 
-# ======== Main Analysis Class ========
+# -------------------- Main Analysis Functions --------------------
 
-class ThreatAnalyzer:
-    """Unified threat analysis with optimized GCP integration"""
+def analyze_indicator(indicator_id: str, force_reanalysis: bool = False) -> Dict[str, Any]:
+    """
+    Analyze a single indicator and enrich it with additional information.
     
-    def __init__(self):
-        """Initialize analyzer and ensure resources"""
-        self._ensure_tables()
+    Args:
+        indicator_id: The ID of the indicator to analyze
+        force_reanalysis: Whether to force reanalysis even if recently analyzed
     
-    def _ensure_tables(self):
-        """Ensure required BigQuery tables exist"""
-        client = get_client('bigquery')
-        if isinstance(client, config.DummyClient):
-            logging.warning("BigQuery not available, cannot ensure tables")
-            return
-            
-        try:
-            from google.cloud import bigquery
-            from google.cloud.exceptions import NotFound
-            
-            # Define tables to create if they don't exist
-            tables = {
-                "threat_analysis": [
-                    bigquery.SchemaField("source_id", "STRING"),
-                    bigquery.SchemaField("source_type", "STRING"),
-                    bigquery.SchemaField("iocs", "STRING"),
-                    bigquery.SchemaField("vertex_analysis", "STRING"),
-                    bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                    bigquery.SchemaField("severity", "STRING"),
-                    bigquery.SchemaField("confidence", "STRING")
-                ],
-                "threat_campaigns": [
-                    bigquery.SchemaField("campaign_id", "STRING"),
-                    bigquery.SchemaField("campaign_name", "STRING"),
-                    bigquery.SchemaField("threat_actor", "STRING"),
-                    bigquery.SchemaField("malware", "STRING"),
-                    bigquery.SchemaField("techniques", "STRING"),
-                    bigquery.SchemaField("targets", "STRING"),
-                    bigquery.SchemaField("severity", "STRING"),
-                    bigquery.SchemaField("sources", "STRING"),
-                    bigquery.SchemaField("iocs", "STRING"),
-                    bigquery.SchemaField("source_count", "INTEGER"),
-                    bigquery.SchemaField("ioc_count", "INTEGER"),
-                    bigquery.SchemaField("first_seen", "STRING"),
-                    bigquery.SchemaField("last_seen", "STRING"),
-                    bigquery.SchemaField("detection_timestamp", "STRING")
-                ]
-            }
-            
-            # Check and create tables as needed
-            for table_name, schema in tables.items():
-                full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-                try:
-                    client.get_table(full_table_id)
-                    logging.info(f"Table {table_name} already exists")
-                except NotFound:
-                    table = bigquery.Table(full_table_id, schema=schema)
-                    client.create_table(table, exists_ok=True)
-                    logging.info(f"Created table {table_name}")
-        except Exception as e:
-            logging.error(f"Error ensuring tables: {str(e)}")
+    Returns:
+        Dictionary containing analysis results
+    """
+    logger.info(f"Analyzing indicator {indicator_id}")
     
-    def analyze_feed_data(self, feed_name: str, days_back: int = 7) -> Dict[str, Any]:
-        """Analyze threat data from a specific feed"""
-        logging.info(f"Analyzing feed {feed_name} for past {days_back} days")
-        
-        # Query to get recent data from the feed
-        query = f"""
-        SELECT *
-        FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-        WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
-        """
-        
-        rows = query_bigquery(query)
-        
-        if not rows:
-            logging.warning(f"No data found for feed {feed_name}")
-            return {
-                "feed_name": feed_name,
-                "processed_count": 0,
-                "ioc_count": 0
-            }
-        
-        # Process each row
-        processed_count = 0
-        ioc_count = 0
-        
-        for row in rows:
-            # Create a unique ID for this analysis
-            row_id = row.get("id", str(hash(str(row))))
-            
-            # Convert row to text for IOC extraction
-            content = "\n".join(f"{k}: {v}" for k, v in row.items() 
-                              if k != "_ingestion_timestamp" and v)
-            
-            # Skip if no content
-            if not content:
-                continue
-            
-            # Extract IOCs
-            is_csv = feed_name.endswith("_csv") or "csv" in feed_name
-            iocs = extract_iocs(row.get("csv_content", ""), "csv") if is_csv else extract_iocs(content, "text")
-            
-            # Enrich IOCs
-            enriched_iocs = [enrich_ioc(ioc) for ioc in iocs]
-            ioc_count += len(enriched_iocs)
-            
-            # Analyze with Vertex AI
-            metadata = {"id": row_id, "type": feed_name}
-            vertex_analysis = analyze_with_vertex_ai(content, metadata)
-            
-            # Combine results
-            analysis_result = {
-                "source_id": row_id,
-                "source_type": feed_name,
-                "iocs": json.dumps(enriched_iocs),
-                "vertex_analysis": json.dumps(vertex_analysis),
-                "analysis_timestamp": datetime.utcnow(),
-                "severity": vertex_analysis.get("severity", "Medium"),
-                "confidence": vertex_analysis.get("confidence", "Medium")
-            }
-            
-            # Store in BigQuery
-            insert_into_bigquery("threat_analysis", [analysis_result])
-            processed_count += 1
-            
-            # Log progress periodically
-            if processed_count % 10 == 0:
-                logging.info(f"Processed {processed_count} items from {feed_name}")
-        
-        # Log completion
-        logging.info(f"Completed processing {processed_count} items, extracted {ioc_count} IOCs from {feed_name}")
-        
-        # Publish event
-        publish_event({
-            "feed_name": feed_name,
-            "processed_count": processed_count,
-            "ioc_count": ioc_count,
-            "timestamp": datetime.utcnow().isoformat(),
-            "event_type": "analysis_complete"
-        })
-        
-        # Run campaign detection
-        self.detect_campaigns(30)
-        
-        return {
-            "feed_name": feed_name,
-            "processed_count": processed_count,
-            "ioc_count": ioc_count
-        }
+    # Get indicator data
+    indicator = get_indicator_data(indicator_id)
     
-    def detect_campaigns(self, days_back: int = 30) -> List[Dict[str, Any]]:
-        """Detect threat campaigns by clustering related IOCs and analyses"""
-        logging.info(f"Detecting campaigns for past {days_back} days")
-        
-        # Query to get recent analyses
-        query = f"""
-        SELECT *
-        FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-        WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
-        """
-        
-        rows = query_bigquery(query)
-        
-        if not rows:
-            logging.warning("No analysis data found for campaign detection")
-            return []
-        
-        # Group analyses by potential campaigns
-        analysis_groups = {}
-        
-        for row in rows:
-            # Parse JSON fields
+    if not indicator:
+        logger.warning(f"Indicator {indicator_id} not found")
+        return {"error": "Indicator not found"}
+    
+    # Check if analysis is needed
+    if not force_reanalysis and indicator.get('last_analyzed'):
+        # Convert string date to datetime if needed
+        if isinstance(indicator['last_analyzed'], str):
             try:
-                vertex_analysis = json.loads(row.get("vertex_analysis", "{}")) if isinstance(row.get("vertex_analysis"), str) else row.get("vertex_analysis", {})
-                iocs = json.loads(row.get("iocs", "[]")) if isinstance(row.get("iocs"), str) else row.get("iocs", [])
-            except json.JSONDecodeError:
-                vertex_analysis = {}
-                iocs = []
-            
-            # Skip if missing key information
-            if not vertex_analysis or not iocs:
-                continue
-            
-            # Extract key campaign identifiers
-            threat_actor = vertex_analysis.get("threat_actor", "").lower()
-            malware = vertex_analysis.get("malware", "").lower()
-            
-            # Generate campaign identifiers
-            campaign_identifiers = []
-            
-            if threat_actor and threat_actor.lower() != "unknown" and len(threat_actor) > 3:
-                campaign_identifiers.append(f"actor:{threat_actor}")
-            
-            if malware and malware.lower() != "unknown" and len(malware) > 3:
-                campaign_identifiers.append(f"malware:{malware}")
-            
-            # Skip if no strong identifiers
-            if not campaign_identifiers:
-                continue
-            
-            # Create a hash key for the campaign
-            campaign_key = hashlib.md5(
-                "|".join(sorted(campaign_identifiers)).encode()
-            ).hexdigest()
-            
-            # Add to campaign group
-            if campaign_key not in analysis_groups:
-                analysis_groups[campaign_key] = {
-                    "analyses": [],
-                    "iocs": [],
-                    "identifiers": campaign_identifiers,
-                    "threat_actor": threat_actor if threat_actor.lower() != "unknown" else "",
-                    "malware": malware if malware.lower() != "unknown" else "",
-                    "techniques": vertex_analysis.get("techniques", ""),
-                    "targets": vertex_analysis.get("targets", ""),
-                    "severity": vertex_analysis.get("severity", "medium"),
-                    "timestamps": []
-                }
-            
-            analysis_groups[campaign_key]["analyses"].append(row["source_id"])
-            analysis_groups[campaign_key]["iocs"].extend(iocs)
-            
-            # Track timestamps
-            if "analysis_timestamp" in row:
-                timestamp = row["analysis_timestamp"]
-                if isinstance(timestamp, datetime):
-                    analysis_groups[campaign_key]["timestamps"].append(timestamp)
+                last_analyzed = datetime.fromisoformat(indicator['last_analyzed'].replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                last_analyzed = None
+        else:
+            last_analyzed = indicator.get('last_analyzed')
         
-        # Convert groups to campaigns
-        campaigns = []
-        for key, group in analysis_groups.items():
-            # Skip small groups (likely false positives)
-            if len(group["analyses"]) < 2:
-                continue
+        # Skip if recently analyzed (within 24 hours)
+        if last_analyzed and (datetime.utcnow() - last_analyzed) < timedelta(hours=24):
+            logger.info(f"Indicator {indicator_id} was recently analyzed, skipping")
+            return {"status": "skipped", "reason": "recently_analyzed"}
+    
+    # Initialize analysis result
+    analysis_result = {
+        "indicator_id": indicator_id,
+        "indicator_type": indicator.get('type'),
+        "indicator_value": indicator.get('value'),
+        "timestamp": datetime.utcnow().isoformat(),
+        "enrichment": {},
+        "tags": []
+    }
+    
+    # Determine indicator type if not set
+    if not indicator.get('type') and indicator.get('value'):
+        indicator_type = extract_ioc_type(indicator['value'])
+        analysis_result["detected_type"] = indicator_type
+    else:
+        indicator_type = indicator.get('type', 'unknown')
+    
+    # Enrich based on indicator type
+    if indicator_type == 'ip':
+        # Enrich IP with geolocation data
+        geo_data = enrich_with_geo_data(indicator['value'])
+        analysis_result["enrichment"]["geo"] = geo_data
+        
+        # Add country tag if available
+        if geo_data.get('country'):
+            analysis_result["tags"].append(f"country:{geo_data['country']}")
+        
+        # Add ASN tag if available
+        if geo_data.get('asn'):
+            analysis_result["tags"].append(f"asn:{geo_data['asn']}")
+    
+    elif indicator_type == 'domain':
+        # Enrich domain with DNS data
+        dns_data = enrich_with_dns_data(indicator['value'])
+        analysis_result["enrichment"]["dns"] = dns_data
+        
+        # Add tags based on DNS data
+        if dns_data.get('resolved_ips'):
+            analysis_result["tags"].append(f"active")
+        
+        if dns_data.get('has_mx'):
+            analysis_result["tags"].append(f"has_mx")
+    
+    elif indicator_type == 'url':
+        # Extract domain from URL
+        try:
+            from urllib.parse import urlparse
+            parsed_url = urlparse(indicator['value'])
+            domain = parsed_url.netloc
             
-            # Unique IOCs
-            unique_iocs = {}
-            for ioc in group["iocs"]:
-                ioc_key = f"{ioc.get('type')}:{ioc.get('value')}"
-                unique_iocs[ioc_key] = ioc
+            # Enrich with DNS data for the domain
+            if domain:
+                dns_data = enrich_with_dns_data(domain)
+                analysis_result["enrichment"]["dns"] = dns_data
+                
+                # Add tags based on DNS data
+                if dns_data.get('resolved_ips'):
+                    analysis_result["tags"].append(f"active")
+        except Exception as e:
+            logger.warning(f"Error parsing URL {indicator['value']}: {str(e)}")
+    
+    # Get related indicators
+    if indicator.get('value') and indicator.get('type'):
+        related = get_related_indicators(
+            indicator_value=indicator['value'],
+            indicator_type=indicator['type']
+        )
+        
+        if related:
+            analysis_result["related_indicators_count"] = len(related)
             
-            # Calculate first and last seen
-            timestamps = group["timestamps"]
-            first_seen = min(timestamps) if timestamps else datetime.utcnow()
-            last_seen = max(timestamps) if timestamps else datetime.utcnow()
+            # Add first 3 related indicators
+            analysis_result["related_indicators_sample"] = related[:3]
+    
+    # Calculate confidence score
+    confidence = compute_confidence_score(indicator)
+    analysis_result["confidence"] = confidence
+    
+    # Calculate risk score
+    risk_score = calculate_risk_score(indicator)
+    analysis_result["risk_score"] = risk_score
+    
+    # Add severity tag based on risk score
+    if risk_score >= 80:
+        analysis_result["tags"].append("severity:critical")
+    elif risk_score >= 60:
+        analysis_result["tags"].append("severity:high")
+    elif risk_score >= 40:
+        analysis_result["tags"].append("severity:medium")
+    else:
+        analysis_result["tags"].append("severity:low")
+    
+    # Add any descriptions to the analysis
+    if indicator.get('description'):
+        # Use AI to extract insights from description if available
+        if Config.NLP_ENABLED and text_model:
+            try:
+                ai_analysis = analyze_text_with_ai(
+                    text=indicator['description'],
+                    prompt_type="threat_assessment"
+                )
+                
+                if ai_analysis.get('processed'):
+                    # Add AI insights
+                    analysis_result["ai_insights"] = ai_analysis
+                    
+                    # Generate summary
+                    summary_analysis = analyze_text_with_ai(
+                        text=indicator['description'],
+                        prompt_type="summarize"
+                    )
+                    
+                    if summary_analysis.get('summary'):
+                        analysis_result["summary"] = summary_analysis['summary']
+                    
+                    # Add MITRE ATT&CK tactics/techniques if identified
+                    if ai_analysis.get('tactics'):
+                        for tactic in ai_analysis.get('tactics', []):
+                            analysis_result["tags"].append(f"mitre:tactic:{tactic}")
+                    
+                    if ai_analysis.get('techniques'):
+                        for technique in ai_analysis.get('techniques', []):
+                            analysis_result["tags"].append(f"mitre:technique:{technique}")
             
-            # Generate campaign name
-            if group["threat_actor"]:
-                prefix = group["threat_actor"].split()[0].title()
-            elif group["malware"]:
-                prefix = group["malware"].split()[0].title()
+            except Exception as e:
+                logger.error(f"Error performing AI analysis: {str(e)}")
+    
+    # Upload full analysis to GCS for reference
+    gcs_uri = upload_analysis_to_gcs(analysis_result, indicator_id)
+    if gcs_uri:
+        analysis_result["gcs_uri"] = gcs_uri
+    
+    # Store analysis results in BigQuery
+    success = store_analysis_result(indicator_id, analysis_result)
+    analysis_result["stored"] = success
+    
+    logger.info(f"Completed analysis for indicator {indicator_id}")
+    return analysis_result
+
+def batch_analyze_indicators(indicator_ids: List[str], force_reanalysis: bool = False) -> Dict[str, Any]:
+    """
+    Analyze multiple indicators in batch.
+    
+    Args:
+        indicator_ids: List of indicator IDs to analyze
+        force_reanalysis: Whether to force reanalysis
+    
+    Returns:
+        Dictionary containing batch analysis results
+    """
+    logger.info(f"Starting batch analysis of {len(indicator_ids)} indicators")
+    
+    results = {
+        "total": len(indicator_ids),
+        "successful": 0,
+        "failed": 0,
+        "skipped": 0,
+        "details": []
+    }
+    
+    for idx, indicator_id in enumerate(indicator_ids):
+        try:
+            logger.info(f"Processing indicator {idx+1}/{len(indicator_ids)}: {indicator_id}")
+            
+            # Analyze the indicator
+            analysis_result = analyze_indicator(indicator_id, force_reanalysis)
+            
+            # Update statistics
+            if analysis_result.get('error'):
+                results["failed"] += 1
+            elif analysis_result.get('status') == 'skipped':
+                results["skipped"] += 1
             else:
-                prefix = "Campaign"
+                results["successful"] += 1
             
-            suffix = key[:6]  # Use first 6 chars of hash
-            campaign_name = f"{prefix}-{suffix}"
-            
-            # Create campaign
-            campaign = {
-                "campaign_id": key,
-                "campaign_name": campaign_name,
-                "threat_actor": group["threat_actor"],
-                "malware": group["malware"],
-                "techniques": group["techniques"],
-                "targets": group["targets"],
-                "severity": group["severity"],
-                "sources": json.dumps(group["analyses"]),
-                "iocs": json.dumps(list(unique_iocs.values())),
-                "source_count": len(group["analyses"]),
-                "ioc_count": len(unique_iocs),
-                "first_seen": first_seen.isoformat() if isinstance(first_seen, datetime) else first_seen,
-                "last_seen": last_seen.isoformat() if isinstance(last_seen, datetime) else last_seen,
-                "detection_timestamp": datetime.utcnow().isoformat()
-            }
-            
-            campaigns.append(campaign)
-            
-            # Store campaign in BigQuery
-            insert_into_bigquery("threat_campaigns", [campaign])
+            # Add summarized result
+            results["details"].append({
+                "indicator_id": indicator_id,
+                "success": not analysis_result.get('error'),
+                "skipped": analysis_result.get('status') == 'skipped',
+                "confidence": analysis_result.get('confidence'),
+                "risk_score": analysis_result.get('risk_score')
+            })
         
-        logging.info(f"Detected {len(campaigns)} threat campaigns")
-        return campaigns
-    
-    def analyze_csv_file(self, csv_content: str, feed_name: str = "csv_upload") -> Dict[str, Any]:
-        """Analyze uploaded CSV for threat intelligence"""
-        if not csv_content:
-            return {"error": "Empty CSV data"}
-        
-        try:
-            # Extract IOCs
-            iocs = extract_iocs(csv_content, "csv")
-            
-            # Enrich IOCs
-            enriched_iocs = [enrich_ioc(ioc) for ioc in iocs]
-            
-            # Create analysis ID
-            analysis_id = f"csv_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            
-            # Get sample rows for AI analysis
-            import csv
-            import io
-            
-            csv_reader = csv.reader(io.StringIO(csv_content))
-            headers = next(csv_reader, [])
-            sample_rows = list(row for _, row in zip(range(5), csv_reader))
-            
-            # Create content for analysis
-            content = f"CSV File Analysis: {feed_name}\n\nHeaders: {headers}\n\n"
-            for i, row in enumerate(sample_rows):
-                content += f"Row {i+1}: {row}\n"
-            
-            # Add IOC summary
-            content += f"\nExtracted IOCs:\n"
-            ioc_types = {}
-            for ioc in enriched_iocs:
-                ioc_type = ioc.get("type", "unknown")
-                ioc_types[ioc_type] = ioc_types.get(ioc_type, 0) + 1
-            
-            for ioc_type, count in ioc_types.items():
-                content += f"- {ioc_type}: {count}\n"
-            
-            # Analyze with Vertex AI
-            metadata = {"id": analysis_id, "type": feed_name}
-            vertex_analysis = analyze_with_vertex_ai(content, metadata)
-            
-            # Store result
-            analysis_result = {
-                "source_id": analysis_id,
-                "source_type": feed_name,
-                "iocs": json.dumps(enriched_iocs),
-                "vertex_analysis": json.dumps(vertex_analysis),
-                "analysis_timestamp": datetime.utcnow(),
-                "severity": vertex_analysis.get("severity", "Medium"),
-                "confidence": vertex_analysis.get("confidence", "Medium")
-            }
-            
-            insert_into_bigquery("threat_analysis", [analysis_result])
-            
-            # Create response
-            result = {
-                "analysis_id": analysis_id,
-                "feed_name": feed_name,
-                "iocs": enriched_iocs,
-                "ioc_count": len(enriched_iocs),
-                "vertex_analysis": vertex_analysis,
-                "analysis_timestamp": datetime.utcnow().isoformat()
-            }
-            
-            logging.info(f"Analyzed CSV with {len(enriched_iocs)} IOCs extracted")
-            return result
         except Exception as e:
-            logging.error(f"Error analyzing CSV: {str(e)}")
-            return {"error": f"Analysis failed: {str(e)}"}
-
-# ======== Main Function ========
-
-def analyze_threat_data(event, context):
-    """Cloud Function for threat data analysis"""
-    analyzer = ThreatAnalyzer()
-    
-    # Parse message
-    if 'data' in event:
-        import base64
-        try:
-            data = json.loads(base64.b64decode(event['data']).decode('utf-8'))
-            logging.info(f"Received analysis event: {data}")
-            
-            feed_name = data.get("feed_name")
-            
-            # Check if this is a CSV analysis request
-            if data.get("file_type") == "csv" and "content" in data:
-                return analyzer.analyze_csv_file(data["content"], data.get("feed_name", "csv_upload"))
-            elif feed_name:
-                # Analyze feed data
-                result = analyzer.analyze_feed_data(feed_name)
-                
-                # Detect campaigns periodically
-                if hash(feed_name) % 10 == 0:
-                    analyzer.detect_campaigns()
-                
-                return result
-        except Exception as e:
-            logging.error(f"Error processing event: {str(e)}")
-    
-    # Fallback to analyzing a few default feeds
-    feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]
-    
-    results = []
-    for feed in feeds:
-        try:
-            result = analyzer.analyze_feed_data(feed)
-            results.append(result)
-        except Exception as e:
-            logging.error(f"Error analyzing {feed}: {str(e)}")
-            results.append({
-                "feed_name": feed,
+            logger.error(f"Error analyzing indicator {indicator_id}: {str(e)}")
+            report_error(e)
+            results["failed"] += 1
+            results["details"].append({
+                "indicator_id": indicator_id,
+                "success": False,
                 "error": str(e)
             })
     
-    # Run campaign detection
-    campaigns = analyzer.detect_campaigns()
-    
-    return {"results": results, "campaign_count": len(campaigns)}
+    logger.info(f"Batch analysis completed: {results['successful']} successful, {results['failed']} failed, {results['skipped']} skipped")
+    return results
 
-# For direct execution
-if __name__ == "__main__":
-    analyzer = ThreatAnalyzer()
+def find_indicators_for_analysis(limit: int = 100) -> List[str]:
+    """
+    Find indicators that need analysis or reanalysis.
     
-    # Process default feeds
-    feeds = ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]
+    Args:
+        limit: Maximum number of indicators to return
     
-    for feed in feeds:
-        try:
-            result = analyzer.analyze_feed_data(feed)
-            print(f"Analyzed {feed}: {result}")
-        except Exception as e:
-            print(f"Error analyzing {feed}: {str(e)}")
+    Returns:
+        List of indicator IDs
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return []
     
-    # Detect campaigns
-    campaigns = analyzer.detect_campaigns()
-    print(f"Detected {len(campaigns)} campaigns")
+    indicator_ids = []
+    
+    try:
+        # Find indicators that have never been analyzed or were analyzed more than 7 days ago
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        
+        query = f"""
+        SELECT id FROM `{Config.get_table_name('indicators')}`
+        WHERE 
+            last_analyzed IS NULL
+            OR last_analyzed < @seven_days_ago
+        ORDER BY confidence DESC, created_at DESC
+        LIMIT @limit
+        """
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("seven_days_ago", "TIMESTAMP", seven_days_ago),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit)
+            ]
+        )
+        query_job = bq_client.query(query, job_config=job_config)
+        
+        # Extract indicator IDs
+        for row in query_job:
+            indicator_ids.append(row.id)
+        
+        logger.info(f"Found {len(indicator_ids)} indicators needing analysis")
+    
+    except Exception as e:
+        logger.error(f"Error finding indicators for analysis: {str(e)}")
+        report_error(e)
+    
+    return indicator_ids
+
+def analyze_threat_data(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Main entry point for threat data analysis.
+    
+    Args:
+        event_data: Event data from PubSub trigger
+    
+    Returns:
+        Dictionary containing analysis results
+    """
+    logger.info(f"Received analysis request: {event_data}")
+    
+    try:
+        # Extract parameters from event
+        analyze_all = event_data.get('analyze_all', False)
+        force_reanalysis = event_data.get('force_reanalysis', False)
+        indicator_ids = event_data.get('indicator_ids', [])
+        
+        # If analyze_all, find indicators that need analysis
+        if analyze_all:
+            limit = int(event_data.get('limit', 100))
+            indicator_ids = find_indicators_for_analysis(limit=limit)
+        
+        # Validate indicator_ids
+        if not indicator_ids:
+            logger.warning("No indicators specified for analysis")
+            return {
+                "status": "error",
+                "message": "No indicators specified for analysis"
+            }
+        
+        # Analyze indicators
+        results = batch_analyze_indicators(indicator_ids, force_reanalysis)
+        
+        # Return results
+        return {
+            "status": "success",
+            "results": results
+        }
+    
+    except Exception as e:
+        logger.error(f"Error processing analysis request: {str(e)}\n{traceback.format_exc()}")
+        report_error(e)
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+# -------------------- Correlation Analysis Functions --------------------
+
+def find_correlations(time_window_days: int = 30, min_confidence: int = 70, limit: int = 1000) -> Dict[str, Any]:
+    """
+    Find correlations between indicators observed in the same time window.
+    
+    Args:
+        time_window_days: Time window in days to look for correlations
+        min_confidence: Minimum confidence score for indicators
+        limit: Maximum number of indicators to analyze
+    
+    Returns:
+        Dictionary containing correlation results
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return {"error": "BigQuery client not initialized"}
+    
+    try:
+        logger.info(f"Finding correlations with time window of {time_window_days} days")
+        
+        # Calculate time window
+        start_date = datetime.utcnow() - timedelta(days=time_window_days)
+        
+        # Query to find indicators in the time window
+        query = f"""
+        WITH recent_indicators AS (
+            SELECT * FROM `{Config.get_table_name('indicators')}`
+            WHERE 
+                created_at > @start_date
+                AND confidence >= @min_confidence
+            ORDER BY confidence DESC
+            LIMIT @limit
+        )
+        SELECT 
+            a.id as indicator_a_id,
+            a.type as indicator_a_type,
+            a.value as indicator_a_value,
+            b.id as indicator_b_id,
+            b.type as indicator_b_type,
+            b.value as indicator_b_value,
+            a.source as source_a,
+            b.source as source_b,
+            a.confidence as confidence_a,
+            b.confidence as confidence_b,
+            a.created_at as created_at_a,
+            b.created_at as created_at_b
+        FROM recent_indicators a
+        JOIN recent_indicators b
+        ON 
+            a.id != b.id
+            AND (
+                a.source = b.source
+                OR a.campaign_id = b.campaign_id
+                OR a.report_id = b.report_id
+                OR (a.related_threat_actors IS NOT NULL AND b.related_threat_actors IS NOT NULL AND 
+                    EXISTS(SELECT 1 FROM UNNEST(a.related_threat_actors) x JOIN UNNEST(b.related_threat_actors) y ON x = y))
+            )
+        ORDER BY a.confidence + b.confidence DESC
+        LIMIT 1000
+        """
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("start_date", "TIMESTAMP", start_date),
+                bigquery.ScalarQueryParameter("min_confidence", "INT64", min_confidence),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit)
+            ]
+        )
+        query_job = bq_client.query(query, job_config=job_config)
+        
+        # Process correlations
+        correlations = []
+        for row in query_job:
+            correlation = {
+                "indicator_a": {
+                    "id": row.indicator_a_id,
+                    "type": row.indicator_a_type,
+                    "value": row.indicator_a_value,
+                    "source": row.source_a,
+                    "confidence": row.confidence_a,
+                    "created_at": row.created_at_a.isoformat() if row.created_at_a else None
+                },
+                "indicator_b": {
+                    "id": row.indicator_b_id,
+                    "type": row.indicator_b_type,
+                    "value": row.indicator_b_value,
+                    "source": row.source_b,
+                    "confidence": row.confidence_b,
+                    "created_at": row.created_at_b.isoformat() if row.created_at_b else None
+                },
+                "strength": (row.confidence_a + row.confidence_b) / 2,
+                "correlation_type": "co-occurrence"
+            }
+            correlations.append(correlation)
+        
+        # Group correlations by type
+        correlation_groups = {}
+        for correlation in correlations:
+            type_pair = f"{correlation['indicator_a']['type']}-{correlation['indicator_b']['type']}"
+            if type_pair not in correlation_groups:
+                correlation_groups[type_pair] = []
+            correlation_groups[type_pair].append(correlation)
+        
+        # Calculate statistics
+        stats = {
+            "total_correlations": len(correlations),
+            "by_type": {k: len(v) for k, v in correlation_groups.items()},
+            "time_window_days": time_window_days,
+            "min_confidence": min_confidence
+        }
+        
+        logger.info(f"Found {len(correlations)} correlations")
+        
+        return {
+            "statistics": stats,
+            "correlations": correlations[:100],  # Return only first 100 to avoid overwhelming response
+            "correlation_groups": {k: len(v) for k, v in correlation_groups.items()}
+        }
+    
+    except Exception as e:
+        logger.error(f"Error finding correlations: {str(e)}")
+        report_error(e)
+        return {"error": f"Error finding correlations: {str(e)}"}
+
+def detect_campaigns(min_indicators: int = 5, min_confidence: int = 70) -> Dict[str, Any]:
+    """
+    Detect potential campaigns based on related indicators.
+    
+    Args:
+        min_indicators: Minimum number of indicators to form a campaign
+        min_confidence: Minimum confidence score for indicators
+    
+    Returns:
+        Dictionary containing detected campaigns
+    """
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return {"error": "BigQuery client not initialized"}
+    
+    try:
+        logger.info(f"Detecting campaigns with min_indicators={min_indicators}, min_confidence={min_confidence}")
+        
+        # Query to find potential campaigns
+        query = f"""
+        WITH indicator_sources AS (
+            SELECT 
+                source,
+                COUNT(*) as indicator_count,
+                ARRAY_AGG(DISTINCT type) as indicator_types,
+                ARRAY_AGG(STRUCT(id, type, value, confidence, created_at)) as indicators
+            FROM `{Config.get_table_name('indicators')}`
+            WHERE confidence >= @min_confidence
+            GROUP BY source
+            HAVING COUNT(*) >= @min_indicators
+        )
+        SELECT * FROM indicator_sources
+        ORDER BY indicator_count DESC
+        LIMIT 100
+        """
+        
+        # Execute the query
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("min_indicators", "INT64", min_indicators),
+                bigquery.ScalarQueryParameter("min_confidence", "INT64", min_confidence)
+            ]
+        )
+        query_job = bq_client.query(query, job_config=job_config)
+        
+        # Process potential campaigns
+        campaigns = []
+        for row in query_job:
+            # Format indicators
+            indicators = []
+            for indicator in row.indicators:
+                indicators.append({
+                    "id": indicator.id,
+                    "type": indicator.type,
+                    "value": indicator.value,
+                    "confidence": indicator.confidence,
+                    "created_at": indicator.created_at.isoformat() if indicator.created_at else None
+                })
+            
+            # Create campaign object
+            campaign = {
+                "source": row.source,
+                "indicator_count": row.indicator_count,
+                "indicator_types": row.indicator_types,
+                "indicators": indicators,
+                "first_seen": min([ind.get("created_at", "9999") for ind in indicators if ind.get("created_at")], default=None),
+                "last_seen": max([ind.get("created_at", "0") for ind in indicators if ind.get("created_at")], default=None),
+                "campaign_id": f"auto-{hashlib.md5(row.source.encode()).hexdigest()[:8]}"
+            }
+            campaigns.append(campaign)
+        
+        logger.info(f"Detected {len(campaigns)} potential campaigns")
+        
+        return {
+            "total_campaigns": len(campaigns),
+            "campaigns": campaigns
+        }
+    
+    except Exception as e:
+        logger.error(f"Error detecting campaigns: {str(e)}")
+        report_error(e)
+        return {"error": f"Error detecting campaigns: {str(e)}"}
+
+# -------------------- Main Function --------------------
+
+def analyze_from_pubsub(event, context):
+    """
+    Cloud Function entry point for PubSub triggered analysis.
+    
+    Args:
+        event: The PubSub event
+        context: The event context
+    
+    Returns:
+        None
+    """
+    try:
+        logger.info(f"Received PubSub message: {event}")
+        
+        # Extract message data
+        if 'data' in event:
+            import base64
+            message_data_bytes = base64.b64decode(event['data'])
+            message_data = json.loads(message_data_bytes)
+        else:
+            message_data = {}
+        
+        # Process the analysis request
+        result = analyze_threat_data(message_data)
+        
+        # Log the result summary
+        logger.info(f"Analysis complete: {result.get('status')}")
+        
+        # Optionally publish result to another topic
+        if publisher and result.get('status') == 'success':
+            try:
+                result_topic = f"projects/{Config.GCP_PROJECT}/topics/threat-analysis-results"
+                future = publisher.publish(
+                    result_topic,
+                    json.dumps(result).encode('utf-8'),
+                    operation="analysis_complete"
+                )
+                future.result()  # Wait for the publish operation to complete
+                logger.info(f"Published analysis results to {result_topic}")
+            except Exception as e:
+                logger.error(f"Error publishing analysis results: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Error processing PubSub message: {str(e)}\n{traceback.format_exc()}")
+        report_error(e)
