@@ -128,7 +128,7 @@ steps:
           fi
         fi
         
-        # Grant access - FIXED: Hard-coded the full service account name
+        # Grant access - Fixed service account
         gcloud secrets add-iam-policy-binding $SECRET_NAME --member="serviceAccount:cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
       done
 
@@ -190,7 +190,7 @@ steps:
         fi
       fi
 
-  # Deploy to Cloud Run with improved health check configuration
+  # Deploy to Cloud Run with correct health check configuration
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
@@ -208,8 +208,7 @@ steps:
         secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
-      # Deploy to Cloud Run with IMPROVED startup probe settings
-      # FIXED: Hard-coded the project ID and service account
+      # Deploy to Cloud Run with proper syntax for health checks
       gcloud run deploy threat-intelligence-platform \
         --image gcr.io/primal-chariot-382610/threat-intelligence-platform:${COMMIT_SHA} \
         --region us-central1 \
@@ -219,32 +218,20 @@ steps:
         --memory 2Gi \
         --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=primal-chariot-382610,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=primal-chariot-382610-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false" \
         --service-account=cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com \
-        --startup-cpu-boost \
+        --cpu-boost \
         --min-instances=1 \
         --max-instances=20 \
-        --no-cpu-throttling \
         --timeout=300 \
         --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild \
-        --set-startup-probe-initial-delay=30 \
-        --set-startup-probe-period=15 \
-        --set-startup-probe-timeout=5 \
-        --set-startup-probe-failure-threshold=5 \
-        --set-startup-probe-path=/health \
-        --set-liveness-probe-path=/health \
-        --set-liveness-probe-period=30 \
-        --set-liveness-probe-timeout=5 \
-        --set-liveness-probe-failure-threshold=3 \
-        --set-readiness-probe-path=/api/health \
-        --set-readiness-probe-period=10 \
-        --set-readiness-probe-timeout=5 \
-        --set-readiness-probe-failure-threshold=3
+        --startup-probe=/health?timeout=5s&period=15s&failure-threshold=5&initial-delay=30s \
+        --liveness-probe=/health?timeout=5s&period=30s&failure-threshold=3 \
+        --readiness-probe=/api/health?timeout=5s&period=10s&failure-threshold=3
 
   # Deploy PubSub and scheduler
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-services'
     script: |
       # Setup PubSub topics and subscriptions
-      # FIXED: Hard-coded the project ID
       gcloud pubsub topics create threat-data-ingestion --project=primal-chariot-382610 2>/dev/null || echo "Topic exists"
       gcloud pubsub topics create threat-analysis-events --project=primal-chariot-382610 2>/dev/null || echo "Topic exists"
       gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=primal-chariot-382610 --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
@@ -303,7 +290,6 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'cleanup-old-images'
     script: |
-      # FIXED: Hard-coded the project ID
       gcloud container images list-tags gcr.io/primal-chariot-382610/threat-intelligence-platform \
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
         --quiet gcr.io/primal-chariot-382610/threat-intelligence-platform@{} --force-delete-tags || true
