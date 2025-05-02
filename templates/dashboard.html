@@ -3,10 +3,10 @@
 {% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
 {% block content %}
-<div class="page-header flex justify-between items-center">
+<div class="page-header">
     <div>
-        <h1 class="text-2xl font-bold flex items-center">
-            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} mr-3 text-blue-600"></i>
+        <h1 class="page-title">
+            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} page-icon"></i>
             {{ page_title }}
         </h1>
         <p class="text-gray-600">{{ page_subtitle }}</p>
@@ -110,31 +110,31 @@
 </div>
 
 {% if current_view == 'dashboard' %}
-<!-- Dashboard View -->
+<!-- Main Visualization Sections for Dashboard View -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-    <!-- Activity Chart -->
+    <!-- Threat Map -->
     <div class="lg:col-span-2 panel">
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-chart-line panel-icon"></i>
-                Threat Intelligence Activity
+                <i class="fas fa-globe panel-icon"></i>
+                Threat Geographic Distribution
             </h3>
+            <div class="flex items-center">
+                <span class="mr-2 text-sm">Live Updates</span>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="liveUpdateSwitch" class="sr-only peer" checked>
+                    <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+            </div>
         </div>
-        <div class="p-4">
-            <div id="activityChart" class="h-80 relative">
-                {% if activity_dates and activity_dates|length > 0 and activity_counts and activity_counts|length > 0 %}
-                <!-- Chart will be rendered by JavaScript -->
-                {% else %}
-                <div class="flex items-center justify-center h-full text-gray-400">
+        <div class="p-0">
+            <div id="threatMap" class="h-96 relative">
+                <div class="absolute inset-0 flex items-center justify-center bg-gray-50">
                     <div class="text-center">
-                        <i class="fas fa-chart-line text-gray-300 text-4xl mb-3"></i>
-                        <p>No activity data available</p>
-                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
-                            <i class="fas fa-sync mr-1"></i> Refresh Data
-                        </a>
+                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mb-2"></div>
+                        <p class="text-gray-500">Loading threat map data...</p>
                     </div>
                 </div>
-                {% endif %}
             </div>
         </div>
     </div>
@@ -199,7 +199,7 @@
     </div>
 </div>
 
-<!-- Charts and Tables Section -->
+<!-- Charts Section -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <!-- IOC Types Distribution Chart -->
     <div class="panel" id="iocTypesPanel">
@@ -212,9 +212,7 @@
         </div>
         <div class="p-4">
             <div id="iocTypesChart" class="h-80 relative">
-                {% if ioc_type_labels and ioc_type_values and ioc_type_labels|length > 0 and ioc_type_values|length > 0 %}
-                <!-- Chart will be rendered by JavaScript -->
-                {% else %}
+                {% if not ioc_type_values or ioc_type_values|length == 0 %}
                 <div class="flex items-center justify-center h-full text-gray-400">
                     <div class="text-center">
                         <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
@@ -229,6 +227,35 @@
         </div>
     </div>
     
+    <!-- Intelligence Collection Trends Chart -->
+    <div class="panel" id="activityPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-chart-line panel-icon"></i>
+                Intelligence Collection Trends
+            </h3>
+            <a href="{{ url_for('feeds') }}" class="text-sm text-blue-600 hover:underline">View Feeds</a>
+        </div>
+        <div class="p-4">
+            <div id="activityChart" class="h-80 relative">
+                {% if not activity_dates or activity_dates|length == 0 %}
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <div class="text-center">
+                        <i class="fas fa-chart-line text-gray-300 text-4xl mb-3"></i>
+                        <p>No activity data available</p>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-blue-500 hover:underline inline-block">
+                            <i class="fas fa-sync mr-1"></i> Refresh Data
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tables Section -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <!-- Recent Campaigns Table -->
     <div class="panel" id="campaignsPanel">
         <div class="panel-header">
@@ -242,17 +269,18 @@
             <table class="data-table">
                 <thead class="table-header">
                     <tr>
-                        <th class="px-6 py-3">Campaign</th>
-                        <th class="px-6 py-3">Threat Actor</th>
-                        <th class="px-6 py-3">Last Seen</th>
-                        <th class="px-6 py-3">Severity</th>
+                        <th>Campaign</th>
+                        <th>Threat Actor</th>
+                        <th>Sources</th>
+                        <th>Last Seen</th>
+                        <th>Severity</th>
                     </tr>
                 </thead>
                 <tbody class="table-body">
                     {% if campaigns and campaigns|length > 0 %}
-                        {% for campaign in campaigns %}
+                        {% for campaign in campaigns[:3] %}
                         <tr>
-                            <td class="px-6 py-4">
+                            <td>
                                 {% if campaign is mapping and campaign.campaign_id is defined and campaign.campaign_name is defined %}
                                 <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-blue-600 hover:underline">
                                     {{ campaign.campaign_name }}
@@ -261,9 +289,10 @@
                                 <span class="text-gray-500">Unknown Campaign</span>
                                 {% endif %}
                             </td>
-                            <td class="px-6 py-4">{{ campaign.threat_actor|default('Unknown') if campaign is mapping else 'Unknown' }}</td>
-                            <td class="px-6 py-4">{{ campaign.last_seen|default('N/A')|datetime if campaign is mapping else 'N/A' }}</td>
-                            <td class="px-6 py-4">
+                            <td>{{ campaign.threat_actor|default('Unknown') if campaign is mapping else 'Unknown' }}</td>
+                            <td>{{ campaign.source_count|default(0) if campaign is mapping else 0 }}</td>
+                            <td>{{ campaign.last_seen|default('N/A')|datetime if campaign is mapping else 'N/A' }}</td>
+                            <td>
                                 {% if campaign is mapping and campaign.severity is defined %}
                                     <span class="severity-badge {{ campaign.severity }}">{{ campaign.severity|title }}</span>
                                 {% else %}
@@ -274,7 +303,7 @@
                         {% endfor %}
                     {% else %}
                     <tr>
-                        <td colspan="4" class="px-6 py-4 text-center text-gray-500">
+                        <td colspan="5" class="px-6 py-4 text-center text-gray-500">
                             <div class="py-6">
                                 <i class="fas fa-project-diagram text-gray-300 text-4xl mb-3"></i>
                                 <p>No campaigns detected yet</p>
@@ -289,91 +318,91 @@
             </table>
         </div>
     </div>
-</div>
-
-<!-- Top IOCs Table -->
-<div class="panel" id="iocsPanel">
-    <div class="panel-header">
-        <h3 class="panel-title">
-            <i class="fas fa-fingerprint panel-icon"></i>
-            Top Indicators of Compromise
-        </h3>
-        <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
-    </div>
-    <div class="overflow-x-auto">
-        <table class="data-table">
-            <thead class="table-header">
-                <tr>
-                    <th class="px-6 py-3">Type</th>
-                    <th class="px-6 py-3">Value</th>
-                    <th class="px-6 py-3">Sources</th>
-                    <th class="px-6 py-3">Confidence</th>
-                </tr>
-            </thead>
-            <tbody class="table-body">
-                {% if top_iocs and top_iocs|length > 0 %}
-                    {% for ioc in top_iocs %}
+    
+    <!-- Top IOCs Table -->
+    <div class="panel" id="iocsPanel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-fingerprint panel-icon"></i>
+                Top Indicators of Compromise
+            </h3>
+            <a href="{{ url_for('iocs') }}" class="text-sm text-blue-600 hover:underline">View All</a>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead class="table-header">
                     <tr>
-                        <td class="px-6 py-4">
-                            {% if ioc is mapping and ioc.type is defined %}
-                            <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
-                            {% else %}
-                            <span class="badge-ioc badge-unknown">Unknown</span>
-                            {% endif %}
-                        </td>
-                        <td class="px-6 py-4">
-                            {% if ioc is mapping and ioc.type is defined and ioc.value is defined %}
-                            <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
-                                {{ ioc.value }}
-                            </a>
-                            {% else %}
-                            <span class="text-gray-500">Unknown Value</span>
-                            {% endif %}
-                        </td>
-                        <td class="px-6 py-4">{{ ioc.sources|default(ioc.count)|default(0) if ioc is mapping else 0 }}</td>
-                        <td class="px-6 py-4">
-                            {% if ioc is mapping %}
-                                {% set confidence = namespace(value=ioc.sources|default(ioc.count)|default(1)) %}
-                                {% if confidence.value > 8 %}
-                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                    <div class="bg-green-500 h-1.5 rounded-full" style="width: 95%"></div>
-                                </div>
-                                <span class="text-xs text-gray-500">High</span>
-                                {% elif confidence.value > 4 %}
-                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                    <div class="bg-yellow-500 h-1.5 rounded-full" style="width: 70%"></div>
-                                </div>
-                                <span class="text-xs text-gray-500">Medium</span>
+                        <th>Type</th>
+                        <th>Value</th>
+                        <th>Sources</th>
+                        <th>Confidence</th>
+                    </tr>
+                </thead>
+                <tbody class="table-body">
+                    {% if top_iocs and top_iocs|length > 0 %}
+                        {% for ioc in top_iocs[:4] %}
+                        <tr>
+                            <td>
+                                {% if ioc is mapping and ioc.type is defined %}
+                                <span class="badge-ioc badge-{{ ioc.type }}">{{ ioc.type }}</span>
                                 {% else %}
-                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                    <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
-                                </div>
-                                <span class="text-xs text-gray-500">Low</span>
+                                <span class="badge-ioc badge-unknown">Unknown</span>
                                 {% endif %}
-                            {% else %}
-                                <div class="w-24 bg-gray-200 rounded-full h-1.5">
-                                    <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
-                                </div>
-                                <span class="text-xs text-gray-500">Low</span>
-                            {% endif %}
+                            </td>
+                            <td>
+                                {% if ioc is mapping and ioc.type is defined and ioc.value is defined %}
+                                <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-blue-600 hover:underline">
+                                    {{ ioc.value }}
+                                </a>
+                                {% else %}
+                                <span class="text-gray-500">Unknown Value</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ ioc.sources|default(ioc.count)|default(0) if ioc is mapping else 0 }}</td>
+                            <td>
+                                {% if ioc is mapping %}
+                                    {% set confidence = namespace(value=ioc.sources|default(ioc.count)|default(1)) %}
+                                    {% if confidence.value > 8 %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-green-500 h-1.5 rounded-full" style="width: 95%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">High</span>
+                                    {% elif confidence.value > 4 %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-yellow-500 h-1.5 rounded-full" style="width: 70%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Medium</span>
+                                    {% else %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Low</span>
+                                    {% endif %}
+                                {% else %}
+                                    <div class="w-24 bg-gray-200 rounded-full h-1.5">
+                                        <div class="bg-blue-500 h-1.5 rounded-full" style="width: 40%"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500">Low</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="px-6 py-4 text-center text-gray-500">
+                            <div class="py-6">
+                                <i class="fas fa-fingerprint text-gray-300 text-4xl mb-3"></i>
+                                <p>No IOCs available</p>
+                                <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                    <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
+                                </a>
+                            </div>
                         </td>
                     </tr>
-                    {% endfor %}
-                {% else %}
-                <tr>
-                    <td colspan="4" class="px-6 py-4 text-center text-gray-500">
-                        <div class="py-6">
-                            <i class="fas fa-fingerprint text-gray-300 text-4xl mb-3"></i>
-                            <p>No IOCs available</p>
-                            <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
-                                <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
-                            </a>
-                        </div>
-                    </td>
-                </tr>
-                {% endif %}
-            </tbody>
-        </table>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -385,7 +414,7 @@
             <i class="fas fa-rss panel-icon"></i>
             Threat Intelligence Feeds
         </h3>
-        <a href="{{ url_for('refresh_feeds') }}" class="btn btn-primary btn-sm">
+        <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary btn-sm">
             <i class="fas fa-sync-alt mr-1"></i> Refresh Feeds
         </a>
     </div>
@@ -563,6 +592,7 @@
                         <th class="px-6 py-3">Campaign</th>
                         <th class="px-6 py-3">Threat Actor</th>
                         <th class="px-6 py-3">Sources</th>
+                        <th class="px-6 py-3">First Seen</th>
                         <th class="px-6 py-3">Last Seen</th>
                         <th class="px-6 py-3">Severity</th>
                         <th class="px-6 py-3">Actions</th>
@@ -586,11 +616,13 @@
                                             {{ campaign.campaign_name }}
                                         </a>
                                     </div>
+                                    <div class="text-xs text-gray-500">ID: {{ campaign.campaign_id }}</div>
                                 </div>
                             </div>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.threat_actor|default('Unknown') }}</td>
                         <td class="px-6 py-4 text-sm text-center">{{ campaign.source_count|default(0) }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.first_seen|default('N/A')|datetime }}</td>
                         <td class="px-6 py-4 text-sm text-gray-500">{{ campaign.last_seen|default('N/A')|datetime }}</td>
                         <td class="px-6 py-4">
                             <span class="severity-badge {{ campaign.severity|default('medium') }}">
@@ -611,7 +643,7 @@
                 <i class="fas fa-project-diagram text-blue-500 text-5xl"></i>
             </div>
             <h3 class="text-xl font-semibold text-gray-800 mb-2">No Campaigns Available</h3>
-            <p class="text-gray-600 mb-6">No threat campaigns have been detected yet.</p>
+            <p class="text-gray-600 mb-6">No threat campaigns have been detected yet. Campaigns are automatically detected when multiple related threat indicators are identified.</p>
             <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
                 <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
             </a>
@@ -650,53 +682,55 @@
         });
     }
     
-    // Create charts only if Plotly is available
-    if (typeof Plotly !== 'undefined') {
-        // IOC Types Chart
-        const iocTypesData = {
-            labels: {{ ioc_type_labels|default('[]')|tojson }},
-            values: {{ ioc_type_values|default('[]')|tojson }}
-        };
-        
-        if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
-            Plotly.newPlot('iocTypesChart', [{
-                labels: iocTypesData.labels,
-                values: iocTypesData.values,
-                type: 'pie',
-                textinfo: 'label+percent',
-                marker: {
-                    colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
-                }
-            }], {
-                margin: { t: 0, b: 30, l: 30, r: 30 },
-                showlegend: true,
-                legend: { orientation: 'h', y: -0.2 }
-            });
-        }
-        
-        // Activity Chart
-        const activityData = {
-            dates: {{ activity_dates|default('[]')|tojson }},
-            counts: {{ activity_counts|default('[]')|tojson }}
-        };
-        
-        if (document.getElementById('activityChart') && activityData.dates.length > 0 && activityData.counts.length > 0) {
-            Plotly.newPlot('activityChart', [{
-                x: activityData.dates,
-                y: activityData.counts,
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#3b82f6', shape: 'spline' },
-                marker: { color: '#3b82f6', size: 6 }
-            }], {
-                margin: { t: 10, b: 30, l: 40, r: 10 },
-                xaxis: { title: '' },
-                yaxis: { title: 'Records' }
-            });
-        }
-        
-        // Mini Trend Charts
-        const createSparkline = (elementId, trend = 1, color = '#3b82f6') => {
+    // IOC Types Chart
+    const iocTypesData = {
+        labels: {{ ioc_type_labels|default('[]')|tojson }},
+        values: {{ ioc_type_values|default('[]')|tojson }}
+    };
+    
+    // Only create chart if we have data
+    if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0 && iocTypesData.values.length > 0) {
+        Plotly.newPlot('iocTypesChart', [{
+            labels: iocTypesData.labels,
+            values: iocTypesData.values,
+            type: 'pie',
+            textinfo: 'label+percent',
+            insidetextorientation: 'radial',
+            marker: {
+                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+            }
+        }], {
+            margin: { t: 0, b: 30, l: 30, r: 30 },
+            showlegend: true,
+            legend: { orientation: 'h', y: -0.2 }
+        });
+    }
+    
+    // Activity Chart
+    const activityData = {
+        dates: {{ activity_dates|default('[]')|tojson }},
+        counts: {{ activity_counts|default('[]')|tojson }}
+    };
+    
+    // Only create chart if we have data
+    if (document.getElementById('activityChart') && activityData.dates.length > 0 && activityData.counts.length > 0) {
+        Plotly.newPlot('activityChart', [{
+            x: activityData.dates,
+            y: activityData.counts,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: '#3b82f6', shape: 'spline' },
+            marker: { color: '#3b82f6', size: 6 }
+        }], {
+            margin: { t: 10, b: 30, l: 40, r: 10 },
+            xaxis: { title: '' },
+            yaxis: { title: 'Records' }
+        });
+    }
+    
+    // Mini Trend Charts
+    const createSparkline = (elementId, trend = 1, color = '#3b82f6') => {
+        try {
             const element = document.getElementById(elementId);
             if (!element) return;
             
@@ -720,13 +754,72 @@
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)'
             });
-        };
+        } catch (error) {
+            console.error(`Error creating sparkline for ${elementId}:`, error);
+        }
+    };
+    
+    // Create the sparklines for the stat cards
+    createSparkline('feedTrendChart', {{ feed_trend|default(0) }}, '#3b82f6');
+    createSparkline('iocTrendChart', {{ ioc_trend|default(0) }}, '#ef4444');
+    createSparkline('campaignTrendChart', {{ campaign_trend|default(0) }}, '#10b981');
+    createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#06b6d4');
+    
+    // Threat Map
+    if (document.getElementById('threatMap') && typeof Plotly !== 'undefined') {
+        // Simple world map with sample data (replace with API data in production)
+        const locations = ['USA', 'RUS', 'CHN', 'IND', 'BRA', 'DEU', 'GBR', 'FRA', 'ITA', 'CAN'];
+        const sizes = [30, 25, 20, 15, 10, 8, 7, 6, 5, 4];
+        const colors = ['#ef4444', '#ef4444', '#f97316', '#f97316', '#fbbf24', '#fbbf24', '#4ade80', '#4ade80', '#4ade80', '#4ade80'];
         
-        // Create stat card sparklines
-        createSparkline('feedTrendChart', {{ feed_trend|default(0) }}, '#3b82f6');
-        createSparkline('iocTrendChart', {{ ioc_trend|default(0) }}, '#ef4444');
-        createSparkline('campaignTrendChart', {{ campaign_trend|default(0) }}, '#10b981');
-        createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#06b6d4');
+        const mapData = [{
+            type: 'scattergeo',
+            mode: 'markers',
+            locations: locations,
+            marker: {
+                size: sizes,
+                color: colors,
+                opacity: 0.7,
+                line: {
+                    color: 'black',
+                    width: 1
+                }
+            },
+            text: locations.map((loc, i) => `${loc}: ${sizes[i]} threats`),
+            hoverinfo: 'text'
+        }];
+
+        const mapLayout = {
+            geo: {
+                scope: 'world',
+                showland: true,
+                landcolor: '#F5F5F5',
+                countrycolor: '#D3D3D3',
+                showocean: true,
+                oceancolor: '#E0F7FA',
+                showlakes: true,
+                lakecolor: '#E0F7FA',
+                showrivers: true,
+                rivercolor: '#E0F7FA',
+                showframe: false,
+                showcountries: true,
+                resolution: 50,
+                projection: {
+                    type: 'natural earth'
+                }
+            },
+            margin: {
+                l: 0,
+                r: 0,
+                t: 0,
+                b: 0
+            }
+        };
+
+        Plotly.newPlot('threatMap', mapData, mapLayout);
+        
+        // Remove loading indicator
+        document.querySelector('#threatMap > div:first-child').style.display = 'none';
     }
     
     // IOC type filter
@@ -773,39 +866,61 @@
         });
     }
     
-    // Search filters
-    const setupSearch = (inputId, tableId) => {
-        const searchInput = document.getElementById(inputId);
-        const table = document.getElementById(tableId);
+    // IOC search functionality
+    if (document.getElementById('iocSearch')) {
+        const iocSearch = document.getElementById('iocSearch');
+        const iocTable = document.getElementById('iocTable');
         
-        if (searchInput && table) {
-            searchInput.addEventListener('keyup', function() {
-                const searchTerm = this.value.toLowerCase();
-                const rows = table.querySelectorAll('tr');
-                
-                rows.forEach(row => {
-                    const text = row.textContent.toLowerCase();
-                    if (text.includes(searchTerm)) {
-                        row.style.display = '';
-                    } else {
-                        row.style.display = 'none';
-                    }
-                });
-            });
-        }
-    };
-    
-    // Initialize search filters
-    setupSearch('iocSearch', 'iocTable');
-    setupSearch('campaignSearch', 'campaignTable');
-    
-    // Handle the Refresh Data button
-    const refreshButtons = document.querySelectorAll('a[href*="ingest_threat_data"], a[href*="refresh_feeds"]');
-    refreshButtons.forEach(button => {
-        button.addEventListener('click', function(e) {
-            e.preventDefault();
+        iocSearch.addEventListener('keyup', function() {
+            const searchTerm = this.value.toLowerCase();
+            if (!iocTable) return;
             
-            // Show loading indicator
+            const rows = iocTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Campaign search functionality
+    if (document.getElementById('campaignSearch')) {
+        const campaignSearch = document.getElementById('campaignSearch');
+        const campaignTable = document.getElementById('campaignTable');
+        
+        campaignSearch.addEventListener('keyup', function() {
+            const searchTerm = this.value.toLowerCase();
+            if (!campaignTable) return;
+            
+            const rows = campaignTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Handle the Refresh Threat Data button
+    const refreshDataButton = document.querySelector('a[href*="ingest_threat_data"]');
+    if (refreshDataButton) {
+        refreshDataButton.addEventListener('click', function(e) {
+            e.preventDefault();
+            const originalHtml = this.innerHTML;
+            this.innerHTML = '<i class="fas fa-sync fa-spin mr-2"></i> Refreshing...';
+            this.classList.add('pointer-events-none', 'opacity-75');
+            
+            // Show global loading
+            const loadingTemplate = document.getElementById('loading-template');
             const loadingOverlay = document.createElement('div');
             loadingOverlay.className = 'loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50';
             loadingOverlay.innerHTML = `
@@ -816,15 +931,12 @@
             `;
             document.body.appendChild(loadingOverlay);
             
-            // Show processing status on button
-            const originalHtml = this.innerHTML;
-            this.innerHTML = '<i class="fas fa-sync fa-spin mr-2"></i> Refreshing...';
-            this.classList.add('pointer-events-none', 'opacity-75');
-            
-            // Make the request
+            // Make the actual request
             fetch(this.href)
                 .then(response => {
-                    if (!response.ok) throw new Error('Network response was not ok');
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
                     return response.text();
                 })
                 .then(() => {
@@ -833,14 +945,18 @@
                 })
                 .catch(error => {
                     console.error('Error:', error);
-                    if (loadingOverlay.parentNode) {
+                    
+                    // Remove loading overlay
+                    if (loadingOverlay && loadingOverlay.parentNode) {
                         loadingOverlay.parentNode.removeChild(loadingOverlay);
                     }
+                    
                     this.innerHTML = originalHtml;
                     this.classList.remove('pointer-events-none', 'opacity-75');
+                    
                     alert('Error refreshing data. Please try again.');
                 });
         });
-    });
+    }
 </script>
 {% endblock %}
