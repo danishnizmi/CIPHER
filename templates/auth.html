@@ -11,6 +11,9 @@
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
+    <!-- Inter Font -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+    
     <!-- Custom Tailwind Config -->
     <script>
         tailwind.config = {
@@ -25,6 +28,15 @@
                         danger: '#dc3545',
                         light: '#f8f9fa',
                         dark: '#212529',
+                        accent: '#3b82f6',
+                        'accent-dark': '#2563eb'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                    },
+                    boxShadow: {
+                        card: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+                        'card-hover': '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
                     }
                 }
             }
@@ -35,28 +47,28 @@
     <style type="text/tailwindcss">
         @layer components {
             .form-control {
-                @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
+                @apply w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent text-gray-700;
             }
             .form-label {
                 @apply block text-gray-700 font-medium mb-2;
             }
             .form-group {
-                @apply mb-4;
+                @apply mb-5;
             }
             .btn {
-                @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+                @apply px-4 py-3 rounded-lg font-medium transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2;
             }
-            .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
-            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
-            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
-            .auth-card { @apply bg-white p-8 rounded-lg shadow-md w-full max-w-md; }
-            .auth-header { @apply text-center mb-6; }
-            .auth-footer { @apply mt-6 text-center text-sm text-gray-600; }
-            .alert { @apply px-4 py-3 rounded relative mb-4; }
-            .alert-success { @apply bg-green-100 border border-green-400 text-green-700; }
-            .alert-danger { @apply bg-red-100 border border-red-400 text-red-700; }
-            .alert-warning { @apply bg-yellow-100 border border-yellow-400 text-yellow-700; }
-            .alert-info { @apply bg-blue-100 border border-blue-400 text-blue-700; }
+            .btn-primary { @apply bg-accent text-white hover:bg-accent-dark focus:ring-accent; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600 focus:ring-gray-500; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-600; }
+            .auth-card { @apply bg-white p-8 rounded-lg shadow-lg w-full max-w-md border border-gray-100; }
+            .auth-header { @apply text-center mb-8; }
+            .auth-footer { @apply mt-8 text-center text-sm text-gray-600; }
+            .alert { @apply px-4 py-3 rounded-lg relative mb-6 shadow-sm; }
+            .alert-success { @apply bg-green-100 border border-green-200 text-green-700; }
+            .alert-danger { @apply bg-red-100 border border-red-200 text-red-700; }
+            .alert-warning { @apply bg-yellow-100 border border-yellow-200 text-yellow-700; }
+            .alert-info { @apply bg-blue-100 border border-blue-200 text-blue-700; }
             .badge { @apply px-2 py-1 rounded-full text-xs font-medium; }
             .badge-admin { @apply bg-purple-100 text-purple-800; }
             .badge-analyst { @apply bg-blue-100 text-blue-800; }
@@ -67,19 +79,45 @@
             .password-strength-meter.medium div { @apply w-2/4 bg-yellow-500; }
             .password-strength-meter.strong div { @apply w-3/4 bg-green-500; }
             .password-strength-meter.very-strong div { @apply w-full bg-green-600; }
+            .input-icon-wrapper {
+                @apply relative;
+            }
+            .input-icon-wrapper input {
+                @apply pl-11;
+            }
+            .input-icon {
+                @apply absolute left-0 top-0 h-full w-10 flex items-center justify-center text-gray-400;
+            }
+            .eye-toggle {
+                @apply absolute right-0 top-0 h-full px-3 flex items-center justify-center text-gray-400 cursor-pointer hover:text-gray-600;
+            }
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.3s ease-out;
         }
     </style>
 </head>
-<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
-    <div class="w-full max-w-md">
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4 font-sans">
+    <div class="w-full max-w-md fade-in">
         {% if page_type == 'login' %}
         <!-- Login Form -->
         <div class="auth-card">
             <div class="auth-header">
-                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
-                    <i class="fas fa-shield-alt mr-2"></i> Threat Intelligence Platform
+                <div class="flex justify-center mb-3">
+                    <div class="bg-accent rounded-lg p-3">
+                        <i class="fas fa-shield-alt text-2xl text-white"></i>
+                    </div>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">
+                    Threat Intelligence Platform
                 </h1>
-                <p class="text-gray-600">Secure login</p>
+                <p class="text-gray-600 mt-1">Secure login to continue</p>
             </div>
             
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -104,37 +142,37 @@
             </div>
             {% endif %}
             
-            <form action="{{ url_for('login') }}" method="post" class="space-y-4">
+            <form action="{{ url_for('login') }}" method="post" class="space-y-5">
                 <!-- CSRF token field - critical for security -->
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user"></i>
                         </div>
-                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                        <input type="text" id="username" name="username" required class="form-control" 
                                placeholder="Enter your username" autofocus>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="password" class="form-label">Password</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-lock text-gray-400"></i>
+                    <div class="flex justify-between mb-2">
+                        <label for="password" class="form-label">Password</label>
+                    </div>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-lock"></i>
                         </div>
-                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                        <input type="password" id="password" name="password" required class="form-control" 
                                placeholder="Enter your password" autocomplete="current-password">
-                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                <i class="fas fa-eye"></i>
-                            </button>
+                        <div class="eye-toggle password-toggle">
+                            <i class="fas fa-eye"></i>
                         </div>
                     </div>
                 </div>
                 <div class="flex items-center mb-4">
-                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-blue-600 focus:ring-blue-500">
+                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-accent focus:ring-accent">
                     <label for="remember" class="ml-2 block text-sm text-gray-700">Remember me</label>
                 </div>
                 <div class="form-group">
@@ -146,8 +184,10 @@
             
             <div class="auth-footer">
                 {% if environment != 'production' %}
-                <p>Default login credentials:</p>
-                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                <div class="bg-gray-100 p-3 rounded-lg text-sm mb-4">
+                    <p>Default login credentials:</p>
+                    <p class="mt-1">Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                </div>
                 {% endif %}
                 <div class="mt-4 text-gray-500 text-xs">
                     <p>&copy; {{ now.year }} Threat Intelligence Platform</p>
@@ -160,10 +200,13 @@
         <!-- User Profile -->
         <div class="auth-card">
             <div class="auth-header">
-                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
-                    <i class="fas fa-user-circle mr-2"></i> User Profile
-                </h1>
-                <p class="text-gray-600">Manage your account settings</p>
+                <div class="flex justify-center mb-4">
+                    <div class="bg-accent rounded-full p-4">
+                        <i class="fas fa-user-circle text-3xl text-white"></i>
+                    </div>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">User Profile</h1>
+                <p class="text-gray-600 mt-1">Manage your account settings</p>
             </div>
             
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -179,11 +222,11 @@
                 {% endif %}
             {% endwith %}
             
-            <div class="mb-6">
-                <div class="bg-gray-50 rounded-lg p-4 mb-4">
+            <div class="mb-8">
+                <div class="bg-gray-50 rounded-lg p-5 mb-5 border border-gray-100">
                     <div class="flex items-center">
                         <div class="rounded-full bg-blue-100 p-3 mr-4">
-                            <i class="fas fa-user text-blue-600 text-xl"></i>
+                            <i class="fas fa-user text-accent text-xl"></i>
                         </div>
                         <div>
                             <p class="text-sm text-gray-500">Username</p>
@@ -193,7 +236,7 @@
                 </div>
                 
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="bg-gray-50 rounded-lg p-4 border border-gray-100">
                         <p class="text-sm text-gray-500">Role</p>
                         <div class="mt-1">
                             <span class="badge badge-{{ user.role }}">
@@ -201,7 +244,7 @@
                             </span>
                         </div>
                     </div>
-                    <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="bg-gray-50 rounded-lg p-4 border border-gray-100">
                         <p class="text-sm text-gray-500">Last Login</p>
                         <p class="font-medium">{{ user.last_login|default('Never') }}</p>
                     </div>
@@ -209,34 +252,30 @@
             </div>
             
             <div class="border-t border-gray-200 my-6 pt-6">
-                <h3 class="text-lg font-medium text-gray-800 mb-3">Change Password</h3>
-                <form action="{{ url_for('change_password') }}" method="post" class="space-y-4" id="passwordForm">
+                <h3 class="text-lg font-medium text-gray-800 mb-4">Change Password</h3>
+                <form action="{{ url_for('change_password') }}" method="post" class="space-y-5" id="passwordForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="form-group">
                         <label for="current_password" class="form-label">Current Password</label>
-                        <div class="relative">
-                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <i class="fas fa-lock text-gray-400"></i>
+                        <div class="input-icon-wrapper">
+                            <div class="input-icon">
+                                <i class="fas fa-lock"></i>
                             </div>
-                            <input type="password" id="current_password" name="current_password" required class="form-control pl-10" autocomplete="current-password">
-                            <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                    <i class="fas fa-eye"></i>
-                                </button>
+                            <input type="password" id="current_password" name="current_password" required class="form-control" autocomplete="current-password">
+                            <div class="eye-toggle password-toggle">
+                                <i class="fas fa-eye"></i>
                             </div>
                         </div>
                     </div>
                     <div class="form-group">
                         <label for="new_password" class="form-label">New Password</label>
-                        <div class="relative">
-                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <i class="fas fa-lock text-gray-400"></i>
+                        <div class="input-icon-wrapper">
+                            <div class="input-icon">
+                                <i class="fas fa-key"></i>
                             </div>
-                            <input type="password" id="new_password" name="new_password" required class="form-control pl-10" autocomplete="new-password">
-                            <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                    <i class="fas fa-eye"></i>
-                                </button>
+                            <input type="password" id="new_password" name="new_password" required class="form-control" autocomplete="new-password">
+                            <div class="eye-toggle password-toggle">
+                                <i class="fas fa-eye"></i>
                             </div>
                         </div>
                         <!-- Password strength meter -->
@@ -247,29 +286,34 @@
                     </div>
                     <div class="form-group">
                         <label for="confirm_password" class="form-label">Confirm New Password</label>
-                        <div class="relative">
-                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <i class="fas fa-lock text-gray-400"></i>
+                        <div class="input-icon-wrapper">
+                            <div class="input-icon">
+                                <i class="fas fa-check-circle"></i>
                             </div>
-                            <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" autocomplete="new-password">
+                            <input type="password" id="confirm_password" name="confirm_password" required class="form-control" autocomplete="new-password">
+                            <div class="eye-toggle password-toggle">
+                                <i class="fas fa-eye"></i>
+                            </div>
                         </div>
                         <div id="password-match-message" class="text-sm mt-1 hidden"></div>
                     </div>
-                    <div class="bg-blue-50 p-4 rounded-lg text-sm text-blue-700 mb-4">
+                    <div class="bg-blue-50 p-4 rounded-lg text-sm text-blue-700 mb-5 border border-blue-100">
                         <p class="flex items-center"><i class="fas fa-info-circle mr-2"></i> Password requirements:</p>
-                        <ul class="list-disc ml-5 mt-1">
+                        <ul class="list-disc ml-5 mt-2">
                             <li>At least 8 characters long</li>
-                            <li>Contains at least one uppercase letter</li>
-                            <li>Contains at least one number</li>
-                            <li>Contains at least one special character</li>
+                            <li class="mt-1">Contains at least one uppercase letter</li>
+                            <li class="mt-1">Contains at least one number</li>
+                            <li class="mt-1">Contains at least one special character</li>
                         </ul>
                     </div>
-                    <button type="submit" class="btn btn-primary w-full" id="changePasswordBtn">Change Password</button>
+                    <button type="submit" class="btn btn-primary w-full flex justify-center items-center" id="changePasswordBtn">
+                        <i class="fas fa-key mr-2"></i> Change Password
+                    </button>
                 </form>
             </div>
             
             <div class="auth-footer">
-                <a href="{{ url_for('dashboard') }}" class="text-blue-600 hover:underline">
+                <a href="{{ url_for('dashboard') }}" class="text-accent hover:underline flex items-center justify-center">
                     <i class="fas fa-arrow-left mr-1"></i> Back to Dashboard
                 </a>
             </div>
@@ -279,10 +323,13 @@
         <!-- Add User Form -->
         <div class="auth-card">
             <div class="auth-header">
-                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
-                    <i class="fas fa-user-plus mr-2"></i> Add New User
-                </h1>
-                <p class="text-gray-600">Create a new platform user</p>
+                <div class="flex justify-center mb-3">
+                    <div class="bg-green-500 rounded-lg p-3">
+                        <i class="fas fa-user-plus text-2xl text-white"></i>
+                    </div>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">Add New User</h1>
+                <p class="text-gray-600 mt-1">Create a new platform user</p>
             </div>
             
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -298,31 +345,29 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('add_user_route') }}" method="post" class="space-y-4" id="userForm">
+            <form action="{{ url_for('add_user_route') }}" method="post" class="space-y-5" id="userForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user"></i>
                         </div>
-                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                        <input type="text" id="username" name="username" required class="form-control" 
                                placeholder="Enter username" autofocus>
                     </div>
                     <p class="text-sm text-gray-500 mt-1">Username must be at least 3 characters long.</p>
                 </div>
                 <div class="form-group">
                     <label for="password" class="form-label">Password</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-lock text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-lock"></i>
                         </div>
-                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                        <input type="password" id="password" name="password" required class="form-control" 
                                placeholder="Enter password" autocomplete="new-password">
-                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                <i class="fas fa-eye"></i>
-                            </button>
+                        <div class="eye-toggle password-toggle">
+                            <i class="fas fa-eye"></i>
                         </div>
                     </div>
                     <!-- Password strength meter -->
@@ -333,45 +378,49 @@
                 </div>
                 <div class="form-group">
                     <label for="confirm_password" class="form-label">Confirm Password</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-lock text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-check-circle"></i>
                         </div>
-                        <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" 
+                        <input type="password" id="confirm_password" name="confirm_password" required class="form-control" 
                                placeholder="Confirm password" autocomplete="new-password">
                     </div>
                     <div id="password-match-message" class="text-sm mt-1 hidden"></div>
                 </div>
                 <div class="form-group">
                     <label for="role" class="form-label">Role</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user-tag text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user-tag"></i>
                         </div>
-                        <select id="role" name="role" class="form-control pl-10">
+                        <select id="role" name="role" class="form-control">
                             <option value="readonly">Read-Only</option>
                             <option value="analyst">Analyst</option>
                             <option value="admin">Admin</option>
                         </select>
                     </div>
-                    <div class="grid grid-cols-3 gap-2 mt-2">
-                        <div class="text-center p-2 rounded bg-gray-100">
+                    <div class="grid grid-cols-3 gap-2 mt-3">
+                        <div class="text-center p-3 rounded bg-gray-50 border border-gray-100">
                             <span class="badge badge-readonly">Read-Only</span>
-                            <p class="text-xs mt-1">View-only access</p>
+                            <p class="text-xs mt-2">View-only access</p>
                         </div>
-                        <div class="text-center p-2 rounded bg-gray-100">
+                        <div class="text-center p-3 rounded bg-gray-50 border border-gray-100">
                             <span class="badge badge-analyst">Analyst</span>
-                            <p class="text-xs mt-1">Can analyze data</p>
+                            <p class="text-xs mt-2">Can analyze data</p>
                         </div>
-                        <div class="text-center p-2 rounded bg-gray-100">
+                        <div class="text-center p-3 rounded bg-gray-50 border border-gray-100">
                             <span class="badge badge-admin">Admin</span>
-                            <p class="text-xs mt-1">Full access</p>
+                            <p class="text-xs mt-2">Full access</p>
                         </div>
                     </div>
                 </div>
                 <div class="flex space-x-4">
-                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center">Cancel</a>
-                    <button type="submit" class="btn btn-primary flex-1" id="submitBtn">Add User</button>
+                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
+                        <i class="fas fa-times mr-2"></i> Cancel
+                    </a>
+                    <button type="submit" class="btn btn-primary flex-1 flex justify-center items-center" id="submitBtn">
+                        <i class="fas fa-user-plus mr-2"></i> Add User
+                    </button>
                 </div>
             </form>
         </div>
@@ -380,10 +429,13 @@
         <!-- Edit User Form -->
         <div class="auth-card">
             <div class="auth-header">
-                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
-                    <i class="fas fa-user-edit mr-2"></i> Edit User
-                </h1>
-                <p class="text-gray-600">Modify user settings for {{ username }}</p>
+                <div class="flex justify-center mb-3">
+                    <div class="bg-blue-500 rounded-lg p-3">
+                        <i class="fas fa-user-edit text-2xl text-white"></i>
+                    </div>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">Edit User</h1>
+                <p class="text-gray-600 mt-1">Modify user settings for {{ username }}</p>
             </div>
             
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -399,39 +451,37 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('edit_user', username=username) }}" method="post" class="space-y-4">
+            <form action="{{ url_for('edit_user', username=username) }}" method="post" class="space-y-5">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user"></i>
                         </div>
-                        <input type="text" id="username" value="{{ username }}" class="form-control pl-10 bg-gray-100" disabled>
+                        <input type="text" id="username" value="{{ username }}" class="form-control bg-gray-100" disabled>
                     </div>
                 </div>
                 <div class="form-group">
                     <label for="password" class="form-label">New Password (leave blank to keep current)</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-lock text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-key"></i>
                         </div>
-                        <input type="password" id="password" name="password" class="form-control pl-10" 
+                        <input type="password" id="password" name="password" class="form-control" 
                                placeholder="Enter new password (optional)" autocomplete="new-password">
-                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                <i class="fas fa-eye"></i>
-                            </button>
+                        <div class="eye-toggle password-toggle">
+                            <i class="fas fa-eye"></i>
                         </div>
                     </div>
                 </div>
                 <div class="form-group">
                     <label for="role" class="form-label">Role</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user-tag text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user-tag"></i>
                         </div>
-                        <select id="role" name="role" class="form-control pl-10">
+                        <select id="role" name="role" class="form-control">
                             <option value="readonly" {% if user.role == 'readonly' %}selected{% endif %}>Read-Only</option>
                             <option value="analyst" {% if user.role == 'analyst' %}selected{% endif %}>Analyst</option>
                             <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>Admin</option>
@@ -440,7 +490,7 @@
                 </div>
                 
                 <!-- Last login information -->
-                <div class="bg-gray-50 rounded-lg p-4 my-4">
+                <div class="bg-gray-50 rounded-lg p-4 my-5 border border-gray-100">
                     <div class="flex items-center">
                         <div class="rounded-full bg-blue-100 p-2 mr-3">
                             <i class="fas fa-clock text-blue-600"></i>
@@ -453,13 +503,20 @@
                 </div>
                 
                 <div class="flex space-x-4">
-                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center">Cancel</a>
-                    <button type="submit" class="btn btn-primary flex-1">Save Changes</button>
+                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
+                        <i class="fas fa-arrow-left mr-2"></i> Cancel
+                    </a>
+                    <button type="submit" class="btn btn-primary flex-1 flex justify-center items-center">
+                        <i class="fas fa-save mr-2"></i> Save Changes
+                    </button>
                 </div>
             </form>
             
             <div class="border-t border-gray-200 my-6 pt-6">
-                <h3 class="text-lg font-medium text-gray-800 mb-3">Danger Zone</h3>
+                <h3 class="text-lg font-medium text-gray-800 mb-3 flex items-center">
+                    <i class="fas fa-exclamation-triangle text-red-500 mr-2"></i>
+                    Danger Zone
+                </h3>
                 <p class="text-sm text-gray-600 mb-3">Deleting a user cannot be undone. This will permanently remove all account information.</p>
                 
                 <button type="button" id="deleteUserBtn" class="btn btn-danger w-full flex items-center justify-center">
@@ -468,13 +525,13 @@
             </div>
             
             <!-- Delete confirmation modal -->
-            <div id="deleteModal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 hidden">
-                <div class="bg-white rounded-lg p-6 max-w-md mx-4">
+            <div id="deleteModal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 hidden fade-in">
+                <div class="bg-white rounded-lg p-6 max-w-md mx-4 shadow-xl">
                     <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
                         <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
                         Confirm Deletion
                     </h3>
-                    <p class="mb-4">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
+                    <p class="mb-6 text-gray-700">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
                     <div class="flex justify-end space-x-3">
                         <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
                         <form action="{{ url_for('delete_user', username=username) }}" method="post">
@@ -489,21 +546,21 @@
         {% elif page_type == 'not_authorized' %}
         <!-- Not Authorized -->
         <div class="auth-card">
-            <div class="text-center mb-6">
-                <div class="text-amber-500 text-6xl mb-4">
+            <div class="text-center mb-8">
+                <div class="text-amber-500 text-6xl mb-4 flex justify-center">
                     <i class="fas fa-exclamation-triangle"></i>
                 </div>
-                <h1 class="text-2xl font-bold text-gray-800 mb-2">Access Denied</h1>
+                <h1 class="text-2xl font-bold text-gray-800 mb-3">Access Denied</h1>
                 <p class="text-gray-600">You don't have permission to access this page.</p>
             </div>
             
             <div class="flex justify-center">
-                <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
+                <a href="{{ url_for('dashboard') }}" class="btn btn-primary flex items-center">
                     <i class="fas fa-home mr-2"></i> Back to Dashboard
                 </a>
             </div>
             
-            <div class="mt-6 text-sm text-gray-500">
+            <div class="mt-6 text-sm text-gray-500 text-center">
                 <p>If you believe this is an error, please contact your system administrator.</p>
             </div>
         </div>
@@ -512,10 +569,15 @@
         <!-- Default Login Form -->
         <div class="auth-card">
             <div class="auth-header">
-                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
-                    <i class="fas fa-shield-alt mr-2"></i> Threat Intelligence Platform
+                <div class="flex justify-center mb-3">
+                    <div class="bg-accent rounded-lg p-3">
+                        <i class="fas fa-shield-alt text-2xl text-white"></i>
+                    </div>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">
+                    Threat Intelligence Platform
                 </h1>
-                <p class="text-gray-600">Secure login</p>
+                <p class="text-gray-600 mt-1">Secure login</p>
             </div>
             
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -531,37 +593,35 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('login') }}" method="post" class="space-y-4">
+            <form action="{{ url_for('login') }}" method="post" class="space-y-5">
                 <!-- Critical: CSRF token field -->
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-user text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-user"></i>
                         </div>
-                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                        <input type="text" id="username" name="username" required class="form-control" 
                                placeholder="Enter your username" autofocus>
                     </div>
                 </div>
                 <div class="form-group">
                     <label for="password" class="form-label">Password</label>
-                    <div class="relative">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-lock text-gray-400"></i>
+                    <div class="input-icon-wrapper">
+                        <div class="input-icon">
+                            <i class="fas fa-lock"></i>
                         </div>
-                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                        <input type="password" id="password" name="password" required class="form-control" 
                                placeholder="Enter your password" autocomplete="current-password">
-                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
-                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
-                                <i class="fas fa-eye"></i>
-                            </button>
+                        <div class="eye-toggle password-toggle">
+                            <i class="fas fa-eye"></i>
                         </div>
                     </div>
                 </div>
                 <div class="flex items-center mb-4">
-                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-blue-600 focus:ring-blue-500">
+                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-accent focus:ring-accent">
                     <label for="remember" class="ml-2 block text-sm text-gray-700">Remember me</label>
                 </div>
                 <div class="form-group">
@@ -573,8 +633,10 @@
             
             <div class="auth-footer">
                 {% if environment != 'production' %}
-                <p>Default login credentials:</p>
-                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                <div class="bg-gray-100 p-3 rounded-lg text-sm mb-4">
+                    <p>Default login credentials:</p>
+                    <p class="mt-1">Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                </div>
                 {% endif %}
                 <div class="mt-4 text-gray-500 text-xs">
                     <p>&copy; {{ now.year }} Threat Intelligence Platform</p>
@@ -592,7 +654,7 @@
             const passwordToggles = document.querySelectorAll('.password-toggle');
             passwordToggles.forEach(toggle => {
                 toggle.addEventListener('click', function() {
-                    const passwordField = this.closest('.relative').querySelector('input');
+                    const passwordField = this.closest('.input-icon-wrapper').querySelector('input');
                     const icon = this.querySelector('i');
                     if (passwordField.type === 'password') {
                         passwordField.type = 'text';
