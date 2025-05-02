@@ -104,7 +104,7 @@ python -c "import config; print(\"config module found\")" || echo "WARNING: conf
 # Start gunicorn\n\
 echo "Starting gunicorn..."\n\
 cd /app && exec gunicorn \\\n\
-  --bind :$PORT \\\n\
+  --bind :$${PORT} \\\n\
   --workers 2 \\\n\
   --threads 8 \\\n\
   --timeout 300 \\\n\
@@ -118,7 +118,7 @@ RUN chown -R appuser:appuser /app /secrets
 USER appuser
 
 # Expose port
-EXPOSE $PORT
+EXPOSE ${PORT}
 
 # Set entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
