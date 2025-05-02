@@ -3,247 +3,481 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% if page_type == 'login' %}Login{% elif page_type == 'profile' %}User Profile{% elif page_type == 'user_add' %}Add User{% elif page_type == 'user_edit' %}Edit User{% else %}Authentication{% endif %} - Threat Intelligence Platform</title>
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+    <title>{% block auth_title %}Authentication{% endblock %} - Threat Intelligence Platform</title>
     
-    <!-- Base Styles -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet">
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    <style>
-        /* Alert styles */
-        .alert { @apply p-4 mb-4 rounded-md; }
-        .alert-danger { @apply bg-red-100 text-red-800; }
-        .alert-success { @apply bg-green-100 text-green-800; }
-        .alert-warning { @apply bg-yellow-100 text-yellow-800; }
-        .alert-info { @apply bg-blue-100 text-blue-800; }
-        
-        /* Form styles */
-        .form-control { @apply block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm; }
-        .form-label { @apply block text-sm font-medium text-gray-700 mb-1; }
-        .form-group { @apply mb-4; }
-        
-        /* Button styles */
-        .btn { @apply px-4 py-2 rounded-md font-medium focus:outline-none focus:ring-2 focus:ring-offset-2; }
-        .btn-primary { @apply bg-blue-600 hover:bg-blue-700 text-white focus:ring-blue-500; }
-        .btn-danger { @apply bg-red-600 hover:bg-red-700 text-white focus:ring-red-500; }
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#0d6efd',
+                        secondary: '#6c757d',
+                        success: '#198754',
+                        info: '#0dcaf0',
+                        warning: '#ffc107',
+                        danger: '#dc3545',
+                        light: '#f8f9fa',
+                        dark: '#212529',
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Custom Tailwind Styles -->
+    <style type="text/tailwindcss">
+        @layer components {
+            .form-control {
+                @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
+            }
+            .form-label {
+                @apply block text-gray-700 font-medium mb-2;
+            }
+            .form-group {
+                @apply mb-4;
+            }
+            .btn {
+                @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+            }
+            .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+            .auth-card { @apply bg-white p-8 rounded-lg shadow-md w-full max-w-md; }
+            .auth-header { @apply text-center mb-6; }
+            .auth-footer { @apply mt-6 text-center text-sm text-gray-600; }
+            .alert { @apply px-4 py-3 rounded relative mb-4; }
+            .alert-success { @apply bg-green-100 border border-green-400 text-green-700; }
+            .alert-danger { @apply bg-red-100 border border-red-400 text-red-700; }
+            .alert-warning { @apply bg-yellow-100 border border-yellow-400 text-yellow-700; }
+            .alert-info { @apply bg-blue-100 border border-blue-400 text-blue-700; }
+            .badge { @apply px-2 py-1 rounded-full text-xs font-medium; }
+            .badge-admin { @apply bg-purple-100 text-purple-800; }
+            .badge-analyst { @apply bg-blue-100 text-blue-800; }
+            .badge-readonly { @apply bg-gray-100 text-gray-800; }
+            .password-strength-meter { @apply h-2 w-full bg-gray-200 rounded-full overflow-hidden mt-1; }
+            .password-strength-meter div { @apply h-full transition-all duration-300; }
+            .password-strength-meter.weak div { @apply w-1/4 bg-red-500; }
+            .password-strength-meter.medium div { @apply w-2/4 bg-yellow-500; }
+            .password-strength-meter.strong div { @apply w-3/4 bg-green-500; }
+            .password-strength-meter.very-strong div { @apply w-full bg-green-600; }
+        }
     </style>
 </head>
-<body class="bg-gray-100 h-screen flex items-center justify-center">
-    <div class="max-w-md w-full">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <div class="mb-4">
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-md">
+        {% if page_type == 'login' %}
+        <!-- Login Form -->
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
+                    <i class="fas fa-shield-alt mr-2"></i> Threat Intelligence Platform
+                </h1>
+                <p class="text-gray-600">Secure login</p>
+            </div>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
                     {% for category, message in messages %}
-                        <div class="alert {% if category == 'error' or category == 'danger' %}alert-danger{% elif category == 'warning' %}alert-warning{% elif category == 'success' %}alert-success{% else %}alert-info{% endif %}">
-                            <div class="flex">
-                                <div class="flex-shrink-0">
-                                    {% if category == 'error' or category == 'danger' %}
-                                        <i class="fas fa-exclamation-circle"></i>
-                                    {% elif category == 'warning' %}
-                                        <i class="fas fa-exclamation-triangle"></i>
-                                    {% elif category == 'success' %}
-                                        <i class="fas fa-check-circle"></i>
-                                    {% else %}
-                                        <i class="fas fa-info-circle"></i>
-                                    {% endif %}
-                                </div>
-                                <div class="ml-3">{{ message }}</div>
-                            </div>
+                        <div class="alert alert-{{ category }}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
                     {% endfor %}
-                </div>
+                {% endif %}
+            {% endwith %}
+            
+            {% if error %}
+            <div class="alert alert-danger">
+                <span class="block sm:inline">{{ error }}</span>
+                <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
             {% endif %}
-        {% endwith %}
+            
+            <form action="{{ url_for('login') }}" method="post" class="space-y-4">
+                <!-- CSRF token field - critical for security -->
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user text-gray-400"></i>
+                        </div>
+                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                               placeholder="Enter your username" autofocus>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-lock text-gray-400"></i>
+                        </div>
+                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                               placeholder="Enter your password" autocomplete="current-password">
+                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center mb-4">
+                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-blue-600 focus:ring-blue-500">
+                    <label for="remember" class="ml-2 block text-sm text-gray-700">Remember me</label>
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn btn-primary w-full flex justify-center items-center">
+                        <i class="fas fa-sign-in-alt mr-2"></i> Log In
+                    </button>
+                </div>
+            </form>
+            
+            <div class="auth-footer">
+                {% if environment != 'production' %}
+                <p>Default login credentials:</p>
+                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                {% endif %}
+                <div class="mt-4 text-gray-500 text-xs">
+                    <p>&copy; {{ now.year }} Threat Intelligence Platform</p>
+                    <p>Version: {{ version }} | {{ environment }}</p>
+                </div>
+            </div>
+        </div>
         
-        <!-- Login View -->
-        {% if page_type == 'login' %}
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="px-6 py-8">
-                <div class="text-center mb-8">
-                    <h1 class="text-3xl font-bold text-gray-800">Threat Intelligence Platform</h1>
-                    <p class="text-gray-600 mt-2">Sign in to your account</p>
+        {% elif page_type == 'profile' %}
+        <!-- User Profile -->
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
+                    <i class="fas fa-user-circle mr-2"></i> User Profile
+                </h1>
+                <p class="text-gray-600">Manage your account settings</p>
+            </div>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <div class="mb-6">
+                <div class="bg-gray-50 rounded-lg p-4 mb-4">
+                    <div class="flex items-center">
+                        <div class="rounded-full bg-blue-100 p-3 mr-4">
+                            <i class="fas fa-user text-blue-600 text-xl"></i>
+                        </div>
+                        <div>
+                            <p class="text-sm text-gray-500">Username</p>
+                            <p class="text-xl font-bold">{{ username }}</p>
+                        </div>
+                    </div>
                 </div>
                 
-                <form method="POST" action="{{ url_for('login') }}">
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-gray-50 rounded-lg p-4">
+                        <p class="text-sm text-gray-500">Role</p>
+                        <div class="mt-1">
+                            <span class="badge badge-{{ user.role }}">
+                                {{ user.role|title }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg p-4">
+                        <p class="text-sm text-gray-500">Last Login</p>
+                        <p class="font-medium">{{ user.last_login|default('Never') }}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="border-t border-gray-200 my-6 pt-6">
+                <h3 class="text-lg font-medium text-gray-800 mb-3">Change Password</h3>
+                <form action="{{ url_for('change_password') }}" method="post" class="space-y-4" id="passwordForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    
                     <div class="form-group">
-                        <label for="username" class="form-label">Username</label>
-                        <input type="text" id="username" name="username" class="form-control" autofocus required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="password" class="form-label">Password</label>
-                        <input type="password" id="password" name="password" class="form-control" required>
-                    </div>
-                    
-                    <div class="flex items-center justify-between mb-6">
-                        <div class="flex items-center">
-                            <input id="remember" name="remember" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
-                            <label for="remember" class="ml-2 block text-sm text-gray-700">
-                                Remember me
-                            </label>
-                        </div>
-                    </div>
-                    
-                    {% if error %}
-                    <div class="alert alert-danger mb-4">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <i class="fas fa-exclamation-circle"></i>
+                        <label for="current_password" class="form-label">Current Password</label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="fas fa-lock text-gray-400"></i>
                             </div>
-                            <div class="ml-3">{{ error }}</div>
+                            <input type="password" id="current_password" name="current_password" required class="form-control pl-10" autocomplete="current-password">
+                            <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
-                    {% endif %}
-                    
-                    <button type="submit" class="w-full btn btn-primary">
-                        Sign in
-                    </button>
+                    <div class="form-group">
+                        <label for="new_password" class="form-label">New Password</label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="fas fa-lock text-gray-400"></i>
+                            </div>
+                            <input type="password" id="new_password" name="new_password" required class="form-control pl-10" autocomplete="new-password">
+                            <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                                <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <!-- Password strength meter -->
+                        <div class="password-strength-meter mt-1" id="newPasswordStrength">
+                            <div></div>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1" id="newPasswordFeedback">Password must be at least 8 characters</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="confirm_password" class="form-label">Confirm New Password</label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="fas fa-lock text-gray-400"></i>
+                            </div>
+                            <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" autocomplete="new-password">
+                        </div>
+                        <div id="password-match-message" class="text-sm mt-1 hidden"></div>
+                    </div>
+                    <div class="bg-blue-50 p-4 rounded-lg text-sm text-blue-700 mb-4">
+                        <p class="flex items-center"><i class="fas fa-info-circle mr-2"></i> Password requirements:</p>
+                        <ul class="list-disc ml-5 mt-1">
+                            <li>At least 8 characters long</li>
+                            <li>Contains at least one uppercase letter</li>
+                            <li>Contains at least one number</li>
+                            <li>Contains at least one special character</li>
+                        </ul>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-full" id="changePasswordBtn">Change Password</button>
                 </form>
             </div>
             
-            <div class="px-6 py-4 bg-gray-50 border-t border-gray-200 text-center text-sm text-gray-600">
-                &copy; {{ now.year }} Threat Intelligence Platform
+            <div class="auth-footer">
+                <a href="{{ url_for('dashboard') }}" class="text-blue-600 hover:underline">
+                    <i class="fas fa-arrow-left mr-1"></i> Back to Dashboard
+                </a>
             </div>
         </div>
         
-        <!-- Profile View -->
-        {% elif page_type == 'profile' %}
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="px-6 py-6">
-                <div class="flex items-center justify-between pb-4 border-b">
-                    <h2 class="text-2xl font-semibold text-gray-800">User Profile</h2>
-                    <a href="{{ url_for('dashboard') }}" class="text-blue-600 hover:text-blue-800">
-                        <i class="fas fa-arrow-left mr-1"></i> Back to Dashboard
-                    </a>
-                </div>
-                
-                <div class="py-4">
-                    <div class="flex items-center mb-6">
-                        <div class="h-20 w-20 rounded-full bg-blue-200 flex items-center justify-center text-blue-600 mr-4">
-                            <i class="fas fa-user text-3xl"></i>
+        {% elif page_type == 'user_add' %}
+        <!-- Add User Form -->
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
+                    <i class="fas fa-user-plus mr-2"></i> Add New User
+                </h1>
+                <p class="text-gray-600">Create a new platform user</p>
+            </div>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
-                        <div>
-                            <h3 class="text-xl font-semibold">{{ username }}</h3>
-                            <p class="text-gray-600">{{ user.role|title }}</p>
-                            <p class="text-sm text-gray-500">
-                                <i class="far fa-clock mr-1"></i>
-                                Last login: {{ user.last_login|default('Unknown')|datetime }}
-                            </p>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <form action="{{ url_for('add_user_route') }}" method="post" class="space-y-4" id="userForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user text-gray-400"></i>
+                        </div>
+                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                               placeholder="Enter username" autofocus>
+                    </div>
+                    <p class="text-sm text-gray-500 mt-1">Username must be at least 3 characters long.</p>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-lock text-gray-400"></i>
+                        </div>
+                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                               placeholder="Enter password" autocomplete="new-password">
+                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <i class="fas fa-eye"></i>
+                            </button>
                         </div>
                     </div>
-                    
-                    <h4 class="text-lg font-semibold mb-4">Change Password</h4>
-                    <form method="POST" action="{{ url_for('change_password') }}">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        
-                        <div class="form-group">
-                            <label for="current_password" class="form-label">Current Password</label>
-                            <input type="password" id="current_password" name="current_password" class="form-control" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="new_password" class="form-label">New Password</label>
-                            <input type="password" id="new_password" name="new_password" class="form-control" required minlength="8">
-                            <p class="text-sm text-gray-500 mt-1">Minimum 8 characters</p>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="confirm_password" class="form-label">Confirm New Password</label>
-                            <input type="password" id="confirm_password" name="confirm_password" class="form-control" required minlength="8">
-                        </div>
-                        
-                        <button type="submit" class="btn btn-primary">Update Password</button>
-                    </form>
+                    <!-- Password strength meter -->
+                    <div class="password-strength-meter mt-1" id="passwordStrength">
+                        <div></div>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1" id="passwordFeedback">Password must be at least 8 characters</p>
                 </div>
-            </div>
+                <div class="form-group">
+                    <label for="confirm_password" class="form-label">Confirm Password</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-lock text-gray-400"></i>
+                        </div>
+                        <input type="password" id="confirm_password" name="confirm_password" required class="form-control pl-10" 
+                               placeholder="Confirm password" autocomplete="new-password">
+                    </div>
+                    <div id="password-match-message" class="text-sm mt-1 hidden"></div>
+                </div>
+                <div class="form-group">
+                    <label for="role" class="form-label">Role</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user-tag text-gray-400"></i>
+                        </div>
+                        <select id="role" name="role" class="form-control pl-10">
+                            <option value="readonly">Read-Only</option>
+                            <option value="analyst">Analyst</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 mt-2">
+                        <div class="text-center p-2 rounded bg-gray-100">
+                            <span class="badge badge-readonly">Read-Only</span>
+                            <p class="text-xs mt-1">View-only access</p>
+                        </div>
+                        <div class="text-center p-2 rounded bg-gray-100">
+                            <span class="badge badge-analyst">Analyst</span>
+                            <p class="text-xs mt-1">Can analyze data</p>
+                        </div>
+                        <div class="text-center p-2 rounded bg-gray-100">
+                            <span class="badge badge-admin">Admin</span>
+                            <p class="text-xs mt-1">Full access</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex space-x-4">
+                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center">Cancel</a>
+                    <button type="submit" class="btn btn-primary flex-1" id="submitBtn">Add User</button>
+                </div>
+            </form>
         </div>
         
-        <!-- Add User View -->
-        {% elif page_type == 'user_add' %}
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="px-6 py-6">
-                <div class="flex items-center justify-between pb-4 border-b">
-                    <h2 class="text-2xl font-semibold text-gray-800">Add New User</h2>
-                    <a href="{{ url_for('users') }}" class="text-blue-600 hover:text-blue-800">
-                        <i class="fas fa-arrow-left mr-1"></i> Back to Users
-                    </a>
-                </div>
-                
-                <div class="py-4">
-                    <form method="POST" action="{{ url_for('add_user_route') }}">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        
-                        <div class="form-group">
-                            <label for="username" class="form-label">Username</label>
-                            <input type="text" id="username" name="username" class="form-control" required autofocus>
-                            <p class="text-sm text-gray-500 mt-1">Letters and numbers only</p>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="password" class="form-label">Password</label>
-                            <input type="password" id="password" name="password" class="form-control" required minlength="8">
-                            <p class="text-sm text-gray-500 mt-1">Minimum 8 characters</p>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="confirm_password" class="form-label">Confirm Password</label>
-                            <input type="password" id="confirm_password" name="confirm_password" class="form-control" required minlength="8">
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="role" class="form-label">Role</label>
-                            <select id="role" name="role" class="form-control">
-                                <option value="readonly">Read Only</option>
-                                <option value="analyst">Analyst</option>
-                                <option value="admin">Administrator</option>
-                            </select>
-                        </div>
-                        
-                        <button type="submit" class="btn btn-primary">Create User</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Edit User View -->
         {% elif page_type == 'user_edit' %}
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="px-6 py-6">
-                <div class="flex items-center justify-between pb-4 border-b">
-                    <h2 class="text-2xl font-semibold text-gray-800">Edit User: {{ username }}</h2>
-                    <a href="{{ url_for('users') }}" class="text-blue-600 hover:text-blue-800">
-                        <i class="fas fa-arrow-left mr-1"></i> Back to Users
-                    </a>
+        <!-- Edit User Form -->
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
+                    <i class="fas fa-user-edit mr-2"></i> Edit User
+                </h1>
+                <p class="text-gray-600">Modify user settings for {{ username }}</p>
+            </div>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <form action="{{ url_for('edit_user', username=username) }}" method="post" class="space-y-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user text-gray-400"></i>
+                        </div>
+                        <input type="text" id="username" value="{{ username }}" class="form-control pl-10 bg-gray-100" disabled>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="form-label">New Password (leave blank to keep current)</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-lock text-gray-400"></i>
+                        </div>
+                        <input type="password" id="password" name="password" class="form-control pl-10" 
+                               placeholder="Enter new password (optional)" autocomplete="new-password">
+                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="role" class="form-label">Role</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user-tag text-gray-400"></i>
+                        </div>
+                        <select id="role" name="role" class="form-control pl-10">
+                            <option value="readonly" {% if user.role == 'readonly' %}selected{% endif %}>Read-Only</option>
+                            <option value="analyst" {% if user.role == 'analyst' %}selected{% endif %}>Analyst</option>
+                            <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>Admin</option>
+                        </select>
+                    </div>
                 </div>
                 
-                <div class="py-4">
-                    <form method="POST" action="{{ url_for('edit_user', username=username) }}">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        
-                        <div class="form-group">
-                            <label for="role" class="form-label">Role</label>
-                            <select id="role" name="role" class="form-control">
-                                <option value="readonly" {% if user.role == 'readonly' %}selected{% endif %}>Read Only</option>
-                                <option value="analyst" {% if user.role == 'analyst' %}selected{% endif %}>Analyst</option>
-                                <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>Administrator</option>
-                            </select>
+                <!-- Last login information -->
+                <div class="bg-gray-50 rounded-lg p-4 my-4">
+                    <div class="flex items-center">
+                        <div class="rounded-full bg-blue-100 p-2 mr-3">
+                            <i class="fas fa-clock text-blue-600"></i>
                         </div>
-                        
-                        <div class="form-group">
-                            <label for="password" class="form-label">New Password (leave blank to keep current)</label>
-                            <input type="password" id="password" name="password" class="form-control" minlength="8">
-                            <p class="text-sm text-gray-500 mt-1">Minimum 8 characters</p>
+                        <div>
+                            <p class="text-sm text-gray-500">Last Login</p>
+                            <p class="font-medium">{{ user.last_login|default('Never') }}</p>
                         </div>
-                        
-                        <button type="submit" class="btn btn-primary">Update User</button>
-                    </form>
-                    
-                    <div class="mt-8 pt-6 border-t">
-                        <h4 class="text-lg font-semibold text-red-600 mb-4">Danger Zone</h4>
-                        <form method="POST" action="{{ url_for('delete_user', username=username) }}" onsubmit="return confirm('Are you sure you want to delete this user? This action cannot be undone.')">
+                    </div>
+                </div>
+                
+                <div class="flex space-x-4">
+                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center">Cancel</a>
+                    <button type="submit" class="btn btn-primary flex-1">Save Changes</button>
+                </div>
+            </form>
+            
+            <div class="border-t border-gray-200 my-6 pt-6">
+                <h3 class="text-lg font-medium text-gray-800 mb-3">Danger Zone</h3>
+                <p class="text-sm text-gray-600 mb-3">Deleting a user cannot be undone. This will permanently remove all account information.</p>
+                
+                <button type="button" id="deleteUserBtn" class="btn btn-danger w-full flex items-center justify-center">
+                    <i class="fas fa-trash-alt mr-2"></i> Delete User
+                </button>
+            </div>
+            
+            <!-- Delete confirmation modal -->
+            <div id="deleteModal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 hidden">
+                <div class="bg-white rounded-lg p-6 max-w-md mx-4">
+                    <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
+                        <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
+                        Confirm Deletion
+                    </h3>
+                    <p class="mb-4">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
+                    <div class="flex justify-end space-x-3">
+                        <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
+                        <form action="{{ url_for('delete_user', username=username) }}" method="post">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn btn-danger">Delete User</button>
                         </form>
@@ -252,46 +486,247 @@
             </div>
         </div>
         
-        <!-- Not Authorized View -->
         {% elif page_type == 'not_authorized' %}
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="px-6 py-8 text-center">
-                <div class="text-6xl text-red-500 mb-4">
-                    <i class="fas fa-ban"></i>
+        <!-- Not Authorized -->
+        <div class="auth-card">
+            <div class="text-center mb-6">
+                <div class="text-amber-500 text-6xl mb-4">
+                    <i class="fas fa-exclamation-triangle"></i>
                 </div>
-                <h2 class="text-2xl font-bold text-gray-800 mb-4">Access Denied</h2>
-                <p class="text-gray-600 mb-6">You do not have permission to access this resource.</p>
+                <h1 class="text-2xl font-bold text-gray-800 mb-2">Access Denied</h1>
+                <p class="text-gray-600">You don't have permission to access this page.</p>
+            </div>
+            
+            <div class="flex justify-center">
                 <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
-                    Return to Dashboard
+                    <i class="fas fa-home mr-2"></i> Back to Dashboard
                 </a>
+            </div>
+            
+            <div class="mt-6 text-sm text-gray-500">
+                <p>If you believe this is an error, please contact your system administrator.</p>
+            </div>
+        </div>
+        
+        {% else %}
+        <!-- Default Login Form -->
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1 class="text-2xl font-bold text-gray-800 flex items-center justify-center">
+                    <i class="fas fa-shield-alt mr-2"></i> Threat Intelligence Platform
+                </h1>
+                <p class="text-gray-600">Secure login</p>
+            </div>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button type="button" class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <form action="{{ url_for('login') }}" method="post" class="space-y-4">
+                <!-- Critical: CSRF token field -->
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-user text-gray-400"></i>
+                        </div>
+                        <input type="text" id="username" name="username" required class="form-control pl-10" 
+                               placeholder="Enter your username" autofocus>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="relative">
+                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <i class="fas fa-lock text-gray-400"></i>
+                        </div>
+                        <input type="password" id="password" name="password" required class="form-control pl-10" 
+                               placeholder="Enter your password" autocomplete="current-password">
+                        <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+                            <button type="button" class="password-toggle text-gray-400 hover:text-gray-600 focus:outline-none">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center mb-4">
+                    <input type="checkbox" id="remember" name="remember" class="h-4 w-4 border-gray-300 rounded text-blue-600 focus:ring-blue-500">
+                    <label for="remember" class="ml-2 block text-sm text-gray-700">Remember me</label>
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn btn-primary w-full flex justify-center items-center">
+                        <i class="fas fa-sign-in-alt mr-2"></i> Log In
+                    </button>
+                </div>
+            </form>
+            
+            <div class="auth-footer">
+                {% if environment != 'production' %}
+                <p>Default login credentials:</p>
+                <p>Username: <strong>admin</strong>, Password: <strong>admin</strong></p>
+                {% endif %}
+                <div class="mt-4 text-gray-500 text-xs">
+                    <p>&copy; {{ now.year }} Threat Intelligence Platform</p>
+                    <p>Powered by Google Cloud Platform</p>
+                </div>
             </div>
         </div>
         {% endif %}
     </div>
     
+    <!-- JavaScript for Auth Forms -->
     <script>
-        // Password confirmation validation
         document.addEventListener('DOMContentLoaded', function() {
-            const passwordField = document.getElementById('new_password') || document.getElementById('password');
-            const confirmField = document.getElementById('confirm_password');
-            
-            if (passwordField && confirmField) {
-                confirmField.addEventListener('input', function() {
-                    if (passwordField.value !== confirmField.value) {
-                        confirmField.setCustomValidity('Passwords do not match');
+            // Toggle password visibility - unified handler for all password fields
+            const passwordToggles = document.querySelectorAll('.password-toggle');
+            passwordToggles.forEach(toggle => {
+                toggle.addEventListener('click', function() {
+                    const passwordField = this.closest('.relative').querySelector('input');
+                    const icon = this.querySelector('i');
+                    if (passwordField.type === 'password') {
+                        passwordField.type = 'text';
+                        icon.className = 'fas fa-eye-slash';
                     } else {
-                        confirmField.setCustomValidity('');
+                        passwordField.type = 'password';
+                        icon.className = 'fas fa-eye';
                     }
                 });
+            });
+            
+            // Password match validation
+            const passwordForm = document.getElementById('passwordForm');
+            const userForm = document.getElementById('userForm');
+            
+            if (passwordForm || userForm) {
+                const form = passwordForm || userForm;
+                const newPassword = form.querySelector('#new_password') || form.querySelector('#password');
+                const confirmPassword = form.querySelector('#confirm_password');
+                const messageEl = document.getElementById('password-match-message');
+                const submitBtn = form.querySelector('button[type="submit"]');
                 
-                passwordField.addEventListener('input', function() {
-                    if (confirmField.value !== '' && passwordField.value !== confirmField.value) {
-                        confirmField.setCustomValidity('Passwords do not match');
-                    } else {
-                        confirmField.setCustomValidity('');
+                if (newPassword && confirmPassword && messageEl) {
+                    const checkPasswordMatch = function() {
+                        if (confirmPassword.value === '') {
+                            messageEl.classList.add('hidden');
+                            return;
+                        }
+                        
+                        if (newPassword.value === confirmPassword.value) {
+                            messageEl.textContent = 'Passwords match';
+                            messageEl.classList.remove('hidden', 'text-red-600');
+                            messageEl.classList.add('text-green-600');
+                            submitBtn.disabled = false;
+                        } else {
+                            messageEl.textContent = 'Passwords do not match';
+                            messageEl.classList.remove('hidden', 'text-green-600');
+                            messageEl.classList.add('text-red-600');
+                            submitBtn.disabled = true;
+                        }
+                    };
+                    
+                    newPassword.addEventListener('input', checkPasswordMatch);
+                    confirmPassword.addEventListener('input', checkPasswordMatch);
+                }
+            }
+            
+            // Password strength meter
+            const strengthMeters = [
+                { input: document.getElementById('password'), meter: document.getElementById('passwordStrength'), feedback: document.getElementById('passwordFeedback') },
+                { input: document.getElementById('new_password'), meter: document.getElementById('newPasswordStrength'), feedback: document.getElementById('newPasswordFeedback') }
+            ];
+            
+            strengthMeters.forEach(item => {
+                if (item.input && item.meter && item.feedback) {
+                    item.input.addEventListener('input', function() {
+                        const password = this.value;
+                        
+                        // Skip if password is empty
+                        if (!password) {
+                            item.meter.className = 'password-strength-meter';
+                            item.feedback.textContent = 'Password must be at least 8 characters';
+                            item.feedback.className = 'text-xs text-gray-500 mt-1';
+                            return;
+                        }
+                        
+                        // Check password strength
+                        const hasUpperCase = /[A-Z]/.test(password);
+                        const hasLowerCase = /[a-z]/.test(password);
+                        const hasNumbers = /\d/.test(password);
+                        const hasSpecialChars = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+                        
+                        // Calculate strength
+                        let strength = 0;
+                        if (password.length >= 8) strength++;
+                        if (hasUpperCase && hasLowerCase) strength++;
+                        if (hasNumbers) strength++;
+                        if (hasSpecialChars) strength++;
+                        
+                        // Update meter and feedback
+                        item.meter.className = 'password-strength-meter';
+                        
+                        if (strength === 1) {
+                            item.meter.classList.add('weak');
+                            item.feedback.textContent = 'Weak password';
+                            item.feedback.className = 'text-xs text-red-500 mt-1';
+                        } else if (strength === 2) {
+                            item.meter.classList.add('medium');
+                            item.feedback.textContent = 'Medium strength password';
+                            item.feedback.className = 'text-xs text-yellow-600 mt-1';
+                        } else if (strength === 3) {
+                            item.meter.classList.add('strong');
+                            item.feedback.textContent = 'Strong password';
+                            item.feedback.className = 'text-xs text-green-600 mt-1';
+                        } else if (strength === 4) {
+                            item.meter.classList.add('very-strong');
+                            item.feedback.textContent = 'Very strong password';
+                            item.feedback.className = 'text-xs text-green-600 mt-1';
+                        }
+                    });
+                }
+            });
+            
+            // Delete user modal functionality
+            const deleteUserBtn = document.getElementById('deleteUserBtn');
+            const deleteModal = document.getElementById('deleteModal');
+            const cancelDeleteBtn = document.getElementById('cancelDeleteBtn');
+            
+            if (deleteUserBtn && deleteModal) {
+                deleteUserBtn.addEventListener('click', function() {
+                    deleteModal.classList.remove('hidden');
+                });
+                
+                if (cancelDeleteBtn) {
+                    cancelDeleteBtn.addEventListener('click', function() {
+                        deleteModal.classList.add('hidden');
+                    });
+                }
+                
+                // Close modal when clicking outside
+                deleteModal.addEventListener('click', function(e) {
+                    if (e.target === deleteModal) {
+                        deleteModal.classList.add('hidden');
                     }
                 });
             }
+            
+            // Auto-hide alerts after 5 seconds
+            const alerts = document.querySelectorAll('.alert');
+            alerts.forEach(alert => {
+                setTimeout(() => {
+                    alert.style.display = 'none';
+                }, 5000);
+            });
         });
     </script>
 </body>
