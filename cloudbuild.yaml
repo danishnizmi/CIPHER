@@ -128,7 +128,7 @@ steps:
           fi
         fi
         
-        # Grant access - Fixed service account
+        # Grant access
         gcloud secrets add-iam-policy-binding $SECRET_NAME --member="serviceAccount:cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
       done
 
@@ -190,7 +190,7 @@ steps:
         fi
       fi
 
-  # Deploy to Cloud Run with correct health check configuration
+  # Deploy to Cloud Run with fixed deployment command
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
@@ -208,7 +208,7 @@ steps:
         secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
-      # Deploy to Cloud Run with proper syntax for health checks
+      # Deploy to Cloud Run with simplified configuration - FIXED!
       gcloud run deploy threat-intelligence-platform \
         --image gcr.io/primal-chariot-382610/threat-intelligence-platform:${COMMIT_SHA} \
         --region us-central1 \
@@ -218,14 +218,10 @@ steps:
         --memory 2Gi \
         --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=primal-chariot-382610,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=primal-chariot-382610-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false" \
         --service-account=cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com \
-        --cpu-boost \
         --min-instances=1 \
         --max-instances=20 \
         --timeout=300 \
-        --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild \
-        --startup-probe=/health?timeout=5s&period=15s&failure-threshold=5&initial-delay=30s \
-        --liveness-probe=/health?timeout=5s&period=30s&failure-threshold=3 \
-        --readiness-probe=/api/health?timeout=5s&period=10s&failure-threshold=3
+        --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild
 
   # Deploy PubSub and scheduler
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -287,9 +283,10 @@ steps:
       fi
 
   # Cleanup old images
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  - name: 'gcr.io/cloud-builders/docker'
     id: 'cleanup-old-images'
     script: |
+      # List and delete old images, keeping the latest 5
       gcloud container images list-tags gcr.io/primal-chariot-382610/threat-intelligence-platform \
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
         --quiet gcr.io/primal-chariot-382610/threat-intelligence-platform@{} --force-delete-tags || true
