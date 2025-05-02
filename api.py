@@ -1,1828 +1,832 @@
-"""
-Threat Intelligence Platform - Streamlined API Module
-Provides RESTful endpoints with optimized GCP integration and enhanced security.
-"""
-
 import os
 import json
 import logging
-import time
-import hashlib
-import secrets
-import re
-import uuid
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Tuple, Union
-from functools import wraps
-
-from flask import Blueprint, request, jsonify, current_app, g, Response, abort
 import traceback
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
 
-# Import config module for centralized GCP service management
-import config
+from flask import Blueprint, jsonify, request, current_app, abort, Response
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from functools import wraps
+from google.cloud import bigquery, storage, pubsub_v1
+from google.cloud.exceptions import NotFound
+import google.auth
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO if os.environ.get('ENVIRONMENT', 'development') != 'production' else logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-)
+# Import configuration
+from config import Config, initialize_bigquery, initialize_storage, initialize_pubsub, report_error
+
+# Initialize logging
 logger = logging.getLogger(__name__)
 
-# Core configuration from config module
-PROJECT_ID = config.project_id
-DATASET_ID = config.bigquery_dataset
-REGION = config.region
-BUCKET_NAME = config.gcs_bucket
-MAX_RESULTS = 1000
-CACHE_TIMEOUT = 300  # 5 minutes
-ENVIRONMENT = config.environment
+# Initialize API blueprint
+api_blueprint = Blueprint('api', __name__)
 
-# Create Blueprint
-api_bp = Blueprint('api', __name__, url_prefix='/api')
+# Initialize GCP clients
+bq_client = initialize_bigquery()
+storage_client = initialize_storage()
+publisher, subscriber = initialize_pubsub()
 
-# Shared cache
-query_cache = {}
-cache_timestamps = {}
+# Initialize rate limiter
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
 
-# API request counter for metrics
-request_counter = 0
-last_metrics_time = time.time()
-
-# ======== Shared Utilities ========
-
-def get_api_key():
-    """Get API key with enhanced security and validation"""
-    # First try direct attribute from config
-    api_key = getattr(config, 'api_key', None)
-    
-    # If not available directly, try to get from cached config
-    if not api_key:
-        api_keys_config = config.get_cached_config('api-keys')
-        if api_keys_config and 'platform_api_key' in api_keys_config:
-            api_key = api_keys_config['platform_api_key']
-    
-    # Try environment variable as last resort
-    if not api_key:
-        api_key = os.environ.get('API_KEY', '')
-    
-    return api_key or ''
-
-def get_client(client_type):
-    """Get GCP client using the centralized config module"""
-    # Use the centralized client management from config
-    return config.get_client(client_type)
-
-def report_metric(metric_type, value=1):
-    """Report a metric to Cloud Monitoring with graceful degradation"""
-    # Use centralized metric reporting from config
-    config.report_metric(metric_type, value)
-
-def report_api_metrics():
-    """Report aggregated API metrics"""
-    global request_counter, last_metrics_time
-    
-    # Only report in production every minute
-    now = time.time()
-    if ENVIRONMENT != 'production' or now - last_metrics_time < 60:
-        return
-        
-    # Report request count if non-zero
-    if request_counter > 0:
-        report_metric("request_count", request_counter)
-        request_counter = 0
-        last_metrics_time = now
-
-# ======== Decorators ========
+# -------------------- Authentication & Authorization --------------------
 
 def require_api_key(f):
-    """API key authentication decorator with enhanced security"""
+    """Decorator to require API key for routes."""
     @wraps(f)
-    def decorated(*args, **kwargs):
-        api_key = get_api_key()
+    def decorated_function(*args, **kwargs):
+        # Get API key from request
+        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
-        # Skip validation if no API key configured or not in production
-        if not api_key or ENVIRONMENT != 'production':
-            return f(*args, **kwargs)
+        # Check if API key is valid
+        if not api_key or api_key != Config.API_KEY:
+            logger.warning(f"Invalid API key attempt from IP: {get_remote_address()}")
+            return jsonify({"error": "Invalid or missing API key"}), 401
         
-        # Get key from headers or query parameters
-        provided_key = request.headers.get('X-API-Key')
-        if not provided_key:
-            provided_key = request.args.get('api_key')
-            
-            # In production, warn about keys in query parameters
-            if provided_key and ENVIRONMENT == 'production':
-                logger.warning("API key provided in query parameters - less secure than headers")
-        
-        # Validate key using constant time comparison to prevent timing attacks
-        if provided_key and secrets.compare_digest(provided_key, api_key):
-            return f(*args, **kwargs)
-        
-        # Log failed attempts in production
-        if ENVIRONMENT == 'production':
-            logger.warning(f"Invalid API key attempt from {request.remote_addr}")
-            report_metric("invalid_api_key")
-            
-        # Return 401 with minimal information to prevent information leakage
-        return jsonify({
-            "error": "Unauthorized", 
-            "timestamp": datetime.utcnow().isoformat()
-        }), 401
-        
-    return decorated
+        return f(*args, **kwargs)
+    
+    return decorated_function
 
-def handle_exceptions(f):
-    """Exception handling decorator with improved security and monitoring"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        try:
-            result = f(*args, **kwargs)
-            # Track successful requests for metrics
-            global request_counter
-            request_counter += 1
-            report_api_metrics()
-            return result
-        except Exception as e:
-            logger.error(f"Error in {f.__name__}: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Report to Error Reporting if available
-            config.report_exception()
-            
-            # Track error for metrics
-            report_metric("error")
-                
-            # Generate request ID for tracking
-            request_id = f"req_{uuid.uuid4().hex[:8]}"
-            
-            # Return sanitized error in production to avoid information disclosure
-            if ENVIRONMENT == 'production':
-                return jsonify({
-                    "error": "An internal error occurred",
-                    "request_id": request_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }), 500
-            else:
-                # In development, return full error details
-                return jsonify({
-                    "error": str(e),
-                    "traceback": traceback.format_exc(),
-                    "request_id": request_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }), 500
-    return decorated
+# -------------------- Helper Functions --------------------
 
-def cache_result(ttl=CACHE_TIMEOUT):
-    """Cache decorator for API results with improved object handling"""
-    def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            # Generate cache key from function name and arguments
-            key_parts = [f.__name__] + [str(a) for a in args]
-            key_parts.extend(f"{k}={v}" for k, v in kwargs.items())
-            
-            # Add query parameters but filter out sensitive ones
-            query_params = {}
-            for k, v in request.args.items():
-                if k.lower() not in ['api_key', 'token', 'password', 'secret']:
-                    query_params[k] = v
-            key_parts.extend(f"{k}={v}" for k, v in query_params.items())
-            
-            # Create hash of the key parts for better security
-            cache_key = hashlib.sha256(":".join(key_parts).encode()).hexdigest()
-            
-            # Check cache
-            now = datetime.now()
-            if cache_key in query_cache and cache_key in cache_timestamps:
-                if (now - cache_timestamps[cache_key]).total_seconds() < ttl:
-                    # Check if the cached result can have attributes before trying to set them
-                    cached_result = query_cache[cache_key]
-                    if hasattr(cached_result, '__dict__'):
-                        # Update hit count for metrics
-                        if hasattr(cached_result, '_cache_hits'):
-                            cached_result._cache_hits += 1
-                        else:
-                            setattr(cached_result, '_cache_hits', 1)
-                        
-                        # Report cache hit metric occasionally
-                        if cached_result._cache_hits % 10 == 0:
-                            report_metric("cache_hit")
-                    
-                    return cached_result
-            
-            # Report cache miss
-            report_metric("cache_miss")
-            
-            # Call function
-            result = f(*args, **kwargs)
-            
-            # Only set hit counter if object can have attributes
-            if hasattr(result, '__dict__'):
-                setattr(result, '_cache_hits', 0)
-            
-            # Cache result
-            query_cache[cache_key] = result
-            cache_timestamps[cache_key] = now
-            
-            # Clean up old cache entries (LRU approximation)
-            if len(query_cache) > 100:
-                # Find 10 oldest entries
-                oldest_keys = sorted(
-                    cache_timestamps.keys(), 
-                    key=lambda k: cache_timestamps[k]
-                )[:10]
-                
-                # Remove them
-                for key in oldest_keys:
-                    if key in query_cache:
-                        del query_cache[key]
-                        del cache_timestamps[key]
-            
-            return result
-        return decorated
-    return decorator
-
-def clear_api_cache(prefix: str = None):
-    """Clear API cache entries, optionally filtering by prefix"""
-    global query_cache, cache_timestamps
-    
-    if prefix:
-        # Clear only entries with matching prefix
-        keys_to_delete = [k for k in query_cache if k.startswith(prefix)]
-        for k in keys_to_delete:
-            if k in query_cache:
-                del query_cache[k]
-            if k in cache_timestamps:
-                del cache_timestamps[k]
-        logger.debug(f"Cleared {len(keys_to_delete)} cache entries with prefix '{prefix}'")
-    else:
-        # Clear all cache
-        query_cache = {}
-        cache_timestamps = {}
-        logger.debug("Cleared all API cache entries")
-
-# ======== Query Functions ========
-
-def query_bigquery(query, params=None):
-    """Execute BigQuery query with enhanced security and error handling"""
-    client = get_client('bigquery')
-    if client is None or isinstance(client, config.DummyClient):
-        return [], "BigQuery client not available"
-    
-    try:
-        # Check for query injection patterns
-        dangerous_patterns = [
-            r';\s*DROP\s+TABLE',
-            r';\s*DELETE\s+FROM',
-            r'INFORMATION_SCHEMA',
-            r';\s*INSERT\s+INTO',
-            r'UNION\s+ALL\s+SELECT',
-            r'--',
-            r'/\*.*\*/'
-        ]
-        
-        for pattern in dangerous_patterns:
-            if re.search(pattern, query, re.IGNORECASE):
-                logger.error(f"Potentially dangerous query detected: {query}")
-                return [], "Query contains potentially dangerous patterns"
-        
-        # Remove any comments that might have sneaked through
-        query = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
-        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
-        
-        # Import locally to avoid global dependency
-        from google.cloud import bigquery
-        from google.cloud.exceptions import NotFound
-        
-        # Create job configuration
-        job_config = bigquery.QueryJobConfig()
-        
-        # Set query parameters
-        if params:
-            query_params = []
-            for k, v in params.items():
-                # Validate parameter name to prevent injection
-                if not re.match(r'^[a-zA-Z0-9_]+$', k):
-                    return [], f"Invalid parameter name: {k}"
-                
-                param_type = "STRING"
-                if isinstance(v, int):
-                    param_type = "INT64"
-                elif isinstance(v, float):
-                    param_type = "FLOAT64"
-                elif isinstance(v, bool):
-                    param_type = "BOOL"
-                elif isinstance(v, datetime):
-                    param_type = "TIMESTAMP"
-                
-                query_params.append(bigquery.ScalarQueryParameter(k, param_type, v))
-            job_config.query_parameters = query_params
-        
-        # Check if tables exist first and create them if needed
-        table_names = []
-        table_pattern = re.compile(r'FROM\s+`?([^`\s.]+)\.([^`\s.]+)\.([^`\s.]+)`?', re.IGNORECASE)
-        for match in table_pattern.findall(query):
-            project, dataset, table = match
-            if project == PROJECT_ID and dataset == DATASET_ID:
-                table_names.append(table)
-        
-        # Check if tables exist and create them if they don't
-        for table_name in table_names:
-            try:
-                table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-                client.get_table(table_id)
-            except NotFound:
-                logger.warning(f"Table {table_id} not found, creating it")
-                
-                # Create a minimal schema based on standard fields
-                schema = [
-                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                    bigquery.SchemaField("_ingestion_id", "STRING"),
-                    bigquery.SchemaField("_source", "STRING"),
-                    bigquery.SchemaField("_feed_type", "STRING")
-                ]
-                
-                # Add specific fields for known tables
-                if table_name == "threat_analysis":
-                    schema.extend([
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ])
-                elif table_name == "threat_campaigns":
-                    schema.extend([
-                        bigquery.SchemaField("campaign_id", "STRING"),
-                        bigquery.SchemaField("campaign_name", "STRING"),
-                        bigquery.SchemaField("threat_actor", "STRING"),
-                        bigquery.SchemaField("malware", "STRING"),
-                        bigquery.SchemaField("techniques", "STRING"),
-                        bigquery.SchemaField("targets", "STRING"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("sources", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("source_count", "INTEGER"),
-                        bigquery.SchemaField("ioc_count", "INTEGER"),
-                        bigquery.SchemaField("first_seen", "STRING"),
-                        bigquery.SchemaField("last_seen", "STRING"),
-                        bigquery.SchemaField("detection_timestamp", "STRING")
-                    ])
-                
-                # Create the table
-                table = bigquery.Table(table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
-        
-        # Execute query with retry logic
-        max_retries = 3
-        retry_delay = 1.0
-        
-        for attempt in range(max_retries):
-            try:
-                # Execute query
-                query_job = client.query(query, job_config=job_config)
-                
-                # Report query execution time for monitoring
-                start_time = time.time()
-                rows = [dict(row) for row in query_job.result()]
-                query_time = time.time() - start_time
-                
-                # Report metrics for slow queries
-                if query_time > 1.0:  # Only report slow queries
-                    report_metric("slow_query_seconds", query_time)
-                    logger.info(f"Slow query ({query_time:.2f}s): {query[:100]}...")
-                
-                return rows, None
-                
-            except Exception as e:
-                if "Not found: Table" in str(e) and attempt == 0:
-                    # Table doesn't exist, let's create empty tables for common queries
-                    logger.warning(f"Table not found: {str(e)}")
-                    if attempt < max_retries - 1:
-                        # Try to create the table and retry
-                        wait_time = retry_delay * (2 ** attempt)
-                        logger.info(f"Waiting {wait_time:.2f}s before retrying...")
-                        time.sleep(wait_time)
-                        continue
-                elif attempt < max_retries - 1:
-                    # On failure, retry with exponential backoff
-                    wait_time = retry_delay * (2 ** attempt)
-                    logger.warning(f"Query error, retrying in {wait_time:.2f}s: {str(e)}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    # Final attempt failed
-                    logger.error(f"Query error after {max_retries} attempts: {str(e)}")
-                    return [], str(e)
-                    
-    except Exception as e:
-        logger.error(f"BigQuery error: {str(e)}")
-        # Report query failure
-        report_metric("query_error")
-        return [], str(e)
-
-def validate_table_name(name):
-    """Validate table name to prevent SQL injection with stronger pattern matching"""
-    if not name:
-        return False
-        
-    # Only allow alphanumeric and underscore with more restrictive pattern
-    if not all(c.isalnum() or c == '_' for c in name):
-        return False
-        
-    # Don't allow names starting with underscore (system tables)
-    if name.startswith('_'):
-        return False
-        
-    # Don't allow double underscores (could indicate SQL comment)
-    if '__' in name:
-        return False
-        
-    # Minimum name length for security
-    if len(name) < 3:
-        return False
-        
-    return True
-
-def ensure_tables_exist():
-    """Ensure required BigQuery tables exist"""
-    client = get_client('bigquery')
-    if client is None or isinstance(client, config.DummyClient):
-        logger.warning("BigQuery client not available, cannot ensure tables")
-        return False
-        
-    try:
-        # Import locally to avoid global dependency
-        from google.cloud import bigquery
-        from google.cloud.exceptions import NotFound
-        
-        # Check if dataset exists
-        dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
-        try:
-            client.get_dataset(dataset_ref)
-            logger.info(f"Dataset {DATASET_ID} exists")
-        except NotFound:
-            # Create dataset
-            dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = "US"
-            client.create_dataset(dataset, exists_ok=True)
-            logger.info(f"Created dataset {DATASET_ID}")
-        
-        # Define tables to check
-        tables_to_check = [
-            "threat_analysis",
-            "threat_campaigns",
-            "threatfox_iocs",
-            "phishtank_urls",
-            "urlhaus_malware"
-        ]
-        
-        # Check each table
-        for table_id in tables_to_check:
-            full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
-            try:
-                client.get_table(full_table_id)
-                logger.info(f"Table {table_id} exists")
-            except NotFound:
-                # Create table with basic schema
-                if table_id == "threat_analysis":
-                    schema = [
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ]
-                elif table_id == "threat_campaigns":
-                    schema = [
-                        bigquery.SchemaField("campaign_id", "STRING"),
-                        bigquery.SchemaField("campaign_name", "STRING"),
-                        bigquery.SchemaField("threat_actor", "STRING"),
-                        bigquery.SchemaField("malware", "STRING"),
-                        bigquery.SchemaField("techniques", "STRING"),
-                        bigquery.SchemaField("targets", "STRING"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("sources", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("source_count", "INTEGER"),
-                        bigquery.SchemaField("ioc_count", "INTEGER"),
-                        bigquery.SchemaField("first_seen", "STRING"),
-                        bigquery.SchemaField("last_seen", "STRING"),
-                        bigquery.SchemaField("detection_timestamp", "STRING")
-                    ]
-                else:
-                    # Generic schema for feed tables
-                    schema = [
-                        bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("_ingestion_id", "STRING"),
-                        bigquery.SchemaField("_source", "STRING"),
-                        bigquery.SchemaField("_feed_type", "STRING")
-                    ]
-                
-                # Create table
-                table = bigquery.Table(full_table_id, schema=schema)
-                client.create_table(table, exists_ok=True)
-                logger.info(f"Created table {table_id}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error ensuring tables: {str(e)}")
-        return False
-
-# Make sure tables exist on module initialization
-ensure_tables_exist()
-
-# ======== API Endpoints ========
-
-@api_bp.route('/health', methods=['GET'])
-@handle_exceptions
-def health_check():
-    """Health check endpoint"""
-    version = os.environ.get("VERSION", "1.0.0")
-    
-    # Check BigQuery connectivity through config
-    db_status = config.check_database_connectivity()
-    
-    # Check GCP services through config
-    gcp_status = "available" if config.GCP_SERVICES_AVAILABLE else "unavailable"
-    
-    # Include unique instance ID for debugging
-    instance_id = os.environ.get("K_REVISION", "local-" + str(uuid.uuid4())[:8])
-    
-    return jsonify({
-        "status": "ok",
-        "database": db_status,
-        "gcp_services": gcp_status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": version,
-        "environment": ENVIRONMENT,
-        "instance": instance_id,
-        "project": PROJECT_ID
-    })
-
-@api_bp.route('/stats', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=300)
-def get_stats():
-    """Get platform statistics"""
-    days = int(request.args.get('days', '30'))
-    
-    # Validate days parameter for security
-    if days < 1 or days > 365:
-        return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    
-    # Use mock data if requested
-    if request.args.get('mock', 'false').lower() == 'true':
-        # Try to import from frontend for consistency
-        try:
-            from frontend import MOCK_DATA
-            return jsonify(MOCK_DATA["stats"])
-        except (ImportError, KeyError):
-            pass
-
-    # Query BigQuery for stats with SQL injection protection
-    feed_query = f"""
-    SELECT 
-      (SELECT COUNT(DISTINCT table_id) FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__` 
-       WHERE table_id NOT LIKE 'threat%') AS total_sources,
-      (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis` 
-       WHERE analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS total_analyses,
-      (SELECT MAX(analysis_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.threat_analysis`) AS last_analysis,
-      (SELECT COUNT(DISTINCT campaign_id) FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`) AS total_campaigns
-    """
-    
-    rows, error = query_bigquery(feed_query, {"days": days})
-    
-    # Create stats object with defaults
-    stats = {
-        "feeds": {"total_sources": 0, "active_feeds": 0, "total_records": 0, "growth_rate": 5},
-        "campaigns": {"total_campaigns": 0, "active_campaigns": 0, "unique_actors": 0, "growth_rate": 3},
-        "iocs": {"total": 0, "types": [], "growth_rate": 8},
-        "analyses": {"total_analyses": 0, "last_analysis": None, "growth_rate": 10},
-        "timestamp": datetime.utcnow().isoformat(),
-        "days": days
-    }
-    
-    # Update with real data if available
-    if not error and rows:
-        row = rows[0]
-        stats["feeds"]["total_sources"] = row.get("total_sources", 0)
-        stats["feeds"]["active_feeds"] = row.get("total_sources", 0)  # Assume all are active
-        stats["analyses"]["total_analyses"] = row.get("total_analyses", 0)
-        stats["campaigns"]["total_campaigns"] = row.get("total_campaigns", 0)
-        stats["campaigns"]["active_campaigns"] = row.get("total_campaigns", 0)
-        
-        # Format last analysis time
-        last_analysis = row.get("last_analysis")
-        if last_analysis:
-            if isinstance(last_analysis, datetime):
-                stats["analyses"]["last_analysis"] = last_analysis.isoformat()
-            else:
-                stats["analyses"]["last_analysis"] = str(last_analysis)
-    
-    # Get IOC types
-    ioc_query = f"""
-    SELECT
-      JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
-      COUNT(DISTINCT JSON_EXTRACT_SCALAR(ioc_item, '$.value')) AS count
-    FROM
-      `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-      UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-    WHERE 
-      analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY type
-    ORDER BY count DESC
-    LIMIT 10
-    """
-    
-    ioc_rows, ioc_error = query_bigquery(ioc_query, {"days": days})
-    
-    if not ioc_error and ioc_rows:
-        stats["iocs"]["types"] = [
-            {"type": row.get("type", "").strip('"'), "count": row.get("count", 0)}
-            for row in ioc_rows
-        ]
-        stats["iocs"]["total"] = sum(row.get("count", 0) for row in ioc_rows)
-    
-    # Get visualization data
-    viz_query = f"""
-    SELECT
-      DATE(analysis_timestamp) as date,
-      COUNT(*) as count
-    FROM
-      `{PROJECT_ID}.{DATASET_ID}.threat_analysis`
-    WHERE
-      analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    
-    viz_rows, viz_error = query_bigquery(viz_query, {"days": days})
-    
-    if not viz_error and viz_rows:
-        stats["visualization_data"] = {
-            "daily_counts": [
-                {"date": row["date"].isoformat() if isinstance(row["date"], datetime) else str(row["date"]), 
-                 "count": row["count"]} 
-                for row in viz_rows
-            ]
-        }
-    
-    return jsonify(stats)
-
-@api_bp.route('/feeds', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=600)
-def list_feeds():
-    """List available threat feeds"""
-    # Query for feed information
-    query = f"""
-    SELECT table_id, 
-           (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) AS record_count,
-           (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.` || table_id) AS last_updated
-    FROM `{PROJECT_ID}.{DATASET_ID}.__TABLES__`
-    WHERE table_id NOT LIKE 'threat%' AND table_id NOT LIKE 'system%'
-    """
-    
-    rows, error = query_bigquery(query)
-    
-    # Get feed descriptions from ingestion module if possible
-    feed_descriptions = {}
-    try:
-        from ingestion import FEED_SOURCES
-        for name, info in FEED_SOURCES.items():
-            table_id = info.get("table_id")
-            if table_id:
-                feed_descriptions[table_id] = info.get("description", "Threat Intelligence Feed")
-    except ImportError:
-        # Fallback descriptions
-        feed_descriptions = {
-            "threatfox_iocs": "ThreatFox IOCs - Malware indicators database",
-            "phishtank_urls": "PhishTank - Community-verified phishing URLs",
-            "urlhaus_malware": "URLhaus - Database of malicious URLs",
-            "feodotracker_c2": "Feodo Tracker - Botnet C2 IP Blocklist",
-            "cisa_vulnerabilities": "CISA Known Exploited Vulnerabilities Catalog",
-            "tor_exit_nodes": "Tor Exit Node List"
-        }
-    
-    # Process results
-    feeds = []
-    if not error and rows:
-        for row in rows:
-            feed = {
-                "name": row["table_id"],
-                "record_count": row["record_count"],
-                "description": feed_descriptions.get(row["table_id"], "Threat Intelligence Feed")
-            }
-            
-            # Format timestamp
-            if row.get("last_updated"):
-                if isinstance(row["last_updated"], datetime):
-                    feed["last_updated"] = row["last_updated"].isoformat()
-                else:
-                    feed["last_updated"] = str(row["last_updated"])
-            else:
-                feed["last_updated"] = None
-                
-            feeds.append(feed)
-    
-    # Return sample data if no results
-    if not feeds:
-        feeds = [
-            {"name": "threatfox_iocs", "record_count": 0, "last_updated": None, 
-             "description": "ThreatFox IOCs - Malware indicators database"},
-            {"name": "phishtank_urls", "record_count": 0, "last_updated": None,
-             "description": "PhishTank - Community-verified phishing URLs"},
-            {"name": "urlhaus_malware", "record_count": 0, "last_updated": None,
-             "description": "URLhaus - Database of malicious URLs"}
-        ]
-    
-    return jsonify({
-        "feeds": [feed["name"] for feed in feeds],
-        "feed_details": feeds,
-        "count": len(feeds),
-        "timestamp": datetime.utcnow().isoformat()
-    })
-
-@api_bp.route('/feeds/<feed_name>/stats', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=300)
-def feed_stats(feed_name):
-    """Get statistics for a specific feed"""
-    if not validate_table_name(feed_name):
-        return jsonify({"error": "Invalid feed name"}), 400
-    
-    days = int(request.args.get('days', '30'))
-    
-    # Validate days parameter for security
-    if days < 1 or days > 365:
-        return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    # Check if table exists and get stats
-    query = f"""
-    SELECT
-      (SELECT COUNT(*) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` 
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS total_records,
-      (SELECT MIN(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS earliest_record,
-      (SELECT MAX(_ingestion_timestamp) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`) AS latest_record,
-      (SELECT COUNT(DISTINCT DATE(_ingestion_timestamp)) FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-       WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)) AS days_with_data
-    """
-    
-    rows, error = query_bigquery(query, {"days": days})
-    
-    # Get daily counts
-    daily_query = f"""
-    SELECT
-      DATE(_ingestion_timestamp) as date,
-      COUNT(*) as record_count
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}`
-    WHERE _ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    
-    daily_rows, daily_error = query_bigquery(daily_query, {"days": days})
-    
-    # Process results
-    stats = rows[0] if not error and rows else {
-        "total_records": 0,
-        "earliest_record": None,
-        "latest_record": None,
-        "days_with_data": 0
-    }
-    
-    # Format datetime fields
-    for field in ["earliest_record", "latest_record"]:
-        if field in stats and stats[field]:
-            if isinstance(stats[field], datetime):
-                stats[field] = stats[field].isoformat()
-            else:
-                stats[field] = str(stats[field])
-    
-    # Process daily counts
-    daily_counts = []
-    if not daily_error and daily_rows:
-        for row in daily_rows:
-            date_val = row["date"]
-            daily_counts.append({
-                "date": date_val.isoformat() if isinstance(date_val, datetime) else str(date_val),
-                "count": row["record_count"]
-            })
-    
-    # If we don't have daily counts, provide sample data
-    if not daily_counts:
-        today = datetime.now().date()
-        daily_counts = [{
-            "date": (today - timedelta(days=i)).isoformat(),
-            "count": 0
-        } for i in range(days)]
-    
-    stats["daily_counts"] = daily_counts
-    
-    return jsonify(stats)
-
-@api_bp.route('/feeds/<feed_name>/data', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def feed_data(feed_name):
-    """Get data from a specific feed with filtering and pagination"""
-    if not validate_table_name(feed_name):
-        return jsonify({"error": "Invalid feed name"}), 400
-    
-    # Parse query parameters with type validation
-    try:
-        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-        offset = int(request.args.get('offset', '0'))
-        days = int(request.args.get('days', '7'))
-        
-        # Security validations
-        if limit < 1 or limit > MAX_RESULTS:
-            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
-        if offset < 0:
-            return jsonify({"error": "Offset cannot be negative"}), 400
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
-    
-    # Get search term and sanitize
-    search = request.args.get('search', '')
-    if search:
-        # Prevent SQL injection in search terms
-        search = re.sub(r'[\'";]', '', search)  # Remove potentially dangerous characters
-        search = '%' + search + '%'  # Add wildcards for LIKE
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    # Build query with parameters (safer than string interpolation)
-    conditions = ["_ingestion_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
-    params = {"days": days, "limit": limit, "offset": offset}
-    
-    if search:
-        conditions.append("TO_JSON_STRING(t) LIKE @search")
-        params["search"] = search
-    
-    query = f"""
-    SELECT *
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` AS t
-    WHERE {" AND ".join(conditions)}
-    ORDER BY _ingestion_timestamp DESC
-    LIMIT @limit OFFSET @offset
-    """
-    
-    count_query = f"""
-    SELECT COUNT(*) as count
-    FROM `{PROJECT_ID}.{DATASET_ID}.{feed_name}` AS t
-    WHERE {" AND ".join(conditions)}
-    """
-    
-    rows, error = query_bigquery(query, params)
-    count_rows, count_error = query_bigquery(count_query, params)
-    
-    # Check for errors
-    if error:
-        return jsonify({"error": f"Query error: {error}"}), 500
-    
-    # Process results with sensitive data masking
-    processed_rows = []
-    sensitive_fields = ['password', 'key', 'token', 'secret', 'credential']
-    
-    for row in rows:
-        processed_row = {}
-        for key, value in row.items():
-            # Mask sensitive fields
-            if any(sensitive in key.lower() for sensitive in sensitive_fields):
-                processed_row[key] = "********"
-            # Format datetime fields
-            elif isinstance(value, datetime):
-                processed_row[key] = value.isoformat()
-            # Truncate very long string values to prevent response bloat
-            elif isinstance(value, str) and len(value) > 10000:
-                processed_row[key] = value[:10000] + "... [truncated]"
-            else:
-                processed_row[key] = value
-        processed_rows.append(processed_row)
-    
-    total_count = count_rows[0]["count"] if not count_error and count_rows else len(processed_rows) + offset
-    
-    # If no results, return empty array with metadata instead of sample data for consistency
-    return jsonify({
-        "records": processed_rows,
-        "total": total_count,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + limit < total_count
-    })
-
-@api_bp.route('/campaigns', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=300)
-def list_campaigns():
-    """List threat campaigns with filtering and pagination"""
-    # Parse and validate parameters
-    try:
-        days = int(request.args.get('days', '30'))
-        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-        offset = int(request.args.get('offset', '0'))
-        
-        # Security validations
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-        if limit < 1 or limit > MAX_RESULTS:
-            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
-        if offset < 0:
-            return jsonify({"error": "Offset cannot be negative"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
-        
-    severity = request.args.get('severity', '')
-    
-    # Validate severity
-    if severity and severity not in ['low', 'medium', 'high', 'critical']:
-        return jsonify({"error": "Invalid severity value"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    # Build conditions
-    conditions = ["last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
-    params = {"days": days, "limit": limit, "offset": offset}
-    
-    if severity:
-        conditions.append("severity = @severity")
-        params["severity"] = severity
-    
-    # Query campaigns
-    query = f"""
-    SELECT
-        campaign_id, campaign_name, threat_actor, malware, techniques, targets,
-        severity, source_count, ioc_count, first_seen, last_seen
-    FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-    WHERE {" AND ".join(conditions)}
-    ORDER BY last_seen DESC
-    LIMIT @limit OFFSET @offset
-    """
-    
-    count_query = f"""
-    SELECT COUNT(*) as count
-    FROM `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-    WHERE {" AND ".join(conditions)}
-    """
-    
-    rows, error = query_bigquery(query, params)
-    count_rows, count_error = query_bigquery(count_query, params)
-    
-    # If query failed or no campaigns, return empty array with metadata
-    if error:
-        return jsonify({"campaigns": [], "count": 0, "total": 0, "has_more": False, "days": days})
-        
-    # Process campaigns
-    campaigns = []
-    if rows:
-        # Process datetime fields
-        for row in rows:
-            campaign = {}
-            for key, value in row.items():
-                if isinstance(value, datetime):
-                    campaign[key] = value.isoformat()
-                else:
-                    campaign[key] = value
-            campaigns.append(campaign)
-    
-    total_count = count_rows[0]["count"] if not count_error and count_rows else len(campaigns)
-    
-    return jsonify({
-        "campaigns": campaigns,
-        "count": len(campaigns),
-        "total": total_count,
-        "has_more": offset + len(campaigns) < total_count,
-        "days": days
-    })
-
-@api_bp.route('/iocs', methods=['GET'])
-@require_api_key
-@handle_exceptions
-def search_iocs():
-    """Search for IOCs across all analyzed data with enhanced filtering"""
-    # Parse and validate parameters
-    try:
-        days = int(request.args.get('days', '30'))
-        limit = min(int(request.args.get('limit', '100')), MAX_RESULTS)
-        offset = int(request.args.get('offset', '0'))
-        
-        # Security validations
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-        if limit < 1 or limit > MAX_RESULTS:
-            return jsonify({"error": f"Limit must be between 1 and {MAX_RESULTS}"}), 400
-        if offset < 0:
-            return jsonify({"error": "Offset cannot be negative"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
-        
-    ioc_type = request.args.get('type', '')
-    value_filter = request.args.get('value', '')
-    
-    # Validate IOC type
-    valid_ioc_types = ["ip", "domain", "url", "md5", "sha1", "sha256", "email", "cve"]
-    if ioc_type and ioc_type not in valid_ioc_types:
-        return jsonify({"error": f"Invalid IOC type. Valid types are: {', '.join(valid_ioc_types)}"}), 400
-    
-    # Sanitize value filter
-    if value_filter:
-        value_filter = re.sub(r'[\'";]', '', value_filter)
-        value_filter = '%' + value_filter + '%'
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    # Build query
-    conditions = ["analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)"]
-    params = {"days": days, "limit": limit, "offset": offset}
-    
-    ioc_conditions = []
-    if ioc_type:
-        ioc_conditions.append("ioc_type = @ioc_type")
-        params["ioc_type"] = ioc_type
-        
-    if value_filter:
-        ioc_conditions.append("ioc_value LIKE @value_filter")
-        params["value_filter"] = value_filter
-    
-    ioc_filter = f"AND {' AND '.join(ioc_conditions)}" if ioc_conditions else ""
-    
-    query = f"""
-    WITH iocs AS (
-        SELECT
-            JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
-            JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ioc_value,
-            MIN(analysis_timestamp) AS first_seen,
-            COUNT(DISTINCT source_id) AS source_count
-        FROM
-            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-        WHERE 
-            {" AND ".join(conditions)}
-        GROUP BY ioc_type, ioc_value
-    )
-    SELECT ioc_type as type, ioc_value as value, first_seen, source_count as sources
-    FROM iocs 
-    WHERE ioc_type IS NOT NULL {ioc_filter}
-    ORDER BY source_count DESC, first_seen DESC
-    LIMIT @limit OFFSET @offset
-    """
-    
-    count_query = f"""
-    WITH iocs AS (
-        SELECT
-            JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS ioc_type,
-            JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ioc_value
-        FROM
-            `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-            UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-        WHERE 
-            {" AND ".join(conditions)}
-    )
-    SELECT COUNT(*) as count
-    FROM iocs 
-    WHERE ioc_type IS NOT NULL {ioc_filter}
-    """
-    
-    rows, error = query_bigquery(query, params)
-    count_rows, count_error = query_bigquery(count_query, params)
-    
-    # Check for errors
-    if error:
-        # Return empty result set with error message
-        return jsonify({
-            "records": [],
-            "count": 0,
-            "total_available": 0,
-            "error": f"Query error: {error}",
-            "filters": {"days": days, "type": ioc_type, "value": value_filter}
-        })
-    
-    # Process results
-    records = []
-    if rows:
-        for row in rows:
-            record = {}
-            for key, value in row.items():
-                if isinstance(value, datetime):
-                    record[key] = value.isoformat()
-                else:
-                    record[key] = value
-            records.append(record)
-    
-    total_count = count_rows[0]["count"] if not count_error and count_rows else len(records) + offset
-    
-    return jsonify({
-        "records": records,
-        "count": len(records),
-        "total_available": total_count,
-        "filters": {"days": days, "type": ioc_type, "value": value_filter}
-    })
-
-@api_bp.route('/iocs/geo', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=3600)  # Cache for 1 hour
-def get_ioc_geo_stats():
-    """Get geographic distribution of IP-based IOCs"""
-    try:
-        days = int(request.args.get('days', '30'))
-        
-        # Security validation
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid days parameter"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    query = f"""
-    WITH ip_iocs AS (
-      SELECT
-        JSON_EXTRACT_SCALAR(ioc_item, '$.value') AS ip,
-        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.country') AS country,
-        JSON_EXTRACT_SCALAR(ioc_item, '$.geo.city') AS city
-      FROM
-        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-      WHERE
-        JSON_EXTRACT_SCALAR(ioc_item, '$.type') = 'ip'
-        AND analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    )
-    SELECT
-      country,
-      COUNT(*) as count,
-      ARRAY_AGG(STRUCT(city, ip) LIMIT 10) as cities
-    FROM ip_iocs
-    WHERE country IS NOT NULL
-    GROUP BY country
-    ORDER BY count DESC
-    LIMIT 50
-    """
-    
-    rows, error = query_bigquery(query, {"days": days})
-    
-    # Check for errors
-    if error:
-        # Return empty result set with error message
-        return jsonify({
-            "countries": [],
-            "total_countries": 0,
-            "timestamp": datetime.utcnow().isoformat(),
-            "error": f"Query error: {error}"
-        })
-    
-    # Process results
-    countries = []
-    if rows:
-        for row in rows:
-            country = {
-                "country": row["country"].strip('"') if row["country"] else "Unknown",
-                "count": row["count"],
-                "cities": []
-            }
-            
-            for city in row["cities"] or []:
-                country["cities"].append({
-                    "name": city.city.strip('"') if city.city else "Unknown",
-                    "ip": city.ip.strip('"') if city.ip else "0.0.0.0"
-                })
-                
-            countries.append(country)
-    
-    return jsonify({
-        "countries": countries,
-        "total_countries": len(countries),
-        "timestamp": datetime.utcnow().isoformat()
-    })
-
-@api_bp.route('/threat_summary', methods=['GET'])
-@require_api_key
-@handle_exceptions
-@cache_result(ttl=600)  # Cache for 10 minutes
-def get_threat_summary():
-    """Get a comprehensive threat intelligence summary"""
-    try:
-        days = int(request.args.get('days', '30'))
-        
-        # Security validation
-        if days < 1 or days > 365:
-            return jsonify({"error": "Days parameter must be between 1 and 365"}), 400
-    except ValueError:
-        return jsonify({"error": "Invalid days parameter"}), 400
-    
-    # Ensure table exists
-    ensure_tables_exist()
-    
-    # Query for recent threat campaigns
-    campaign_query = f"""
-    SELECT
-      campaign_id,
-      campaign_name,
-      threat_actor,
-      malware,
-      severity,
-      source_count,
-      ioc_count,
-      last_seen,
-      targets
-    FROM
-      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-    WHERE
-      last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    ORDER BY
-      severity DESC, last_seen DESC
-    LIMIT 5
-    """
-    
-    # Query for top IOC types
-    ioc_types_query = f"""
-    WITH ioc_types AS (
-      SELECT
-        JSON_EXTRACT_SCALAR(ioc_item, '$.type') AS type,
-        COUNT(*) as count
-      FROM
-        `{PROJECT_ID}.{DATASET_ID}.threat_analysis`,
-        UNNEST(JSON_EXTRACT_ARRAY(iocs)) AS ioc_item
-      WHERE
-        analysis_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-      GROUP BY type
-    )
-    SELECT type, count
-    FROM ioc_types
-    ORDER BY count DESC
-    LIMIT 5
-    """
-    
-    # Query for top threat actors
-    actors_query = f"""
-    SELECT
-      COALESCE(threat_actor, 'Unknown') as actor,
-      COUNT(*) as campaign_count,
-      MAX(severity) as max_severity,
-      MAX(last_seen) as last_seen
-    FROM
-      `{PROJECT_ID}.{DATASET_ID}.threat_campaigns`
-    WHERE
-      last_seen >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY
-      actor
-    ORDER BY
-      campaign_count DESC, last_seen DESC
-    LIMIT 5
-    """
-    
-    # Execute queries
-    params = {"days": days}
-    campaigns, campaigns_error = query_bigquery(campaign_query, params)
-    ioc_types, ioc_types_error = query_bigquery(ioc_types_query, params)
-    actors, actors_error = query_bigquery(actors_query, params)
-    
-    # Format results
-    formatted_campaigns = []
-    if campaigns and not campaigns_error:
-        for campaign in campaigns:
-            formatted_campaign = {}
-            for key, value in campaign.items():
-                if isinstance(value, datetime):
-                    formatted_campaign[key] = value.isoformat()
-                else:
-                    formatted_campaign[key] = value
-            formatted_campaigns.append(formatted_campaign)
-    
-    formatted_actors = []
-    if actors and not actors_error:
-        for actor in actors:
-            formatted_actor = {}
-            for key, value in actor.items():
-                if isinstance(value, datetime):
-                    formatted_actor[key] = value.isoformat()
-                else:
-                    formatted_actor[key] = value
-            formatted_actors.append(formatted_actor)
-    
-    # Create summary object
-    summary = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "period_days": days,
-        "top_campaigns": formatted_campaigns,
-        "top_ioc_types": ioc_types if ioc_types and not ioc_types_error else [],
-        "top_actors": formatted_actors,
-        "errors": {}
-    }
-    
-    # Add any error information
-    if campaigns_error:
-        summary["errors"]["campaigns"] = campaigns_error
-    if ioc_types_error:
-        summary["errors"]["ioc_types"] = ioc_types_error
-    if actors_error:
-        summary["errors"]["actors"] = actors_error
-    
-    return jsonify(summary)
-
-@api_bp.route('/ingest_threat_data', methods=['POST'])
-@require_api_key
-@handle_exceptions
-def ingest_threat_data():
-    """Trigger data ingestion with enhanced validation and error handling"""
-    # Report metric for ingestion request
-    report_metric("ingestion_request")
-    
-    # Check content type
-    content_type = request.headers.get('Content-Type', '')
-    if 'application/json' not in content_type and request.method == 'POST':
-        return jsonify({"error": "Content-Type must be application/json"}), 415
-    
-    # Check request size limit for DoS protection
-    content_length = request.headers.get('Content-Length', 0)
-    if int(content_length) > 10 * 1024 * 1024:  # 10MB limit
-        return jsonify({"error": "Request body too large"}), 413
-    
-    try:
-        # Import ingestion module
-        try:
-            from ingestion import ThreatDataIngestion
-            
-            # Validate request body if present
-            payload = None
-            if request.data:
-                try:
-                    # Limit parse depth and disable duplicate keys
-                    payload = json.loads(request.data.decode('utf-8'))
-                    
-                    # Prevent command injection in feed names
-                    if 'feed_name' in payload and payload['feed_name']:
-                        feed_name = payload['feed_name']
-                        if not re.match(r'^[a-zA-Z0-9_-]+$', feed_name):
-                            return jsonify({"error": "Invalid feed name format"}), 400
-                    
-                    # Limit content size for parsing
-                    if 'content' in payload and isinstance(payload['content'], str):
-                        if len(payload['content']) > 50 * 1024 * 1024:  # 50MB limit
-                            return jsonify({"error": "Content too large"}), 413
-                except json.JSONDecodeError:
-                    return jsonify({"error": "Invalid JSON in request body"}), 400
-            
-            # Initialize ingestion engine
-            ingestion = ThreatDataIngestion()
-            
-            # Process specific feed or all feeds
-            if payload and 'feed_name' in payload and payload['feed_name'] != 'all':
-                feed_name = payload['feed_name']
-                logger.info(f"Ingesting data for feed: {feed_name}")
-                result = ingestion.process_feed(feed_name)
-            elif payload and payload.get('file_type') == 'csv' and 'content' in payload:
-                # Handle CSV content
-                feed_name = payload.get('feed_name', 'csv_upload')
-                logger.info(f"Analyzing CSV data for feed: {feed_name}")
-                result = ingestion.analyze_csv_file(payload['content'], feed_name)
-            else:
-                # Process all feeds
-                logger.info("Ingesting data for all feeds")
-                result = {"results": ingestion.process_all_feeds(), "timestamp": datetime.utcnow().isoformat()}
-            
-            # Clear API cache for related endpoints
-            clear_api_cache("get_feeds")
-            clear_api_cache("get_stats")
-            clear_api_cache("get_iocs")
-            clear_api_cache("get_campaigns")
-            
-            # Report success metric
-            report_metric("ingestion_success")
-            return jsonify(result)
-        except ImportError:
-            # If ingestion module not available, provide minimal functionality
-            logger.warning("Ingestion module not available, using minimal implementation")
-            
-            # Create sample data for testing
-            now = datetime.utcnow()
-            
-            # Ensure threat_analysis table exists
-            client = get_client('bigquery')
-            if client and not isinstance(client, config.DummyClient):
-                # Get imports locally
-                from google.cloud import bigquery
-                from google.cloud.exceptions import NotFound
-                
-                # Check if table exists
-                try:
-                    table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_analysis"
-                    client.get_table(table_id)
-                except NotFound:
-                    # Create the table with minimal schema
-                    schema = [
-                        bigquery.SchemaField("source_id", "STRING"),
-                        bigquery.SchemaField("source_type", "STRING"),
-                        bigquery.SchemaField("iocs", "STRING"),
-                        bigquery.SchemaField("vertex_analysis", "STRING"),
-                        bigquery.SchemaField("analysis_timestamp", "TIMESTAMP"),
-                        bigquery.SchemaField("severity", "STRING"),
-                        bigquery.SchemaField("confidence", "STRING")
-                    ]
-                    table = bigquery.Table(table_id, schema=schema)
-                    client.create_table(table, exists_ok=True)
-                    logger.info(f"Created table threat_analysis")
-                
-                # Create sample data row
-                sample_row = {
-                    "source_id": f"sample-{uuid.uuid4().hex[:8]}",
-                    "source_type": "sample",
-                    "iocs": json.dumps([
-                        {"type": "ip", "value": "192.168.1.1", "sources": 3},
-                        {"type": "domain", "value": "example.com", "sources": 2}
-                    ]),
-                    "vertex_analysis": json.dumps({
-                        "summary": "Sample threat analysis",
-                        "threat_actor": "SampleActor",
-                        "targets": "Sample targets",
-                        "techniques": "Sample techniques",
-                        "malware": "SampleMalware",
-                        "severity": "medium",
-                        "confidence": "medium"
-                    }),
-                    "analysis_timestamp": now.isoformat(),
-                    "severity": "medium",
-                    "confidence": "medium"
-                }
-                
-                # Insert into table
-                try:
-                    errors = client.insert_rows_json(table_id, [sample_row])
-                    
-                    if not errors:
-                        logger.info("Successfully inserted sample data for testing")
-                        
-                        # Also create campaign table if it doesn't exist
-                        try:
-                            campaign_table_id = f"{PROJECT_ID}.{DATASET_ID}.threat_campaigns"
-                            client.get_table(campaign_table_id)
-                        except NotFound:
-                            # Create the table with schema
-                            campaign_schema = [
-                                bigquery.SchemaField("campaign_id", "STRING"),
-                                bigquery.SchemaField("campaign_name", "STRING"),
-                                bigquery.SchemaField("threat_actor", "STRING"),
-                                bigquery.SchemaField("malware", "STRING"),
-                                bigquery.SchemaField("techniques", "STRING"),
-                                bigquery.SchemaField("targets", "STRING"),
-                                bigquery.SchemaField("severity", "STRING"),
-                                bigquery.SchemaField("sources", "STRING"),
-                                bigquery.SchemaField("iocs", "STRING"),
-                                bigquery.SchemaField("source_count", "INTEGER"),
-                                bigquery.SchemaField("ioc_count", "INTEGER"),
-                                bigquery.SchemaField("first_seen", "STRING"),
-                                bigquery.SchemaField("last_seen", "STRING"),
-                                bigquery.SchemaField("detection_timestamp", "STRING")
-                            ]
-                            table = bigquery.Table(campaign_table_id, campaign_schema)
-                            client.create_table(table, exists_ok=True)
-                            logger.info(f"Created table threat_campaigns")
-                        
-                        # Create a sample campaign too
-                        campaign_row = {
-                            "campaign_id": f"campaign-{uuid.uuid4().hex[:8]}",
-                            "campaign_name": "SampleCampaign",
-                            "threat_actor": "SampleActor",
-                            "malware": "SampleMalware",
-                            "techniques": "Sample techniques",
-                            "targets": "Sample targets",
-                            "severity": "medium",
-                            "sources": json.dumps(["sample1", "sample2"]),
-                            "iocs": json.dumps([
-                                {"type": "ip", "value": "192.168.1.1"},
-                                {"type": "domain", "value": "example.com"}
-                            ]),
-                            "source_count": 2,
-                            "ioc_count": 2,
-                            "first_seen": (now - timedelta(days=7)).isoformat(),
-                            "last_seen": now.isoformat(),
-                            "detection_timestamp": now.isoformat()
-                        }
-                        
-                        client.insert_rows_json(campaign_table_id, [campaign_row])
-                        
-                        # Create feed tables if they don't exist
-                        for feed_name in ["threatfox_iocs", "phishtank_urls", "urlhaus_malware"]:
-                            try:
-                                feed_table_id = f"{PROJECT_ID}.{DATASET_ID}.{feed_name}"
-                                client.get_table(feed_table_id)
-                            except NotFound:
-                                # Create table with basic schema
-                                feed_schema = [
-                                    bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                                    bigquery.SchemaField("_ingestion_id", "STRING"),
-                                    bigquery.SchemaField("_source", "STRING"),
-                                    bigquery.SchemaField("_feed_type", "STRING"),
-                                    bigquery.SchemaField("value", "STRING"),
-                                    bigquery.SchemaField("type", "STRING")
-                                ]
-                                table = bigquery.Table(feed_table_id, feed_schema)
-                                client.create_table(table, exists_ok=True)
-                                logger.info(f"Created table {feed_name}")
-                                
-                                # Add a sample row
-                                feed_row = {
-                                    "_ingestion_timestamp": now.isoformat(),
-                                    "_ingestion_id": f"sample-{uuid.uuid4().hex[:8]}",
-                                    "_source": feed_name,
-                                    "_feed_type": f"Sample {feed_name} data",
-                                    "value": "example.com" if "domain" in feed_name else "192.168.1.1",
-                                    "type": "domain" if "domain" in feed_name else "ip"
-                                }
-                                client.insert_rows_json(feed_table_id, [feed_row])
-                        
-                        report_metric("ingestion_success")
-                        return jsonify({
-                            "status": "success",
-                            "message": "Created sample data for testing (ingestion module not available)",
-                            "timestamp": now.isoformat()
-                        })
-                    else:
-                        logger.error(f"Errors inserting sample data: {errors}")
-                except Exception as e:
-                    logger.error(f"Error creating sample data: {e}")
-            
-            report_metric("ingestion_module_missing")
-            return jsonify({"error": "Ingestion module not available, but created minimal test data"}), 200
-    except Exception as e:
-        logger.error(f"Ingestion error: {str(e)}")
-        report_metric("ingestion_error")
-        return jsonify({"error": f"Ingestion error: {str(e)}"}), 500
-
-@api_bp.route('/upload_csv', methods=['POST'])
-@require_api_key
-@handle_exceptions
-def upload_csv():
-    """Upload CSV file for processing with enhanced security and error handling"""
-    # Report metric for upload request
-    report_metric("csv_upload_request")
-    
-    try:
-        # Handle both file uploads and direct JSON payloads with csv_content
-        if request.headers.get('Content-Type', '').startswith('application/json'):
-            # Handle JSON payload
-            payload = request.get_json()
-            if not payload:
-                return jsonify({"error": "Invalid JSON payload"}), 400
-                
-            csv_content = payload.get('content')
-            feed_name = payload.get('feed_name', 'csv_upload')
-            
-            if not csv_content:
-                return jsonify({"error": "No CSV content provided"}), 400
-                
-        elif 'file' in request.files:
-            # Handle file upload
-            file = request.files['file']
-            if file.filename == '':
-                return jsonify({"error": "No file selected"}), 400
-            
-            # Validate file extension and type
-            if not file.filename.lower().endswith('.csv'):
-                return jsonify({"error": "Only CSV files are accepted"}), 400
-            
-            # Check file size
-            if file.content_length and file.content_length > 50 * 1024 * 1024:  # 50MB limit
-                return jsonify({"error": "File too large. Maximum size is 50MB"}), 413
-            
-            try:
-                # Read file content with size limits
-                csv_content = file.read(50 * 1024 * 1024).decode('utf-8')  # 50MB limit
-                feed_name = request.form.get('feed_name', os.path.splitext(file.filename)[0])
-            except UnicodeDecodeError:
-                # Try alternative encodings
-                file.seek(0)
-                content = file.read(50 * 1024 * 1024)  # 50MB limit
-                for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'windows-1252']:
-                    try:
-                        csv_content = content.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                else:
-                    return jsonify({"error": "Unable to decode CSV file. Please ensure it's a text file with UTF-8 or Latin-1 encoding."}), 400
+def format_bq_row(row: Dict) -> Dict:
+    """Format BigQuery row for JSON response."""
+    formatted = {}
+    for key, value in dict(row).items():
+        if isinstance(value, datetime):
+            formatted[key] = value.isoformat()
+        elif hasattr(value, 'isoformat'):  # For other datetime-like objects
+            formatted[key] = value.isoformat()
         else:
-            return jsonify({"error": "No file or content provided"}), 400
-        
-        # Clean feed name to ensure it's valid for table naming
-        feed_name = re.sub(r'[^a-zA-Z0-9_]', '_', feed_name.lower())
-        
-        # Use ingestion module if available
-        try:
-            from ingestion import ThreatDataIngestion
-            
-            # Initialize ingestion engine
-            ingestion = ThreatDataIngestion()
-            
-            # Process the CSV file
-            result = ingestion.analyze_csv_file(csv_content, feed_name)
-            
-            # Clear relevant caches on successful upload
-            if not result.get("error"):
-                clear_api_cache("get_feeds")
-                clear_api_cache("get_stats")
-            
-            return jsonify(result)
-            
-        except ImportError:
-            logger.warning("Ingestion module not available, using minimal implementation")
-            
-            # Create a minimal implementation that inserts data directly to BigQuery
-            client = get_client('bigquery')
-            if client and not isinstance(client, config.DummyClient):
-                try:
-                    # Import locally
-                    from google.cloud import bigquery
-                    
-                    # Create a table for this upload if it doesn't exist
-                    table_id = f"upload_{feed_name}"
-                    full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{table_id}"
-                    
-                    try:
-                        client.get_table(full_table_id)
-                        logger.info(f"Table {full_table_id} already exists")
-                    except Exception:
-                        # Create table
-                        schema = [
-                            bigquery.SchemaField("_ingestion_timestamp", "TIMESTAMP"),
-                            bigquery.SchemaField("_ingestion_id", "STRING"),
-                            bigquery.SchemaField("_source", "STRING"),
-                            bigquery.SchemaField("_feed_type", "STRING"),
-                            bigquery.SchemaField("csv_content", "STRING")
-                        ]
-                        table = bigquery.Table(full_table_id, schema=schema)
-                        client.create_table(table, exists_ok=True)
-                        logger.info(f"Created table {table_id}")
-                    
-                    # Parse CSV to find headers
-                    import csv
-                    from io import StringIO
-                    
-                    try:
-                        csv_file = StringIO(csv_content)
-                        reader = csv.reader(csv_file)
-                        headers = next(reader, [])
-                        
-                        # Create record
-                        ingestion_id = f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        row = {
-                            "_ingestion_timestamp": datetime.utcnow().isoformat(),
-                            "_ingestion_id": ingestion_id,
-                            "_source": "csv_upload",
-                            "_feed_type": f"Uploaded CSV: {feed_name}",
-                            "csv_content": csv_content
-                        }
-                        
-                        # Insert into BQ
-                        errors = client.insert_rows_json(full_table_id, [row])
-                        
-                        if not errors:
-                            logger.info(f"Successfully uploaded CSV to table {table_id}")
-                            report_metric("csv_upload_direct_to_bq")
-                            
-                            # Clear API cache for related endpoints
-                            clear_api_cache("get_feeds")
-                            clear_api_cache("get_stats")
-                            
-                            return jsonify({
-                                "status": "success",
-                                "message": "CSV uploaded directly to BigQuery",
-                                "feed_name": feed_name,
-                                "table": table_id,
-                                "record_count": sum(1 for _ in reader),  # Count remaining rows
-                                "headers": headers
-                            })
-                        else:
-                            logger.error(f"Errors inserting CSV data: {errors}")
-                            return jsonify({"error": f"BigQuery insert errors: {errors}"}), 500
-                    except Exception as e:
-                        logger.error(f"CSV parsing error: {str(e)}")
-                        return jsonify({"error": f"CSV parsing error: {str(e)}"}), 400
-                except Exception as e:
-                    logger.error(f"Error uploading to BigQuery: {e}")
-                    return jsonify({"error": f"BigQuery error: {str(e)}"}), 500
-            
-            report_metric("csv_upload_storage_unavailable")
-            return jsonify({"error": "Storage not available"}), 500
-    except UnicodeDecodeError:
-        report_metric("csv_upload_encoding_error")
-        return jsonify({"error": "Invalid CSV file encoding"}), 400
-    except Exception as e:
-        logger.error(f"CSV upload error: {str(e)}")
-        report_metric("csv_upload_error")
-        return jsonify({"error": f"Upload error: {str(e)}"}), 500
+            formatted[key] = value
+    return formatted
 
-@api_bp.route('/status', methods=['GET'])
-def api_status():
-    """Enhanced API status endpoint with detailed metrics"""
-    # Get GCP service status from config module
-    cloud_status = config.get_cloud_status()
+def execute_bq_query(query: str, params: Optional[Dict] = None) -> List[Dict]:
+    """Execute BigQuery query and return formatted results."""
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        raise Exception("Database connection unavailable")
     
-    # Get cache stats
-    cache_stats = {
-        "size": len(query_cache),
-        "oldest_entry": min(cache_timestamps.values()).isoformat() if cache_timestamps else None,
-        "newest_entry": max(cache_timestamps.values()).isoformat() if cache_timestamps else None
-    }
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=params if params else []
+    )
     
-    # Get environment info
-    env_info = {
-        "environment": ENVIRONMENT,
-        "project_id": PROJECT_ID,
-        "region": REGION,
-        "version": os.environ.get("VERSION", "1.0.0"),
-        "api_key_configured": bool(get_api_key()),
-        "dataset_id": DATASET_ID
-    }
+    query_job = bq_client.query(query, job_config=job_config)
+    results = [format_bq_row(row) for row in query_job]
     
-    # System resource info if available
-    system_info = {}
+    return results
+
+def publish_to_topic(topic_name: str, message_data: Dict) -> str:
+    """Publish message to Pub/Sub topic."""
+    if not publisher:
+        logger.error("Pub/Sub publisher not initialized")
+        raise Exception("Pub/Sub connection unavailable")
+    
+    topic_path = publisher.topic_path(Config.GCP_PROJECT, topic_name)
+    message = json.dumps(message_data).encode("utf-8")
+    
     try:
-        import psutil
-        system_info = {
-            "cpu_percent": psutil.cpu_percent(interval=None),
-            "memory_percent": psutil.virtual_memory().percent,
-            "thread_count": len(psutil.Process().threads())
-        }
-    except ImportError:
-        system_info = {"status": "psutil not available"}
+        publish_future = publisher.publish(topic_path, data=message)
+        message_id = publish_future.result()
+        return message_id
+    except Exception as e:
+        logger.error(f"Error publishing to {topic_name}: {str(e)}")
+        raise
+
+def check_table_exists(table_name: str) -> bool:
+    """Check if BigQuery table exists."""
+    if not bq_client:
+        return False
     
-    # Return comprehensive status
+    try:
+        full_table_id = Config.get_table_name(table_name)
+        if not full_table_id:
+            return False
+            
+        # Parse full table ID
+        project_id, dataset_id, table_id = full_table_id.split('.')
+        
+        # Get table reference
+        dataset_ref = bq_client.dataset(dataset_id, project=project_id)
+        table_ref = dataset_ref.table(table_id)
+        
+        # Try to get table
+        bq_client.get_table(table_ref)
+        return True
+    except NotFound:
+        return False
+    except Exception as e:
+        logger.error(f"Error checking table {table_name}: {str(e)}")
+        return False
+
+# -------------------- Health Check Endpoint --------------------
+
+@api_blueprint.route('/health', methods=['GET'])
+def api_health_check():
+    """Health check endpoint for readiness probe."""
+    try:
+        health_data = {
+            'status': 'ready',
+            'timestamp': datetime.utcnow().isoformat(),
+            'api_version': Config.API_VERSION,
+            'version': Config.VERSION,
+            'environment': Config.ENVIRONMENT
+        }
+        
+        # Add service dependency status
+        dependencies = {}
+        
+        # Check BigQuery connection if client initialized
+        if bq_client:
+            try:
+                # Simple query to test connection
+                query = "SELECT 1 AS test"
+                query_job = bq_client.query(query)
+                query_job.result(timeout=2)  # Short timeout
+                dependencies['bigquery'] = 'connected'
+                
+                # Check required tables
+                for table_key in Config.BIGQUERY_TABLES:
+                    table_exists = check_table_exists(table_key)
+                    dependencies[f'table_{table_key}'] = 'exists' if table_exists else 'missing'
+            except Exception as e:
+                logger.warning(f"BigQuery health check failed: {str(e)}")
+                dependencies['bigquery'] = 'error'
+        else:
+            dependencies['bigquery'] = 'not_initialized'
+            
+        # Check Cloud Storage connection if client initialized
+        if storage_client:
+            try:
+                # Check if bucket exists
+                bucket_name = Config.GCS_BUCKET
+                bucket = storage_client.bucket(bucket_name)
+                dependencies['storage'] = 'connected' if bucket.exists() else 'bucket_not_found'
+            except Exception as e:
+                logger.warning(f"Storage health check failed: {str(e)}")
+                dependencies['storage'] = 'error'
+        else:
+            dependencies['storage'] = 'not_initialized'
+            
+        # Check Pub/Sub connection if client initialized
+        if publisher and subscriber:
+            try:
+                topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
+                dependencies['pubsub'] = 'initialized'
+            except Exception as e:
+                logger.warning(f"Pub/Sub health check failed: {str(e)}")
+                dependencies['pubsub'] = 'error'
+        else:
+            dependencies['pubsub'] = 'not_initialized'
+        
+        # Add dependencies to health data
+        health_data['dependencies'] = dependencies
+        
+        return jsonify(health_data), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        report_error(e)
+        return jsonify({
+            'status': 'error',
+            'message': 'Service is not ready',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 503
+
+# -------------------- API Information Endpoints --------------------
+
+@api_blueprint.route('/info', methods=['GET'])
+def get_api_info():
+    """Get API information."""
     return jsonify({
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": cloud_status.get("services", {}),
-        "cache": cache_stats,
-        "environment": env_info,
-        "system": system_info
+        'name': 'Threat Intelligence Platform API',
+        'version': Config.API_VERSION,
+        'build_version': Config.VERSION,
+        'endpoints': [
+            {'path': '/api/health', 'method': 'GET', 'description': 'API health check'},
+            {'path': '/api/info', 'method': 'GET', 'description': 'API information'},
+            {'path': '/api/indicators', 'method': 'GET', 'description': 'Get indicators of compromise'},
+            {'path': '/api/vulnerabilities', 'method': 'GET', 'description': 'Get vulnerability information'},
+            {'path': '/api/threat_actors', 'method': 'GET', 'description': 'Get threat actor information'},
+            {'path': '/api/campaigns', 'method': 'GET', 'description': 'Get campaign information'},
+            {'path': '/api/malware', 'method': 'GET', 'description': 'Get malware information'},
+            {'path': '/api/admin/ingest', 'method': 'POST', 'description': 'Trigger data ingestion'},
+            {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'}
+        ]
     })
 
-def init_app(app):
-    """Initialize API routes with the main app"""
-    # Register blueprint
-    app.register_blueprint(api_bp)
+@api_blueprint.route('/feeds', methods=['GET'])
+def get_feed_info():
+    """Get information about available threat feeds."""
+    feeds = []
     
-    # Add root health check
-    @app.route('/health', methods=['GET'])
-    @handle_exceptions
-    def root_health_check():
-        return health_check()
+    for feed in Config.FEEDS:
+        feeds.append({
+            'id': feed.get('id'),
+            'name': feed.get('name'),
+            'description': feed.get('description'),
+            'type': feed.get('type'),
+            'update_frequency': feed.get('update_frequency')
+        })
     
-    # Initialize request tracking
-    @app.before_request
-    def track_request():
-        g.request_start_time = time.time()
-    
-    # Report request metrics after request
-    @app.after_request
-    def report_request_metrics(response):
-        if hasattr(g, 'request_start_time'):
-            # Calculate response time
-            response_time = time.time() - g.request_start_time
+    return jsonify({
+        'feeds': feeds,
+        'count': len(feeds),
+        'update_interval': Config.FEED_UPDATE_INTERVAL
+    })
+
+# -------------------- Data Access Endpoints --------------------
+
+@api_blueprint.route('/indicators', methods=['GET'])
+@require_api_key
+@limiter.limit(Config.API_RATE_LIMIT)
+def get_indicators():
+    """Get indicators of compromise."""
+    try:
+        # Get query parameters with defaults
+        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
+        offset = int(request.args.get('offset', 0))
+        type_filter = request.args.get('type')
+        value_filter = request.args.get('value')
+        feed_filter = request.args.get('feed_id')
+        min_confidence = request.args.get('min_confidence')
+        max_age_days = request.args.get('max_age_days')
+        
+        # Build query filters
+        filters = []
+        query_params = []
+        
+        if type_filter:
+            filters.append("type = @type_filter")
+            query_params.append(bigquery.ScalarQueryParameter("type_filter", "STRING", type_filter))
             
-            # Add X-Response-Time header
-            response.headers['X-Response-Time'] = f"{response_time:.3f}s"
+        if value_filter:
+            filters.append("value LIKE @value_filter")
+            query_params.append(bigquery.ScalarQueryParameter("value_filter", "STRING", f"%{value_filter}%"))
             
-            # Log slow requests
-            if response_time > 1.0:
-                endpoint = request.endpoint or 'unknown'
-                logger.info(f"Slow request to {endpoint}: {response_time:.3f}s")
-                
-                # Report metric if in production
-                if ENVIRONMENT == 'production' and response_time > 2.0:
-                    report_metric("slow_request_seconds", response_time)
+        if feed_filter:
+            filters.append("feed_id = @feed_filter")
+            query_params.append(bigquery.ScalarQueryParameter("feed_filter", "STRING", feed_filter))
+            
+        if min_confidence:
+            filters.append("confidence >= @min_confidence")
+            query_params.append(bigquery.ScalarQueryParameter("min_confidence", "INT64", int(min_confidence)))
+            
+        if max_age_days:
+            date_threshold = datetime.utcnow() - timedelta(days=int(max_age_days))
+            filters.append("created_at >= @date_threshold")
+            query_params.append(bigquery.ScalarQueryParameter("date_threshold", "TIMESTAMP", date_threshold))
         
-        # Add security headers
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Frame-Options'] = 'DENY'
-        response.headers['X-XSS-Protection'] = '1; mode=block'
+        # Build query
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('indicators')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+            ORDER BY created_at DESC
+            LIMIT {limit} OFFSET {offset}
+        """
         
-        # Don't cache API responses by default
-        if request.path.startswith('/api/') and not 'Cache-Control' in response.headers:
-            response.headers['Cache-Control'] = 'no-store, max-age=0'
+        # Get count query
+        count_query = f"""
+            SELECT COUNT(*) as count FROM `{Config.get_table_name('indicators')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+        """
         
-        return response
+        # Execute queries
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        count_job = bq_client.query(count_query, job_config=job_config)
+        count_result = list(count_job)[0]
+        total_count = count_result['count']
+        
+        results_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in results_job]
+        
+        return jsonify({
+            'indicators': results,
+            'count': len(results),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset
+        })
     
-    # Log initialization
-    logger.info("API routes initialized with enhanced security")
-    return app
+    except Exception as e:
+        logger.error(f"Error querying indicators: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve indicators: {str(e)}"}), 500
+
+@api_blueprint.route('/vulnerabilities', methods=['GET'])
+@require_api_key
+@limiter.limit(Config.API_RATE_LIMIT)
+def get_vulnerabilities():
+    """Get vulnerability information."""
+    try:
+        # Get query parameters with defaults
+        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
+        offset = int(request.args.get('offset', 0))
+        cve_filter = request.args.get('cve')
+        min_cvss = request.args.get('min_cvss')
+        product_filter = request.args.get('product')
+        
+        # Build query filters
+        filters = []
+        query_params = []
+        
+        if cve_filter:
+            filters.append("cve_id = @cve_filter")
+            query_params.append(bigquery.ScalarQueryParameter("cve_filter", "STRING", cve_filter))
+            
+        if min_cvss:
+            filters.append("cvss_score >= @min_cvss")
+            query_params.append(bigquery.ScalarQueryParameter("min_cvss", "FLOAT64", float(min_cvss)))
+            
+        if product_filter:
+            filters.append("(product LIKE @product_filter OR vendor LIKE @product_filter)")
+            query_params.append(bigquery.ScalarQueryParameter("product_filter", "STRING", f"%{product_filter}%"))
+        
+        # Build query
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('vulnerabilities')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+            ORDER BY cvss_score DESC, created_at DESC
+            LIMIT {limit} OFFSET {offset}
+        """
+        
+        # Get count query
+        count_query = f"""
+            SELECT COUNT(*) as count FROM `{Config.get_table_name('vulnerabilities')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+        """
+        
+        # Execute queries
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        count_job = bq_client.query(count_query, job_config=job_config)
+        count_result = list(count_job)[0]
+        total_count = count_result['count']
+        
+        results_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in results_job]
+        
+        return jsonify({
+            'vulnerabilities': results,
+            'count': len(results),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset
+        })
+    
+    except Exception as e:
+        logger.error(f"Error querying vulnerabilities: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve vulnerabilities: {str(e)}"}), 500
+
+@api_blueprint.route('/threat_actors', methods=['GET'])
+@require_api_key
+@limiter.limit(Config.API_RATE_LIMIT)
+def get_threat_actors():
+    """Get threat actor information."""
+    try:
+        # Get query parameters with defaults
+        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
+        offset = int(request.args.get('offset', 0))
+        name_filter = request.args.get('name')
+        target_filter = request.args.get('target')
+        
+        # Build query filters
+        filters = []
+        query_params = []
+        
+        if name_filter:
+            filters.append("(name LIKE @name_filter OR aliases LIKE @name_filter)")
+            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
+            
+        if target_filter:
+            filters.append("targets LIKE @target_filter")
+            query_params.append(bigquery.ScalarQueryParameter("target_filter", "STRING", f"%{target_filter}%"))
+        
+        # Build query
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('threat_actors')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+            ORDER BY last_updated DESC
+            LIMIT {limit} OFFSET {offset}
+        """
+        
+        # Get count query
+        count_query = f"""
+            SELECT COUNT(*) as count FROM `{Config.get_table_name('threat_actors')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+        """
+        
+        # Execute queries
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        count_job = bq_client.query(count_query, job_config=job_config)
+        count_result = list(count_job)[0]
+        total_count = count_result['count']
+        
+        results_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in results_job]
+        
+        return jsonify({
+            'threat_actors': results,
+            'count': len(results),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset
+        })
+    
+    except Exception as e:
+        logger.error(f"Error querying threat actors: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve threat actors: {str(e)}"}), 500
+
+@api_blueprint.route('/campaigns', methods=['GET'])
+@require_api_key
+@limiter.limit(Config.API_RATE_LIMIT)
+def get_campaigns():
+    """Get campaign information."""
+    try:
+        # Get query parameters with defaults
+        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
+        offset = int(request.args.get('offset', 0))
+        name_filter = request.args.get('name')
+        actor_filter = request.args.get('actor')
+        
+        # Build query filters
+        filters = []
+        query_params = []
+        
+        if name_filter:
+            filters.append("name LIKE @name_filter")
+            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
+            
+        if actor_filter:
+            filters.append("threat_actor_ids LIKE @actor_filter")
+            query_params.append(bigquery.ScalarQueryParameter("actor_filter", "STRING", f"%{actor_filter}%"))
+        
+        # Build query
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('campaigns')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+            ORDER BY first_seen DESC
+            LIMIT {limit} OFFSET {offset}
+        """
+        
+        # Get count query
+        count_query = f"""
+            SELECT COUNT(*) as count FROM `{Config.get_table_name('campaigns')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+        """
+        
+        # Execute queries
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        count_job = bq_client.query(count_query, job_config=job_config)
+        count_result = list(count_job)[0]
+        total_count = count_result['count']
+        
+        results_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in results_job]
+        
+        return jsonify({
+            'campaigns': results,
+            'count': len(results),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset
+        })
+    
+    except Exception as e:
+        logger.error(f"Error querying campaigns: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve campaigns: {str(e)}"}), 500
+
+@api_blueprint.route('/malware', methods=['GET'])
+@require_api_key
+@limiter.limit(Config.API_RATE_LIMIT)
+def get_malware():
+    """Get malware information."""
+    try:
+        # Get query parameters with defaults
+        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
+        offset = int(request.args.get('offset', 0))
+        name_filter = request.args.get('name')
+        type_filter = request.args.get('type')
+        hash_filter = request.args.get('hash')
+        
+        # Build query filters
+        filters = []
+        query_params = []
+        
+        if name_filter:
+            filters.append("(name LIKE @name_filter OR aliases LIKE @name_filter)")
+            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
+            
+        if type_filter:
+            filters.append("malware_type = @type_filter")
+            query_params.append(bigquery.ScalarQueryParameter("type_filter", "STRING", type_filter))
+            
+        if hash_filter:
+            filters.append("(md5 = @hash_filter OR sha1 = @hash_filter OR sha256 = @hash_filter)")
+            query_params.append(bigquery.ScalarQueryParameter("hash_filter", "STRING", hash_filter))
+        
+        # Build query
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('malware')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+            ORDER BY first_seen DESC
+            LIMIT {limit} OFFSET {offset}
+        """
+        
+        # Get count query
+        count_query = f"""
+            SELECT COUNT(*) as count FROM `{Config.get_table_name('malware')}`
+            {f"WHERE {' AND '.join(filters)}" if filters else ""}
+        """
+        
+        # Execute queries
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        count_job = bq_client.query(count_query, job_config=job_config)
+        count_result = list(count_job)[0]
+        total_count = count_result['count']
+        
+        results_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in results_job]
+        
+        return jsonify({
+            'malware': results,
+            'count': len(results),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset
+        })
+    
+    except Exception as e:
+        logger.error(f"Error querying malware: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve malware: {str(e)}"}), 500
+
+# -------------------- Detail Endpoints --------------------
+
+@api_blueprint.route('/indicators/<indicator_id>', methods=['GET'])
+@require_api_key
+def get_indicator_detail(indicator_id):
+    """Get detailed information about a specific indicator."""
+    try:
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('indicators')}`
+            WHERE id = @indicator_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("indicator_id", "STRING", indicator_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = list(query_job)
+        
+        if not results:
+            return jsonify({"error": "Indicator not found"}), 404
+            
+        indicator = format_bq_row(results[0])
+        
+        # Get related entities
+        related_malware_query = f"""
+            SELECT m.* FROM `{Config.get_table_name('malware')}` m
+            JOIN `{Config.get_table_name('indicators')}` i
+            ON REGEXP_CONTAINS(i.related_malware_ids, m.id)
+            WHERE i.id = @indicator_id
+        """
+        
+        related_malware_job = bq_client.query(related_malware_query, job_config=job_config)
+        related_malware = [format_bq_row(row) for row in related_malware_job]
+        
+        indicator['related_malware'] = related_malware
+        
+        return jsonify(indicator)
+    
+    except Exception as e:
+        logger.error(f"Error getting indicator detail: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve indicator detail: {str(e)}"}), 500
+
+@api_blueprint.route('/vulnerabilities/<cve_id>', methods=['GET'])
+@require_api_key
+def get_vulnerability_detail(cve_id):
+    """Get detailed information about a specific vulnerability."""
+    try:
+        query = f"""
+            SELECT * FROM `{Config.get_table_name('vulnerabilities')}`
+            WHERE cve_id = @cve_id
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("cve_id", "STRING", cve_id)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = list(query_job)
+        
+        if not results:
+            return jsonify({"error": "Vulnerability not found"}), 404
+            
+        vulnerability = format_bq_row(results[0])
+        
+        # Get related indicators
+        related_indicators_query = f"""
+            SELECT * FROM `{Config.get_table_name('indicators')}`
+            WHERE related_vulnerabilities LIKE @vuln_pattern
+            LIMIT 100
+        """
+        
+        related_indicators_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("vuln_pattern", "STRING", f"%{cve_id}%")
+            ]
+        )
+        
+        related_indicators_job = bq_client.query(related_indicators_query, job_config=related_indicators_config)
+        related_indicators = [format_bq_row(row) for row in related_indicators_job]
+        
+        vulnerability['related_indicators'] = related_indicators
+        
+        return jsonify(vulnerability)
+    
+    except Exception as e:
+        logger.error(f"Error getting vulnerability detail: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to retrieve vulnerability detail: {str(e)}"}), 500
+
+# -------------------- Admin API Endpoints --------------------
+
+@api_blueprint.route('/admin/ingest', methods=['POST'])
+@require_api_key
+def trigger_ingest():
+    """Trigger data ingestion process."""
+    try:
+        data = request.get_json() or {}
+        process_all = data.get('process_all', False)
+        feed_id = data.get('feed_id')
+        
+        # Validate feed_id if provided
+        if feed_id and not Config.get_feed_by_id(feed_id):
+            return jsonify({"error": f"Invalid feed_id: {feed_id}"}), 400
+        
+        # Prepare message for Pub/Sub
+        message = {
+            "operation": "ingest",
+            "timestamp": datetime.utcnow().isoformat(),
+            "process_all": process_all,
+            "feed_id": feed_id
+        }
+        
+        # Publish message to trigger Cloud Function
+        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
+        
+        return jsonify({
+            "message": "Ingestion process triggered",
+            "message_id": message_id,
+            "process_all": process_all,
+            "feed_id": feed_id
+        })
+    
+    except Exception as e:
+        logger.error(f"Error triggering ingestion: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to trigger ingestion: {str(e)}"}), 500
+
+@api_blueprint.route('/admin/analyze', methods=['POST'])
+@require_api_key
+def trigger_analysis():
+    """Trigger threat data analysis process."""
+    try:
+        data = request.get_json() or {}
+        indicator_ids = data.get('indicator_ids', [])
+        analyze_all = data.get('analyze_all', False)
+        force_reanalysis = data.get('force_reanalysis', False)
+        
+        if not analyze_all and not indicator_ids:
+            return jsonify({"error": "Must provide indicator_ids or set analyze_all=true"}), 400
+            
+        # Limit the number of indicators that can be analyzed at once
+        if len(indicator_ids) > Config.ANALYSIS_MAX_INDICATORS_PER_BATCH:
+            return jsonify({
+                "error": f"Too many indicators to analyze at once. Maximum is {Config.ANALYSIS_MAX_INDICATORS_PER_BATCH}"
+            }), 400
+        
+        # Prepare message for Pub/Sub
+        message = {
+            "operation": "analyze",
+            "timestamp": datetime.utcnow().isoformat(),
+            "analyze_all": analyze_all,
+            "force_reanalysis": force_reanalysis,
+            "indicator_ids": indicator_ids
+        }
+        
+        # Publish message to trigger Cloud Function
+        message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message)
+        
+        return jsonify({
+            "message": "Analysis process triggered",
+            "message_id": message_id,
+            "analyze_all": analyze_all,
+            "indicator_count": len(indicator_ids) if not analyze_all else "all"
+        })
+    
+    except Exception as e:
+        logger.error(f"Error triggering analysis: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to trigger analysis: {str(e)}"}), 500
+
+@api_blueprint.route('/admin/export', methods=['POST'])
+@require_api_key
+def export_data():
+    """Export threat intelligence data."""
+    try:
+        data = request.get_json() or {}
+        export_type = data.get('type', 'indicators')
+        export_format = data.get('format', 'json')
+        filters = data.get('filters', {})
+        
+        if export_format not in Config.EXPORT_FORMATS:
+            return jsonify({"error": f"Invalid export format. Supported formats: {', '.join(Config.EXPORT_FORMATS)}"}), 400
+            
+        if export_type not in Config.BIGQUERY_TABLES:
+            return jsonify({"error": f"Invalid export type. Supported types: {', '.join(Config.BIGQUERY_TABLES.keys())}"}), 400
+            
+        # Prepare message for Pub/Sub to trigger export
+        message = {
+            "operation": "export",
+            "timestamp": datetime.utcnow().isoformat(),
+            "export_type": export_type,
+            "export_format": export_format,
+            "filters": filters
+        }
+        
+        # Publish message
+        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
+        
+        # For immediate exports of small datasets, we could implement direct export logic here
+        
+        return jsonify({
+            "message": "Export process triggered",
+            "message_id": message_id,
+            "export_type": export_type,
+            "export_format": export_format
+        })
+    
+    except Exception as e:
+        logger.error(f"Error triggering export: {str(e)}")
+        report_error(e)
+        return jsonify({"error": f"Failed to trigger export: {str(e)}"}), 500
+
+# -------------------- Error Handlers --------------------
+
+@api_blueprint.errorhandler(400)
+def bad_request(e):
+    """Handle 400 errors."""
+    return jsonify({"error": "Bad request", "message": str(e)}), 400
+
+@api_blueprint.errorhandler(401)
+def unauthorized(e):
+    """Handle 401 errors."""
+    return jsonify({"error": "Unauthorized", "message": "Authentication required"}), 401
+
+@api_blueprint.errorhandler(403)
+def forbidden(e):
+    """Handle 403 errors."""
+    return jsonify({"error": "Forbidden", "message": "Insufficient permissions"}), 403
+
+@api_blueprint.errorhandler(404)
+def not_found(e):
+    """Handle 404 errors."""
+    return jsonify({"error": "Not found", "message": "Resource not found"}), 404
+
+@api_blueprint.errorhandler(405)
+def method_not_allowed(e):
+    """Handle 405 errors."""
+    return jsonify({"error": "Method not allowed", "message": "HTTP method not allowed for this endpoint"}), 405
+
+@api_blueprint.errorhandler(429)
+def too_many_requests(e):
+    """Handle 429 errors."""
+    return jsonify({
+        "error": "Too many requests", 
+        "message": "Rate limit exceeded. Please try again later."
+    }), 429
+
+@api_blueprint.errorhandler(500)
+def internal_server_error(e):
+    """Handle 500 errors."""
+    logger.error(f"Internal server error: {str(e)}\n{traceback.format_exc()}")
+    report_error(e)
+    return jsonify({"error": "Internal server error", "message": "An unexpected error occurred"}), 500
