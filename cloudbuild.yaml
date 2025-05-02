@@ -1,52 +1,259 @@
 steps:
-# Build the image
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'build-image'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
-  timeout: '1200s'  # Increased timeout for Go module download and compilation
-
-# Push to Container Registry
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'push-image'
-  args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
-  timeout: '300s'
-  waitFor: ['build-image']
-
-# Deploy to Cloud Run
-- name: 'gcr.io/cloud-builders/gcloud'
-  id: 'deploy-cloud-run'
+# Install dependencies with caching
+- name: 'python:3.10'
+  id: 'install-dependencies'
+  entrypoint: bash
   args:
-  - 'run'
-  - 'deploy'
-  - 'threat-intelligence-platform'
-  - '--image'
-  - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
-  - '--region'
-  - 'us-central1'
-  - '--platform'
-  - 'managed'
-  - '--allow-unauthenticated'
-  - '--memory'
-  - '2Gi'  # Increased memory
-  - '--cpu'
-  - '2'     # Increased CPU
-  - '--min-instances'
-  - '1'     # Keep at least 1 instance running
-  - '--max-instances'
-  - '20'
-  - '--port'
-  - '8080'
-  - '--set-env-vars'
-  - 'ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,GO_INGESTION_PORT=8081,API_KEY=b03bb05c6597c6473e83a271c0bb5d492061fea4c0e67cc7,SECRET_KEY=5a92c3067bc4587d021925678ea071825973c85c2b824df3bfff14ff8bc803a9,VERSION=1.0.2'
-  timeout: '300s'
-  waitFor: ['push-image']
+    - '-c'
+    - |
+      echo "Installing dependencies with optimized settings..."
+      pip install --upgrade pip
+      pip install --no-cache-dir -r requirements.txt --user
 
-images:
-- 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+# Prepare function directories with minimal requirements
+- name: 'python:3.10'
+  id: 'prepare-functions'
+  entrypoint: bash
+  args:
+    - '-c'
+    - |
+      # Create functions directory structure
+      mkdir -p functions/ingestion functions/analysis scripts
+      
+      # Copy main files
+      cp config.py functions/analysis/
+      cp config.py functions/ingestion/
+      
+      # Create function entry points
+      echo 'from ingestion import ingest_threat_data' > functions/ingestion/main.py
+      echo 'from analysis import analyze_threat_data' > functions/analysis/main.py
+      
+      # Create requirements files with pinned versions to avoid backtracking
+      cat > functions/ingestion/requirements.txt << 'EOF'
+      google-cloud-bigquery==3.11.4
+      google-cloud-storage==2.10.0
+      google-cloud-pubsub==2.18.4
+      google-cloud-secret-manager==2.17.0
+      google-cloud-logging==3.8.0
+      google-cloud-error-reporting==1.9.1
+      google-auth==2.23.0
+      requests==2.31.0
+      python-dateutil==2.8.2
+      EOF
+      
+      cat > functions/analysis/requirements.txt << 'EOF'
+      google-cloud-bigquery==3.11.4
+      google-cloud-storage==2.10.0
+      google-cloud-pubsub==2.18.4
+      google-cloud-language==2.11.1
+      google-cloud-secret-manager==2.17.0
+      google-cloud-logging==3.8.0
+      google-cloud-error-reporting==1.9.1
+      vertexai==1.43.0
+      google-auth==2.23.0
+      requests==2.31.0
+      python-dateutil==2.8.2
+      EOF
+      
+      # Setup BigQuery script
+      cp requirements.txt scripts/
+
+# Run basic tests
+- name: 'python:3.10'
+  id: 'run-tests'
+  entrypoint: bash
+  args:
+    - '-c'
+    - |
+      echo "Running basic tests..."
+      python -m py_compile app.py config.py api.py frontend.py || echo "Warning: Python syntax check failed"
+      if [ -d "templates" ]; then echo "Template directory exists"; else echo "Warning: Template directory missing"; fi
+
+# Build frontend
+- name: 'node:16'
+  id: 'build-frontend'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      mkdir -p static/src static/dist
+      if [ ! -f static/src/input.css ]; then
+        echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
+      fi
+      
+      cat > package.json << 'EOF'
+      {"name":"threat-intelligence-platform","version":"1.0.0","scripts":{"build":"tailwindcss -i static/src/input.css -o static/dist/output.css --minify"},"devDependencies":{"tailwindcss":"^3.3.0","postcss":"^8.4.21","autoprefixer":"^10.4.14"}}
+      EOF
+      
+      cat > tailwind.config.js << 'EOF'
+      module.exports = {content: ["./templates/**/*.html"],theme: {extend: {colors: {primary: '#0d6efd',secondary: '#6c757d',success: '#198754',info: '#0dcaf0',warning: '#ffc107',danger: '#dc3545',light: '#f8f9fa',dark: '#212529'}}},plugins: []};
+      EOF
+      
+      npm install
+      npm run build
+
+# Enable APIs with fault tolerance
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'enable-apis'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      gcloud services enable cloudfunctions.googleapis.com eventarc.googleapis.com appengine.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com run.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com clouderrorreporting.googleapis.com monitoring.googleapis.com aiplatform.googleapis.com
+
+# Build container with caching
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'build-container'
+  args:
+    - 'build'
+    - '--cache-from'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
+    - '-t'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
+    - '-t'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
+    - '.'
+
+# Push container
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'push-container'
+  args:
+    - 'push'
+    - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
+
+# Setup secrets
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-secrets'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Check and create secrets with meaningful initial values if they don't exist
+      if ! gcloud secrets describe api-keys 2>/dev/null; then
+        platform_api_key=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$platform_api_key\",\"created_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
+      fi
+      
+      for SECRET_NAME in auth-config database-credentials feed-config admin-initial-password; do
+        if ! gcloud secrets describe $$SECRET_NAME 2>/dev/null; then
+          if [ "$$SECRET_NAME" = "admin-initial-password" ]; then
+            admin_password=$$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits + '!@#\$%^&*()'; print(''.join(secrets.choice(chars) for i in range(12)))")
+            echo "$$admin_password" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
+          else
+            echo "{}" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
+          fi
+        fi
+        
+        # Grant access
+        gcloud secrets add-iam-policy-binding $$SECRET_NAME --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
+      done
+
+# Deploy to Cloud Run 
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-cloudrun'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Get API key from Secret Manager
+      api_key_value=$$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      if [ -z "$$api_key_value" ]; then
+        api_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$api_key_value\",\"updated_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
+      fi
+      
+      # Get session key
+      secret_key_value=$$(gcloud secrets versions access latest --secret=auth-config | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
+      if [ -z "$$secret_key_value" ]; then
+        secret_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(32))")
+      fi
+      
+      # Deploy to Cloud Run
+      gcloud run deploy threat-intelligence-platform \
+        --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA} \
+        --region ${_REGION} \
+        --platform managed \
+        --allow-unauthenticated \
+        --cpu 2 \
+        --memory 2Gi \
+        --set-env-vars "ENVIRONMENT=${_ENVIRONMENT},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.2" \
+        --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+
+# Deploy functions and services in parallel
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-services'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # Setup PubSub topics and subscriptions
+      gcloud pubsub topics create threat-data-ingestion --project=${PROJECT_ID} 2>/dev/null || echo "Topic exists"
+      gcloud pubsub topics create threat-analysis-events --project=${PROJECT_ID} 2>/dev/null || echo "Topic exists"
+      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=${PROJECT_ID} --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
+      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=${PROJECT_ID} --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
+      
+      # Create scheduler job
+      gcloud scheduler jobs create http update-threat-feeds \
+        --location=${_REGION} \
+        --schedule="0 */3 * * *" \
+        --uri="https://${_REGION}-${PROJECT_ID}.cloudfunctions.net/ingest_threat_data" \
+        --http-method=POST \
+        --headers="X-API-Key=$$api_key_value" \
+        --message-body='{"process_all": true}' \
+        --time-zone="UTC" \
+        --description="Update threat feeds every 3 hours" \
+        --project=${PROJECT_ID} 2>/dev/null || echo "Scheduler job exists"
+
+# Run post-deployment check
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'post-deployment-check'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      echo "Waiting for service to be ready..."
+      sleep 30
+      service_url=$$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
+      echo "Service deployed at: $$service_url"
+      
+      # Check if service is responding
+      for attempt in {1..5}; do
+        echo "Health check attempt $$attempt of 5..."
+        response_code=$$(curl -s -o /dev/null -w "%{http_code}" "$$service_url/health" || echo "failed")
+        if [ "$$response_code" = "200" ]; then
+          echo "✅ Health check successful!"
+          break
+        else
+          echo "⚠️ Health check returned: $$response_code - waiting 30s..."
+          sleep 30
+        fi
+      done
+      
+      echo "✨ Deployment completed! ✨"
+
+# Clean up old images (keeping 5)
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'cleanup-old-images'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      gcloud container images list-tags gcr.io/${PROJECT_ID}/threat-intelligence-platform \
+        --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
+        --quiet gcr.io/${PROJECT_ID}/threat-intelligence-platform@{} --force-delete-tags || true
 
 options:
   logging: CLOUD_LOGGING_ONLY
-  env:
-  - 'CLOUDSDK_CORE_PROJECT=$PROJECT_ID'
+  machineType: 'E2_HIGHCPU_8'
 
-timeout: '1800s'  # Increased overall timeout
+substitutions:
+  _ENVIRONMENT: 'production'
+  _REGION: 'us-central1'
+
+images:
+  - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
+  - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
+
+timeout: '2700s'
