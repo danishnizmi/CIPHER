@@ -10,11 +10,9 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "10"
-        run.googleapis.com/client-name: "cloud-console"
-        run.googleapis.com/vpc-access-connector: "connector-threat-intel"
-        run.googleapis.com/vpc-access-egress: "all-traffic"
-        run.googleapis.com/cloudsql-instances: ""
+        autoscaling.knative.dev/maxScale: "20"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/startup-cpu-boost: "true"
     spec:
       serviceAccountName: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       timeoutSeconds: 300
@@ -40,7 +38,7 @@ spec:
         - name: PORT
           value: "8080"
         - name: API_URL
-          value: "https://api-production.primal-chariot-382610.cloudfunctions.net"
+          value: "https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
@@ -51,14 +49,14 @@ spec:
           value: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         startupProbe:
           httpGet:
-            path: /api/health
+            path: /health
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 5
           failureThreshold: 3
         livenessProbe:
           httpGet:
-            path: /api/health
+            path: /health
             port: 8080
           periodSeconds: 30
           timeoutSeconds: 5
