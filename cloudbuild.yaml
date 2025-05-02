@@ -175,6 +175,19 @@ steps:
         secret_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
+      # Verify service account exists
+      if ! gcloud iam service-accounts describe cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com 2>/dev/null; then
+        echo "Creating service account: cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+        gcloud iam service-accounts create cloud-build-service --display-name="Cloud Build Service Account"
+      fi
+      
+      # Grant necessary roles to service account if not already assigned
+      for role in roles/run.admin roles/storage.admin roles/secretmanager.secretAccessor; do
+        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+          --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --role="$$role" || echo "Role $$role already assigned"
+      done
+      
       # Deploy to Cloud Run
       gcloud run deploy threat-intelligence-platform \
         --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA} \
