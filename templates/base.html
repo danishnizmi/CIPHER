@@ -21,6 +21,11 @@
                         info: '#0dcaf0',
                         warning: '#ffc107',
                         danger: '#dc3545',
+                        light: '#f8f9fa',
+                        dark: '#212529',
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                     }
                 }
             }
@@ -48,7 +53,7 @@
             .panel-title { @apply font-semibold flex items-center; }
             .panel-icon { @apply mr-2 text-blue-600; }
             
-            .stat-card { @apply bg-white rounded-lg shadow-md p-6 transform transition-transform hover:shadow-lg; }
+            .stat-card { @apply bg-white rounded-lg shadow-md p-6 transform transition-transform duration-200 hover:shadow-lg hover:-translate-y-1; }
             
             .btn { @apply px-4 py-2 rounded-md font-medium transition-colors duration-200; }
             .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
@@ -59,33 +64,48 @@
             
             .form-control { @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500; }
             
-            .sidebar-item { @apply block px-4 py-2 rounded transition-colors; }
+            .sidebar-item { @apply block px-4 py-2 rounded transition-colors duration-200; }
             .sidebar-item.active { @apply bg-blue-50 text-blue-600 border-l-4 border-blue-500; }
-            .sidebar-item:not(.active) { @apply hover:bg-gray-50; }
+            .sidebar-item:not(.active) { @apply hover:bg-gray-50 hover:text-blue-600; }
             
             .data-table { @apply min-w-full divide-y divide-gray-200; }
             .table-header { @apply bg-gray-50; }
             .table-header th { @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider; }
             .table-body { @apply bg-white divide-y divide-gray-200; }
-            .table-body tr { @apply hover:bg-gray-50; }
-            .table-body td { @apply px-6 py-4 whitespace-nowrap; }
+            .table-body tr { @apply hover:bg-gray-50 transition-colors duration-150; }
+            .table-body td { @apply px-6 py-4 whitespace-nowrap text-sm; }
             
             /* User dropdown */
             .user-dropdown {
-                @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-50;
-                display: none;
+                @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-50 transition-all duration-200 transform scale-95 origin-top-right opacity-0 pointer-events-none;
             }
             .user-dropdown.active {
-                display: block;
+                @apply transform scale-100 opacity-100 pointer-events-auto;
+            }
+            
+            /* Custom scrollbar */
+            ::-webkit-scrollbar {
+                @apply w-2 h-2;
+            }
+            ::-webkit-scrollbar-track {
+                @apply bg-gray-200 rounded-full;
+            }
+            ::-webkit-scrollbar-thumb {
+                @apply bg-blue-500 rounded-full hover:bg-blue-600;
+            }
+            
+            /* Loading animation */
+            .loading-circle {
+                @apply inline-block animate-spin rounded-full h-4 w-4 border-2 border-t-blue-500 border-r-blue-500 border-b-transparent border-l-transparent;
             }
         }
     </style>
     
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-100 text-gray-800">
+<body class="bg-gray-100 text-gray-800 min-h-screen flex flex-col">
     <!-- Navigation Bar -->
-    <nav class="bg-gray-900 text-white shadow-md">
+    <nav class="bg-gradient-to-r from-gray-900 to-blue-900 text-white shadow-md sticky top-0 z-20">
         <div class="container mx-auto px-4 py-3 flex justify-between items-center">
             <a href="{{ url_for('dashboard') }}" class="flex items-center">
                 <i class="fas fa-shield-alt mr-2 text-xl"></i>
@@ -94,29 +114,29 @@
             <div class="flex items-center space-x-4">
                 {% if session.get('logged_in') %}
                 <div class="relative" id="userDropdownContainer">
-                    <button id="userDropdownButton" class="flex items-center space-x-2 focus:outline-none">
+                    <button id="userDropdownButton" class="flex items-center space-x-2 focus:outline-none hover:bg-blue-800 px-3 py-1 rounded-lg transition-colors duration-200">
                         <i class="fas fa-user-circle text-lg"></i>
                         <span>{{ session.get('username', 'User') }}</span>
                         <span class="bg-blue-600 text-xs px-2 py-1 rounded">{{ session.get('role', 'user') }}</span>
                         <i class="fas fa-chevron-down text-xs"></i>
                     </button>
                     <div id="userDropdown" class="user-dropdown">
-                        <a href="{{ url_for('profile') }}" class="block px-4 py-2 hover:bg-gray-100">
+                        <a href="{{ url_for('profile') }}" class="block px-4 py-2 hover:bg-gray-100 transition-colors duration-150">
                             <i class="fas fa-user-cog mr-2"></i> Profile
                         </a>
                         {% if session.get('role') == 'admin' %}
-                        <a href="{{ url_for('users') }}" class="block px-4 py-2 hover:bg-gray-100">
+                        <a href="{{ url_for('users') }}" class="block px-4 py-2 hover:bg-gray-100 transition-colors duration-150">
                             <i class="fas fa-users mr-2"></i> User Management
                         </a>
                         {% endif %}
                         <div class="border-t border-gray-200"></div>
-                        <a href="{{ url_for('logout') }}" class="block px-4 py-2 hover:bg-gray-100">
+                        <a href="{{ url_for('logout') }}" class="block px-4 py-2 hover:bg-gray-100 transition-colors duration-150">
                             <i class="fas fa-sign-out-alt mr-2"></i> Logout
                         </a>
                     </div>
                 </div>
                 {% else %}
-                <a href="{{ url_for('login') }}" class="flex items-center">
+                <a href="{{ url_for('login') }}" class="flex items-center hover:bg-blue-800 px-3 py-1 rounded-lg transition-colors duration-200">
                     <i class="fas fa-sign-in-alt mr-1"></i>
                     <span>Login</span>
                 </a>
@@ -125,15 +145,15 @@
         </div>
     </nav>
     
-    <div class="container mx-auto px-4 flex mt-4">
+    <div class="container mx-auto px-4 flex mt-4 flex-grow">
         <!-- Sidebar -->
         <div class="w-64 flex-shrink-0 hidden md:block" id="sidebar">
-            <div class="bg-white rounded-lg shadow-md p-4">
+            <div class="bg-white rounded-lg shadow-md p-4 sticky top-20">
                 <!-- Search Box -->
                 <form action="{{ url_for('dashboard') }}" method="get" class="mb-6">
                     <div class="relative">
-                        <input type="text" name="q" placeholder="Search..." class="form-control" value="{{ request.args.get('q', '') }}">
-                        <button type="submit" class="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center">
+                        <input type="text" name="q" placeholder="Search..." class="form-control pr-10" value="{{ request.args.get('q', '') }}">
+                        <button type="submit" class="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center hover:bg-blue-600 transition-colors duration-200">
                             <i class="fas fa-search"></i>
                         </button>
                     </div>
@@ -163,6 +183,9 @@
                         <a href="{{ url_for('users') }}" class="sidebar-item {% if request.endpoint == 'users' %}active{% endif %}">
                             <i class="fas fa-users w-5 mr-2"></i> User Management
                         </a>
+                        <a href="{{ url_for('ingest_threat_data') }}" class="sidebar-item">
+                            <i class="fas fa-sync-alt w-5 mr-2"></i> Refresh Data
+                        </a>
                     </div>
                 </div>
                 {% endif %}
@@ -187,6 +210,9 @@
                             </div>
                             <span class="text-green-600">Operational</span>
                         </div>
+                        <div class="mt-3 text-xs text-gray-500 text-center">
+                            <span>{{ environment|title }} | v{{ version }}</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -194,7 +220,7 @@
         
         <!-- Mobile Navigation Toggle -->
         <div class="md:hidden fixed bottom-4 right-4 z-10">
-            <button id="mobileNavToggle" class="btn btn-primary rounded-full w-12 h-12 flex items-center justify-center">
+            <button id="mobileNavToggle" class="btn btn-primary rounded-full w-12 h-12 flex items-center justify-center shadow-lg">
                 <i class="fas fa-bars"></i>
             </button>
         </div>
@@ -236,7 +262,7 @@
     <!-- Common Scripts -->
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // User dropdown toggle
+            // User dropdown toggle with smooth animation
             const userDropdownButton = document.getElementById('userDropdownButton');
             const userDropdown = document.getElementById('userDropdown');
             
@@ -256,7 +282,7 @@
                 });
             }
             
-            // Mobile navigation toggle
+            // Mobile navigation toggle with improved animation
             const mobileNavToggle = document.getElementById('mobileNavToggle');
             const sidebar = document.getElementById('sidebar');
             
@@ -270,18 +296,25 @@
                     sidebar.classList.toggle('p-4');
                     sidebar.classList.toggle('overflow-y-auto');
                     
-                    // Toggle icon
+                    // Toggle icon with transition
                     const icon = mobileNavToggle.querySelector('i');
                     icon.classList.toggle('fa-bars');
                     icon.classList.toggle('fa-times');
+                    
+                    // Add transition to button
+                    mobileNavToggle.classList.toggle('rotate-90');
                 });
             }
             
-            // Auto-hide flash messages after 5 seconds
+            // Auto-hide flash messages after 5 seconds with fade-out effect
             const alertMessages = document.querySelectorAll('.alert-message');
             alertMessages.forEach(alert => {
                 setTimeout(() => {
-                    alert.style.display = 'none';
+                    alert.style.opacity = '0';
+                    alert.style.transition = 'opacity 0.5s ease-out';
+                    setTimeout(() => {
+                        alert.style.display = 'none';
+                    }, 500);
                 }, 5000);
             });
             
@@ -299,6 +332,17 @@
                     return dateString;
                 }
             };
+            
+            // Add animation to stat cards on hover
+            const statCards = document.querySelectorAll('.stat-card');
+            statCards.forEach(card => {
+                card.addEventListener('mouseenter', function() {
+                    this.classList.add('shadow-lg');
+                });
+                card.addEventListener('mouseleave', function() {
+                    this.classList.remove('shadow-lg');
+                });
+            });
         });
     </script>
     
