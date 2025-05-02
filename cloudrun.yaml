@@ -10,7 +10,7 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "20"
+        autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/client-name: "cloud-console"
         run.googleapis.com/vpc-access-connector: "connector-threat-intel"
         run.googleapis.com/vpc-access-egress: "all-traffic"
@@ -39,34 +39,26 @@ spec:
           value: "threat_intelligence"
         - name: PORT
           value: "8080"
-        - name: GO_INGESTION_PORT
-          value: "8081"
         - name: API_URL
           value: "https://api-production.primal-chariot-382610.cloudfunctions.net"
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
-        - name: API_KEY
-          value: "b03bb05c6597c6473e83a271c0bb5d492061fea4c0e67cc7"
-        - name: SECRET_KEY
-          value: "5a92c3067bc4587d021925678ea071825973c85c2b824df3bfff14ff8bc803a9"
-        - name: VERSION
-          value: "1.0.2" 
         - name: REQUIRE_AUTH
           value: "true"
         - name: SERVICE_ACCOUNT
           value: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         startupProbe:
           httpGet:
-            path: /health
+            path: /api/health
             port: 8080
-          initialDelaySeconds: 20  # Increased from 10 to give more startup time
-          periodSeconds: 10
-          failureThreshold: 5      # Increased from 3 to allow more retry attempts
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
         livenessProbe:
           httpGet:
-            path: /health
+            path: /api/health
             port: 8080
           periodSeconds: 30
           timeoutSeconds: 5
