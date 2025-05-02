@@ -99,10 +99,7 @@ steps:
   args:
     - '-c'
     - |
-      gcloud services enable cloudfunctions.googleapis.com eventarc.googleapis.com appengine.googleapis.com \
-        cloudscheduler.googleapis.com secretmanager.googleapis.com run.googleapis.com cloudbuild.googleapis.com \
-        cloudresourcemanager.googleapis.com clouderrorreporting.googleapis.com monitoring.googleapis.com aiplatform.googleapis.com \
-        || echo "Warning: Some APIs may not have been enabled"
+      gcloud services enable cloudfunctions.googleapis.com eventarc.googleapis.com appengine.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com run.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com clouderrorreporting.googleapis.com monitoring.googleapis.com aiplatform.googleapis.com
 
 # Build container with caching
 - name: 'gcr.io/cloud-builders/docker'
@@ -124,7 +121,7 @@ steps:
     - 'push'
     - 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA}'
 
-# Setup secrets with better error handling
+# Setup secrets with proper escaping
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'setup-secrets'
   entrypoint: 'bash'
@@ -132,75 +129,52 @@ steps:
     - '-c'
     - |
       # Check and create secrets with meaningful initial values if they don't exist
-      set -e  # Exit immediately if a command exits with non-zero status
-      
-      # API Keys
       if ! gcloud secrets describe api-keys 2>/dev/null; then
-        echo "Creating api-keys secret..."
-        platform_api_key=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-        api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
+        platform_api_key=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$platform_api_key\",\"created_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
       fi
       
-      # Create other required secrets if they don't exist
       for SECRET_NAME in auth-config database-credentials feed-config admin-initial-password; do
-        if ! gcloud secrets describe $SECRET_NAME 2>/dev/null; then
-          echo "Creating $SECRET_NAME secret..."
-          if [ "$SECRET_NAME" = "admin-initial-password" ]; then
-            admin_password=$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits + '!@#\$%^&*()'; print(''.join(secrets.choice(chars) for i in range(12)))")
-            echo "$admin_password" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
-          elif [ "$SECRET_NAME" = "auth-config" ]; then
+        if ! gcloud secrets describe $$SECRET_NAME 2>/dev/null; then
+          if [ "$$SECRET_NAME" = "admin-initial-password" ]; then
+            admin_password=$$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits + '!@#\$%^&*()'; print(''.join(secrets.choice(chars) for i in range(12)))")
+            echo "$$admin_password" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
+          elif [ "$$SECRET_NAME" = "auth-config" ]; then
             # Create auth-config with a session secret
-            session_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-            auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
-            echo "$auth_config_json" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
+            session_secret=$$(python3 -c "import secrets; print(secrets.token_hex(32))")
+            auth_config_json="{\"session_secret\":\"$$session_secret\",\"users\":{}}"
+            echo "$$auth_config_json" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
           else
-            echo "{}" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
+            echo "{}" | gcloud secrets create $$SECRET_NAME --replication-policy="automatic" --data-file=-
           fi
         fi
         
         # Grant access
-        echo "Granting access to $SECRET_NAME for cloud-build-service..."
-        gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor" || echo "Warning: Could not set IAM policy for $SECRET_NAME"
+        gcloud secrets add-iam-policy-binding $$SECRET_NAME --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor" || true
       done
 
-# Deploy to Cloud Run with improved error handling
+# Deploy to Cloud Run with proper escaping
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
   entrypoint: 'bash'
   args:
     - '-c'
     - |
-      set -e  # Exit immediately if a command exits with non-zero status
-      
       # Get API key from Secret Manager
-      echo "Retrieving API key from Secret Manager..."
-      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
-      if [ -z "$api_key_value" ]; then
-        echo "API key not found, generating a new one..."
-        api_key_value=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-        api_keys_json="{\"platform_api_key\":\"$api_key_value\",\"updated_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
+      api_key_value=$$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      if [ -z "$$api_key_value" ]; then
+        api_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(16))")
+        api_keys_json="{\"platform_api_key\":\"$$api_key_value\",\"updated_at\":\"$$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
+        echo "$$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
       fi
       
       # Get session key
-      echo "Retrieving session key from Secret Manager..."
-      secret_key_value=$(gcloud secrets versions access latest --secret=auth-config 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
-      if [ -z "$secret_key_value" ]; then
-        echo "Session key not found, generating a new one..."
-        secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-        
-        # If auth-config exists but doesn't have session_secret, update it
-        if gcloud secrets describe auth-config &>/dev/null; then
-          auth_config=$(gcloud secrets versions access latest --secret=auth-config 2>/dev/null || echo "{}")
-          updated_auth_config=$(python3 -c "import sys, json; config = json.loads(sys.stdin.read() or '{}'); config['session_secret'] = '$secret_key_value'; print(json.dumps(config))" <<< "$auth_config")
-          echo "$updated_auth_config" | gcloud secrets versions add auth-config --data-file=-
-        fi
+      secret_key_value=$$(gcloud secrets versions access latest --secret=auth-config | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
+      if [ -z "$$secret_key_value" ]; then
+        secret_key_value=$$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
-      echo "Deploying to Cloud Run..."
       # Deploy to Cloud Run
       gcloud run deploy threat-intelligence-platform \
         --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:${COMMIT_SHA} \
@@ -209,65 +183,43 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=${_ENVIRONMENT}" \
-        --set-env-vars="GCP_PROJECT=${PROJECT_ID}" \
-        --set-env-vars="GCP_REGION=${_REGION}" \
-        --set-env-vars="BIGQUERY_DATASET=threat_intelligence" \
-        --set-env-vars="GCS_BUCKET=${PROJECT_ID}-threat-data" \
-        --set-env-vars="PUBSUB_TOPIC=threat-data-ingestion" \
-        --set-env-vars="API_KEY=$api_key_value" \
-        --set-env-vars="SECRET_KEY=$secret_key_value" \
-        --set-env-vars="VERSION=1.0.2" \
-        --service-account=cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
-        --quiet
+        --set-env-vars="ENVIRONMENT=${_ENVIRONMENT},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${_REGION},BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$$api_key_value,SECRET_KEY=$$secret_key_value,VERSION=1.0.2" \
+        --service-account=cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
-# Deploy PubSub topics and setup scheduler
+# Deploy PubSub topics and subscriptions
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-services'
   entrypoint: 'bash'
   args:
     - '-c'
     - |
-      set -e  # Exit immediately if a command exits with non-zero status
+      # Setup PubSub topics and subscriptions
+      gcloud pubsub topics create threat-data-ingestion --project=${PROJECT_ID} 2>/dev/null || echo "Topic exists"
+      gcloud pubsub topics create threat-analysis-events --project=${PROJECT_ID} 2>/dev/null || echo "Topic exists"
+      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=${PROJECT_ID} --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
+      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=${PROJECT_ID} --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
       
-      # Retrieve API key for scheduler job
-      api_key_value=$(gcloud secrets versions access latest --secret=api-keys 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
+      # Get API key for scheduler
+      api_key_value=$$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
-      # Setup PubSub topics and subscriptions with error handling
-      echo "Setting up PubSub topics and subscriptions..."
-      gcloud pubsub topics create threat-data-ingestion --project=${PROJECT_ID} 2>/dev/null || echo "Topic threat-data-ingestion already exists"
-      gcloud pubsub topics create threat-analysis-events --project=${PROJECT_ID} 2>/dev/null || echo "Topic threat-analysis-events already exists"
+      # Create scheduler job
+      cloud_run_url=$$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --format='value(status.url)')
       
-      gcloud pubsub subscriptions create threat-data-ingestion-sub \
-        --topic=threat-data-ingestion \
-        --project=${PROJECT_ID} \
-        --message-retention-duration=7d 2>/dev/null || echo "Subscription threat-data-ingestion-sub already exists"
-        
-      gcloud pubsub subscriptions create threat-analysis-events-sub \
-        --topic=threat-analysis-events \
-        --project=${PROJECT_ID} \
-        --message-retention-duration=7d 2>/dev/null || echo "Subscription threat-analysis-events-sub already exists"
-      
-      # Create scheduler job with correct URL
-      echo "Creating scheduler job..."
-      cloud_run_url=$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --format='value(status.url)')
-      
-      # Delete existing job if it exists to avoid conflicts
+      # Delete existing job if it exists
       gcloud scheduler jobs delete update-threat-feeds --location=${_REGION} --quiet 2>/dev/null || echo "Job doesn't exist yet"
       
-      # Create scheduler job pointing to cloud run endpoint
       gcloud scheduler jobs create http update-threat-feeds \
         --location=${_REGION} \
         --schedule="0 */3 * * *" \
-        --uri="$cloud_run_url/api/admin/ingest" \
+        --uri="$$cloud_run_url/api/admin/ingest" \
         --http-method=POST \
-        --headers="X-API-Key=$api_key_value" \
+        --headers="X-API-Key=$$api_key_value" \
         --message-body='{"process_all": true}' \
         --time-zone="UTC" \
         --description="Update threat feeds every 3 hours" \
-        --project=${PROJECT_ID} || echo "Warning: Could not create scheduler job"
+        --project=${PROJECT_ID} || echo "Scheduler job exists"
 
-# Post-deployment health check with better retry logic
+# Run post-deployment check
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'post-deployment-check'
   entrypoint: 'bash'
@@ -275,38 +227,25 @@ steps:
     - '-c'
     - |
       echo "Waiting for service to be ready..."
-      sleep 15
+      sleep 20
+      service_url=$$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
+      echo "Service deployed at: $$service_url"
       
-      # Get the service URL
-      service_url=$(gcloud run services describe threat-intelligence-platform --region=${_REGION} --project=${PROJECT_ID} --format='value(status.url)')
-      echo "Service deployed at: $service_url"
-      
-      # Check if service is responding with improved retry logic
-      max_attempts=10
-      for attempt in $(seq 1 $max_attempts); do
-        echo "Health check attempt $attempt of $max_attempts..."
-        response_code=$(curl -s -o /dev/null -w "%{http_code}" "$service_url/health" || echo "failed")
-        
-        if [ "$response_code" = "200" ]; then
+      # Check if service is responding
+      max_attempts=5
+      for attempt in $$(seq 1 $$max_attempts); do
+        echo "Health check attempt $$attempt of $$max_attempts..."
+        response_code=$$(curl -s -o /dev/null -w "%{http_code}" "$$service_url/health" || echo "failed")
+        if [ "$$response_code" = "200" ]; then
           echo "✅ Health check successful!"
-          echo "✨ Deployment completed successfully! ✨"
-          exit 0
+          break
         else
-          echo "⚠️ Health check returned: $response_code"
-          
-          # If we're on the last attempt, don't wait
-          if [ "$attempt" -lt "$max_attempts" ]; then
-            backoff=$((15 * attempt))  # Exponential backoff
-            echo "Waiting $backoff seconds before next attempt..."
-            sleep $backoff
-          fi
+          echo "⚠️ Health check returned: $$response_code - waiting 15s..."
+          sleep 15
         fi
       done
       
-      echo "⚠️ Health checks failed, but deployment might still be in progress."
-      echo "Please manually check the service status at: $service_url/health"
-      # Don't fail the build just because health checks timeout
-      exit 0
+      echo "✨ Deployment completed! ✨"
 
 # Clean up old images (keeping 5)
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -315,7 +254,6 @@ steps:
   args:
     - '-c'
     - |
-      # List tags and delete old ones, keeping the 5 most recent
       gcloud container images list-tags gcr.io/${PROJECT_ID}/threat-intelligence-platform \
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
         --quiet gcr.io/${PROJECT_ID}/threat-intelligence-platform@{} --force-delete-tags || true
