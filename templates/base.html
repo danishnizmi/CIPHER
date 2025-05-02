@@ -4,302 +4,305 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Threat Intelligence Platform{% endblock %}</title>
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
     
-    <!-- Base Styles -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet">
+    <!-- Tailwind CSS and Font Awesome -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     
-    <!-- Plotly for Charts -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.16.1/plotly.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#0d6efd',
+                        secondary: '#6c757d',
+                        success: '#198754',
+                        info: '#0dcaf0',
+                        warning: '#ffc107',
+                        danger: '#dc3545',
+                    }
+                }
+            }
+        }
+    </script>
     
-    <style>
-        /* Custom Styles */
-        .sidebar { @apply w-64 bg-gray-800 text-white fixed h-full transition-all duration-300 ease-in-out z-30; }
-        .sidebar-collapsed { @apply w-20; }
-        .content-wrapper { @apply ml-64 transition-all duration-300 ease-in-out; }
-        .content-wrapper-collapsed { @apply ml-20; }
-        .nav-link { @apply flex items-center p-4 text-gray-300 hover:bg-gray-700 hover:text-white; }
-        .nav-link.active { @apply bg-blue-600 text-white; }
-        .nav-icon { @apply mr-4 text-lg; }
-        .sidebar-collapsed .nav-text { @apply hidden; }
-        .profile-dropdown { @apply origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-40; }
-        .dropdown-item { @apply block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100; }
-        
-        /* Card styles */
-        .panel { @apply bg-white shadow-md rounded-lg overflow-hidden; }
-        .panel-header { @apply flex justify-between items-center px-6 py-4 bg-white border-b; }
-        .panel-title { @apply text-lg font-semibold text-gray-800 flex items-center; }
-        .panel-icon { @apply text-blue-600 mr-2; }
-        .stat-card { @apply bg-white p-6 rounded-lg shadow-md; }
-        
-        /* Table styles */
-        .data-table { @apply min-w-full divide-y divide-gray-200; }
-        .table-header { @apply bg-gray-50; }
-        .table-header th { @apply text-left text-xs font-medium text-gray-500 uppercase tracking-wider; }
-        .table-body { @apply bg-white divide-y divide-gray-200; }
-        
-        /* Badge styles */
-        .badge-ioc { @apply px-2 py-1 rounded-full text-xs font-semibold; }
-        .badge-ip { @apply bg-blue-100 text-blue-800; }
-        .badge-domain { @apply bg-green-100 text-green-800; }
-        .badge-url { @apply bg-yellow-100 text-yellow-800; }
-        .badge-md5, .badge-sha1, .badge-sha256 { @apply bg-purple-100 text-purple-800; }
-        .badge-email { @apply bg-red-100 text-red-800; }
-        .badge-cve { @apply bg-orange-100 text-orange-800; }
-        .badge-unknown { @apply bg-gray-100 text-gray-800; }
-        
-        /* Severity indicators */
-        .severity-badge { @apply px-2 py-1 rounded-full text-xs font-semibold; }
-        .severity-badge.critical { @apply bg-red-100 text-red-800; }
-        .severity-badge.high { @apply bg-orange-100 text-orange-800; }
-        .severity-badge.medium { @apply bg-yellow-100 text-yellow-800; }
-        .severity-badge.low { @apply bg-green-100 text-green-800; }
-        
-        /* Form controls */
-        .form-control { @apply block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm; }
-        .btn { @apply px-4 py-2 rounded-md font-medium focus:outline-none focus:ring-2 focus:ring-offset-2; }
-        .btn-primary { @apply bg-blue-600 hover:bg-blue-700 text-white focus:ring-blue-500; }
-        .btn-secondary { @apply bg-gray-600 hover:bg-gray-700 text-white focus:ring-gray-500; }
-        .btn-danger { @apply bg-red-600 hover:bg-red-700 text-white focus:ring-red-500; }
-        .btn-light { @apply bg-white hover:bg-gray-100 text-gray-800 border border-gray-300; }
-        .btn-sm { @apply px-3 py-1 text-sm; }
-        
-        /* Alerts */
-        .alert { @apply p-4 mb-4 rounded-md; }
-        .alert-success { @apply bg-green-100 text-green-800; }
-        .alert-danger { @apply bg-red-100 text-red-800; }
-        .alert-warning { @apply bg-yellow-100 text-yellow-800; }
-        .alert-info { @apply bg-blue-100 text-blue-800; }
-        
-        /* Other UI elements */
-        .loading-overlay { @apply fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50; }
+    <style type="text/tailwindcss">
+        @layer components {
+            .badge-ioc { @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block; }
+            .badge-ip { @apply bg-amber-300 text-gray-800; }
+            .badge-domain { @apply bg-emerald-400 text-gray-800; }
+            .badge-url { @apply bg-blue-500 text-white; }
+            .badge-md5, .badge-sha1, .badge-sha256, .badge-hash { @apply bg-pink-500 text-white; }
+            .badge-email { @apply bg-orange-500 text-gray-800; }
+            .badge-unknown { @apply bg-gray-300 text-gray-800; }
+            
+            .severity-badge { @apply inline-block px-2 py-1 rounded text-xs font-bold uppercase; }
+            .severity-badge.critical { @apply bg-red-600 text-white; }
+            .severity-badge.high { @apply bg-orange-500 text-white; }
+            .severity-badge.medium { @apply bg-amber-400 text-gray-800; }
+            .severity-badge.low { @apply bg-teal-500 text-white; }
+            
+            .panel { @apply bg-white rounded-lg shadow-md overflow-hidden mb-6; }
+            .panel-header { @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center; }
+            .panel-title { @apply font-semibold flex items-center; }
+            .panel-icon { @apply mr-2 text-blue-600; }
+            
+            .stat-card { @apply bg-white rounded-lg shadow-md p-6 transform transition-transform hover:shadow-lg; }
+            
+            .btn { @apply px-4 py-2 rounded-md font-medium transition-colors duration-200; }
+            .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+            .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50; }
+            .btn-sm { @apply px-3 py-1 text-sm; }
+            
+            .form-control { @apply w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500; }
+            
+            .sidebar-item { @apply block px-4 py-2 rounded transition-colors; }
+            .sidebar-item.active { @apply bg-blue-50 text-blue-600 border-l-4 border-blue-500; }
+            .sidebar-item:not(.active) { @apply hover:bg-gray-50; }
+            
+            .data-table { @apply min-w-full divide-y divide-gray-200; }
+            .table-header { @apply bg-gray-50; }
+            .table-header th { @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider; }
+            .table-body { @apply bg-white divide-y divide-gray-200; }
+            .table-body tr { @apply hover:bg-gray-50; }
+            .table-body td { @apply px-6 py-4 whitespace-nowrap; }
+            
+            /* User dropdown */
+            .user-dropdown {
+                @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded shadow-lg z-50;
+                display: none;
+            }
+            .user-dropdown.active {
+                display: block;
+            }
+        }
     </style>
     
-    {% block extra_css %}{% endblock %}
+    {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-100 font-sans leading-normal tracking-normal">
-    <!-- Sidebar -->
-    <nav id="sidebar" class="sidebar">
-        <div class="flex items-center justify-between h-16 bg-gray-900 px-4">
-            <div class="flex items-center">
-                <div class="flex-shrink-0">
-                    <span class="text-white font-bold text-xl">ThreatIntel</span>
+<body class="bg-gray-100 text-gray-800">
+    <!-- Navigation Bar -->
+    <nav class="bg-gray-900 text-white shadow-md">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <a href="{{ url_for('dashboard') }}" class="flex items-center">
+                <i class="fas fa-shield-alt mr-2 text-xl"></i>
+                <span class="font-bold text-lg">Threat Intelligence Platform</span>
+            </a>
+            <div class="flex items-center space-x-4">
+                {% if session.get('logged_in') %}
+                <div class="relative" id="userDropdownContainer">
+                    <button id="userDropdownButton" class="flex items-center space-x-2 focus:outline-none">
+                        <i class="fas fa-user-circle text-lg"></i>
+                        <span>{{ session.get('username', 'User') }}</span>
+                        <span class="bg-blue-600 text-xs px-2 py-1 rounded">{{ session.get('role', 'user') }}</span>
+                        <i class="fas fa-chevron-down text-xs"></i>
+                    </button>
+                    <div id="userDropdown" class="user-dropdown">
+                        <a href="{{ url_for('profile') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-user-cog mr-2"></i> Profile
+                        </a>
+                        {% if session.get('role') == 'admin' %}
+                        <a href="{{ url_for('users') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-users mr-2"></i> User Management
+                        </a>
+                        {% endif %}
+                        <div class="border-t border-gray-200"></div>
+                        <a href="{{ url_for('logout') }}" class="block px-4 py-2 hover:bg-gray-100">
+                            <i class="fas fa-sign-out-alt mr-2"></i> Logout
+                        </a>
+                    </div>
                 </div>
-            </div>
-            <button id="toggle-sidebar" class="text-gray-300 hover:text-white focus:outline-none">
-                <i class="fas fa-bars"></i>
-            </button>
-        </div>
-        
-        <div class="pt-4">
-            <a href="{{ url_for('dashboard') }}" class="nav-link {% if current_view == 'dashboard' %}active{% endif %}">
-                <i class="fas fa-tachometer-alt nav-icon"></i>
-                <span class="nav-text">Dashboard</span>
-            </a>
-            <a href="{{ url_for('feeds') }}" class="nav-link {% if current_view == 'feeds' %}active{% endif %}">
-                <i class="fas fa-rss nav-icon"></i>
-                <span class="nav-text">Feeds</span>
-            </a>
-            <a href="{{ url_for('iocs') }}" class="nav-link {% if current_view == 'iocs' %}active{% endif %}">
-                <i class="fas fa-fingerprint nav-icon"></i>
-                <span class="nav-text">IOCs</span>
-            </a>
-            <a href="{{ url_for('campaigns') }}" class="nav-link {% if current_view == 'campaigns' %}active{% endif %}">
-                <i class="fas fa-project-diagram nav-icon"></i>
-                <span class="nav-text">Campaigns</span>
-            </a>
-            <a href="{{ url_for('intel_summary') }}" class="nav-link">
-                <i class="fas fa-brain nav-icon"></i>
-                <span class="nav-text">Analysis</span>
-            </a>
-            
-            {% if session.role == 'admin' %}
-            <a href="{{ url_for('users') }}" class="nav-link">
-                <i class="fas fa-users-cog nav-icon"></i>
-                <span class="nav-text">Users</span>
-            </a>
-            {% endif %}
-            
-            <!-- System status indicator -->
-            <div class="px-4 py-2 mt-6 mb-2">
-                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">System Status</p>
-                <div class="flex items-center mt-2">
-                    <span class="h-2 w-2 rounded-full bg-green-500 mr-2"></span>
-                    <span class="text-sm text-gray-400">Operational</span>
-                </div>
-                <div class="text-xs text-gray-500 mt-1">
-                    <span>Version: {{ version|default('1.0.0') }}</span>
-                </div>
+                {% else %}
+                <a href="{{ url_for('login') }}" class="flex items-center">
+                    <i class="fas fa-sign-in-alt mr-1"></i>
+                    <span>Login</span>
+                </a>
+                {% endif %}
             </div>
         </div>
     </nav>
     
-    <!-- Main Content -->
-    <div id="content-wrapper" class="content-wrapper">
-        <!-- Top Navbar -->
-        <header class="bg-white shadow-sm">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="flex justify-between h-16">
-                    <div class="flex items-center">
-                        <div class="ml-4">
-                            <div class="text-sm text-gray-500">
-                                <span>
-                                    <i class="far fa-calendar-alt mr-1"></i>
-                                    {{ now.strftime('%A, %B %d, %Y') }}
-                                </span>
-                            </div>
-                        </div>
+    <div class="container mx-auto px-4 flex mt-4">
+        <!-- Sidebar -->
+        <div class="w-64 flex-shrink-0 hidden md:block" id="sidebar">
+            <div class="bg-white rounded-lg shadow-md p-4">
+                <!-- Search Box -->
+                <form action="{{ url_for('dashboard') }}" method="get" class="mb-6">
+                    <div class="relative">
+                        <input type="text" name="q" placeholder="Search..." class="form-control" value="{{ request.args.get('q', '') }}">
+                        <button type="submit" class="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center">
+                            <i class="fas fa-search"></i>
+                        </button>
                     </div>
-                    
-                    <div class="flex items-center">
-                        <!-- Search Bar -->
-                        <div class="mr-4 hidden md:block">
-                            <div class="relative">
-                                <input type="text" placeholder="Global Search..." class="form-control pl-10 py-1.5 pr-4 focus:z-10 text-sm">
-                                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                    <i class="fas fa-search text-gray-400"></i>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Refresh Data Button -->
-                        <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-light btn-sm mr-4">
-                            <i class="fas fa-sync mr-1"></i>
-                            Refresh Data
+                </form>
+                
+                <!-- Navigation Menu -->
+                <div class="space-y-1">
+                    <a href="{{ url_for('dashboard') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view', 'dashboard') == 'dashboard' %}active{% endif %}">
+                        <i class="fas fa-tachometer-alt w-5 mr-2"></i> Dashboard
+                    </a>
+                    <a href="{{ url_for('feeds') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'feeds' %}active{% endif %}">
+                        <i class="fas fa-rss w-5 mr-2"></i> Threat Feeds
+                    </a>
+                    <a href="{{ url_for('iocs') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'iocs' %}active{% endif %}">
+                        <i class="fas fa-fingerprint w-5 mr-2"></i> IOCs
+                    </a>
+                    <a href="{{ url_for('campaigns') }}" class="sidebar-item {% if request.endpoint == 'dashboard' and request.args.get('view') == 'campaigns' %}active{% endif %}">
+                        <i class="fas fa-project-diagram w-5 mr-2"></i> Campaigns
+                    </a>
+                </div>
+                
+                <!-- Admin Section -->
+                {% if session.get('role') == 'admin' %}
+                <div class="border-t border-gray-200 my-4 pt-4">
+                    <h6 class="font-semibold text-sm mb-2 text-gray-500 uppercase tracking-wider px-4">Administration</h6>
+                    <div class="space-y-1">
+                        <a href="{{ url_for('users') }}" class="sidebar-item {% if request.endpoint == 'users' %}active{% endif %}">
+                            <i class="fas fa-users w-5 mr-2"></i> User Management
                         </a>
-                        
-                        <!-- Profile Menu -->
-                        <div class="relative" id="profile-menu">
-                            <div>
-                                <button type="button" id="profile-menu-button" class="flex text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" aria-expanded="false" aria-haspopup="true">
-                                    <span class="sr-only">Open user menu</span>
-                                    <div class="h-8 w-8 rounded-full bg-blue-200 flex items-center justify-center text-blue-600">
-                                        <i class="fas fa-user"></i>
-                                    </div>
-                                </button>
+                    </div>
+                </div>
+                {% endif %}
+                
+                <!-- System Status -->
+                <div class="mt-auto pt-4">
+                    <div class="bg-gray-50 rounded-lg p-3 mt-4">
+                        <h6 class="text-sm font-semibold mb-2">
+                            <i class="fas fa-shield-alt mr-1"></i> System Status
+                        </h6>
+                        <div class="flex justify-between items-center mb-2 text-sm">
+                            <div class="flex items-center">
+                                <div class="w-2 h-2 rounded-full bg-green-500 mr-2"></div>
+                                <span>API Service</span>
                             </div>
-                            <div id="profile-dropdown" class="profile-dropdown hidden" role="menu" aria-orientation="vertical" aria-labelledby="profile-menu-button" tabindex="-1">
-                                <div class="py-1" role="none">
-                                    <div class="px-4 py-2 text-sm text-gray-900 border-b">
-                                        <p class="font-medium">{{ session.username }}</p>
-                                        <p class="text-xs text-gray-500">{{ session.role|title }}</p>
-                                    </div>
-                                    <a href="{{ url_for('profile') }}" class="dropdown-item" role="menuitem">Profile</a>
-                                    <a href="{{ url_for('logout') }}" class="dropdown-item text-red-600" role="menuitem">Sign out</a>
-                                </div>
+                            <span class="text-green-600">Operational</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <div class="flex items-center">
+                                <div class="w-2 h-2 rounded-full bg-green-500 mr-2"></div>
+                                <span>Feed Collection</span>
                             </div>
+                            <span class="text-green-600">Operational</span>
                         </div>
                     </div>
                 </div>
             </div>
-        </header>
+        </div>
         
-        <!-- Flash Messages -->
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+        <!-- Mobile Navigation Toggle -->
+        <div class="md:hidden fixed bottom-4 right-4 z-10">
+            <button id="mobileNavToggle" class="btn btn-primary rounded-full w-12 h-12 flex items-center justify-center">
+                <i class="fas fa-bars"></i>
+            </button>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="flex-grow p-4">
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
                     {% for category, message in messages %}
-                        <div class="alert {% if category == 'error' or category == 'danger' %}alert-danger{% elif category == 'warning' %}alert-warning{% elif category == 'success' %}alert-success{% else %}alert-info{% endif %}">
-                            <div class="flex items-center">
-                                <div class="text-lg mr-3">
-                                    {% if category == 'error' or category == 'danger' %}
-                                        <i class="fas fa-exclamation-circle"></i>
-                                    {% elif category == 'warning' %}
-                                        <i class="fas fa-exclamation-triangle"></i>
-                                    {% elif category == 'success' %}
-                                        <i class="fas fa-check-circle"></i>
-                                    {% else %}
-                                        <i class="fas fa-info-circle"></i>
-                                    {% endif %}
-                                </div>
-                                <div>{{ message }}</div>
-                                <button class="ml-auto close-alert">
-                                    <i class="fas fa-times"></i>
-                                </button>
-                            </div>
+                        <div class="mb-4 px-4 py-3 rounded relative {% if category == 'danger' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% elif category == 'warning' %}bg-yellow-100 text-yellow-700{% else %}bg-blue-100 text-blue-700{% endif %} alert-message">
+                            <span class="block sm:inline">{{ message }}</span>
+                            <button class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
                     {% endfor %}
-                </div>
+                {% endif %}
+            {% endwith %}
+            
+            <!-- CSRF Token for forms -->
+            {% if csrf_token %}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {% endif %}
-        {% endwith %}
-        
-        <!-- Page Content -->
-        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            
+            <!-- Page Content -->
             {% block content %}{% endblock %}
-        </main>
-        
-        <!-- Footer -->
-        <footer class="bg-white py-4 mt-8 border-t">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="flex justify-between items-center">
-                    <div class="text-sm text-gray-500">
-                        &copy; {{ now.year }} Threat Intelligence Platform
-                    </div>
-                    <div class="text-sm text-gray-500">
-                        Environment: <span class="font-semibold">{{ environment|title }}</span> | 
-                        Project: <span class="font-semibold">{{ project_id }}</span>
-                    </div>
-                </div>
-            </div>
-        </footer>
+        </div>
     </div>
     
-    <!-- Core JavaScript -->
+    <!-- Footer -->
+    <footer class="bg-white shadow-inner mt-8 py-4">
+        <div class="container mx-auto px-4 text-center text-gray-500 text-sm">
+            <p>&copy; {{ now.year if now else 2025 }} Threat Intelligence Platform</p>
+            <p class="mt-1">Environment: {{ environment }} | Version: {{ version }}</p>
+        </div>
+    </footer>
+    
+    <!-- Common Scripts -->
     <script>
-        // Sidebar Toggle
-        const toggleSidebar = document.getElementById('toggle-sidebar');
-        const sidebar = document.getElementById('sidebar');
-        const contentWrapper = document.getElementById('content-wrapper');
-        
-        if (toggleSidebar && sidebar && contentWrapper) {
-            toggleSidebar.addEventListener('click', () => {
-                sidebar.classList.toggle('sidebar-collapsed');
-                contentWrapper.classList.toggle('content-wrapper-collapsed');
+        document.addEventListener('DOMContentLoaded', function() {
+            // User dropdown toggle
+            const userDropdownButton = document.getElementById('userDropdownButton');
+            const userDropdown = document.getElementById('userDropdown');
+            
+            if (userDropdownButton && userDropdown) {
+                userDropdownButton.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    userDropdown.classList.toggle('active');
+                });
                 
-                // Store preference in localStorage
-                const isSidebarCollapsed = sidebar.classList.contains('sidebar-collapsed');
-                localStorage.setItem('sidebarCollapsed', isSidebarCollapsed ? 'true' : 'false');
-            });
-            
-            // Check localStorage on load
-            const storedSidebarState = localStorage.getItem('sidebarCollapsed');
-            if (storedSidebarState === 'true') {
-                sidebar.classList.add('sidebar-collapsed');
-                contentWrapper.classList.add('content-wrapper-collapsed');
+                // Close dropdown when clicking elsewhere
+                document.addEventListener('click', function(e) {
+                    if (userDropdown.classList.contains('active') && 
+                        !userDropdownButton.contains(e.target) && 
+                        !userDropdown.contains(e.target)) {
+                        userDropdown.classList.remove('active');
+                    }
+                });
             }
-        }
-        
-        // Profile Dropdown
-        const profileMenuButton = document.getElementById('profile-menu-button');
-        const profileDropdown = document.getElementById('profile-dropdown');
-        
-        if (profileMenuButton && profileDropdown) {
-            profileMenuButton.addEventListener('click', (event) => {
-                event.stopPropagation();
-                profileDropdown.classList.toggle('hidden');
-            });
             
-            // Close dropdown when clicking elsewhere
-            document.addEventListener('click', (event) => {
-                if (!profileMenuButton.contains(event.target) && !profileDropdown.contains(event.target)) {
-                    profileDropdown.classList.add('hidden');
-                }
-            });
-        }
-        
-        // Alert Dismissal
-        document.querySelectorAll('.close-alert').forEach(button => {
-            button.addEventListener('click', () => {
-                const alert = button.closest('.alert');
-                alert.style.opacity = '0';
+            // Mobile navigation toggle
+            const mobileNavToggle = document.getElementById('mobileNavToggle');
+            const sidebar = document.getElementById('sidebar');
+            
+            if (mobileNavToggle && sidebar) {
+                mobileNavToggle.addEventListener('click', function() {
+                    sidebar.classList.toggle('hidden');
+                    sidebar.classList.toggle('fixed');
+                    sidebar.classList.toggle('inset-0');
+                    sidebar.classList.toggle('z-50');
+                    sidebar.classList.toggle('bg-white');
+                    sidebar.classList.toggle('p-4');
+                    sidebar.classList.toggle('overflow-y-auto');
+                    
+                    // Toggle icon
+                    const icon = mobileNavToggle.querySelector('i');
+                    icon.classList.toggle('fa-bars');
+                    icon.classList.toggle('fa-times');
+                });
+            }
+            
+            // Auto-hide flash messages after 5 seconds
+            const alertMessages = document.querySelectorAll('.alert-message');
+            alertMessages.forEach(alert => {
                 setTimeout(() => {
                     alert.style.display = 'none';
-                }, 300);
+                }, 5000);
             });
+            
+            // Helper functions for formatting
+            window.formatNumber = function(num) {
+                return num ? num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0";
+            };
+            
+            window.formatDate = function(dateString) {
+                if (!dateString) return 'N/A';
+                try {
+                    const date = new Date(dateString);
+                    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+                } catch (e) {
+                    return dateString;
+                }
+            };
         });
     </script>
     
+    <!-- Page-specific scripts -->
     {% block scripts %}{% endblock %}
 </body>
 </html>
