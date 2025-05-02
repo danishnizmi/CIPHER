@@ -1,7 +1,6 @@
 """
 Threat Intelligence Platform - Frontend Module
 Handles web interface, user authentication, and dashboard views.
-Production-ready implementation with full GCP integration.
 """
 
 import os
@@ -11,7 +10,6 @@ import hashlib
 import time
 import traceback
 import secrets
-import requests
 from datetime import datetime, timedelta
 from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional, Union
@@ -24,7 +22,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import config
 
 # Environment settings
-VERSION = os.environ.get("VERSION", "1.0.1")
+VERSION = os.environ.get("VERSION", "1.0.2")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
@@ -242,6 +240,9 @@ def get_api_key() -> str:
 def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
     """Make an internal API request with caching and enhanced error handling"""
     try:
+        # Import requests here to avoid global dependency
+        import requests
+        
         # Construct base URL
         base_url = request.url_root.rstrip('/')
         api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
@@ -419,7 +420,7 @@ def upload_csv_file(csv_content, feed_name="csv_upload"):
     
     return result
 
-# ====== Authentication Decorators ======
+# ====== Authentication Functions ======
 
 def login_required(f):
     """Decorator to require login for views"""
@@ -442,8 +443,6 @@ def admin_required(f):
             return render_template('auth.html', page_type='not_authorized')
         return f(*args, **kwargs)
     return decorated_function
-
-# ====== Authentication Functions ======
 
 def load_users() -> Dict[str, Dict]:
     """Load user data from auth config using config module"""
@@ -1255,7 +1254,24 @@ def inject_global_data():
         'debug_mode': DEBUG_MODE
     }
 
-# Initialize the app
+# Mock data for development environments
+MOCK_DATA = {
+    "stats": {
+        "feeds": {"total_sources": 5, "active_feeds": 5, "total_records": 500, "growth_rate": 10},
+        "campaigns": {"total_campaigns": 12, "active_campaigns": 8, "unique_actors": 5, "growth_rate": 15},
+        "iocs": {"total": 2500, "types": [
+            {"type": "ip", "count": 1200},
+            {"type": "domain", "count": 800},
+            {"type": "url", "count": 300},
+            {"type": "md5", "count": 150},
+            {"type": "sha256", "count": 50}
+        ], "growth_rate": 20},
+        "analyses": {"total_analyses": 450, "last_analysis": datetime.now().isoformat(), "growth_rate": 15},
+        "timestamp": datetime.now().isoformat()
+    }
+}
+
+# Initialize the app when imported
 if __name__ == "__main__":
     app.run(debug=ENVIRONMENT != 'production', 
             host='0.0.0.0', 
