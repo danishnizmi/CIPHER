@@ -1,7 +1,7 @@
 """
 Threat Intelligence Platform - Frontend Module
 Handles web interface, user authentication, and dashboard views.
-Streamlined implementation with Vertex AI summarization capabilities.
+Production-ready implementation with full GCP integration.
 """
 
 import os
@@ -28,9 +28,9 @@ VERSION = os.environ.get("VERSION", "1.0.1")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
-# Cache settings - longer cache for cost control
-CACHE_TIMEOUT = 900  # Cache for 15 minutes to reduce API calls
-LONG_CACHE_TIMEOUT = 3600  # Cache for 60 minutes for expensive operations
+# Cache settings
+CACHE_TIMEOUT = 300  # Cache for 5 minutes
+LONG_CACHE_TIMEOUT = 1800  # Cache for 30 minutes
 API_CACHE = {}
 API_CACHE_TIMESTAMP = {}
 
@@ -320,109 +320,10 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
         return {"error": f"Unexpected error: {str(e)}"}
 
-def get_sample_data(data_type):
-    """Generate sample data when real data is unavailable"""
-    current_time = datetime.now().isoformat()
-    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-    
-    if data_type == 'campaigns':
-        return {
-            "campaigns": [
-                {
-                    "campaign_id": "sample1",
-                    "campaign_name": "SampleCampaign1",
-                    "threat_actor": "APT29",
-                    "severity": "high",
-                    "source_count": 5,
-                    "ioc_count": 12,
-                    "first_seen": yesterday,
-                    "last_seen": current_time
-                },
-                {
-                    "campaign_id": "sample2",
-                    "campaign_name": "SampleCampaign2",
-                    "threat_actor": "Lazarus",
-                    "severity": "medium",
-                    "source_count": 3,
-                    "ioc_count": 8,
-                    "first_seen": yesterday,
-                    "last_seen": current_time
-                }
-            ],
-            "count": 2,
-            "total": 2,
-            "has_more": False
-        }
-    elif data_type == 'iocs':
-        return {
-            "records": [
-                {
-                    "type": "ip",
-                    "value": "192.168.1.1",
-                    "sources": 3,
-                    "first_seen": yesterday
-                },
-                {
-                    "type": "url",
-                    "value": "https://example.com/malware",
-                    "sources": 2,
-                    "first_seen": yesterday
-                },
-                {
-                    "type": "domain",
-                    "value": "malicious-domain.com",
-                    "sources": 5,
-                    "first_seen": yesterday
-                }
-            ],
-            "count": 3,
-            "total_available": 3,
-            "filters": {"days": 30, "type": "", "value": ""}
-        }
-    elif data_type == 'stats':
-        return {
-            "feeds": {"total_sources": 3, "active_feeds": 3, "total_records": 150, "growth_rate": 5},
-            "campaigns": {"total_campaigns": 2, "active_campaigns": 2, "unique_actors": 2, "growth_rate": 3},
-            "iocs": {
-                "total": 25, 
-                "types": [
-                    {"type": "ip", "count": 10},
-                    {"type": "url", "count": 8},
-                    {"type": "domain", "count": 7}
-                ],
-                "growth_rate": 8
-            },
-            "analyses": {"total_analyses": 15, "last_analysis": current_time, "growth_rate": 10},
-            "timestamp": current_time,
-            "days": 30,
-            "visualization_data": {
-                "daily_counts": [{"date": (datetime.now() - timedelta(days=i)).date().isoformat(), "count": int(20 + i * 0.5 + (i % 3))} for i in range(30)]
-            }
-        }
-    elif data_type == 'intel_summary':
-        return {
-            "summary": "Recent threat intelligence shows a surge in ransomware activity targeting healthcare and financial sectors. Multiple APT groups are leveraging phishing campaigns to deliver initial payloads.",
-            "common_types": ["ip", "domain", "url"],
-            "possible_actors": ["APT29", "Lazarus"],
-            "attack_vectors": ["Phishing", "Vulnerability Exploitation"],
-            "severity": "High",
-            "confidence": "Medium",
-            "ioc_count": 45,
-            "period_days": 7,
-            "analysis_timestamp": current_time
-        }
-    return {}
-
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_stats_data(days=30):
-    """Get statistics data from API with caching and sample fallback"""
-    response = _api_request(f"stats?days={days}")
-    
-    # If error or empty response, return sample data
-    if not response or 'error' in response or not response.get('feeds'):
-        return get_sample_data('stats')
-    
-    return response
+    """Get statistics data from API with caching"""
+    return _api_request(f"stats?days={days}")
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_feeds_data():
@@ -431,7 +332,7 @@ def get_feeds_data():
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_iocs_data(days=30, ioc_type=None, value=None):
-    """Get IOCs data from API with caching and sample fallback"""
+    """Get IOCs data from API with caching"""
     params = {"days": days}
     if ioc_type:
         params["type"] = ioc_type
@@ -439,17 +340,11 @@ def get_iocs_data(days=30, ioc_type=None, value=None):
         params["value"] = value
     
     param_str = "&".join(f"{k}={v}" for k, v in params.items())
-    response = _api_request(f"iocs?{param_str}")
-    
-    # If no data or error, return sample data
-    if not response or 'error' in response or not response.get('records'):
-        return get_sample_data('iocs')
-    
-    return response
+    return _api_request(f"iocs?{param_str}")
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_campaigns_data(days=30, severity=None):
-    """Get campaigns data from API with caching and sample fallback"""
+    """Get campaigns data from API with caching and better error handling"""
     params = {"days": days}
     if severity:
         params["severity"] = severity
@@ -457,26 +352,12 @@ def get_campaigns_data(days=30, severity=None):
     param_str = "&".join(f"{k}={v}" for k, v in params.items())
     response = _api_request(f"campaigns?{param_str}")
     
-    # If error or empty response, return sample data
-    if not response or 'error' in response or not isinstance(response.get('campaigns'), list):
-        return get_sample_data('campaigns')
-    
-    return response
-
-@api_cache(timeout=LONG_CACHE_TIMEOUT)
-def get_recent_intel_summary(days=7):
-    """Get recent threat intelligence summary with longer caching"""
-    # Make request to the analysis endpoint
-    data = {
-        "command": "summarize_recent",
-        "days": days
-    }
-    
-    response = _api_request("analyze", method="POST", data=data)
-    
-    # If error or empty response, return sample data
-    if not response or 'error' in response or not response.get('summary'):
-        return get_sample_data('intel_summary')
+    # Ensure 'campaigns' is always a list even if not present in the response
+    if isinstance(response, dict) and 'campaigns' not in response:
+        response['campaigns'] = []
+    elif not isinstance(response, dict):
+        # Return a properly formatted empty result
+        return {"campaigns": [], "count": 0, "total": 0, "has_more": False}
     
     return response
 
@@ -514,22 +395,12 @@ def trigger_ingestion(feed_name=None, force=False):
     if not result.get("error"):
         clear_api_cache("get_feeds_data")
         clear_api_cache("get_stats_data")
-        clear_api_cache("get_recent_intel_summary")
         if feed_name:
             clear_api_cache(f"get_feed_stats:{feed_name}")
             clear_api_cache(f"get_feed_data:{feed_name}")
         clear_api_cache("get_threat_summary")
     
     return result
-
-def analyze_ioc_batch(iocs):
-    """Analyze a batch of IOCs and get a summary"""
-    data = {
-        "command": "analyze_batch",
-        "iocs": iocs
-    }
-    
-    return _api_request("analyze", method="POST", data=data)
 
 def upload_csv_file(csv_content, feed_name="csv_upload"):
     """Upload CSV for threat analysis"""
@@ -545,7 +416,6 @@ def upload_csv_file(csv_content, feed_name="csv_upload"):
     if not result.get("error"):
         clear_api_cache("get_feeds_data")
         clear_api_cache("get_stats_data")
-        clear_api_cache("get_recent_intel_summary")
     
     return result
 
@@ -751,51 +621,50 @@ def dashboard(view=None):
                 'page_icon': 'tachometer-alt'
             })
         
-        # Get Intel Summary for dashboard
-        if current_view == 'dashboard':
-            try:
-                intel_summary = get_recent_intel_summary(days=7)
-                context['intel_summary'] = intel_summary
-            except Exception as e:
-                logger.error(f"Error getting intel summary: {str(e)}")
-                context['intel_summary'] = get_sample_data('intel_summary')
-        
         # Load statistics for all views with safety checks
         try:
             # Get statistics using the helper function
-            stats_response = get_stats_data(days=days)
+            stats_response = get_stats_data(days=days) or {}
             context['stats'] = stats_response
             
             # Extract trends from statistics - use real data if available or defaults if not
-            context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
-            context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
-            context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
-            context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
-            
-            # Extract IOC type data for charts
-            context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
-            context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+            if isinstance(stats_response, dict):
+                context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
+                context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
+                context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
+                context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
+                
+                # Extract IOC type data for charts
+                context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
+                context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+            else:
+                # Set defaults if stats_response is not a dict
+                context['feed_trend'] = 0
+                context['ioc_trend'] = 0
+                context['campaign_trend'] = 0
+                context['analysis_trend'] = 0
+                context['ioc_type_labels'] = []
+                context['ioc_type_values'] = []
             
             # Load view-specific data with safety checks
             if current_view == 'feeds':
-                feeds_response = get_feeds_data()
-                context['feed_items'] = feeds_response.get('feed_details', []) if isinstance(feeds_response, dict) else []
-                feed_items = context['feed_items']
-                
-                # Create descriptions dictionary safely
-                context['feed_type_descriptions'] = {}
-                if isinstance(feed_items, list):
-                    for feed in feed_items:
-                        if isinstance(feed, dict) and 'name' in feed:
-                            context['feed_type_descriptions'][feed['name']] = feed.get('description', 'Threat Intelligence Feed')
+                feeds_response = get_feeds_data() or {}
+                context['feed_items'] = (feeds_response.get('feed_details', []) 
+                                        if isinstance(feeds_response, dict) else [])
+                context['feed_type_descriptions'] = {
+                    feed.get('name', ''): feed.get('description', 'Threat Intelligence Feed') 
+                    for feed in context['feed_items'] if isinstance(feed, dict) and 'name' in feed
+                }
                 
             elif current_view == 'iocs':
-                iocs_response = get_iocs_data(days=days)
-                context['ioc_items'] = iocs_response.get('records', []) if isinstance(iocs_response, dict) else []
+                iocs_response = get_iocs_data(days=days) or {}
+                context['ioc_items'] = (iocs_response.get('records', []) 
+                                       if isinstance(iocs_response, dict) else [])
                 
             elif current_view == 'campaigns':
-                campaigns_response = get_campaigns_data(days=days)
-                context['campaigns'] = campaigns_response.get('campaigns', []) if isinstance(campaigns_response, dict) else []
+                campaigns_response = get_campaigns_data(days=days) or {}
+                context['campaigns'] = (campaigns_response.get('campaigns', []) 
+                                       if isinstance(campaigns_response, dict) else [])
                 
             else:
                 # Dashboard view - load additional data with safety checks
@@ -822,37 +691,33 @@ def dashboard(view=None):
                     context['activity_counts'] = generate_trend_data(days)
                 
                 # Load campaigns for dashboard - safely handle list slicing
-                campaigns_response = get_campaigns_data(days=days)
-                campaigns_list = campaigns_response.get('campaigns', []) if isinstance(campaigns_response, dict) else []
+                campaigns_response = get_campaigns_data(days=days) or {}
+                campaigns_list = (campaigns_response.get('campaigns', []) 
+                                 if isinstance(campaigns_response, dict) else [])
                 
-                # Safely handle list slicing by checking if list exists and is non-empty
-                if isinstance(campaigns_list, list) and campaigns_list:
-                    if len(campaigns_list) > 3:
-                        context['campaigns'] = campaigns_list[0:3]  # Explicit slice using indices
-                    else:
-                        context['campaigns'] = campaigns_list
+                # FIX: Safely handle list slicing by checking if list exists first
+                if campaigns_list:
+                    context['campaigns'] = campaigns_list[:3]
                 else:
                     context['campaigns'] = []
                 
-                # Load IOCs for dashboard - safely handle list slicing
-                iocs_response = get_iocs_data(days=days)
-                iocs_list = iocs_response.get('records', []) if isinstance(iocs_response, dict) else []
+                # Load IOCs for dashboard
+                iocs_response = get_iocs_data(days=days) or {}
+                iocs_list = (iocs_response.get('records', []) 
+                            if isinstance(iocs_response, dict) else [])
                 
-                # Safely handle list slicing here too
-                if isinstance(iocs_list, list) and iocs_list:
-                    if len(iocs_list) > 4:
-                        context['top_iocs'] = iocs_list[0:4]  # Explicit slice using indices
-                    else:
-                        context['top_iocs'] = iocs_list
+                # FIX: Safely handle list slicing here too
+                if iocs_list:
+                    context['top_iocs'] = iocs_list[:4]
                 else:
                     context['top_iocs'] = []
                 
                 # Load threat summary for dashboard
-                threat_summary = get_threat_summary(days=days)
+                threat_summary = get_threat_summary(days=days) or {}
                 context['threat_summary'] = threat_summary
                 
                 # Load geo data for map
-                geo_stats = get_ioc_geo_stats(days=days)
+                geo_stats = get_ioc_geo_stats(days=days) or {}
                 context['geo_stats'] = geo_stats.get('countries', []) if isinstance(geo_stats, dict) else []
                 
         except Exception as e:
@@ -884,7 +749,6 @@ def dashboard(view=None):
                 context['campaigns'] = []
                 context['top_iocs'] = []
                 context['geo_stats'] = []
-                context['intel_summary'] = get_sample_data('intel_summary')
                 
             flash('Could not load all dashboard data. Some information may be missing.', 'warning')
         
@@ -915,7 +779,6 @@ def refresh_feeds():
             # Clear all relevant caches
             clear_api_cache('get_feeds')
             clear_api_cache('get_stats')
-            clear_api_cache('get_recent_intel_summary')
             
             feeds_count = len(result.get('results', []))
             success_count = sum(1 for r in result.get('results', []) if r.get('status') == 'success')
@@ -928,54 +791,6 @@ def refresh_feeds():
         logger.error(f"Error in refresh_feeds: {str(e)}")
         flash(f'Error refreshing feeds: {str(e)}', 'danger')
         return redirect(url_for('dashboard', view='feeds'))
-
-@app.route('/intel_summary', methods=['GET'])
-@login_required
-def intel_summary():
-    """Generate an intelligence summary for display"""
-    days = int(request.args.get('days', '7'))
-    
-    try:
-        # Get or generate an intel summary
-        summary = get_recent_intel_summary(days=days)
-        
-        # Return JSON if requested
-        if request.args.get('format') == 'json':
-            return jsonify(summary)
-        
-        # Otherwise render a template
-        return render_template('content.html', 
-                              page_type='intel_summary', 
-                              summary=summary,
-                              days=days)
-    except Exception as e:
-        logger.error(f"Error generating intel summary: {str(e)}")
-        
-        if request.args.get('format') == 'json':
-            return jsonify({"error": str(e)}), 500
-            
-        flash(f'Error generating intelligence summary: {str(e)}', 'danger')
-        return redirect(url_for('dashboard'))
-
-@app.route('/analyze_iocs', methods=['POST'])
-@login_required
-def analyze_ioc_batch_endpoint():
-    """Submit IOCs for batch analysis"""
-    try:
-        # Get IOCs from form
-        data = request.json
-        iocs = data.get('iocs', [])
-        
-        if not iocs:
-            return jsonify({"error": "No IOCs provided"}), 400
-            
-        # Call the analysis function
-        result = analyze_ioc_batch(iocs)
-        
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Error analyzing IOCs: {str(e)}")
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
@@ -1239,11 +1054,9 @@ def dynamic_content_detail(content_type, identifier):
                 campaigns_data = get_campaigns_data()
                 campaigns_list = campaigns_data.get('campaigns', [])
                 
-                if isinstance(campaigns_list, list) and campaigns_list:
-                    if len(campaigns_list) > 3:
-                        data['campaigns'] = campaigns_list[0:3]  # Explicit slice
-                    else:
-                        data['campaigns'] = campaigns_list
+                # Fix potential slicing issue here too
+                if campaigns_list:
+                    data['campaigns'] = campaigns_list[:3]
                 else:
                     data['campaigns'] = []
                     
@@ -1251,15 +1064,6 @@ def dynamic_content_detail(content_type, identifier):
                 for field in ['first_seen', 'last_seen', 'sources', 'confidence', 'tags']:
                     if field not in data:
                         data[field] = [] if field in ['sources', 'tags'] else None
-                
-                # Try to get an AI analysis of this individual IOC
-                try:
-                    ioc_analysis = analyze_ioc_batch([data])
-                    if ioc_analysis and not ioc_analysis.get('error'):
-                        data['ai_analysis'] = ioc_analysis
-                except Exception as e:
-                    logger.error(f"Error getting IOC analysis: {str(e)}")
-                    # Continue without AI analysis
                 
         elif content_type == 'campaign':
             # Get campaign details
@@ -1277,11 +1081,9 @@ def dynamic_content_detail(content_type, identifier):
                 iocs_data = get_iocs_data()
                 iocs_list = iocs_data.get('records', [])
                 
-                if isinstance(iocs_list, list) and iocs_list:
-                    if len(iocs_list) > 5:
-                        data['iocs'] = iocs_list[0:5]  # Explicit slice
-                    else:
-                        data['iocs'] = iocs_list
+                # Fix potential slicing issue here too
+                if iocs_list:
+                    data['iocs'] = iocs_list[:5]
                 else:
                     data['iocs'] = []
                 
@@ -1299,11 +1101,9 @@ def dynamic_content_detail(content_type, identifier):
             data['name'] = identifier
             sample_data = feed_data.get('records', [])
             
-            if isinstance(sample_data, list) and sample_data:
-                if len(sample_data) > 10:
-                    data['sample_data'] = sample_data[0:10]  # Explicit slice
-                else:
-                    data['sample_data'] = sample_data
+            # Fix potential slicing issue here too
+            if sample_data:
+                data['sample_data'] = sample_data[:10]
             else:
                 data['sample_data'] = []
             
@@ -1398,73 +1198,6 @@ def api_upload_csv():
     except Exception as e:
         logger.error(f"Error in API upload_csv: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/analyze', methods=['POST'])
-@login_required
-def api_analyze():
-    """API endpoint for various analysis functions"""
-    try:
-        data = request.json
-        command = data.get('command', 'summarize_recent')
-        
-        if command == 'summarize_recent':
-            days = data.get('days', 7)
-            result = get_recent_intel_summary(days=days)
-            return jsonify(result)
-            
-        elif command == 'analyze_batch':
-            iocs = data.get('iocs', [])
-            if not iocs:
-                return jsonify({"error": "No IOCs provided"}), 400
-                
-            result = analyze_ioc_batch(iocs)
-            return jsonify(result)
-            
-        elif command == 'analyze_feed':
-            feed_name = data.get('feed_name')
-            if not feed_name:
-                return jsonify({"error": "No feed name provided"}), 400
-                
-            # Forward to the analysis service
-            analyze_data = {
-                "command": "analyze_feed",
-                "feed_name": feed_name,
-                "days": data.get('days', 7)
-            }
-            
-            result = _api_request("analyze", method="POST", data=analyze_data)
-            return jsonify(result)
-            
-        else:
-            return jsonify({"error": f"Unknown command: {command}"}), 400
-            
-    except Exception as e:
-        logger.error(f"Error in API analyze: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-# ====== Admin-only diagnostic endpoint ======
-@app.route('/admin/trigger_ingestion')
-@admin_required
-def admin_trigger_ingestion():
-    """Admin-only endpoint to force ingestion with diagnostic info"""
-    try:
-        from ingestion import ThreatDataIngestion
-        ingestion = ThreatDataIngestion()
-        results = ingestion.process_all_feeds()
-        
-        return jsonify({
-            "status": "completed",
-            "results": results,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Error in admin trigger ingestion: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
 
 # ====== Template Filters ======
 
