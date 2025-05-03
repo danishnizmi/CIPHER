@@ -9,7 +9,7 @@ from flask_limiter.util import get_remote_address
 # Import your other modules (adjusted to fix the import error)
 import config
 from api import api_blueprint
-from frontend import app as frontend_blueprint  # Fixed import - assuming 'app' is the Flask instance in frontend.py
+from frontend import app as frontend_blueprint, format_datetime  # Import both the blueprint and the filter function
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +39,9 @@ limiter = Limiter(
 # Register blueprints
 app.register_blueprint(api_blueprint, url_prefix='/api')
 app.register_blueprint(frontend_blueprint)
+
+# Register template filters properly on the main Flask app
+app.template_filter('datetime')(format_datetime)
 
 # Health check endpoint for startup and liveness probes
 @app.route('/health', methods=['GET'])
