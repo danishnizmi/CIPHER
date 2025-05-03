@@ -25,7 +25,7 @@ spec:
       timeoutSeconds: 300
       containerConcurrency: 80
       containers:
-      - image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
+      - image: gcr.io/primal-chariot-382610/threat-intelligence-platform:latest
         ports:
         - name: http1
           containerPort: 8080
@@ -35,7 +35,7 @@ spec:
             memory: "2Gi"
         env:
         - name: GCP_PROJECT
-          value: "${PROJECT_ID}"
+          value: "primal-chariot-382610"
         - name: ENVIRONMENT
           value: "production"
         - name: GCP_REGION
@@ -45,9 +45,9 @@ spec:
         - name: PORT
           value: "8080"
         - name: API_URL
-          value: "https://threat-intelligence-platform-${HASH}-${REGION}.a.run.app"
+          value: "https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"
         - name: GCS_BUCKET
-          value: "${PROJECT_ID}-threat-data"
+          value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
         - name: PUBSUB_ANALYSIS_TOPIC
@@ -55,7 +55,7 @@ spec:
         - name: REQUIRE_AUTH
           value: "true"
         - name: VERSION
-          value: "${COMMIT_SHA}"
+          value: "latest"
         - name: DEBUG
           value: "false"
         - name: PYTHONPATH
@@ -66,6 +66,12 @@ spec:
           value: "true"
         - name: LOG_LEVEL
           value: "INFO"
+        - name: LOAD_SECRETS
+          value: "true"
+        - name: ENSURE_GCP_RESOURCES
+          value: "true"
+        - name: IGNORE_PERMISSION_ERRORS 
+          value: "true"
         - name: API_KEY
           valueFrom:
             secretKeyRef:
@@ -80,8 +86,8 @@ spec:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
+          initialDelaySeconds: 60
+          periodSeconds: 15
           failureThreshold: 3
         livenessProbe:
           httpGet:
