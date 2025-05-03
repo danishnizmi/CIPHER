@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
     ENVIRONMENT=production \
     LOAD_SECRETS=true \
-    ENSURE_GCP_RESOURCES=true
+    ENSURE_GCP_RESOURCES=true \
+    GOOGLE_APPLICATION_CREDENTIALS="/tmp/keys/service-account.json"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,18 +18,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     curl \
     gnupg \
+    apt-transport-https \
+    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install gcloud CLI for better GCP integration
-RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
     && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
     && apt-get update && apt-get install -y --no-install-recommends google-cloud-cli \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p static/dist templates data logs
+RUN mkdir -p static/dist templates data logs /tmp/keys
 
 # Copy requirements first for better layer caching
 COPY requirements.txt .
@@ -48,7 +51,7 @@ RUN if [ ! -f static/dist/output.css ]; then \
     echo "/* Placeholder CSS - will be replaced by Tailwind in production */" > static/dist/output.css; \
     fi
 
-# Wait for GCP services to be available before starting the app
+# Create startup script
 RUN echo '#!/bin/bash' > /app/start.sh && \
     echo 'cd /app' >> /app/start.sh && \
     echo 'echo "Starting application on port $PORT"' >> /app/start.sh && \
@@ -57,9 +60,13 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo 'if [ "$ENVIRONMENT" = "production" ]; then' >> /app/start.sh && \
     echo '  echo "Checking GCP authentication..."' >> /app/start.sh && \
     echo '  if ! curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/ > /dev/null; then' >> /app/start.sh && \
-    echo '    echo "Warning: Not running on GCP or metadata server not available."' >> /app/start.sh && \
+    echo '    echo "Warning: Not running on GCP or metadata server not available"' >> /app/start.sh && \
     echo '  else' >> /app/start.sh && \
-    echo '    echo "Running on GCP with metadata server available."' >> /app/start.sh && \
+    echo '    echo "Running on GCP with metadata server available"' >> /app/start.sh && \
+    echo '    # Get service account from metadata' >> /app/start.sh && \
+    echo '    # The container will use the service account provided by Cloud Run' >> /app/start.sh && \
+    echo '    export DETECTED_SA_EMAIL=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)' >> /app/start.sh && \
+    echo '    echo "Using service account: $DETECTED_SA_EMAIL"' >> /app/start.sh && \
     echo '  fi' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
@@ -72,8 +79,23 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '  fi' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
-    echo '# Run database migrations if needed' >> /app/start.sh && \
-    echo 'python -c "import config; config.Config.ensure_gcp_resources()" || echo "Warning: Could not ensure GCP resources"' >> /app/start.sh && \
+    echo '# Ensure GCP resources are set up correctly' >> /app/start.sh && \
+    echo 'if [ "$ENSURE_GCP_RESOURCES" = "true" ]; then' >> /app/start.sh && \
+    echo '  echo "Ensuring GCP resources are properly set up..."' >> /app/start.sh && \
+    echo '  python -c "import config; config.Config.ensure_gcp_resources()" || echo "Warning: Could not ensure GCP resources"' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '  echo "Skipping GCP resource validation"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Log information about environment' >> /app/start.sh && \
+    echo 'echo "Environment: $ENVIRONMENT"' >> /app/start.sh && \
+    echo 'echo "GCP Project: $GCP_PROJECT"' >> /app/start.sh && \
+    echo 'echo "GCP Region: $GCP_REGION"' >> /app/start.sh && \
+    echo 'echo "BigQuery Dataset: $BIGQUERY_DATASET"' >> /app/start.sh && \
+    echo 'echo "GCS Bucket: $GCS_BUCKET"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Test connections to required services' >> /app/start.sh && \
+    echo 'python -c "from config import check_gcp_permissions; print(\"\\nGCP Permissions Check:\", check_gcp_permissions())"' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
     echo '# Start the application with gunicorn' >> /app/start.sh && \
     echo 'exec gunicorn --workers=2 --threads=8 --timeout=120 --bind=:$PORT app:app' >> /app/start.sh && \
