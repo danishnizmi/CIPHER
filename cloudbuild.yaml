@@ -150,7 +150,7 @@ steps:
       
       # Set up bucket folder structure
       echo "Creating bucket folder structure..."
-      for FOLDER in raw processed exports temp feeds cache; do
+      for FOLDER in feeds raw processed exports temp cache; do
         mkdir -p /tmp/bucket_folders
         touch /tmp/bucket_folders/empty.txt
         gsutil cp /tmp/bucket_folders/empty.txt gs://${BUCKET_NAME}/${FOLDER}/
@@ -261,8 +261,7 @@ steps:
                 value: "us-central1"
               - name: BIGQUERY_DATASET
                 value: "threat_intelligence"
-              - name: PORT
-                value: "8080"
+              # PORT environment variable removed from here
               - name: GCS_BUCKET
                 value: "${PROJECT_ID}-threat-data"
               - name: PUBSUB_TOPIC
