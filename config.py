@@ -3,9 +3,20 @@ import sys
 import json
 import logging
 import tempfile
+import hashlib
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Tuple
+
+# Global client variables
+_bigquery_client = None
+_storage_client = None
+_publisher = None
+_subscriber = None
+_logging_client = None
+_error_client = None
+_secret_client = None
+_redis_client = None
+_vertex_client = None
 
 # Google Cloud imports
 try:
@@ -15,9 +26,23 @@ try:
     from google.api_core.exceptions import GoogleAPIError, PermissionDenied, ResourceExhausted
     from google.auth.exceptions import DefaultCredentialsError, TransportError
     import google.auth
+    try:
+        import vertexai
+        from vertexai.language_models import TextGenerationModel
+        HAS_VERTEX = True
+    except ImportError:
+        HAS_VERTEX = False
     HAS_GCP = True
 except ImportError:
     HAS_GCP = False
+    HAS_VERTEX = False
+
+# Redis (for production caching)
+try:
+    import redis
+    HAS_REDIS = True
+except ImportError:
+    HAS_REDIS = False
 
 # Initialize logging
 logging.basicConfig(
@@ -34,16 +59,40 @@ DEFAULT_API_RATE_LIMIT = "200 per day, 50 per hour"
 DEFAULT_ADMIN_USERNAME = "admin"
 FEED_TYPES = ["indicators", "vulnerabilities", "threat_actors", "campaigns", "malware"]
 SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
+DEFAULT_FEED_CONFIGS = [
+    {
+        "id": "phishtank",
+        "name": "PhishTank URLs",
+        "url": "http://data.phishtank.com/data/online-valid.json",
+        "description": "URLs verified as phishing by PhishTank community",
+        "format": "json",
+        "type": "url",
+        "update_frequency": "daily",
+        "enabled": True
+    },
+    {
+        "id": "urlhaus",
+        "name": "URLhaus Malware",
+        "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+        "description": "Recent malware URLs from URLhaus",
+        "format": "csv",
+        "type": "url",
+        "update_frequency": "daily",
+        "enabled": True
+    },
+    {
+        "id": "threatfox",
+        "name": "ThreatFox IOCs",
+        "url": "https://threatfox.abuse.ch/export/json/recent/",
+        "description": "Recent indicators from ThreatFox",
+        "format": "json",
+        "type": "mixed",
+        "update_frequency": "daily",
+        "enabled": True
+    }
+]
 
-# Global clients
-_bigquery_client = None
-_storage_client = None
-_publisher = None
-_subscriber = None
-_logging_client = None
-_error_client = None
-_secret_client = None
-
+# Helper Functions
 def get_project_id() -> Optional[str]:
     """Get Google Cloud project ID from environment or GCP metadata with improved error handling."""
     # First try environment variable
@@ -60,34 +109,214 @@ def get_project_id() -> Optional[str]:
                 # Cache this in environment for future calls
                 os.environ['GCP_PROJECT'] = project_id
                 return project_id
-        except DefaultCredentialsError:
-            logger.warning("Unable to determine GCP project ID from metadata (DefaultCredentialsError)")
-        except TransportError:
-            logger.warning("Unable to determine GCP project ID from metadata (TransportError)")
-        except Exception as e:
+        except (DefaultCredentialsError, TransportError) as e:
             logger.warning(f"Unable to determine GCP project ID from metadata: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Unexpected error getting project ID: {str(e)}")
     
     logger.error("No project ID found in environment or metadata")
     return None
 
-def initialize_credentials():
-    """Initialize Google credentials with fallback options."""
+def get_env_bool(var_name: str, default: bool = False) -> bool:
+    """Get boolean value from environment variable."""
+    val = os.environ.get(var_name, str(default)).lower()
+    return val in ('true', 't', 'yes', 'y', '1')
+
+def get_env_list(var_name: str, default: Optional[List] = None, separator: str = ',') -> List:
+    """Get list from environment variable."""
+    if default is None:
+        default = []
+    val = os.environ.get(var_name)
+    if not val:
+        return default
+    return [item.strip() for item in val.split(separator) if item.strip()]
+
+def get_env_dict(var_name: str, default: Optional[Dict] = None) -> Dict:
+    """Get dictionary from JSON-formatted environment variable."""
+    if default is None:
+        default = {}
+    val = os.environ.get(var_name)
+    if not val:
+        return default
+    try:
+        return json.loads(val)
+    except json.JSONDecodeError:
+        logger.warning(f"Invalid JSON in {var_name} environment variable")
+        return default
+
+# GCP Service Initialization Functions
+def initialize_bigquery():
+    """Initialize and return a BigQuery client with error handling."""
+    global _bigquery_client
+    
+    if _bigquery_client is not None:
+        return _bigquery_client
+        
     if not HAS_GCP:
-        logger.warning("Google Cloud libraries not installed, cannot initialize credentials")
+        logger.warning("Google Cloud libraries not installed, cannot initialize BigQuery")
+        return None
+        
+    try:
+        project_id = get_project_id()
+        if not project_id:
+            logger.error("Project ID not available, cannot initialize BigQuery client")
+            return None
+
+        _bigquery_client = bigquery.Client(project=project_id)
+        logger.info(f"BigQuery client initialized for project {project_id}")
+        return _bigquery_client
+    except PermissionDenied:
+        logger.error("Permission denied initializing BigQuery client. Check service account roles.")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize BigQuery client: {str(e)}")
+        return None
+
+def initialize_storage():
+    """Initialize and return a Cloud Storage client with error handling."""
+    global _storage_client
+    
+    if _storage_client is not None:
+        return _storage_client
+        
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot initialize Storage")
+        return None
+        
+    try:
+        project_id = get_project_id()
+        if not project_id:
+            logger.error("Project ID not available, cannot initialize Storage client")
+            return None
+
+        _storage_client = storage.Client(project=project_id)
+        logger.info(f"Storage client initialized for project {project_id}")
+        return _storage_client
+    except PermissionDenied:
+        logger.error("Permission denied initializing Storage client. Check service account roles.")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize Storage client: {str(e)}")
+        return None
+
+def initialize_pubsub():
+    """Initialize and return PubSub publisher and subscriber clients with error handling."""
+    global _publisher, _subscriber
+    
+    if _publisher is not None and _subscriber is not None:
+        return _publisher, _subscriber
+        
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot initialize PubSub")
         return None, None
         
     try:
-        # Try default credentials first
-        credentials, project_id = google.auth.default()
-        logger.info(f"Using default credentials with project: {project_id}")
-        return credentials, project_id
-    except DefaultCredentialsError:
-        logger.warning("Default credentials not found")
+        # PubSub clients don't require explicit project ID in constructor
+        if _publisher is None:
+            _publisher = pubsub_v1.PublisherClient()
+        if _subscriber is None:
+            _subscriber = pubsub_v1.SubscriberClient()
+        logger.info("PubSub clients initialized successfully")
+        return _publisher, _subscriber
+    except PermissionDenied:
+        logger.error("Permission denied initializing Pub/Sub clients. Check service account roles.")
         return None, None
     except Exception as e:
-        logger.warning(f"Error initializing credentials: {str(e)}")
+        logger.error(f"Failed to initialize PubSub clients: {str(e)}")
         return None, None
 
+def initialize_error_reporting(project_id: str = None):
+    """Initialize Google Cloud Error Reporting."""
+    global _error_client
+    
+    if _error_client is not None:
+        return _error_client
+        
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot initialize Error Reporting")
+        return None
+        
+    try:
+        if project_id is None:
+            project_id = get_project_id()
+            if not project_id:
+                logger.error("Project ID not available, cannot initialize Error Reporting")
+                return None
+                
+        _error_client = error_reporting.Client(project=project_id)
+        logger.info("Error reporting initialized")
+        return _error_client
+    except PermissionDenied:
+        logger.error("Permission denied accessing Error Reporting. Check service account roles.")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize error reporting: {str(e)}")
+        return None
+
+def initialize_vertexai(project_id: str = None, location: str = "us-central1"):
+    """Initialize Vertex AI."""
+    global _vertex_client
+    
+    if not HAS_VERTEX:
+        logger.warning("Vertex AI libraries not installed, cannot initialize Vertex AI")
+        return False
+        
+    try:
+        if project_id is None:
+            project_id = get_project_id()
+            if not project_id:
+                logger.error("Project ID not available, cannot initialize Vertex AI")
+                return False
+                
+        # Initialize Vertex AI
+        vertexai.init(project=project_id, location=location)
+        logger.info(f"Vertex AI initialized for project {project_id} in {location}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize Vertex AI: {str(e)}")
+        return False
+
+def initialize_redis(host: str = None, port: int = 6379, db: int = 0, password: str = None):
+    """Initialize Redis client for caching in production."""
+    global _redis_client
+    
+    if _redis_client is not None:
+        return _redis_client
+        
+    if not HAS_REDIS:
+        logger.warning("Redis library not installed, cannot initialize Redis")
+        return None
+        
+    try:
+        if host is None:
+            # Check for Redis host in environment variables
+            host = os.environ.get('REDIS_HOST')
+            if not host:
+                logger.warning("Redis host not specified, cannot initialize Redis")
+                return None
+                
+        # Initialize Redis client
+        _redis_client = redis.Redis(
+            host=host,
+            port=int(os.environ.get('REDIS_PORT', port)),
+            db=int(os.environ.get('REDIS_DB', db)),
+            password=os.environ.get('REDIS_PASSWORD', password),
+            socket_timeout=5,
+            decode_responses=True
+        )
+        
+        # Test connection
+        _redis_client.ping()
+        logger.info(f"Redis client initialized and connected to {host}")
+        return _redis_client
+    except redis.ConnectionError:
+        logger.error(f"Cannot connect to Redis at {host}:{port}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize Redis client: {str(e)}")
+        return None
+
+# Secret Manager Functions
 def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
     """Access secrets from Google Cloud Secret Manager with robust error handling."""
     global _secret_client
@@ -170,6 +399,7 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
                         "secret": {"replication": {"automatic": {}}},
                     }
                 )
+                logger.info(f"Created new secret: {secret_id}")
             except Exception as e:
                 logger.error(f"Error creating secret {secret_id}: {str(e)}")
                 return False
@@ -182,6 +412,7 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
                     "payload": {"data": secret_value.encode("UTF-8")},
                 }
             )
+            logger.info(f"Updated secret: {secret_id}")
             return True
         except Exception as e:
             logger.error(f"Error adding secret version for {secret_id}: {str(e)}")
@@ -194,45 +425,47 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
 def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
     """Get and cache configuration from Secret Manager."""
     # Return from memory cache for subsequent calls
-    if hasattr(get_cached_config, f"_cached_{secret_id}") and not force_refresh:
-        return getattr(get_cached_config, f"_cached_{secret_id}")
+    cache_attr = f"_cached_{secret_id.replace('-', '_')}"
+    if hasattr(get_cached_config, cache_attr) and not force_refresh:
+        return getattr(get_cached_config, cache_attr)
         
     # Fetch from Secret Manager
     config_data = access_secret(secret_id)
     
     # Cache for future use
     if config_data:
-        setattr(get_cached_config, f"_cached_{secret_id}", config_data)
+        setattr(get_cached_config, cache_attr, config_data)
         
     return config_data
 
-def get_env_bool(var_name: str, default: bool = False) -> bool:
-    """Get boolean value from environment variable."""
-    val = os.environ.get(var_name, str(default)).lower()
-    return val in ('true', 't', 'yes', 'y', '1')
-
-def get_env_list(var_name: str, default: Optional[List] = None, separator: str = ',') -> List:
-    """Get list from environment variable."""
-    if default is None:
-        default = []
-    val = os.environ.get(var_name)
-    if not val:
-        return default
-    return [item.strip() for item in val.split(separator) if item.strip()]
-
-def get_env_dict(var_name: str, default: Optional[Dict] = None) -> Dict:
-    """Get dictionary from JSON-formatted environment variable."""
-    if default is None:
-        default = {}
-    val = os.environ.get(var_name)
-    if not val:
-        return default
+def create_default_feed_config():
+    """Create a default feed configuration if it doesn't exist."""
     try:
-        return json.loads(val)
-    except json.JSONDecodeError:
-        logger.warning(f"Invalid JSON in {var_name} environment variable")
-        return default
+        # Check if feed-config exists
+        feed_config = access_secret("feed-config")
+        if feed_config:
+            logger.info("Feed configuration already exists in Secret Manager")
+            return True
+            
+        # Create default feed configuration
+        feed_config = {
+            "feeds": DEFAULT_FEED_CONFIGS,
+            "update_interval_hours": 6,
+            "default_tags": [],
+            "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
+            "request_timeout": 30,
+            "max_retries": 3
+        }
+        
+        success = create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
+        if success:
+            logger.info("Created default feed-config in Secret Manager")
+        return success
+    except Exception as e:
+        logger.error(f"Error creating default feed config: {str(e)}")
+        return False
 
+# User Management Functions
 def set_initial_admin_password() -> Optional[str]:
     """Sets initial admin password if not already set."""
     if not HAS_GCP:
@@ -250,6 +483,8 @@ def set_initial_admin_password() -> Optional[str]:
             admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
             create_or_update_secret("admin-initial-password", admin_password)
             logger.info("Created new admin password in Secret Manager")
+        else:
+            logger.info("Loaded admin password from Secret Manager")
         
         # For development environments, log the password
         if os.environ.get('ENVIRONMENT', 'development') == 'development':
@@ -271,7 +506,7 @@ def update_user(username: str, updates: Dict) -> bool:
         # Get current auth config
         auth_config = get_cached_config("auth-config", force_refresh=True)
         if not auth_config or not isinstance(auth_config, dict):
-            auth_config = {"users": {}}
+            auth_config = {"users": {}, "session_secret": os.urandom(32).hex()}
         
         # Ensure users dict exists
         if "users" not in auth_config:
@@ -290,8 +525,8 @@ def update_user(username: str, updates: Dict) -> bool:
         
         # Clear cache if successful
         if result:
-            if hasattr(get_cached_config, "_cached_auth-config"):
-                delattr(get_cached_config, "_cached_auth-config")
+            if hasattr(get_cached_config, "_cached_auth_config"):
+                delattr(get_cached_config, "_cached_auth_config")
         
         return result
     except Exception as e:
@@ -319,6 +554,7 @@ def add_user(username: str, password: str, role: str = "readonly") -> bool:
         logger.error(f"Error adding user {username}: {str(e)}")
         return False
 
+# Configuration Classes
 class BaseConfig:
     """Base configuration class with common settings."""
     
@@ -416,7 +652,7 @@ class BaseConfig:
     # Error reporting configuration
     ENABLE_ERROR_REPORTING = get_env_bool('ENABLE_ERROR_REPORTING', False)
     
-    # Threat intelligence feed configuration - Default empty array, will be populated
+    # Threat intelligence feed configuration
     FEEDS = []
     FEED_UPDATE_INTERVAL = int(os.environ.get('FEED_UPDATE_INTERVAL', 3))  # hours
     DEFAULT_FEED_CONFIDENCE = 70  # Default confidence level (0-100)
@@ -439,9 +675,14 @@ class BaseConfig:
     TEMPLATES_AUTO_RELOAD = get_env_bool('TEMPLATES_AUTO_RELOAD', False)
     FRONTEND_THEME = os.environ.get('FRONTEND_THEME', 'default')
     
-    # Cache configuration
+    # Cache configuration (SimpleCache for dev/testing, Redis for production)
     CACHE_TYPE = os.environ.get('CACHE_TYPE', 'SimpleCache')
     CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', 300))
+    # Redis settings (for production)
+    REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
+    REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
+    REDIS_DB = int(os.environ.get('REDIS_DB', 0))
+    REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', None)
     
     # Export configuration
     EXPORT_FORMATS = ['csv', 'json', 'stix']
@@ -457,17 +698,6 @@ class BaseConfig:
             return
             
         try:
-            # Load database credentials
-            db_creds = access_secret('database-credentials')
-            if db_creds:
-                if isinstance(db_creds, dict):
-                    cls.DATABASE_USER = db_creds.get('username')
-                    cls.DATABASE_PASSWORD = db_creds.get('password')
-                    cls.DATABASE_HOST = db_creds.get('host')
-                    cls.DATABASE_PORT = db_creds.get('port')
-                    cls.DATABASE_NAME = db_creds.get('database')
-                logger.info("Loaded database credentials from Secret Manager")
-            
             # Load API keys
             api_keys = access_secret('api-keys')
             if api_keys and isinstance(api_keys, dict):
@@ -487,6 +717,7 @@ class BaseConfig:
             if auth_config and isinstance(auth_config, dict):
                 cls.AUTH_ENABLED = auth_config.get('enabled', cls.AUTH_ENABLED)
                 cls.SESSION_SECRET = auth_config.get('session_secret')
+                
                 # If session secret is available, use it for Flask's secret key
                 if cls.SESSION_SECRET:
                     cls.SECRET_KEY = cls.SESSION_SECRET
@@ -494,6 +725,7 @@ class BaseConfig:
                 # Load custom authentication settings if available
                 if 'providers' in auth_config:
                     cls.AUTH_PROVIDERS = auth_config['providers']
+                
                 logger.info("Loaded authentication configuration from Secret Manager")
             
             # Load feed configuration
@@ -509,6 +741,9 @@ class BaseConfig:
                 cls.FEED_MAX_RETRIES = feed_config.get('max_retries', 3)
                 
                 logger.info("Loaded feed configuration from Secret Manager")
+            else:
+                # Create default feed config if it doesn't exist
+                create_default_feed_config()
             
             # Load admin password if available
             admin_password = access_secret('admin-initial-password')
@@ -560,18 +795,7 @@ class BaseConfig:
         if not cls.ENABLE_ERROR_REPORTING or not cls.GCP_PROJECT or not HAS_GCP:
             return None
             
-        try:
-            global _error_client
-            if _error_client is None:
-                _error_client = error_reporting.Client(project=cls.GCP_PROJECT)
-            logger.info("Error reporting initialized")
-            return _error_client
-        except PermissionDenied:
-            logger.error("Permission denied accessing Error Reporting. Service account may need Error Reporting Writer role.")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to initialize error reporting: {str(e)}")
-            return None
+        return initialize_error_reporting(cls.GCP_PROJECT)
     
     @classmethod
     def validate_configuration(cls):
@@ -605,8 +829,6 @@ class BaseConfig:
                     logger.info("BigQuery permissions OK")
                 else:
                     warnings.append("BigQuery client initialization failed")
-            except PermissionDenied:
-                errors.append("Permission denied accessing BigQuery - check service account roles")
             except Exception as e:
                 warnings.append(f"BigQuery access check failed: {str(e)}")
                 
@@ -619,8 +841,6 @@ class BaseConfig:
                     logger.info("Storage permissions OK")
                 else:
                     warnings.append("Storage client initialization failed")
-            except PermissionDenied:
-                errors.append("Permission denied accessing Storage - check service account roles")
             except Exception as e:
                 warnings.append(f"Storage access check failed: {str(e)}")
                 
@@ -633,8 +853,6 @@ class BaseConfig:
                     logger.info("Pub/Sub permissions OK")
                 else:
                     warnings.append("Pub/Sub client initialization failed")
-            except PermissionDenied:
-                errors.append("Permission denied accessing Pub/Sub - check service account roles")
             except Exception as e:
                 warnings.append(f"Pub/Sub access check failed: {str(e)}")
         
@@ -706,14 +924,6 @@ class BaseConfig:
         return f"projects/{cls.GCP_PROJECT}/subscriptions/{subscription_name}"
     
     @classmethod
-    def get_function_url(cls, function_name):
-        """Get the URL for a Cloud Function."""
-        if not cls.GCP_PROJECT or not cls.GCP_REGION:
-            return None
-            
-        return f"https://{cls.GCP_REGION}-{cls.GCP_PROJECT}.cloudfunctions.net/{function_name}"
-    
-    @classmethod
     def ensure_gcp_resources(cls):
         """Ensure required GCP resources exist."""
         if not cls.GCP_PROJECT or not HAS_GCP:
@@ -736,6 +946,9 @@ class BaseConfig:
                     dataset.location = cls.BIGQUERY_LOCATION
                     bq_client.create_dataset(dataset)
                     logger.info(f"Created BigQuery dataset {cls.BIGQUERY_DATASET}")
+            else:
+                logger.error("BigQuery client initialization failed")
+                success = False
         except Exception as e:
             logger.error(f"Error ensuring BigQuery dataset: {str(e)}")
             success = False
@@ -747,10 +960,19 @@ class BaseConfig:
                 bucket = storage_client.bucket(cls.GCS_BUCKET)
                 if not bucket.exists():
                     logger.warning(f"GCS bucket {cls.GCS_BUCKET} not found, creating it")
-                    storage_client.create_bucket(bucket, location=cls.GCP_REGION)
-                    logger.info(f"Created GCS bucket {cls.GCS_BUCKET}")
+                    bucket = storage_client.create_bucket(bucket, location=cls.GCP_REGION)
+                    
+                    # Create folder structure
+                    for folder in ['raw', 'processed', 'exports', 'temp', 'feeds', 'cache']:
+                        blob = bucket.blob(f"{folder}/")
+                        blob.upload_from_string('')
+                    
+                    logger.info(f"Created GCS bucket {cls.GCS_BUCKET} with folder structure")
                 else:
                     logger.info(f"GCS bucket {cls.GCS_BUCKET} exists")
+            else:
+                logger.error("Storage client initialization failed")
+                success = False
         except Exception as e:
             logger.error(f"Error ensuring GCS bucket: {str(e)}")
             success = False
@@ -773,8 +995,53 @@ class BaseConfig:
                         logger.warning(f"Pub/Sub topic {topic_name} not found, creating it")
                         publisher.create_topic(request={"name": topic_path})
                         logger.info(f"Created Pub/Sub topic {topic_name}")
+            else:
+                logger.error("Pub/Sub client initialization failed")
+                success = False
         except Exception as e:
             logger.error(f"Error ensuring Pub/Sub topics: {str(e)}")
+            success = False
+            
+        # Ensure required secrets exist
+        try:
+            # Check and create required secrets
+            required_secrets = ['api-keys', 'auth-config', 'admin-initial-password', 'feed-config']
+            
+            for secret_id in required_secrets:
+                if not access_secret(secret_id):
+                    logger.warning(f"Secret {secret_id} not found, creating default")
+                    
+                    if secret_id == 'api-keys':
+                        # Create default API key
+                        import secrets as py_secrets
+                        api_key = py_secrets.token_hex(16)
+                        create_or_update_secret(secret_id, json.dumps({
+                            "platform_api_key": api_key,
+                            "created_at": datetime.utcnow().isoformat()
+                        }))
+                    elif secret_id == 'auth-config':
+                        # Create default auth config
+                        create_or_update_secret(secret_id, json.dumps({
+                            "session_secret": os.urandom(32).hex(),
+                            "users": {}
+                        }))
+                    elif secret_id == 'admin-initial-password':
+                        # Create admin password
+                        set_initial_admin_password()
+                    elif secret_id == 'feed-config':
+                        # Create feed config
+                        create_default_feed_config()
+                
+                # Add default admin user if it doesn't exist
+                if secret_id == 'auth-config':
+                    auth_config = access_secret('auth-config')
+                    if auth_config and 'users' in auth_config and not auth_config['users'].get('admin'):
+                        admin_password = access_secret('admin-initial-password')
+                        if admin_password:
+                            add_user('admin', admin_password, 'admin')
+                            logger.info("Created default admin user")
+        except Exception as e:
+            logger.error(f"Error ensuring secrets: {str(e)}")
             success = False
             
         return success
@@ -892,8 +1159,12 @@ class ProductionConfig(BaseConfig):
     # Enable error reporting
     ENABLE_ERROR_REPORTING = True
     
-    # Production caching
-    CACHE_TYPE = 'SimpleCache'  # In a real scenario, you might use Redis or Memcached
+    # Production caching - use Redis if available, otherwise SimpleCache
+    @property
+    def CACHE_TYPE(self):
+        if HAS_REDIS and self.REDIS_HOST:
+            return 'RedisCache'
+        return 'SimpleCache'
     
     @classmethod
     def init_app(cls):
@@ -918,6 +1189,22 @@ class ProductionConfig(BaseConfig):
         if admin_password:
             add_user('admin', admin_password, 'admin')
         
+        # Initialize Redis if configured
+        if cls.CACHE_TYPE == 'RedisCache':
+            redis_client = initialize_redis(
+                host=cls.REDIS_HOST, 
+                port=cls.REDIS_PORT,
+                db=cls.REDIS_DB,
+                password=cls.REDIS_PASSWORD
+            )
+            if not redis_client:
+                logger.warning("Redis initialization failed, falling back to SimpleCache")
+                cls.CACHE_TYPE = 'SimpleCache'
+        
+        # Initialize Vertex AI if enabled
+        if cls.NLP_ENABLED and HAS_VERTEX:
+            initialize_vertexai(cls.GCP_PROJECT, cls.VERTEXAI_LOCATION)
+        
         logger.info("Initialized production configuration")
 
 # Dictionary of environment configurations
@@ -940,93 +1227,20 @@ Config = config_by_name.get(current_env, config_by_name['default'])
 if hasattr(Config, 'init_app'):
     Config.init_app()
 
-# Export for usage in other modules
+# Helper Functions for other modules
 def get_config():
     """Return the current configuration."""
     return Config
-
-# Helper functions for other modules
-def initialize_bigquery():
-    """Initialize and return a BigQuery client with error handling."""
-    global _bigquery_client
-    
-    if _bigquery_client is not None:
-        return _bigquery_client
-        
-    if not HAS_GCP:
-        logger.warning("Google Cloud libraries not installed, cannot initialize BigQuery")
-        return None
-        
-    try:
-        _bigquery_client = bigquery.Client(project=Config.GCP_PROJECT)
-        return _bigquery_client
-    except PermissionDenied:
-        logger.error("Permission denied initializing BigQuery client. Check service account roles.")
-        return None
-    except Exception as e:
-        logger.error(f"Failed to initialize BigQuery client: {str(e)}")
-        return None
-
-def initialize_storage():
-    """Initialize and return a Cloud Storage client with error handling."""
-    global _storage_client
-    
-    if _storage_client is not None:
-        return _storage_client
-        
-    if not HAS_GCP:
-        logger.warning("Google Cloud libraries not installed, cannot initialize Storage")
-        return None
-        
-    try:
-        _storage_client = storage.Client(project=Config.GCP_PROJECT)
-        return _storage_client
-    except PermissionDenied:
-        logger.error("Permission denied initializing Storage client. Check service account roles.")
-        return None
-    except Exception as e:
-        logger.error(f"Failed to initialize Storage client: {str(e)}")
-        return None
-
-def initialize_pubsub():
-    """Initialize and return PubSub publisher and subscriber clients with error handling."""
-    global _publisher, _subscriber
-    
-    if _publisher is not None and _subscriber is not None:
-        return _publisher, _subscriber
-        
-    if not HAS_GCP:
-        logger.warning("Google Cloud libraries not installed, cannot initialize PubSub")
-        return None, None
-        
-    try:
-        if _publisher is None:
-            _publisher = pubsub_v1.PublisherClient()
-        if _subscriber is None:
-            _subscriber = pubsub_v1.SubscriberClient()
-        return _publisher, _subscriber
-    except PermissionDenied:
-        logger.error("Permission denied initializing Pub/Sub clients. Check service account roles.")
-        return None, None
-    except Exception as e:
-        logger.error(f"Failed to initialize PubSub clients: {str(e)}")
-        return None, None
-
-def get_error_client():
-    """Get the error reporting client."""
-    return Config.initialize_error_reporting()
 
 def report_error(exception):
     """Report an error to Cloud Error Reporting."""
     if not Config.ENABLE_ERROR_REPORTING:
         return
         
-    client = get_error_client()
+    client = initialize_error_reporting()
     if client:
         try:
             client.report_exception()
-        except PermissionDenied:
-            logger.error("Permission denied reporting error. Service account may need Error Reporting Writer role.")
         except Exception as e:
             logger.error(f"Failed to report error: {str(e)}")
 
@@ -1036,7 +1250,7 @@ def get_gcp_clients():
         "bigquery": initialize_bigquery(),
         "storage": initialize_storage(),
         "pubsub": initialize_pubsub(),
-        "error_reporting": get_error_client()
+        "error_reporting": initialize_error_reporting()
     }
 
 def check_gcp_permissions():
@@ -1047,7 +1261,8 @@ def check_gcp_permissions():
         "pubsub": False,
         "secretmanager": False,
         "logging": False,
-        "errorreporting": False
+        "errorreporting": False,
+        "vertexai": False
     }
     
     # Check BigQuery permissions
@@ -1104,6 +1319,14 @@ def check_gcp_permissions():
     except Exception:
         pass
         
+    # Check Vertex AI permissions
+    try:
+        if HAS_VERTEX and Config.GCP_PROJECT:
+            vertexai_status = initialize_vertexai(Config.GCP_PROJECT, Config.VERTEXAI_LOCATION)
+            permissions["vertexai"] = vertexai_status
+    except Exception:
+        pass
+        
     return permissions
 
 # Define a constant for GCP services availability
@@ -1116,12 +1339,15 @@ __all__ = [
     'initialize_bigquery', 
     'initialize_storage', 
     'initialize_pubsub',
-    'get_error_client',
+    'initialize_error_reporting',
+    'initialize_vertexai',
+    'initialize_redis',
     'report_error',
     'check_gcp_permissions',
     'access_secret',
     'create_or_update_secret',
     'get_cached_config',
+    'create_default_feed_config',
     'add_user',
     'update_user',
     'set_initial_admin_password',
