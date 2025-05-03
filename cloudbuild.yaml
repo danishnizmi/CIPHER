@@ -114,12 +114,13 @@ steps:
           --project=${PROJECT_ID}
       fi
       
-      # Grant required roles to the service account
+      # Grant required roles to the service account - with --condition=None flag to fix the IAM binding error
       echo "Granting required roles to service account..."
       for ROLE in roles/bigquery.dataEditor roles/bigquery.jobUser roles/pubsub.publisher roles/pubsub.subscriber roles/storage.objectAdmin roles/secretmanager.secretAccessor roles/logging.logWriter roles/errorreporting.writer; do
         gcloud projects add-iam-policy-binding ${PROJECT_ID} \
           --member="serviceAccount:${CLOUD_RUN_SA}" \
-          --role="${ROLE}" || true
+          --role="${ROLE}" \
+          --condition=None || true
       done
       
       # Verify and create secrets if needed
@@ -263,20 +264,6 @@ steps:
       # Define project ID
       PROJECT_ID="primal-chariot-382610"
       CLOUD_RUN_SA="threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-      
-      # Modify the Dockerfile to update GOOGLE_APPLICATION_CREDENTIALS environment variable
-      echo "Updating environment variable configuration..."
-      cat > env_patch.yaml << EOF
-      spec:
-        template:
-          spec:
-            containers:
-              - env:
-                - name: "GOOGLE_APPLICATION_CREDENTIALS"
-                  value: ""
-                - name: "USE_GCP_METADATA"
-                  value: "true"
-      EOF
       
       # Deploy to Cloud Run using Cloud Run service account
       gcloud run deploy threat-intelligence-platform \
