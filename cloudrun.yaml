@@ -74,7 +74,7 @@ spec:
         - name: ENSURE_GCP_RESOURCES
           value: "true"
         - name: IGNORE_PERMISSION_ERRORS 
-          value: "true"
+          value: "false"
         # Secret references
         - name: API_KEY
           valueFrom:
