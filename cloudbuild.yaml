@@ -85,96 +85,125 @@ steps:
         iam.googleapis.com \
         aiplatform.googleapis.com
       
-      # Verify secrets exist
-      echo "Verifying required secrets..."
-      for SECRET_NAME in api-keys auth-config admin-initial-password feed-config flask-secret-key; do
-        if ! gcloud secrets describe $SECRET_NAME --project=${PROJECT_ID} >/dev/null 2>&1; then
-          echo "Creating required secret $SECRET_NAME"
-          gcloud secrets create $SECRET_NAME --project=${PROJECT_ID}
-        else
+      # Function to create or update secrets
+      create_or_update_secret() {
+        SECRET_NAME=$1
+        
+        # Check if secret exists
+        if gcloud secrets describe $SECRET_NAME --project=${PROJECT_ID} >/dev/null 2>&1; then
           echo "Secret $SECRET_NAME exists"
+        else
+          echo "Creating required secret $SECRET_NAME"
+          gcloud secrets create $SECRET_NAME --project=${PROJECT_ID} || true
         fi
           
         # Ensure the service account has access to the secret
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
           --member="serviceAccount:${SERVICE_ACCOUNT}" \
           --role="roles/secretmanager.secretAccessor" \
-          --project=${PROJECT_ID}
+          --project=${PROJECT_ID} || true
+      }
+      
+      # Verify and create secrets if needed
+      echo "Verifying required secrets..."
+      for SECRET_NAME in api-keys auth-config admin-initial-password feed-config flask-secret-key; do
+        create_or_update_secret $SECRET_NAME
       done
       
       # Create BigQuery dataset if needed
       echo "Setting up BigQuery..."
       DATASET_ID="threat_intelligence"
-      if ! bq ls --project_id=${PROJECT_ID} | grep -q ${DATASET_ID}; then
+      if bq ls --project_id=${PROJECT_ID} | grep -q ${DATASET_ID}; then
+        echo "BigQuery dataset ${DATASET_ID} already exists"
+      else
         bq --location=US mk --dataset \
           --description="Threat Intelligence Platform Data" \
-          ${PROJECT_ID}:${DATASET_ID}
+          ${PROJECT_ID}:${DATASET_ID} || true
         echo "Created BigQuery dataset ${DATASET_ID}"
-      else
-        echo "BigQuery dataset ${DATASET_ID} already exists"
       fi
       
       # Create GCS bucket if needed
       echo "Setting up Cloud Storage..."
       BUCKET_NAME="${PROJECT_ID}-threat-data"
-      if ! gsutil ls -b gs://${BUCKET_NAME} &>/dev/null; then
-        gsutil mb -l us-central1 gs://${BUCKET_NAME}
-        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME}
-        
-        # Create folder structure
-        for FOLDER in raw processed exports temp feeds cache; do
-          touch empty.txt
-          gsutil cp empty.txt gs://${BUCKET_NAME}/${FOLDER}/
-          gsutil rm gs://${BUCKET_NAME}/${FOLDER}/empty.txt
-        done
-        rm -f empty.txt
-        
-        echo "Created GCS bucket ${BUCKET_NAME} with folder structure"
-      else
+      if gsutil ls -b gs://${BUCKET_NAME} >/dev/null 2>&1; then
         echo "GCS bucket ${BUCKET_NAME} already exists"
+      else
+        gsutil mb -l us-central1 gs://${BUCKET_NAME} || true
+        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME} || true
+        echo "Created GCS bucket ${BUCKET_NAME}"
       fi
+      
+      # Create folder structure regardless of bucket status
+      echo "Setting up bucket folder structure..."
+      for FOLDER in raw processed exports temp feeds cache; do
+        echo "Ensuring folder: $FOLDER"
+        if ! gsutil ls gs://${BUCKET_NAME}/${FOLDER}/ >/dev/null 2>&1; then
+          touch empty.txt
+          gsutil cp empty.txt gs://${BUCKET_NAME}/${FOLDER}/ || true
+          gsutil rm gs://${BUCKET_NAME}/${FOLDER}/empty.txt || true
+        fi
+      done
+      rm -f empty.txt
+      echo "Ensured GCS bucket folder structure"
       
       # Create PubSub topics if needed
       echo "Setting up PubSub..."
       for TOPIC in threat-data-ingestion threat-analysis-events; do
-        if ! gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} &>/dev/null; then
-          gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID}
-          echo "Created PubSub topic ${TOPIC}"
-        else
+        if gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} >/dev/null 2>&1; then
           echo "PubSub topic ${TOPIC} already exists"
+        else
+          gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID} || true
+          echo "Created PubSub topic ${TOPIC}"
         fi
         
-        # Ensure Pub/Sub access for the service account
+        # Ensure Pub/Sub access for the service account regardless of topic status
+        echo "Setting up IAM for topic ${TOPIC}..."
         gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
           --project=${PROJECT_ID} \
           --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.publisher"
+          --role="roles/pubsub.publisher" || true
           
         gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
           --project=${PROJECT_ID} \
           --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.subscriber"
+          --role="roles/pubsub.subscriber" || true
       done
       
       # Set up default secrets if they don't exist with values
-      if ! gcloud secrets versions list api-keys --project=${PROJECT_ID} | grep -q "1"; then
+      setup_secret_if_missing() {
+        SECRET_NAME=$1
+        DEFAULT_VALUE=$2
+        
+        if ! gcloud secrets versions list $SECRET_NAME --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
+          echo "$DEFAULT_VALUE" | \
+          gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID} || true
+          echo "Created default value for $SECRET_NAME"
+        else
+          echo "Secret $SECRET_NAME already has a value"
+        fi
+      }
+      
+      # Create API key secret if not exists
+      if ! gcloud secrets versions list api-keys --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
         API_KEY=$(openssl rand -hex 24)
         echo "{\"platform_api_key\": \"${API_KEY}\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" | \
-        gcloud secrets versions add api-keys --data-file=- --project=${PROJECT_ID}
+        gcloud secrets versions add api-keys --data-file=- --project=${PROJECT_ID} || true
         echo "Created default API key"
       fi
       
-      if ! gcloud secrets versions list auth-config --project=${PROJECT_ID} | grep -q "1"; then
+      # Create auth config secret if not exists
+      if ! gcloud secrets versions list auth-config --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
         SESSION_SECRET=$(openssl rand -hex 32)
         ADMIN_PASS=$(echo -n "admin" | sha256sum | awk '{print $1}')
         echo "{\"session_secret\": \"${SESSION_SECRET}\", \"users\": {\"admin\": {\"password\": \"${ADMIN_PASS}\", \"role\": \"admin\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}}}" | \
-        gcloud secrets versions add auth-config --data-file=- --project=${PROJECT_ID}
+        gcloud secrets versions add auth-config --data-file=- --project=${PROJECT_ID} || true
         echo "Created default auth config"
       fi
       
-      if ! gcloud secrets versions list feed-config --project=${PROJECT_ID} | grep -q "1"; then
+      # Create feed config secret if not exists
+      if ! gcloud secrets versions list feed-config --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
         echo "{\"feeds\": [{\"id\": \"phishtank\", \"name\": \"PhishTank URLs\", \"url\": \"http://data.phishtank.com/data/online-valid.json\", \"description\": \"URLs verified as phishing by PhishTank community\", \"format\": \"json\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"urlhaus\", \"name\": \"URLhaus Malware\", \"url\": \"https://urlhaus.abuse.ch/downloads/csv_recent/\", \"description\": \"Recent malware URLs from URLhaus\", \"format\": \"csv\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"threatfox\", \"name\": \"ThreatFox IOCs\", \"url\": \"https://threatfox.abuse.ch/export/json/recent/\", \"description\": \"Recent indicators from ThreatFox\", \"format\": \"json\", \"type\": \"mixed\", \"update_frequency\": \"daily\", \"enabled\": true}], \"update_interval_hours\": 6, \"default_tags\": [], \"user_agent\": \"ThreatIntelligencePlatform/1.0.0\", \"request_timeout\": 30, \"max_retries\": 3}" | \
-        gcloud secrets versions add feed-config --data-file=- --project=${PROJECT_ID}
+        gcloud secrets versions add feed-config --data-file=- --project=${PROJECT_ID} || true
         echo "Created default feed config"
       fi
       
