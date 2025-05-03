@@ -10,16 +10,18 @@ import hashlib
 import time
 import traceback
 import secrets
+import threading
 from datetime import datetime, timedelta
 from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional, Union
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask import Blueprint, request, jsonify, render_template, redirect, url_for
 from flask import flash, session, abort, g, Response, current_app
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Import config module for centralized configuration
 import config
+from config import Config
 
 # Environment settings
 VERSION = os.environ.get("VERSION", "1.0.2")
@@ -38,29 +40,17 @@ LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), loggin
 logging.basicConfig(level=LOG_LEVEL, 
                     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
-# Initialize Flask app
-app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-
-# Try to import CORS but continue if not available
-try:
-    from flask_cors import CORS
-    CORS(app)
-    logger.info("CORS support enabled")
-except ImportError:
-    logger.warning("CORS not available - flask_cors not installed")
+# Create Blueprint for the frontend module
+app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
 
 # ====== CSRF Protection Setup ======
+HAS_CSRF = False
 try:
     from flask_wtf.csrf import CSRFProtect
     csrf = CSRFProtect()
-    # Initialize without immediately protecting all routes
-    csrf.init_app(app)
     HAS_CSRF = True
     logger.info("CSRF protection initialized")
-    
 except ImportError:
-    HAS_CSRF = False
     logger.warning("CSRF protection not available - flask_wtf not installed")
     
     # Provide a dummy csrf_token function for templates
@@ -69,7 +59,6 @@ except ImportError:
         return dict(csrf_token=lambda: "")
 
 # ====== Secret Key for Sessions ======
-
 def get_secret_key() -> str:
     """Get secret key for Flask sessions using config module"""
     try:
@@ -84,7 +73,7 @@ def get_secret_key() -> str:
             return secret_key
         
         # Try Secret Manager via config module
-        secret = config.get_secret("flask-secret-key")
+        secret = config.access_secret("flask-secret-key")
         if secret:
             return secret
     except Exception as e:
@@ -93,20 +82,6 @@ def get_secret_key() -> str:
     # Generate a secure key if all else fails
     logger.warning("Generating temporary secret key - sessions will be invalidated on restart")
     return hashlib.sha256(f"{time.time()}{secrets.token_hex(32)}".encode()).hexdigest()
-
-# Configure Flask
-SECRET_KEY = get_secret_key()
-app.config.update(
-    SECRET_KEY=SECRET_KEY,
-    SESSION_COOKIE_SECURE=ENVIRONMENT == 'production',
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
-    TEMPLATES_AUTO_RELOAD=ENVIRONMENT != 'production',
-    WTF_CSRF_ENABLED=HAS_CSRF,  # Only enable if the library is available
-    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
-    WTF_CSRF_SSL_STRICT=False,  # Allow HTTPS -> HTTP
-)
 
 # Share GCP clients with the app context
 @app.before_request
@@ -118,11 +93,10 @@ def setup_gcp_clients():
         g.gcp_services_available = config.GCP_SERVICES_AVAILABLE
 
 # ====== Helper Functions ======
-
 def safe_report_exception():
     """Safely report exception using config module"""
     try:
-        config.report_exception()
+        config.report_error(Exception("Frontend error"))
     except Exception as e:
         logger.warning(f"Failed to report exception: {e}")
 
@@ -218,11 +192,10 @@ def clear_api_cache(prefix: str = None):
         logger.debug("Cleared all API cache entries")
 
 # ====== API Interaction Functions ======
-
 def get_api_key() -> str:
     """Get API key for internal requests using config module"""
     # Try to get API key from config module
-    api_key = getattr(config, 'api_key', None)
+    api_key = getattr(Config, 'API_KEY', None)
     
     # If not available directly, try to get from cached config
     if not api_key:
@@ -307,19 +280,19 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         
         return {}
     
-    except requests.RequestException as e:
-        logger.error(f"API request error ({endpoint}): {str(e)}")
-        status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
-        
-        error_msg = f"API error: {str(e)}"
-        if status_code:
-            error_msg += f" (status code: {status_code})"
-        
-        return {"error": error_msg, "status_code": status_code}
-    
     except Exception as e:
-        logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
-        return {"error": f"Unexpected error: {str(e)}"}
+        if 'requests' in locals() and isinstance(e, requests.RequestException):
+            logger.error(f"API request error ({endpoint}): {str(e)}")
+            status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+            
+            error_msg = f"API error: {str(e)}"
+            if status_code:
+                error_msg += f" (status code: {status_code})"
+            
+            return {"error": error_msg, "status_code": status_code}
+        else:
+            logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
+            return {"error": f"Unexpected error: {str(e)}"}
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def get_stats_data(days=30):
@@ -386,11 +359,11 @@ def trigger_ingestion(feed_name=None, force=False):
     """Trigger data ingestion for a specific feed or all feeds"""
     data = {"process_all": True}
     if feed_name and feed_name != "all":
-        data["feed_name"] = feed_name
+        data["feed_id"] = feed_name
     if force:
         data["force"] = True
     
-    result = _api_request("ingest_threat_data", method="POST", data=data)
+    result = _api_request("admin/ingest", method="POST", data=data)
     
     # Clear relevant caches on successful ingestion
     if not result.get("error"):
@@ -421,14 +394,13 @@ def upload_csv_file(csv_content, feed_name="csv_upload"):
     return result
 
 # ====== Authentication Functions ======
-
 def login_required(f):
     """Decorator to require login for views"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
             # Remember where the user was trying to go
-            return redirect(url_for('login', next=request.url))
+            return redirect(url_for('frontend.login', next=request.url))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -437,7 +409,7 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            return redirect(url_for('login', next=request.url))
+            return redirect(url_for('frontend.login', next=request.url))
         if session.get('role') != 'admin':
             flash('Admin privileges required', 'danger')
             return render_template('auth.html', page_type='not_authorized')
@@ -491,16 +463,14 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 # ====== Route Handlers ======
-
 @app.route('/')
 def index():
     """Root redirects to dashboard if logged in, otherwise to login"""
     if session.get('logged_in'):
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('login'))
+        return redirect(url_for('frontend.dashboard'))
+    return redirect(url_for('frontend.login'))
 
 @app.route('/login', methods=['GET', 'POST'])
-@csrf.exempt  # Properly exempt the login route from CSRF
 def login():
     """Login page handler with comprehensive error handling"""
     error = None
@@ -550,7 +520,7 @@ def login():
                     next_page = request.args.get('next')
                     if next_page and next_page.startswith('/'):
                         return redirect(next_page)
-                    return redirect(url_for('dashboard'))
+                    return redirect(url_for('frontend.dashboard'))
                 else:
                     error = "Invalid password"
                     logger.warning(f"Failed login attempt: Invalid password for {username}")
@@ -576,7 +546,7 @@ def logout():
     
     session.clear()
     flash('You have been logged out', 'info')
-    return redirect(url_for('login'))
+    return redirect(url_for('frontend.login'))
 
 @app.route('/dashboard')
 @app.route('/dashboard/<view>')
@@ -757,7 +727,7 @@ def dashboard(view=None):
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('An unexpected error occurred. Please try again later.', 'danger')
-        return redirect(url_for('login'))
+        return redirect(url_for('frontend.login'))
 
 @app.route('/refresh_feeds')
 @login_required
@@ -785,11 +755,11 @@ def refresh_feeds():
             flash(f'Successfully refreshed {success_count} of {feeds_count} feeds', 'success')
         
         # Redirect back to feeds view
-        return redirect(url_for('dashboard', view='feeds'))
+        return redirect(url_for('frontend.dashboard', view='feeds'))
     except Exception as e:
         logger.error(f"Error in refresh_feeds: {str(e)}")
         flash(f'Error refreshing feeds: {str(e)}', 'danger')
-        return redirect(url_for('dashboard', view='feeds'))
+        return redirect(url_for('frontend.dashboard', view='feeds'))
 
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
@@ -837,13 +807,13 @@ def change_password():
             else:
                 flash('Current password is incorrect', 'danger')
         
-        return redirect(url_for('profile'))
+        return redirect(url_for('frontend.profile'))
     except Exception as e:
         logger.error(f"Error in change_password: {str(e)}")
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('An error occurred while changing password. Please try again.', 'danger')
-        return redirect(url_for('profile'))
+        return redirect(url_for('frontend.profile'))
 
 @app.route('/users')
 @admin_required
@@ -879,7 +849,7 @@ def add_user_route():
                 if config.add_user(username, password, role):
                     flash(f'User {username} added successfully', 'success')
                     logger.info(f"New user added: {username} with role {role}")
-                    return redirect(url_for('users'))
+                    return redirect(url_for('frontend.users'))
                 else:
                     flash('Error adding user. Please try again.', 'danger')
         
@@ -889,7 +859,7 @@ def add_user_route():
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('An error occurred while adding user. Please try again.', 'danger')
-        return redirect(url_for('users'))
+        return redirect(url_for('frontend.users'))
 
 @app.route('/user/edit/<username>', methods=['GET', 'POST'])
 @admin_required
@@ -900,7 +870,7 @@ def edit_user(username):
         
         if username not in users:
             flash(f'User {username} not found', 'danger')
-            return redirect(url_for('users'))
+            return redirect(url_for('frontend.users'))
         
         user = users[username]
         
@@ -921,7 +891,7 @@ def edit_user(username):
             if config.update_user(username, updates):
                 flash(f'User {username} updated successfully', 'success')
                 logger.info(f"User updated: {username}")
-                return redirect(url_for('users'))
+                return redirect(url_for('frontend.users'))
             else:
                 flash('Error updating user. Please try again.', 'danger')
         
@@ -931,7 +901,7 @@ def edit_user(username):
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('An error occurred while editing user. Please try again.', 'danger')
-        return redirect(url_for('users'))
+        return redirect(url_for('frontend.users'))
 
 @app.route('/user/delete/<username>', methods=['POST'])
 @admin_required
@@ -942,11 +912,11 @@ def delete_user(username):
         
         if username not in users:
             flash(f'User {username} not found', 'danger')
-            return redirect(url_for('users'))
+            return redirect(url_for('frontend.users'))
         
         if username == session.get('username'):
             flash('Cannot delete your own account', 'danger')
-            return redirect(url_for('users'))
+            return redirect(url_for('frontend.users'))
         
         # Delete user by removing from auth config
         auth_config = config.get_cached_config('auth-config', force_refresh=True)
@@ -960,31 +930,31 @@ def delete_user(username):
         else:
             flash(f'User {username} not found in configuration', 'danger')
         
-        return redirect(url_for('users'))
+        return redirect(url_for('frontend.users'))
     except Exception as e:
         logger.error(f"Error in delete_user: {str(e)}")
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('An error occurred while deleting user. Please try again.', 'danger')
-        return redirect(url_for('users'))
+        return redirect(url_for('frontend.users'))
 
 @app.route('/feeds')
 @login_required
 def feeds():
     """Shortcut to feeds view"""
-    return redirect(url_for('dashboard', view='feeds'))
+    return redirect(url_for('frontend.dashboard', view='feeds'))
 
 @app.route('/iocs')
 @login_required
 def iocs():
     """Shortcut to IOCs view"""
-    return redirect(url_for('dashboard', view='iocs'))
+    return redirect(url_for('frontend.dashboard', view='iocs'))
 
 @app.route('/campaigns')
 @login_required
 def campaigns():
     """Shortcut to campaigns view"""
-    return redirect(url_for('dashboard', view='campaigns'))
+    return redirect(url_for('frontend.dashboard', view='campaigns'))
 
 @app.route('/ingest_threat_data')
 @login_required
@@ -1022,7 +992,7 @@ def ingest_threat_data():
         safe_report_exception()
         flash(f'Error refreshing threat data: {str(e)}', 'danger')
     
-    return redirect(url_for('dashboard'))
+    return redirect(url_for('frontend.dashboard'))
 
 @app.route('/dynamic_content_detail/<content_type>/<identifier>')
 @login_required
@@ -1037,7 +1007,7 @@ def dynamic_content_detail(content_type, identifier):
                 ioc_type, ioc_value = identifier.split('/', 1)
             except ValueError:
                 flash('Invalid IOC identifier format', 'danger')
-                return redirect(url_for('iocs'))
+                return redirect(url_for('frontend.iocs'))
             
             # Get IOCs with matching type/value
             iocs_data = get_iocs_data()
@@ -1131,7 +1101,7 @@ def dynamic_content_detail(content_type, identifier):
         logger.error(traceback.format_exc())
         safe_report_exception()
         flash('Error loading content details.', 'danger')
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('frontend.dashboard'))
 
 # ====== API Passthrough ======
 @app.route('/api/refresh_feeds', methods=['POST'])
@@ -1237,7 +1207,7 @@ def handle_csrf_error(e):
     # Check if this is a CSRF error
     if 'CSRF' in str(e):
         flash('Your session has expired or there was a security issue. Please try again.', 'danger')
-        return redirect(url_for('login'))
+        return redirect(url_for('frontend.login'))
     # For other 400 errors, use the default handler
     return str(e), 400
 
@@ -1250,7 +1220,7 @@ def inject_global_data():
         'now': datetime.now(),
         'environment': ENVIRONMENT,
         'version': VERSION,
-        'project_id': config.project_id,
+        'project_id': getattr(Config, 'GCP_PROJECT', None),
         'debug_mode': DEBUG_MODE
     }
 
@@ -1271,7 +1241,29 @@ MOCK_DATA = {
     }
 }
 
-# Initialize the app when imported
+# Initialize detail.html template for content detail views
+@app.route('/detail')
+@login_required
+def detail():
+    """Detail page placeholder - for template testing purposes"""
+    return render_template('detail.html', content_type='placeholder', identifier='test', data={})
+
+# Add template for 404 and 500 error pages if they don't exist
+if not os.path.exists('templates/404.html'):
+    @app.route('/404')
+    def error_404_page():
+        return render_template('base.html', 
+                               title="Page Not Found", 
+                               content="<h1>404 - Page Not Found</h1><p>The requested page does not exist.</p>")
+
+if not os.path.exists('templates/500.html'):
+    @app.route('/500')
+    def error_500_page():
+        return render_template('base.html', 
+                               title="Server Error", 
+                               content="<h1>500 - Server Error</h1><p>An unexpected error occurred.</p>")
+
+# If this script is run directly, start a development server
 if __name__ == "__main__":
     app.run(debug=ENVIRONMENT != 'production', 
             host='0.0.0.0', 
