@@ -1,5 +1,5 @@
 steps:
-  # Install dependencies and run checks in a single step
+  # Install dependencies and run checks
   - name: 'python:3.10'
     id: 'setup-and-checks'
     script: |
@@ -7,7 +7,7 @@ steps:
       pip install --upgrade pip
       pip install --no-cache-dir -r requirements.txt
       
-      # Optional: Run simple verification checks
+      # Verify config module loads correctly
       python -c "import config; print('Config module loaded successfully')"
 
   # Build frontend assets
@@ -62,17 +62,18 @@ steps:
       npm install
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
 
-  # Enable required Google Cloud APIs and setup resources
+  # Setup GCP resources and permissions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-gcp'
     script: |
       echo "Setting up Google Cloud resources..."
       
-      # Define project ID
+      # Define project ID and service accounts
       PROJECT_ID="primal-chariot-382610"
-      SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+      BUILD_SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
       
       # Enable required APIs
+      echo "Enabling required GCP APIs..."
       gcloud services enable \
         run.googleapis.com \
         cloudbuild.googleapis.com \
@@ -85,99 +86,99 @@ steps:
         iam.googleapis.com \
         aiplatform.googleapis.com
       
-      # Verify secrets exist
-      echo "Verifying required secrets..."
+      # Create and configure Secret Manager secrets
+      echo "Setting up Secret Manager secrets..."
       for SECRET_NAME in api-keys auth-config admin-initial-password feed-config flask-secret-key; do
-        if ! gcloud secrets describe $SECRET_NAME --project=${PROJECT_ID} >/dev/null 2>&1; then
-          echo "Creating required secret $SECRET_NAME"
-          gcloud secrets create $SECRET_NAME --project=${PROJECT_ID} || true
-        else
-          echo "Secret $SECRET_NAME exists"
-        fi
+        # Check if secret exists
+        if ! gcloud secrets describe $SECRET_NAME --project=${PROJECT_ID} 2>/dev/null; then
+          echo "Creating secret: $SECRET_NAME"
+          gcloud secrets create $SECRET_NAME --project=${PROJECT_ID}
           
-        # Ensure the service account has access to the secret
+          # Add initial values based on secret type
+          if [[ "$SECRET_NAME" == "api-keys" && $(gcloud secrets versions list $SECRET_NAME --format="value(name)" | wc -l) -eq 0 ]]; then
+            API_KEY=$(openssl rand -hex 24)
+            echo "{\"platform_api_key\": \"${API_KEY}\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" | \
+            gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID}
+          elif [[ "$SECRET_NAME" == "auth-config" && $(gcloud secrets versions list $SECRET_NAME --format="value(name)" | wc -l) -eq 0 ]]; then
+            SESSION_SECRET=$(openssl rand -hex 32)
+            ADMIN_PASS=$(echo -n "admin" | sha256sum | awk '{print $1}')
+            echo "{\"session_secret\": \"${SESSION_SECRET}\", \"users\": {\"admin\": {\"password\": \"${ADMIN_PASS}\", \"role\": \"admin\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}}}" | \
+            gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID}
+          elif [[ "$SECRET_NAME" == "admin-initial-password" && $(gcloud secrets versions list $SECRET_NAME --format="value(name)" | wc -l) -eq 0 ]]; then
+            echo "admin" | gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID}
+          elif [[ "$SECRET_NAME" == "feed-config" && $(gcloud secrets versions list $SECRET_NAME --format="value(name)" | wc -l) -eq 0 ]]; then
+            echo "{\"feeds\": [{\"id\": \"phishtank\", \"name\": \"PhishTank URLs\", \"url\": \"http://data.phishtank.com/data/online-valid.json\", \"description\": \"URLs verified as phishing by PhishTank community\", \"format\": \"json\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"urlhaus\", \"name\": \"URLhaus Malware\", \"url\": \"https://urlhaus.abuse.ch/downloads/csv_recent/\", \"description\": \"Recent malware URLs from URLhaus\", \"format\": \"csv\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"threatfox\", \"name\": \"ThreatFox IOCs\", \"url\": \"https://threatfox.abuse.ch/export/json/recent/\", \"description\": \"Recent indicators from ThreatFox\", \"format\": \"json\", \"type\": \"mixed\", \"update_frequency\": \"daily\", \"enabled\": true}], \"update_interval_hours\": 6, \"default_tags\": [], \"user_agent\": \"ThreatIntelligencePlatform/1.0.0\", \"request_timeout\": 30, \"max_retries\": 3}" | \
+            gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID}
+          elif [[ "$SECRET_NAME" == "flask-secret-key" && $(gcloud secrets versions list $SECRET_NAME --format="value(name)" | wc -l) -eq 0 ]]; then
+            openssl rand -hex 32 | gcloud secrets versions add $SECRET_NAME --data-file=- --project=${PROJECT_ID}
+          fi
+        else
+          echo "Secret $SECRET_NAME already exists"
+        fi
+        
+        # Grant access to the service account
+        echo "Configuring IAM for secret: $SECRET_NAME"
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/secretmanager.secretAccessor" || true
+          --member="serviceAccount:${BUILD_SERVICE_ACCOUNT}" \
+          --role="roles/secretmanager.secretAccessor" \
+          --project=${PROJECT_ID}
       done
       
-      # Create BigQuery dataset if needed with improved error handling
-      echo "Setting up BigQuery..."
+      # Create BigQuery dataset
+      echo "Setting up BigQuery dataset..."
       DATASET_ID="threat_intelligence"
       if ! bq ls --project_id=${PROJECT_ID} | grep -q ${DATASET_ID}; then
         bq --location=US mk --dataset \
           --description="Threat Intelligence Platform Data" \
-          ${PROJECT_ID}:${DATASET_ID} || true
+          ${PROJECT_ID}:${DATASET_ID}
         echo "Created BigQuery dataset ${DATASET_ID}"
       else
         echo "BigQuery dataset ${DATASET_ID} already exists"
       fi
       
-      # Create GCS bucket if needed with improved error handling
-      echo "Setting up Cloud Storage..."
+      # Create GCS bucket
+      echo "Setting up Cloud Storage bucket..."
       BUCKET_NAME="${PROJECT_ID}-threat-data"
-      if ! gsutil ls -b gs://${BUCKET_NAME} &>/dev/null; then
-        gsutil mb -l us-central1 gs://${BUCKET_NAME} || true
-        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME} || true
+      if ! gsutil ls -b gs://${BUCKET_NAME} 2>/dev/null; then
+        gsutil mb -l us-central1 gs://${BUCKET_NAME}
+        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME}
         echo "Created GCS bucket ${BUCKET_NAME}"
       else
         echo "GCS bucket ${BUCKET_NAME} already exists"
-        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME} || true
+        gsutil uniformbucketlevelaccess set on gs://${BUCKET_NAME}
       fi
       
-      # Create folder structure regardless of whether bucket is new or existing
+      # Set up bucket folder structure
+      echo "Creating bucket folder structure..."
       for FOLDER in raw processed exports temp feeds cache; do
-        echo "Setting up folder: ${FOLDER}"
-        touch empty.txt
-        gsutil cp empty.txt gs://${BUCKET_NAME}/${FOLDER}/ || true
-        gsutil rm gs://${BUCKET_NAME}/${FOLDER}/empty.txt || true
+        mkdir -p /tmp/bucket_folders
+        touch /tmp/bucket_folders/empty.txt
+        gsutil cp /tmp/bucket_folders/empty.txt gs://${BUCKET_NAME}/${FOLDER}/
+        gsutil rm gs://${BUCKET_NAME}/${FOLDER}/empty.txt
       done
-      rm -f empty.txt
-      echo "Ensured GCS bucket folder structure exists"
+      rm -rf /tmp/bucket_folders
       
-      # Create PubSub topics if needed with improved error handling
-      echo "Setting up PubSub..."
+      # Create PubSub topics
+      echo "Setting up Pub/Sub topics..."
       for TOPIC in threat-data-ingestion threat-analysis-events; do
-        if ! gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} &>/dev/null; then
-          gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID} || true
+        if ! gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} 2>/dev/null; then
+          gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID}
           echo "Created PubSub topic ${TOPIC}"
         else
           echo "PubSub topic ${TOPIC} already exists"
         fi
         
-        # Ensure Pub/Sub access for the service account
+        # Configure topic IAM permissions
         gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
           --project=${PROJECT_ID} \
-          --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.publisher" || true
+          --member="serviceAccount:${BUILD_SERVICE_ACCOUNT}" \
+          --role="roles/pubsub.publisher"
           
         gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
           --project=${PROJECT_ID} \
-          --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.subscriber" || true
+          --member="serviceAccount:${BUILD_SERVICE_ACCOUNT}" \
+          --role="roles/pubsub.subscriber"
       done
-      
-      # Set up default secrets if they don't exist with values
-      if ! gcloud secrets versions list api-keys --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
-        API_KEY=$(openssl rand -hex 24)
-        echo "{\"platform_api_key\": \"${API_KEY}\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" | \
-        gcloud secrets versions add api-keys --data-file=- --project=${PROJECT_ID} || true
-        echo "Created default API key"
-      fi
-      
-      if ! gcloud secrets versions list auth-config --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
-        SESSION_SECRET=$(openssl rand -hex 32)
-        ADMIN_PASS=$(echo -n "admin" | sha256sum | awk '{print $1}')
-        echo "{\"session_secret\": \"${SESSION_SECRET}\", \"users\": {\"admin\": {\"password\": \"${ADMIN_PASS}\", \"role\": \"admin\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}}}" | \
-        gcloud secrets versions add auth-config --data-file=- --project=${PROJECT_ID} || true
-        echo "Created default auth config"
-      fi
-      
-      if ! gcloud secrets versions list feed-config --project=${PROJECT_ID} 2>/dev/null | grep -q "1"; then
-        echo "{\"feeds\": [{\"id\": \"phishtank\", \"name\": \"PhishTank URLs\", \"url\": \"http://data.phishtank.com/data/online-valid.json\", \"description\": \"URLs verified as phishing by PhishTank community\", \"format\": \"json\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"urlhaus\", \"name\": \"URLhaus Malware\", \"url\": \"https://urlhaus.abuse.ch/downloads/csv_recent/\", \"description\": \"Recent malware URLs from URLhaus\", \"format\": \"csv\", \"type\": \"url\", \"update_frequency\": \"daily\", \"enabled\": true}, {\"id\": \"threatfox\", \"name\": \"ThreatFox IOCs\", \"url\": \"https://threatfox.abuse.ch/export/json/recent/\", \"description\": \"Recent indicators from ThreatFox\", \"format\": \"json\", \"type\": \"mixed\", \"update_frequency\": \"daily\", \"enabled\": true}], \"update_interval_hours\": 6, \"default_tags\": [], \"user_agent\": \"ThreatIntelligencePlatform/1.0.0\", \"request_timeout\": 30, \"max_retries\": 3}" | \
-        gcloud secrets versions add feed-config --data-file=- --project=${PROJECT_ID} || true
-        echo "Created default feed config"
-      fi
       
       echo "GCP resource setup completed successfully"
 
@@ -200,7 +201,7 @@ steps:
       'gcr.io/primal-chariot-382610/threat-intelligence-platform:latest'
     ]
 
-  # Deploy to Cloud Run with secrets mounted
+  # Deploy to Cloud Run with secrets properly mounted
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
@@ -210,7 +211,7 @@ steps:
       PROJECT_ID="primal-chariot-382610"
       SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
       
-      # Create YAML configuration file for Secret volumes
+      # Create YAML configuration file
       cat > cloudrun-config.yaml << EOF
       apiVersion: serving.knative.dev/v1
       kind: Service
@@ -285,7 +286,7 @@ steps:
               - name: ENSURE_GCP_RESOURCES
                 value: "true"
               - name: IGNORE_PERMISSION_ERRORS 
-                value: "true"
+                value: "false"
               # Secret references
               - name: API_KEY
                 valueFrom:
@@ -323,26 +324,53 @@ steps:
                 mountPath: /tmp
               - name: app-data
                 mountPath: /app/data
+              - name: api-keys-volume
+                mountPath: /app/secrets/api-keys
+                readOnly: true
+              - name: auth-config-volume
+                mountPath: /app/secrets/auth-config
+                readOnly: true
               - name: feed-config-volume
-                mountPath: /app/secrets
+                mountPath: /app/secrets/feed-config
+                readOnly: true
+              - name: admin-password-volume
+                mountPath: /app/secrets/admin-password
                 readOnly: true
             volumes:
             - name: tmp
               emptyDir: {}
             - name: app-data
               emptyDir: {}
+            - name: api-keys-volume
+              secret:
+                secretName: api-keys
+                items:
+                - key: latest
+                  path: api-keys.json
+            - name: auth-config-volume
+              secret:
+                secretName: auth-config
+                items:
+                - key: latest
+                  path: auth-config.json
             - name: feed-config-volume
               secret:
                 secretName: feed-config
                 items:
                 - key: latest
                   path: feed-config.json
+            - name: admin-password-volume
+              secret:
+                secretName: admin-initial-password
+                items:
+                - key: latest
+                  path: admin-password.txt
         traffic:
         - percent: 100
           latestRevision: true
       EOF
       
-      # Deploy using the YAML configuration
+      # Deploy to Cloud Run
       gcloud run services replace cloudrun-config.yaml \
         --region us-central1 \
         --project=${PROJECT_ID}
@@ -379,7 +407,13 @@ steps:
         fi
       done
       
-      echo "Deployment completed successfully! Service URL: ${service_url}"
+      # Output information about the deployed service
+      echo "===================== DEPLOYMENT SUMMARY ====================="
+      echo "Service URL: ${service_url}"
+      echo "Project: ${PROJECT_ID}"
+      echo "Service Account: ${SERVICE_ACCOUNT}"
+      echo "Deployed Image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest"
+      echo "=============================================================="
 
 # Build timeout and options
 timeout: '1800s'
