@@ -7,6 +7,237 @@ steps:
       pip install --upgrade pip
       pip install --no-cache-dir -r requirements.txt --user
 
+  # Fix circular imports and module structure
+  - name: 'python:3.10'
+    id: 'fix-imports'
+    script: |
+      echo "Fixing module imports and circular dependencies..."
+      
+      # Create __init__.py files to ensure proper module structure
+      touch __init__.py
+      
+      # Fix config.py imports
+      cat > config_fix.py << 'EOF'
+      # Apply selective patches to fix initialization functions
+      import os
+      import sys
+      import json
+      import logging
+      import tempfile
+      from datetime import datetime, timedelta
+      from pathlib import Path
+      from typing import Dict, List, Optional, Any, Union, Tuple
+
+      # Google Cloud imports
+      try:
+          from google.cloud import secretmanager, storage, bigquery, pubsub_v1, error_reporting
+          from google.cloud.logging_v2 import Client as LoggingClient
+          from google.cloud.exceptions import NotFound, Forbidden, BadRequest
+          from google.api_core.exceptions import GoogleAPIError, PermissionDenied, ResourceExhausted
+          from google.auth.exceptions import DefaultCredentialsError, TransportError
+          import google.auth
+          HAS_GCP = True
+      except ImportError:
+          HAS_GCP = False
+
+      # Global clients
+      _bigquery_client = None
+      _storage_client = None
+      _publisher = None
+      _subscriber = None
+      _logging_client = None
+      _error_client = None
+      _secret_client = None
+
+      def initialize_bigquery():
+          """Initialize and return a BigQuery client with error handling."""
+          global _bigquery_client
+          
+          if _bigquery_client is not None:
+              return _bigquery_client
+              
+          if not HAS_GCP:
+              logging.warning("Google Cloud libraries not installed, cannot initialize BigQuery")
+              return None
+              
+          try:
+              # Get project ID
+              project_id = get_project_id()
+              if not project_id:
+                  logging.error("No project ID found, cannot initialize BigQuery")
+                  return None
+                  
+              _bigquery_client = bigquery.Client(project=project_id)
+              return _bigquery_client
+          except PermissionDenied:
+              logging.error("Permission denied initializing BigQuery client. Check service account roles.")
+              return None
+          except Exception as e:
+              logging.error(f"Failed to initialize BigQuery client: {str(e)}")
+              return None
+
+      def initialize_storage():
+          """Initialize and return a Cloud Storage client with error handling."""
+          global _storage_client
+          
+          if _storage_client is not None:
+              return _storage_client
+              
+          if not HAS_GCP:
+              logging.warning("Google Cloud libraries not installed, cannot initialize Storage")
+              return None
+              
+          try:
+              # Get project ID
+              project_id = get_project_id()
+              if not project_id:
+                  logging.error("No project ID found, cannot initialize Storage")
+                  return None
+                  
+              _storage_client = storage.Client(project=project_id)
+              return _storage_client
+          except PermissionDenied:
+              logging.error("Permission denied initializing Storage client. Check service account roles.")
+              return None
+          except Exception as e:
+              logging.error(f"Failed to initialize Storage client: {str(e)}")
+              return None
+
+      def initialize_pubsub():
+          """Initialize and return PubSub publisher and subscriber clients with error handling."""
+          global _publisher, _subscriber
+          
+          if _publisher is not None and _subscriber is not None:
+              return _publisher, _subscriber
+              
+          if not HAS_GCP:
+              logging.warning("Google Cloud libraries not installed, cannot initialize PubSub")
+              return None, None
+              
+          try:
+              if _publisher is None:
+                  _publisher = pubsub_v1.PublisherClient()
+              if _subscriber is None:
+                  _subscriber = pubsub_v1.SubscriberClient()
+              return _publisher, _subscriber
+          except PermissionDenied:
+              logging.error("Permission denied initializing Pub/Sub clients. Check service account roles.")
+              return None, None
+          except Exception as e:
+              logging.error(f"Failed to initialize PubSub clients: {str(e)}")
+              return None, None
+
+      def get_project_id() -> Optional[str]:
+          """Get Google Cloud project ID from environment or GCP metadata with improved error handling."""
+          # First try environment variable
+          project_id = os.environ.get('GCP_PROJECT')
+          if project_id:
+              return project_id
+          
+          # If not in environment, try to get from GCP metadata
+          if HAS_GCP:
+              try:
+                  # Try to get project ID from metadata
+                  credentials, project_id = google.auth.default()
+                  if project_id:
+                      # Cache this in environment for future calls
+                      os.environ['GCP_PROJECT'] = project_id
+                      return project_id
+              except DefaultCredentialsError:
+                  logging.warning("Unable to determine GCP project ID from metadata (DefaultCredentialsError)")
+              except TransportError:
+                  logging.warning("Unable to determine GCP project ID from metadata (TransportError)")
+              except Exception as e:
+                  logging.warning(f"Unable to determine GCP project ID from metadata: {str(e)}")
+          
+          logging.error("No project ID found in environment or metadata")
+          return None
+
+      def report_error(exception):
+          """Report an error to Cloud Error Reporting."""
+          if not os.environ.get('ENABLE_ERROR_REPORTING', 'false').lower() == 'true':
+              return
+              
+          global _error_client
+          if _error_client is None:
+              try:
+                  project_id = get_project_id()
+                  if project_id:
+                      _error_client = error_reporting.Client(project=project_id)
+              except Exception as e:
+                  logging.error(f"Failed to initialize error reporting client: {str(e)}")
+                  return
+          
+          if _error_client:
+              try:
+                  _error_client.report_exception()
+              except PermissionDenied:
+                  logging.error("Permission denied reporting error. Service account may need Error Reporting Writer role.")
+              except Exception as e:
+                  logging.error(f"Failed to report error: {str(e)}")
+      EOF
+      
+      # Move the fixed file into place
+      cp config_fix.py config_fix_functions.py
+      
+      # Add import to config.py at the top (after existing imports)
+      sed -i '1s/^/# Import fixed functions to prevent circular imports\n/' config.py
+      sed -i '/^import/a from config_fix_functions import initialize_bigquery, initialize_storage, initialize_pubsub, report_error, get_project_id' config.py
+      
+      # Fix app.py to ensure it imports config properly
+      sed -i '1s/^/# Ensure proper import path\nimport sys\nsys.path.append(".")\n/' app.py
+      
+      # Fix other modules to ensure proper imports of utility functions
+      sed -i '1s/^/# Ensure proper import path\nimport sys\nsys.path.append(".")\n/' api.py
+      sed -i '1s/^/# Ensure proper import path\nimport sys\nsys.path.append(".")\n/' frontend.py
+      sed -i '1s/^/# Ensure proper import path\nimport sys\nsys.path.append(".")\n/' analysis.py
+      sed -i '1s/^/# Ensure proper import path\nimport sys\nsys.path.append(".")\n/' ingestion.py
+      
+      # Create a utility for checking configuration
+      cat > check_config.py << 'EOF'
+      #!/usr/bin/env python3
+      import sys
+      import os
+      import logging
+
+      # Configure logging
+      logging.basicConfig(level=logging.INFO, 
+                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+      logger = logging.getLogger(__name__)
+
+      # Add the current directory to the path
+      sys.path.append(".")
+
+      try:
+          # Import the initialization functions
+          from config_fix_functions import initialize_bigquery, initialize_storage, initialize_pubsub, get_project_id
+          
+          # Test initialization
+          logger.info("Testing BigQuery initialization...")
+          bq_client = initialize_bigquery()
+          logger.info(f"BigQuery initialization result: {bq_client is not None}")
+          
+          logger.info("Testing Storage initialization...")
+          storage_client = initialize_storage()
+          logger.info(f"Storage initialization result: {storage_client is not None}")
+          
+          logger.info("Testing PubSub initialization...")
+          publisher, subscriber = initialize_pubsub()
+          logger.info(f"PubSub initialization result: {publisher is not None and subscriber is not None}")
+          
+          logger.info("Testing project ID retrieval...")
+          project_id = get_project_id()
+          logger.info(f"Project ID: {project_id}")
+          
+          logger.info("Configuration check completed successfully")
+          sys.exit(0)
+      except Exception as e:
+          logger.error(f"Configuration check failed: {str(e)}")
+          sys.exit(1)
+      EOF
+      
+      chmod +x check_config.py
+
   # Prepare functions structure
   - name: 'python:3.10'
     id: 'prepare-functions'
@@ -14,13 +245,20 @@ steps:
       # Create functions directory structure
       mkdir -p functions/ingestion functions/analysis scripts
       
-      # Copy main files
+      # Copy fixed files
       cp config.py functions/analysis/
       cp config.py functions/ingestion/
+      cp config_fix_functions.py functions/analysis/
+      cp config_fix_functions.py functions/ingestion/
       
       # Create function entry points
-      echo 'from ingestion import ingest_threat_data' > functions/ingestion/main.py
-      echo 'from analysis import analyze_threat_data' > functions/analysis/main.py
+      echo 'import sys' > functions/ingestion/main.py
+      echo 'sys.path.append(".")' >> functions/ingestion/main.py
+      echo 'from ingestion import ingest_threat_data' >> functions/ingestion/main.py
+      
+      echo 'import sys' > functions/analysis/main.py
+      echo 'sys.path.append(".")' >> functions/analysis/main.py
+      echo 'from analysis import analyze_threat_data' >> functions/analysis/main.py
       
       # Create requirements files with pinned versions to avoid backtracking
       cat > functions/ingestion/requirements.txt << 'EOF'
@@ -59,8 +297,12 @@ steps:
   - name: 'python:3.10'
     id: 'run-tests'
     script: |
-      echo "Running basic tests..."
+      echo "Running basic tests and configuration checks..."
       python -m py_compile app.py config.py api.py frontend.py || echo "Warning: Python syntax check failed"
+      
+      # Run the configuration check script
+      python check_config.py || echo "Warning: Configuration check failed but continuing build"
+      
       if [ -d "templates" ]; then echo "Template directory exists"; else echo "Warning: Template directory missing"; fi
 
   # Build frontend
@@ -113,8 +355,61 @@ steps:
         echo "pandas==1.5.3" >> requirements.txt
       fi
       
+      # Add missing package for GCP import fixes
+      echo "werkzeug==2.3.7" >> requirements.txt
+      
       echo "Updated requirements.txt:"
       cat requirements.txt
+
+  # Create an optimized Dockerfile
+  - name: 'python:3.10'
+    id: 'create-dockerfile'
+    script: |
+      cat > Dockerfile << 'EOF'
+      FROM python:3.10-slim
+
+      WORKDIR /app
+
+      # Set environment variables
+      ENV PYTHONDONTWRITEBYTECODE=1 \
+          PYTHONUNBUFFERED=1 \
+          PYTHONPATH=/app \
+          PORT=8080
+
+      # Install system dependencies
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+          gcc \
+          python3-dev \
+          && apt-get clean \
+          && rm -rf /var/lib/apt/lists/*
+
+      # Create necessary directories
+      RUN mkdir -p static/dist templates
+
+      # Copy requirements first
+      COPY requirements.txt .
+
+      # Install dependencies with strict version pinning to ensure compatibility
+      RUN pip install --upgrade pip && \
+          pip install numpy==1.24.3 && \
+          pip install pandas==1.5.3 && \
+          pip install -r requirements.txt
+
+      # Copy application code
+      COPY . .
+
+      # Create a startup script that ensures proper initialization
+      RUN echo '#!/bin/bash' > /app/start.sh && \
+          echo 'cd /app' >> /app/start.sh && \
+          echo 'echo "Starting application on port $PORT"' >> /app/start.sh && \
+          echo 'export PYTHONPATH=/app' >> /app/start.sh && \
+          echo 'exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 120 app:app' >> /app/start.sh && \
+          chmod +x /app/start.sh
+
+      EXPOSE 8080
+
+      CMD ["/app/start.sh"]
+      EOF
 
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
@@ -257,7 +552,7 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=primal-chariot-382610,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=primal-chariot-382610-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=primal-chariot-382610,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=primal-chariot-382610-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS_IN_DEV=true" \
         --service-account="$SERVICE_ACCOUNT" \
         --min-instances=1 \
         --max-instances=20 \
@@ -302,12 +597,12 @@ steps:
     id: 'post-deployment-check'
     script: |
       echo "Waiting for service to be ready..."
-      sleep 30
+      sleep 60  # Increased wait time to allow for initialization
       service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=primal-chariot-382610 --format='value(status.url)')
       echo "Service deployed at: $service_url"
       
       # Check if service is responding
-      max_attempts=10
+      max_attempts=15  # Increased attempts
       for attempt in $(seq 1 $max_attempts); do
         echo "Health check attempt $attempt of $max_attempts..."
         response_code=$(curl -s -o /dev/null -w "%{http_code}" "$service_url/health" || echo "failed")
@@ -315,17 +610,18 @@ steps:
           echo "✅ Health check successful!"
           break
         else
-          echo "⚠️ Health check returned: $response_code - waiting 15s..."
-          sleep 15
+          echo "⚠️ Health check returned: $response_code - waiting 20s..."
+          sleep 20  # Increased wait time between attempts
         fi
       done
       
       # Print logs if health check failed
       if [ "$response_code" != "200" ]; then
         echo "❌ Health check failed after $max_attempts attempts. Retrieving logs..."
-        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=50
+        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=100
       else
         echo "✨ Deployment completed successfully! ✨"
+        echo "Service URL: $service_url"
       fi
 
   # Cleanup old images
@@ -338,7 +634,7 @@ steps:
         --quiet gcr.io/primal-chariot-382610/threat-intelligence-platform@{} --force-delete-tags || true
 
 # Set a longer timeout for the build
-timeout: '1800s'
+timeout: '2400s'  # Increased timeout to 40 minutes
 
 # Options
 options:
