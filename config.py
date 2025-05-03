@@ -132,6 +132,65 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
         logger.error(f"Error accessing secret {secret_id}: {str(e)}")
         return None
 
+def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
+    """Create or update a secret in Secret Manager."""
+    global _secret_client
+    
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot create/update secret")
+        return False
+        
+    project_id = get_project_id()
+    if not project_id:
+        logger.warning(f"Unable to create/update secret {secret_id}: No project ID available")
+        return False
+    
+    try:
+        # Create the Secret Manager client if not already initialized
+        if _secret_client is None:
+            _secret_client = secretmanager.SecretManagerServiceClient()
+        
+        # Build the parent resource name
+        parent = f"projects/{project_id}"
+        
+        # Check if secret exists
+        secret_exists = True
+        try:
+            _secret_client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
+        except Exception:
+            secret_exists = False
+        
+        # Create secret if it doesn't exist
+        if not secret_exists:
+            try:
+                _secret_client.create_secret(
+                    request={
+                        "parent": parent,
+                        "secret_id": secret_id,
+                        "secret": {"replication": {"automatic": {}}},
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Error creating secret {secret_id}: {str(e)}")
+                return False
+        
+        # Add new version with the secret value
+        try:
+            _secret_client.add_secret_version(
+                request={
+                    "parent": f"{parent}/secrets/{secret_id}",
+                    "payload": {"data": secret_value.encode("UTF-8")},
+                }
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error adding secret version for {secret_id}: {str(e)}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
+        return False
+
 def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
     """Get and cache configuration from Secret Manager."""
     # Return from memory cache for subsequent calls
@@ -173,6 +232,92 @@ def get_env_dict(var_name: str, default: Optional[Dict] = None) -> Dict:
     except json.JSONDecodeError:
         logger.warning(f"Invalid JSON in {var_name} environment variable")
         return default
+
+def set_initial_admin_password() -> Optional[str]:
+    """Sets initial admin password if not already set."""
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot set initial admin password")
+        return "admin"  # Default password for local development
+    
+    try:
+        # Get existing password
+        admin_password = access_secret("admin-initial-password")
+        
+        # If no password exists, generate a random one
+        if not admin_password:
+            import secrets
+            import string
+            admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+            create_or_update_secret("admin-initial-password", admin_password)
+            logger.info("Created new admin password in Secret Manager")
+        
+        # For development environments, log the password
+        if os.environ.get('ENVIRONMENT', 'development') == 'development':
+            logger.info(f"Admin password: {admin_password}")
+        
+        return admin_password
+    except Exception as e:
+        logger.error(f"Error setting initial admin password: {str(e)}")
+        # Return a default password for development
+        return "admin"
+
+def update_user(username: str, updates: Dict) -> bool:
+    """Update user data in auth config."""
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot update user data")
+        return False
+    
+    try:
+        # Get current auth config
+        auth_config = get_cached_config("auth-config", force_refresh=True)
+        if not auth_config or not isinstance(auth_config, dict):
+            auth_config = {"users": {}}
+        
+        # Ensure users dict exists
+        if "users" not in auth_config:
+            auth_config["users"] = {}
+        
+        # Ensure user exists
+        if username not in auth_config["users"]:
+            auth_config["users"][username] = {"role": "readonly"}
+        
+        # Update user data
+        for key, value in updates.items():
+            auth_config["users"][username][key] = value
+        
+        # Save updated auth config
+        result = create_or_update_secret("auth-config", json.dumps(auth_config))
+        
+        # Clear cache if successful
+        if result:
+            if hasattr(get_cached_config, "_cached_auth-config"):
+                delattr(get_cached_config, "_cached_auth-config")
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error updating user {username}: {str(e)}")
+        return False
+
+def add_user(username: str, password: str, role: str = "readonly") -> bool:
+    """Add a new user to auth config."""
+    import hashlib
+    
+    try:
+        # Hash the password
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        # Create user data
+        user_data = {
+            "password": hashed_password,
+            "role": role,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        # Update auth config
+        return update_user(username, user_data)
+    except Exception as e:
+        logger.error(f"Error adding user {username}: {str(e)}")
+        return False
 
 class BaseConfig:
     """Base configuration class with common settings."""
@@ -271,8 +416,8 @@ class BaseConfig:
     # Error reporting configuration
     ENABLE_ERROR_REPORTING = get_env_bool('ENABLE_ERROR_REPORTING', False)
     
-    # Threat intelligence feed configuration
-    FEEDS = []  # Will be populated from feed-config secret
+    # Threat intelligence feed configuration - Default empty array, will be populated
+    FEEDS = []
     FEED_UPDATE_INTERVAL = int(os.environ.get('FEED_UPDATE_INTERVAL', 3))  # hours
     DEFAULT_FEED_CONFIDENCE = 70  # Default confidence level (0-100)
     
@@ -511,6 +656,16 @@ class BaseConfig:
         return None
     
     @classmethod
+    def get_enabled_feeds(cls):
+        """Get all enabled feed configurations."""
+        return [feed for feed in cls.FEEDS if feed.get('enabled', True)]
+    
+    @classmethod
+    def get_feeds_by_schedule(cls, schedule):
+        """Get feeds configured for a specific schedule."""
+        return [feed for feed in cls.FEEDS if feed.get('schedule') == schedule and feed.get('enabled', True)]
+    
+    @classmethod
     def get_table_name(cls, table_key):
         """Get the full BigQuery table name including project and dataset."""
         if not cls.GCP_PROJECT or not cls.BIGQUERY_DATASET:
@@ -624,6 +779,28 @@ class BaseConfig:
             
         return success
 
+    @classmethod
+    def init_app(cls):
+        """Initialize application configuration."""
+        # Configure logging
+        cls.configure_logging()
+        
+        # Initialize secrets if enabled
+        if get_env_bool('LOAD_SECRETS', True):
+            cls.init_secrets()
+        
+        # Initialize error reporting
+        cls.initialize_error_reporting()
+        
+        # Validate configuration
+        cls.validate_configuration()
+        
+        # Ensure GCP resources if enabled
+        if get_env_bool('ENSURE_GCP_RESOURCES', True):
+            cls.ensure_gcp_resources()
+            
+        logger.info(f"Initialized {cls.ENVIRONMENT} configuration")
+
 class DevelopmentConfig(BaseConfig):
     """Development configuration."""
     DEBUG = True
@@ -659,6 +836,10 @@ class DevelopmentConfig(BaseConfig):
         # Validate configuration
         cls.validate_configuration()
         
+        # Ensure admin user exists with password "admin" in development
+        if not get_env_bool('LOAD_SECRETS_IN_DEV', False):
+            add_user('admin', 'admin', 'admin')
+            
         logger.info("Initialized development configuration")
 
 class TestingConfig(BaseConfig):
@@ -731,6 +912,11 @@ class ProductionConfig(BaseConfig):
         
         # Ensure GCP resources exist
         cls.ensure_gcp_resources()
+        
+        # Ensure admin user is set up
+        admin_password = set_initial_admin_password()
+        if admin_password:
+            add_user('admin', admin_password, 'admin')
         
         logger.info("Initialized production configuration")
 
@@ -844,6 +1030,15 @@ def report_error(exception):
         except Exception as e:
             logger.error(f"Failed to report error: {str(e)}")
 
+def get_gcp_clients():
+    """Get a dictionary of initialized GCP clients."""
+    return {
+        "bigquery": initialize_bigquery(),
+        "storage": initialize_storage(),
+        "pubsub": initialize_pubsub(),
+        "error_reporting": get_error_client()
+    }
+
 def check_gcp_permissions():
     """Check if service account has the necessary GCP permissions."""
     permissions = {
@@ -911,6 +1106,9 @@ def check_gcp_permissions():
         
     return permissions
 
+# Define a constant for GCP services availability
+GCP_SERVICES_AVAILABLE = HAS_GCP
+
 # Module exports
 __all__ = [
     'Config', 
@@ -920,5 +1118,13 @@ __all__ = [
     'initialize_pubsub',
     'get_error_client',
     'report_error',
-    'check_gcp_permissions'
+    'check_gcp_permissions',
+    'access_secret',
+    'create_or_update_secret',
+    'get_cached_config',
+    'add_user',
+    'update_user',
+    'set_initial_admin_password',
+    'get_gcp_clients',
+    'GCP_SERVICES_AVAILABLE'
 ]
