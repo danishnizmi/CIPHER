@@ -69,7 +69,7 @@ steps:
       echo "Setting up Google Cloud resources..."
       
       # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
+      PROJECT_ID="primal-chariot-382610"
       
       # Enable required APIs
       gcloud services enable \
@@ -83,61 +83,45 @@ steps:
         bigquery.googleapis.com \
         iam.googleapis.com
       
-      # Create or verify service account
-      SERVICE_ACCOUNT="threat-intelligence-sa"
-      SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
-      
-      if ! gcloud iam service-accounts describe ${SERVICE_ACCOUNT_EMAIL} 2>/dev/null; then
-        echo "Creating service account: ${SERVICE_ACCOUNT_EMAIL}"
-        gcloud iam service-accounts create ${SERVICE_ACCOUNT} \
-          --display-name="Threat Intelligence Platform Service Account"
-      else
-        echo "Service account ${SERVICE_ACCOUNT_EMAIL} already exists"
-      fi
-      
-      # Set up secrets
+      # Set up secrets - Recreate if they don't exist
       echo "Setting up secrets..."
       
       # API Keys
-      if ! gcloud secrets describe api-keys 2>/dev/null; then
+      if ! gcloud secrets describe api-keys --project=${PROJECT_ID} 2>/dev/null; then
         platform_api_key=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | fold -w 48 | head -n 1)
         api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
+        echo "$api_keys_json" | gcloud secrets create api-keys --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
         echo "Created api-keys secret"
       else
         echo "Secret api-keys already exists"
       fi
       
       # Admin password
-      if ! gcloud secrets describe admin-initial-password 2>/dev/null; then
+      if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} 2>/dev/null; then
         admin_password=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
-        echo "$admin_password" | gcloud secrets create admin-initial-password --replication-policy="automatic" --data-file=-
+        echo "$admin_password" | gcloud secrets create admin-initial-password --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
         echo "Created admin-initial-password secret with value: [REDACTED]"
       else
         echo "Secret admin-initial-password already exists"
       fi
       
       # Auth config
-      if ! gcloud secrets describe auth-config 2>/dev/null; then
+      if ! gcloud secrets describe auth-config --project=${PROJECT_ID} 2>/dev/null; then
         session_secret=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
         auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
-        echo "$auth_config_json" | gcloud secrets create auth-config --replication-policy="automatic" --data-file=-
+        echo "$auth_config_json" | gcloud secrets create auth-config --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
         echo "Created auth-config secret"
       else
         echo "Secret auth-config already exists"
       fi
       
-      # Grant secret access to the service accounts (cloud-build-service and threat-intelligence-sa)
+      # Grant secret access to cloud-build-service (already has proper permissions)
       for SECRET_NAME in api-keys admin-initial-password auth-config; do
-        echo "Granting secret access to $SECRET_NAME..."
+        echo "Ensuring access to $SECRET_NAME..."
         
-        # Grant access to threat-intelligence-sa
-        gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
-          --role="roles/secretmanager.secretAccessor" || echo "Warning: Could not grant access on $SECRET_NAME to $SERVICE_ACCOUNT_EMAIL"
-          
         # Grant access to cloud-build-service
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
+          --project=${PROJECT_ID} \
           --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
           --role="roles/secretmanager.secretAccessor" || echo "Warning: Could not grant access on $SECRET_NAME to cloud-build-service"
       done
@@ -154,14 +138,6 @@ steps:
         echo "BigQuery dataset ${DATASET_ID} already exists"
       fi
       
-      # Grant BigQuery access to service accounts
-      echo "Granting BigQuery access..."
-      for ACCOUNT in "$SERVICE_ACCOUNT_EMAIL" "cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"; do
-        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-          --member="serviceAccount:${ACCOUNT}" \
-          --role="roles/bigquery.dataEditor" --condition=None || echo "Warning: Could not grant BigQuery access to ${ACCOUNT}"
-      done
-      
       # Create GCS bucket if needed
       echo "Setting up Cloud Storage..."
       BUCKET_NAME="${PROJECT_ID}-threat-data"
@@ -171,12 +147,6 @@ steps:
       else
         echo "GCS bucket ${BUCKET_NAME} already exists"
       fi
-      
-      # Grant Storage access to service accounts
-      echo "Granting Storage access..."
-      for ACCOUNT in "$SERVICE_ACCOUNT_EMAIL" "cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"; do
-        gsutil iam ch serviceAccount:${ACCOUNT}:objectAdmin gs://${BUCKET_NAME} || echo "Warning: Could not grant Storage access to ${ACCOUNT}"
-      done
       
       # Create PubSub topics if needed
       echo "Setting up PubSub..."
@@ -188,12 +158,11 @@ steps:
           echo "PubSub topic ${TOPIC} already exists"
         fi
         
-        # Grant Pub/Sub access to service accounts
-        for ACCOUNT in "$SERVICE_ACCOUNT_EMAIL" "cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"; do
-          gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
-            --member="serviceAccount:${ACCOUNT}" \
-            --role="roles/pubsub.publisher" || echo "Warning: Could not grant Pub/Sub access to ${ACCOUNT}"
-        done
+        # Ensure Pub/Sub access for cloud-build-service
+        gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
+          --project=${PROJECT_ID} \
+          --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --role="roles/pubsub.publisher" || echo "Warning: Could not grant Pub/Sub access"
       done
       
       echo "GCP resource setup completed successfully"
@@ -203,9 +172,9 @@ steps:
     id: 'build-container'
     args: [
       'build',
-      '--cache-from', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest',
-      '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest',
-      '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA',
+      '--cache-from', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest',
+      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest',
+      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:$COMMIT_SHA',
       '.'
     ]
 
@@ -214,7 +183,7 @@ steps:
     id: 'push-container'
     args: [
       'push', 
-      'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+      'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
     ]
 
   # Deploy to Cloud Run
@@ -223,8 +192,12 @@ steps:
     script: |
       echo "Deploying to Cloud Run..."
       
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
+      # Use specific project ID
+      PROJECT_ID="primal-chariot-382610"
+      
+      # Get platform_api_key and session_secret from secrets
+      API_KEY=$(gcloud secrets versions access latest --secret=api-keys --project=${PROJECT_ID} | jq -r '.platform_api_key')
+      SESSION_SECRET=$(gcloud secrets versions access latest --secret=auth-config --project=${PROJECT_ID} | jq -r '.session_secret')
       
       # Deploy to Cloud Run
       gcloud run deploy threat-intelligence-platform \
@@ -234,15 +207,15 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=${COMMIT_SHA},DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=true" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=${COMMIT_SHA},DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=true,API_KEY=${API_KEY},SECRET_KEY=${SESSION_SECRET}" \
         --service-account="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
         --min-instances=1 \
         --max-instances=20 \
         --execution-environment=gen2 \
-        --update-secrets="API_KEY=api-keys:platform_api_key,SECRET_KEY=auth-config:session_secret"
+        --project=${PROJECT_ID}
       
       # Get Cloud Run URL
-      CLOUD_RUN_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
+      CLOUD_RUN_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=${PROJECT_ID} --format='value(status.url)')
       echo "Deployed to: $CLOUD_RUN_URL"
 
   # Verify deployment
@@ -251,9 +224,11 @@ steps:
     script: |
       echo "Verifying deployment..."
       
+      PROJECT_ID="primal-chariot-382610"
+      
       # Wait for service to be ready
       sleep 60
-      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
+      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=${PROJECT_ID} --format='value(status.url)')
       echo "Service deployed at: ${service_url}"
       
       # Check health endpoint
