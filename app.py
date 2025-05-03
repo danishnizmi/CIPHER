@@ -6,10 +6,10 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-# Import your other modules (adjust as needed)
+# Import your other modules (adjusted to fix the import error)
 import config
 from api import api_blueprint
-from frontend import frontend_blueprint
+from frontend import app as frontend_blueprint  # Fixed import - assuming 'app' is the Flask instance in frontend.py
 
 # Configure logging
 logging.basicConfig(
