@@ -2,11 +2,10 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Set environment variables
+# Set environment variables - removed PORT (Cloud Run sets this)
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    PORT=8080 \
     ENVIRONMENT=production \
     LOAD_SECRETS=true \
     ENSURE_GCP_RESOURCES=true \
@@ -106,12 +105,23 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '# Test connections to required services' >> /app/start.sh && \
     echo 'python -c "from config import check_gcp_permissions; print(\"\\nGCP Permissions Check:\", check_gcp_permissions())"' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
+    echo '# Ensure all directories have proper permissions' >> /app/start.sh && \
+    echo 'mkdir -p data logs static/dist' >> /app/start.sh && \
+    echo 'chmod -R 755 data logs static/dist' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
     echo '# Start the application with gunicorn' >> /app/start.sh && \
     echo 'exec gunicorn --workers=2 --threads=8 --timeout=120 --bind=:$PORT app:app' >> /app/start.sh && \
     chmod +x /app/start.sh
 
-# Expose the application port
+# Set proper permissions
+RUN chmod -R 755 /app
+
+# Expose port 8080 (documentation only - doesn't set the PORT env var)
 EXPOSE 8080
+
+# Set healthcheck 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 # Run the application
 CMD ["/app/start.sh"]
