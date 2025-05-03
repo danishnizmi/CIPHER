@@ -261,7 +261,6 @@ steps:
                 value: "us-central1"
               - name: BIGQUERY_DATASET
                 value: "threat_intelligence"
-              # PORT environment variable removed from here
               - name: GCS_BUCKET
                 value: "${PROJECT_ID}-threat-data"
               - name: PUBSUB_TOPIC
@@ -310,14 +309,7 @@ steps:
                 periodSeconds: 30
                 timeoutSeconds: 5
                 failureThreshold: 3
-              readinessProbe:
-                httpGet:
-                  path: /api/health
-                  port: 8080
-                periodSeconds: 10
-                timeoutSeconds: 5
-                successThreshold: 1
-                failureThreshold: 3
+              # Readiness probe removed - not available for this project
               volumeMounts:
               - name: tmp
                 mountPath: /tmp
