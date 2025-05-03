@@ -38,13 +38,21 @@ spec:
         - name: PORT
           value: "8080"
         - name: API_URL
-          value: "https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['run.googleapis.com/custom-url']
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
+        - name: PUBSUB_ANALYSIS_TOPIC
+          value: "threat-analysis-events"
         - name: REQUIRE_AUTH
           value: "true"
+        - name: VERSION
+          value: "1.0.2"
+        - name: DEBUG
+          value: "false"
         startupProbe:
           httpGet:
             path: /health
