@@ -262,7 +262,7 @@ steps:
         --min-instances=1 \
         --max-instances=20 \
         --timeout=300 \
-        --startup-cpu-boost \
+        --cpu-boost \
         --execution-environment=gen2 \
         --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild
 
