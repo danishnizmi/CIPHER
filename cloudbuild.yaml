@@ -246,13 +246,14 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=false" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=true,GOOGLE_APPLICATION_CREDENTIALS=/tmp/keys/service-account.json,USE_METADATA_SERVICE=true" \
         --update-secrets="API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
         --service-account="${SERVICE_ACCOUNT}" \
         --min-instances=1 \
         --max-instances=20 \
         --execution-environment=gen2 \
-        --project=${PROJECT_ID}
+        --project=${PROJECT_ID} \
+        --no-cpu-throttling
       
       # Get Cloud Run URL
       CLOUD_RUN_URL=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=${PROJECT_ID} --format='value(status.url)')
