@@ -19,7 +19,6 @@ spec:
         run.googleapis.com/cpu-throttling: "false"
         run.googleapis.com/startup-cpu-boost: "true"
         run.googleapis.com/execution-environment: "gen2"
-        run.googleapis.com/cloudsql-instances: ""
     spec:
       serviceAccountName: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       timeoutSeconds: 300
@@ -55,7 +54,7 @@ spec:
         - name: REQUIRE_AUTH
           value: "true"
         - name: VERSION
-          value: "latest"
+          value: "1.0.2"
         - name: DEBUG
           value: "false"
         - name: PYTHONPATH
@@ -71,7 +70,7 @@ spec:
         - name: ENSURE_GCP_RESOURCES
           value: "true"
         - name: IGNORE_PERMISSION_ERRORS 
-          value: "true"
+          value: "false"
         - name: API_KEY
           valueFrom:
             secretKeyRef:
