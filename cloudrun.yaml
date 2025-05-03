@@ -49,8 +49,7 @@ spec:
           value: "us-central1"
         - name: BIGQUERY_DATASET
           value: "threat_intelligence"
-        - name: PORT
-          value: "8080"
+        # PORT environment variable removed from here
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
