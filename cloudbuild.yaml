@@ -104,10 +104,34 @@ steps:
           --project=${PROJECT_ID} || true
       }
       
+      # Create Cloud Run service account with proper permissions if it doesn't exist
+      CLOUD_RUN_SA="threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+      
+      if ! gcloud iam service-accounts describe ${CLOUD_RUN_SA} --project=${PROJECT_ID} >/dev/null 2>&1; then
+        echo "Creating service account for Cloud Run: ${CLOUD_RUN_SA}"
+        gcloud iam service-accounts create threat-intelligence-sa \
+          --display-name="Threat Intelligence Platform Service Account" \
+          --project=${PROJECT_ID}
+      fi
+      
+      # Grant required roles to the service account
+      echo "Granting required roles to service account..."
+      for ROLE in roles/bigquery.dataEditor roles/bigquery.jobUser roles/pubsub.publisher roles/pubsub.subscriber roles/storage.objectAdmin roles/secretmanager.secretAccessor roles/logging.logWriter roles/errorreporting.writer; do
+        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+          --member="serviceAccount:${CLOUD_RUN_SA}" \
+          --role="${ROLE}" || true
+      done
+      
       # Verify and create secrets if needed
       echo "Verifying required secrets..."
       for SECRET_NAME in api-keys auth-config admin-initial-password feed-config flask-secret-key; do
         create_or_update_secret $SECRET_NAME
+        
+        # Ensure the Cloud Run service account has access to the secret
+        gcloud secrets add-iam-policy-binding $SECRET_NAME \
+          --member="serviceAccount:${CLOUD_RUN_SA}" \
+          --role="roles/secretmanager.secretAccessor" \
+          --project=${PROJECT_ID} || true
       done
       
       # Create BigQuery dataset if needed
@@ -156,17 +180,19 @@ steps:
           echo "Created PubSub topic ${TOPIC}"
         fi
         
-        # Ensure Pub/Sub access for the service account regardless of topic status
+        # Ensure Pub/Sub access for the service accounts
         echo "Setting up IAM for topic ${TOPIC}..."
-        gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
-          --project=${PROJECT_ID} \
-          --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.publisher" || true
-          
-        gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
-          --project=${PROJECT_ID} \
-          --member="serviceAccount:${SERVICE_ACCOUNT}" \
-          --role="roles/pubsub.subscriber" || true
+        for SA in "${SERVICE_ACCOUNT}" "${CLOUD_RUN_SA}"; do
+          gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
+            --project=${PROJECT_ID} \
+            --member="serviceAccount:${SA}" \
+            --role="roles/pubsub.publisher" || true
+            
+          gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
+            --project=${PROJECT_ID} \
+            --member="serviceAccount:${SA}" \
+            --role="roles/pubsub.subscriber" || true
+        done
       done
       
       # Set up default secrets if they don't exist with values
@@ -236,9 +262,23 @@ steps:
       
       # Define project ID
       PROJECT_ID="primal-chariot-382610"
-      SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+      CLOUD_RUN_SA="threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
       
-      # Deploy to Cloud Run using Secret Manager references
+      # Modify the Dockerfile to update GOOGLE_APPLICATION_CREDENTIALS environment variable
+      echo "Updating environment variable configuration..."
+      cat > env_patch.yaml << EOF
+      spec:
+        template:
+          spec:
+            containers:
+              - env:
+                - name: "GOOGLE_APPLICATION_CREDENTIALS"
+                  value: ""
+                - name: "USE_GCP_METADATA"
+                  value: "true"
+      EOF
+      
+      # Deploy to Cloud Run using Cloud Run service account
       gcloud run deploy threat-intelligence-platform \
         --image "gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest" \
         --region us-central1 \
@@ -246,9 +286,9 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=true,GOOGLE_APPLICATION_CREDENTIALS=/tmp/keys/service-account.json,USE_METADATA_SERVICE=true" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,USE_GCP_METADATA=true" \
         --update-secrets="API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
-        --service-account="${SERVICE_ACCOUNT}" \
+        --service-account="${CLOUD_RUN_SA}" \
         --min-instances=1 \
         --max-instances=20 \
         --execution-environment=gen2 \
