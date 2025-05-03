@@ -33,6 +33,7 @@ steps:
       google-auth==2.23.0
       requests==2.31.0
       python-dateutil==2.8.2
+      numpy==1.24.3
       EOF
       
       cat > functions/analysis/requirements.txt << 'EOF'
@@ -47,6 +48,7 @@ steps:
       google-auth==2.23.0
       requests==2.31.0
       python-dateutil==2.8.2
+      numpy==1.24.3
       EOF
       
       # Setup BigQuery script
@@ -85,6 +87,24 @@ steps:
     id: 'enable-apis'
     script: |
       gcloud services enable cloudfunctions.googleapis.com eventarc.googleapis.com appengine.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com run.googleapis.com cloudbuild.googleapis.com cloudresourcemanager.googleapis.com clouderrorreporting.googleapis.com monitoring.googleapis.com aiplatform.googleapis.com
+
+  # Update requirements.txt to pin numpy version
+  - name: 'python:3.10'
+    id: 'update-requirements'
+    script: |
+      echo "Updating requirements.txt to pin numpy version..."
+      
+      # Check if numpy is already in requirements.txt
+      if grep -q "numpy==" requirements.txt; then
+        # Update numpy version
+        sed -i 's/numpy==.*/numpy==1.24.3/' requirements.txt
+      else
+        # Add numpy to requirements.txt
+        echo "numpy==1.24.3" >> requirements.txt
+      fi
+      
+      echo "Updated requirements.txt:"
+      cat requirements.txt
 
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
@@ -193,12 +213,11 @@ steps:
         fi
       fi
 
-  # Deploy to Cloud Run with fixed image reference
+  # Deploy to Cloud Run with fixed image and extended startup timeout
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
-      # Use hardcoded image reference with 'latest' tag which is guaranteed to exist
-      # The key fix is using a hardcoded image name with the 'latest' tag instead of trying to use environment variables
+      # Use hardcoded image reference with 'latest' tag
       IMAGE_NAME="gcr.io/primal-chariot-382610/threat-intelligence-platform:latest"
       echo "Deploying image: ${IMAGE_NAME}"
       
@@ -220,6 +239,7 @@ steps:
         secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
+      # Deploy with extended timeouts for startup
       gcloud run deploy threat-intelligence-platform \
         --image "${IMAGE_NAME}" \
         --region us-central1 \
@@ -232,6 +252,8 @@ steps:
         --min-instances=1 \
         --max-instances=20 \
         --timeout=300 \
+        --startup-cpu-boost \
+        --execution-environment=gen2 \
         --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild
 
   # Deploy PubSub and scheduler
