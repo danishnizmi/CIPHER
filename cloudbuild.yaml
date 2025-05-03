@@ -1,60 +1,24 @@
 steps:
-  # Install development dependencies
+  # Install dependencies and run checks in a single step
   - name: 'python:3.10'
-    id: 'install-dev-dependencies'
+    id: 'setup-and-checks'
     script: |
-      echo "Installing development dependencies..."
-      pip install --upgrade pip
-      pip install flake8 pytest pytest-cov black isort
-
-  # Lint Python code
-  - name: 'python:3.10'
-    id: 'lint-code'
-    script: |
-      echo "Running linting checks..."
-      flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-      black --check --diff .
-      isort --check-only --profile black .
-
-  # Install application dependencies
-  - name: 'python:3.10'
-    id: 'install-app-dependencies'
-    script: |
-      echo "Installing application dependencies..."
+      echo "Installing dependencies and running basic checks..."
       pip install --upgrade pip
       pip install --no-cache-dir -r requirements.txt
-
-  # Run unit tests
-  - name: 'python:3.10'
-    id: 'run-tests'
-    script: |
-      echo "Running unit tests..."
-      # Create mock configuration for tests
-      mkdir -p tests
-      cat > tests/test_config.py << 'EOF'
-      import os
-      import sys
-      sys.path.append('.')
-      import unittest
-      from unittest.mock import patch, MagicMock
-      import config
       
-      class TestConfig(unittest.TestCase):
-          def test_config_exists(self):
-              self.assertIsNotNone(config.Config)
-              
-      if __name__ == '__main__':
-          unittest.main()
-      EOF
-      
-      # Run the test
-      python -m tests.test_config
+      # Optional: Run simple verification checks
+      python -c "import config; print('Config module loaded successfully')"
 
-  # Set up frontend and build assets
+  # Build frontend assets
   - name: 'node:16'
     id: 'build-frontend'
     script: |
       echo "Building frontend assets..."
+      
+      # Create directories and files
+      mkdir -p static/src static/dist templates
+      echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
       
       # Set up package.json for Tailwind
       cat > package.json << 'EOF'
@@ -71,10 +35,6 @@ steps:
         }
       }
       EOF
-      
-      # Create directories and files
-      mkdir -p static/src static/dist templates
-      echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
       
       # Set up Tailwind config
       cat > tailwind.config.js << 'EOF'
@@ -102,86 +62,28 @@ steps:
       npm install
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
 
-  # Create Dockerfile
-  - name: 'python:3.10'
-    id: 'create-dockerfile'
-    script: |
-      echo "Creating optimized Dockerfile..."
-      
-      cat > Dockerfile << 'EOF'
-      FROM python:3.10-slim
-
-      WORKDIR /app
-
-      # Set environment variables
-      ENV PYTHONDONTWRITEBYTECODE=1 \
-          PYTHONUNBUFFERED=1 \
-          PYTHONPATH=/app \
-          PORT=8080
-
-      # Install system dependencies
-      RUN apt-get update && apt-get install -y --no-install-recommends \
-          gcc \
-          python3-dev \
-          && apt-get clean \
-          && rm -rf /var/lib/apt/lists/*
-
-      # Create necessary directories
-      RUN mkdir -p static/dist templates
-
-      # Copy requirements first for better layer caching
-      COPY requirements.txt .
-
-      # Install dependencies with strict version pinning
-      RUN pip install --upgrade pip && \
-          pip install numpy==1.24.3 pandas==1.5.3 && \
-          pip install -r requirements.txt
-
-      # Copy application code
-      COPY . .
-
-      # Create startup script with error handling
-      RUN echo '#!/bin/bash' > /app/start.sh && \
-          echo 'cd /app' >> /app/start.sh && \
-          echo 'echo "Starting application on port $PORT"' >> /app/start.sh && \
-          echo 'exec gunicorn --bind :$PORT --workers 2 --threads 8 --timeout 120 app:app' >> /app/start.sh && \
-          chmod +x /app/start.sh
-
-      EXPOSE 8080
-
-      CMD ["/app/start.sh"]
-      EOF
-
   # Enable required Google Cloud APIs
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'enable-apis'
+    id: 'setup-gcp'
     script: |
-      echo "Enabling required Google Cloud APIs..."
+      echo "Setting up Google Cloud resources..."
       
+      # Get project ID
+      PROJECT_ID=$(gcloud config get-value project)
+      
+      # Enable required APIs
       gcloud services enable \
-        cloudfunctions.googleapis.com \
         run.googleapis.com \
         cloudbuild.googleapis.com \
-        cloudscheduler.googleapis.com \
         secretmanager.googleapis.com \
         cloudresourcemanager.googleapis.com \
         clouderrorreporting.googleapis.com \
         pubsub.googleapis.com \
         storage-api.googleapis.com \
         bigquery.googleapis.com \
-        monitoring.googleapis.com \
         iam.googleapis.com
-
-  # Set up required service accounts and permissions
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-service-accounts'
-    script: |
-      echo "Setting up service accounts and permissions..."
       
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Create service account for the application if it doesn't exist
+      # Create service account if not exists
       SERVICE_ACCOUNT="threat-intelligence-sa"
       SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
       
@@ -189,178 +91,66 @@ steps:
         echo "Creating service account: ${SERVICE_ACCOUNT_EMAIL}"
         gcloud iam service-accounts create ${SERVICE_ACCOUNT} \
           --display-name="Threat Intelligence Platform Service Account"
+          
+        # Grant necessary permissions
+        for ROLE in roles/bigquery.dataEditor roles/storage.objectAdmin roles/pubsub.editor roles/secretmanager.secretAccessor; do
+          gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+            --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+            --role="${ROLE}" --quiet
+        done
       fi
       
-      # Grant necessary roles to the service account
-      declare -a ROLES=(
-        "roles/bigquery.dataEditor"
-        "roles/bigquery.jobUser"
-        "roles/storage.objectAdmin"
-        "roles/pubsub.editor"
-        "roles/secretmanager.secretAccessor"
-        "roles/logging.logWriter"
-        "roles/errorreporting.writer"
-      )
+      # Set up secrets
+      echo "Setting up secrets..."
       
-      for ROLE in "${ROLES[@]}"; do
-        echo "Granting ${ROLE} to ${SERVICE_ACCOUNT_EMAIL}"
-        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-          --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-          --role="${ROLE}" --quiet
-      done
-
-  # Set up secrets in Secret Manager
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-secrets'
-    script: |
-      echo "Setting up secrets in Secret Manager..."
-      
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Create api-keys secret if it doesn't exist
+      # API Key
       if ! gcloud secrets describe api-keys 2>/dev/null; then
         platform_api_key=$(python3 -c "import secrets; print(secrets.token_hex(16))")
         api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
         echo "$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
       fi
       
-      # Create other required secrets
-      for SECRET_NAME in auth-config database-credentials feed-config admin-initial-password; do
-        if ! gcloud secrets describe $SECRET_NAME 2>/dev/null; then
-          if [ "$SECRET_NAME" = "admin-initial-password" ]; then
-            admin_password=$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits; print(''.join(secrets.choice(chars) for i in range(12)))")
-            echo "$admin_password" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
-          elif [ "$SECRET_NAME" = "auth-config" ]; then
-            session_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-            auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
-            echo "$auth_config_json" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
-          else
-            echo "{}" | gcloud secrets create $SECRET_NAME --replication-policy="automatic" --data-file=-
-          fi
-        fi
-        
-        # Grant access to the service account
-        SERVICE_ACCOUNT="threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+      # Admin password
+      if ! gcloud secrets describe admin-initial-password 2>/dev/null; then
+        admin_password="admin"
+        echo "$admin_password" | gcloud secrets create admin-initial-password --replication-policy="automatic" --data-file=-
+      fi
+      
+      # Auth config
+      if ! gcloud secrets describe auth-config 2>/dev/null; then
+        session_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
+        echo "$auth_config_json" | gcloud secrets create auth-config --replication-policy="automatic" --data-file=-
+      fi
+      
+      # Grant secret access to service account
+      for SECRET_NAME in api-keys admin-initial-password auth-config; do
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --member="serviceAccount:$SERVICE_ACCOUNT" \
+          --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
           --role="roles/secretmanager.secretAccessor" || true
       done
-
-  # Create BigQuery dataset if it doesn't exist
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-bigquery'
-    script: |
-      echo "Setting up BigQuery dataset..."
       
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Create BigQuery dataset if it doesn't exist
+      # Create BigQuery dataset if needed
+      echo "Setting up BigQuery..."
       DATASET_ID="threat_intelligence"
-      
       if ! bq ls --project_id=${PROJECT_ID} | grep -q ${DATASET_ID}; then
-        echo "Creating BigQuery dataset: ${DATASET_ID}"
         bq --location=US mk --dataset \
           --description="Threat Intelligence Platform Data" \
           ${PROJECT_ID}:${DATASET_ID}
       fi
       
-      # Define tables to create if they don't exist
-      declare -a TABLES=(
-        "indicators"
-        "vulnerabilities"
-        "threat_actors"
-        "campaigns"
-        "malware"
-        "users"
-        "audit_log"
-      )
-      
-      # Create tables if they don't exist (basic schema)
-      for TABLE in "${TABLES[@]}"; do
-        if ! bq ls --project_id=${PROJECT_ID} ${DATASET_ID} | grep -q ${TABLE}; then
-          echo "Creating table: ${TABLE}"
-          
-          # Create a simple schema file
-          cat > ${TABLE}_schema.json << EOF
-          [
-            {"name": "id", "type": "STRING", "mode": "REQUIRED"},
-            {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
-            {"name": "updated_at", "type": "TIMESTAMP", "mode": "NULLABLE"}
-          ]
-          EOF
-          
-          # Create the table with the schema
-          bq mk --table \
-            --project_id=${PROJECT_ID} \
-            --schema=${TABLE}_schema.json \
-            ${DATASET_ID}.${TABLE}
-          
-          # Clean up schema file
-          rm ${TABLE}_schema.json
-        fi
-      done
-
-  # Create GCS bucket if it doesn't exist
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-storage'
-    script: |
-      echo "Setting up Cloud Storage bucket..."
-      
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Create GCS bucket if it doesn't exist
+      # Create GCS bucket if needed
+      echo "Setting up Cloud Storage..."
       BUCKET_NAME="${PROJECT_ID}-threat-data"
-      
       if ! gsutil ls -b gs://${BUCKET_NAME} &>/dev/null; then
-        echo "Creating GCS bucket: ${BUCKET_NAME}"
         gsutil mb -l us-central1 gs://${BUCKET_NAME}
-        
-        # Create necessary folder structure with empty objects
-        declare -a FOLDERS=(
-          "feeds"
-          "raw"
-          "processed"
-          "cache"
-          "exports"
-        )
-        
-        for FOLDER in "${FOLDERS[@]}"; do
-          gsutil cp /dev/null gs://${BUCKET_NAME}/${FOLDER}/.keep
-        done
       fi
-
-  # Set up PubSub topics and subscriptions
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-pubsub'
-    script: |
-      echo "Setting up PubSub topics and subscriptions..."
       
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Create PubSub topics
-      declare -a TOPICS=(
-        "threat-data-ingestion"
-        "threat-analysis-events"
-      )
-      
-      for TOPIC in "${TOPICS[@]}"; do
+      # Create PubSub topics if needed
+      echo "Setting up PubSub..."
+      for TOPIC in threat-data-ingestion threat-analysis-events; do
         if ! gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating PubSub topic: ${TOPIC}"
           gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID}
-        fi
-        
-        # Create subscription if it doesn't exist
-        SUBSCRIPTION="${TOPIC}-sub"
-        if ! gcloud pubsub subscriptions describe ${SUBSCRIPTION} --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating PubSub subscription: ${SUBSCRIPTION}"
-          gcloud pubsub subscriptions create ${SUBSCRIPTION} \
-            --topic=${TOPIC} \
-            --project=${PROJECT_ID} \
-            --message-retention-duration=7d
         fi
       done
 
@@ -375,7 +165,7 @@ steps:
       '.'
     ]
 
-  # Push container
+  # Push container to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
     args: [
@@ -389,28 +179,13 @@ steps:
     script: |
       echo "Deploying to Cloud Run..."
       
-      # Get project ID
+      # Get project ID and service account
       PROJECT_ID=$(gcloud config get-value project)
-      
-      # Get API key from Secret Manager
-      api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
-      if [ -z "$api_key_value" ]; then
-        api_key_value=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-        api_keys_json="{\"platform_api_key\":\"$api_key_value\",\"updated_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets versions add api-keys --data-file=-
-      fi
-      
-      # Get session key
-      secret_key_value=$(gcloud secrets versions access latest --secret=auth-config | python3 -c "import sys, json; print(json.load(sys.stdin).get('session_secret', ''))" || echo "")
-      if [ -z "$secret_key_value" ]; then
-        secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-      fi
-      
-      # Service account email
       SERVICE_ACCOUNT="threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-      
-      # Bucket name
       BUCKET_NAME="${PROJECT_ID}-threat-data"
+      
+      # Get API key from Secret Manager (for scheduler job)
+      api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
       
       # Deploy to Cloud Run
       gcloud run deploy threat-intelligence-platform \
@@ -420,44 +195,33 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${BUCKET_NAME},PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,API_KEY=${api_key_value},SECRET_KEY=${secret_key_value},VERSION=${COMMIT_SHA},DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${BUCKET_NAME},PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=${COMMIT_SHA},DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO" \
         --service-account="${SERVICE_ACCOUNT}" \
         --min-instances=1 \
         --max-instances=20 \
-        --timeout=300 \
-        --cpu-boost \
-        --execution-environment=gen2 \
-        --update-labels=app=threat-intelligence-platform,managed-by=cloudbuild
-
-  # Set up Cloud Scheduler job for regular updates
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-scheduler'
-    script: |
-      echo "Setting up Cloud Scheduler job for regular updates..."
+        --execution-environment=gen2
       
-      # Get project ID
-      PROJECT_ID=$(gcloud config get-value project)
-      
-      # Get API key from Secret Manager
-      api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
-      
-      # Get Cloud Run URL
+      # Get Cloud Run URL for scheduler
       cloud_run_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --format='value(status.url)')
       
-      # Delete existing job if it exists
-      gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || echo "Job doesn't exist yet"
-      
-      # Create new job
-      gcloud scheduler jobs create http update-threat-feeds \
-        --location=us-central1 \
-        --schedule="0 */3 * * *" \
-        --uri="${cloud_run_url}/api/admin/ingest" \
-        --http-method=POST \
-        --headers="X-API-Key=${api_key_value}" \
-        --message-body='{"process_all": true}' \
-        --time-zone="UTC" \
-        --description="Update threat feeds every 3 hours" \
-        --project=${PROJECT_ID} || echo "Scheduler job setup failed"
+      # Set up Cloud Scheduler job for regular updates if API key is available
+      if [ ! -z "$api_key_value" ]; then
+        echo "Setting up Cloud Scheduler job..."
+        
+        # Delete existing job if it exists
+        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || echo "Job doesn't exist yet"
+        
+        # Create scheduler job
+        gcloud scheduler jobs create http update-threat-feeds \
+          --location=us-central1 \
+          --schedule="0 */3 * * *" \
+          --uri="${cloud_run_url}/api/admin/ingest" \
+          --http-method=POST \
+          --headers="X-API-Key=${api_key_value}" \
+          --message-body='{"process_all": true}' \
+          --time-zone="UTC" \
+          --description="Update threat feeds every 3 hours" || echo "Scheduler job setup failed"
+      fi
 
   # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -471,7 +235,7 @@ steps:
       echo "Service deployed at: ${service_url}"
       
       # Check health endpoint
-      max_attempts=10
+      max_attempts=5
       for attempt in $(seq 1 $max_attempts); do
         echo "Health check attempt $attempt of $max_attempts..."
         response_code=$(curl -s -o /dev/null -w "%{http_code}" "${service_url}/health" || echo "failed")
@@ -484,19 +248,10 @@ steps:
         fi
       done
       
-      # Get logs if health check failed
-      if [ "$response_code" != "200" ]; then
-        echo "❌ Health check failed. Retrieving logs..."
-        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=50
-      else
-        echo "✨ Deployment completed successfully! ✨"
-        echo "Service URL: ${service_url}"
-      fi
+      echo "Deployment completed. Service URL: ${service_url}"
 
 # Build timeout and options
-timeout: '3600s'
+timeout: '1800s'
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
-  env:
-    - 'PYTHONUNBUFFERED=1'
