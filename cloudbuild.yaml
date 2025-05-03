@@ -62,13 +62,13 @@ steps:
       npm install
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
 
-  # Enable required Google Cloud APIs
+  # Enable required Google Cloud APIs and setup resources
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-gcp'
     script: |
       echo "Setting up Google Cloud resources..."
       
-      # Get project ID
+      # Define project ID
       PROJECT_ID="primal-chariot-382610"
       
       # Enable required APIs
@@ -83,47 +83,20 @@ steps:
         bigquery.googleapis.com \
         iam.googleapis.com
       
-      # Set up secrets - Recreate if they don't exist
-      echo "Setting up secrets..."
-      
-      # API Keys
-      if ! gcloud secrets describe api-keys --project=${PROJECT_ID} 2>/dev/null; then
-        platform_api_key=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | fold -w 48 | head -n 1)
-        api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
-        echo "$api_keys_json" | gcloud secrets create api-keys --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
-        echo "Created api-keys secret"
-      else
-        echo "Secret api-keys already exists"
-      fi
-      
-      # Admin password
-      if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} 2>/dev/null; then
-        admin_password=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
-        echo "$admin_password" | gcloud secrets create admin-initial-password --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
-        echo "Created admin-initial-password secret with value: [REDACTED]"
-      else
-        echo "Secret admin-initial-password already exists"
-      fi
-      
-      # Auth config
-      if ! gcloud secrets describe auth-config --project=${PROJECT_ID} 2>/dev/null; then
-        session_secret=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
-        auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
-        echo "$auth_config_json" | gcloud secrets create auth-config --project=${PROJECT_ID} --replication-policy="automatic" --data-file=-
-        echo "Created auth-config secret"
-      else
-        echo "Secret auth-config already exists"
-      fi
-      
-      # Grant secret access to cloud-build-service (already has proper permissions)
-      for SECRET_NAME in api-keys admin-initial-password auth-config; do
-        echo "Ensuring access to $SECRET_NAME..."
-        
-        # Grant access to cloud-build-service
-        gcloud secrets add-iam-policy-binding $SECRET_NAME \
-          --project=${PROJECT_ID} \
-          --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor" || echo "Warning: Could not grant access on $SECRET_NAME to cloud-build-service"
+      # Verify secrets exist
+      echo "Verifying required secrets..."
+      for SECRET_NAME in api-keys auth-config admin-initial-password feed-config flask-secret-key; do
+        if ! gcloud secrets describe $SECRET_NAME --project=${PROJECT_ID} >/dev/null 2>&1; then
+          echo "Warning: Required secret $SECRET_NAME not found"
+        else
+          echo "Secret $SECRET_NAME exists"
+          
+          # Ensure the service account has access to the secret
+          gcloud secrets add-iam-policy-binding $SECRET_NAME \
+            --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project=${PROJECT_ID} >/dev/null 2>&1 || echo "Note: Service account may already have access to $SECRET_NAME"
+        fi
       done
       
       # Create BigQuery dataset if needed
@@ -158,7 +131,7 @@ steps:
           echo "PubSub topic ${TOPIC} already exists"
         fi
         
-        # Ensure Pub/Sub access for cloud-build-service
+        # Ensure Pub/Sub access for the service account
         gcloud pubsub topics add-iam-policy-binding ${TOPIC} \
           --project=${PROJECT_ID} \
           --member="serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
@@ -172,9 +145,9 @@ steps:
     id: 'build-container'
     args: [
       'build',
-      '--cache-from', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest',
-      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest',
-      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:$COMMIT_SHA',
+      '--cache-from', 'gcr.io/primal-chariot-382610/threat-intelligence-platform:latest',
+      '-t', 'gcr.io/primal-chariot-382610/threat-intelligence-platform:latest',
+      '-t', 'gcr.io/primal-chariot-382610/threat-intelligence-platform:$COMMIT_SHA',
       '.'
     ]
 
@@ -183,23 +156,19 @@ steps:
     id: 'push-container'
     args: [
       'push', 
-      'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest'
+      'gcr.io/primal-chariot-382610/threat-intelligence-platform:latest'
     ]
 
-  # Deploy to Cloud Run
+  # Deploy to Cloud Run using Secret Manager integration
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
       echo "Deploying to Cloud Run..."
       
-      # Use specific project ID
+      # Define project ID
       PROJECT_ID="primal-chariot-382610"
       
-      # Get platform_api_key and session_secret from secrets
-      API_KEY=$(gcloud secrets versions access latest --secret=api-keys --project=${PROJECT_ID} | jq -r '.platform_api_key')
-      SESSION_SECRET=$(gcloud secrets versions access latest --secret=auth-config --project=${PROJECT_ID} | jq -r '.session_secret')
-      
-      # Deploy to Cloud Run
+      # Deploy to Cloud Run using Secret Manager references
       gcloud run deploy threat-intelligence-platform \
         --image "gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest" \
         --region us-central1 \
@@ -207,7 +176,8 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=${COMMIT_SHA},DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,IGNORE_PERMISSION_ERRORS=true,API_KEY=${API_KEY},SECRET_KEY=${SESSION_SECRET}" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.2,DEBUG=false,PYTHONPATH=/app,CLOUD_LOGGING=true,ENABLE_ERROR_REPORTING=true,LOG_LEVEL=INFO,LOAD_SECRETS_IN_DEV=true" \
+        --update-secrets="API_KEY=api-keys:platform_api_key,SECRET_KEY=auth-config:session_secret" \
         --service-account="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com" \
         --min-instances=1 \
         --max-instances=20 \
@@ -224,6 +194,7 @@ steps:
     script: |
       echo "Verifying deployment..."
       
+      # Define project ID
       PROJECT_ID="primal-chariot-382610"
       
       # Wait for service to be ready
@@ -245,7 +216,7 @@ steps:
         fi
       done
       
-      echo "Deployment completed. Service URL: ${service_url}"
+      echo "Deployment completed successfully! Service URL: ${service_url}"
 
 # Build timeout and options
 timeout: '1800s'
