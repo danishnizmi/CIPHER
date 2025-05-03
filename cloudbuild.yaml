@@ -102,12 +102,12 @@ steps:
     id: 'push-container'
     args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$SHORT_SHA']
 
-  # Setup secrets
+  # Setup secrets - FIXED VERSION
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-secrets'
     script: |
-      # Create service account variable
-      SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+      # Create service account variable with hardcoded project ID
+      SERVICE_ACCOUNT="cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       echo "Using service account: $SERVICE_ACCOUNT"
       
       # Check and create secrets with meaningful initial values if they don't exist
@@ -132,7 +132,7 @@ steps:
           fi
         fi
         
-        # Grant access using variable instead of hardcoded service account
+        # Grant access using hardcoded service account
         gcloud secrets add-iam-policy-binding $SECRET_NAME --member="serviceAccount:$SERVICE_ACCOUNT" --role="roles/secretmanager.secretAccessor" || true
       done
 
@@ -198,8 +198,8 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
-      # Create service account variable
-      SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+      # Create service account variable with hardcoded project ID
+      SERVICE_ACCOUNT="cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       echo "Using service account: $SERVICE_ACCOUNT"
       
       # Get API key from Secret Manager
@@ -218,7 +218,7 @@ steps:
       
       # Deploy to Cloud Run with simplified configuration
       # Using fully specified image name with explicit SHORT_SHA variable
-      image_name="gcr.io/$PROJECT_ID/threat-intelligence-platform:$SHORT_SHA"
+      image_name="gcr.io/primal-chariot-382610/threat-intelligence-platform:$SHORT_SHA"
       echo "Deploying image: $image_name"
       
       gcloud run deploy threat-intelligence-platform \
@@ -228,7 +228,7 @@ steps:
         --allow-unauthenticated \
         --cpu 2 \
         --memory 2Gi \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false" \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=primal-chariot-382610,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=primal-chariot-382610-threat-data,PUBSUB_TOPIC=threat-data-ingestion,API_KEY=$api_key_value,SECRET_KEY=$secret_key_value,VERSION=1.0.2,DEBUG=false" \
         --service-account="$SERVICE_ACCOUNT" \
         --min-instances=1 \
         --max-instances=20 \
@@ -239,14 +239,14 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-services'
     script: |
-      # Create service account variable
-      SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+      # Create service account variable with hardcoded project ID
+      SERVICE_ACCOUNT="cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       
       # Setup PubSub topics and subscriptions
-      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID 2>/dev/null || echo "Topic exists"
-      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID 2>/dev/null || echo "Topic exists"
-      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=$PROJECT_ID --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
-      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=$PROJECT_ID --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
+      gcloud pubsub topics create threat-data-ingestion --project=primal-chariot-382610 2>/dev/null || echo "Topic exists"
+      gcloud pubsub topics create threat-analysis-events --project=primal-chariot-382610 2>/dev/null || echo "Topic exists"
+      gcloud pubsub subscriptions create threat-data-ingestion-sub --topic=threat-data-ingestion --project=primal-chariot-382610 --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
+      gcloud pubsub subscriptions create threat-analysis-events-sub --topic=threat-analysis-events --project=primal-chariot-382610 --message-retention-duration=7d 2>/dev/null || echo "Subscription exists"
       
       # Get API key for scheduler
       api_key_value=$(gcloud secrets versions access latest --secret=api-keys | python3 -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))" || echo "")
@@ -264,7 +264,7 @@ steps:
         --message-body='{"process_all": true}' \
         --time-zone="UTC" \
         --description="Update threat feeds every 3 hours" \
-        --project=$PROJECT_ID || echo "Scheduler job setup failed"
+        --project=primal-chariot-382610 || echo "Scheduler job setup failed"
 
   # Check deployment and provide status
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -272,7 +272,7 @@ steps:
     script: |
       echo "Waiting for service to be ready..."
       sleep 30
-      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=$PROJECT_ID --format='value(status.url)')
+      service_url=$(gcloud run services describe threat-intelligence-platform --region=us-central1 --project=primal-chariot-382610 --format='value(status.url)')
       echo "Service deployed at: $service_url"
       
       # Check if service is responding
@@ -302,9 +302,9 @@ steps:
     id: 'cleanup-old-images'
     script: |
       # List and delete old images, keeping the latest 5
-      gcloud container images list-tags gcr.io/$PROJECT_ID/threat-intelligence-platform \
+      gcloud container images list-tags gcr.io/primal-chariot-382610/threat-intelligence-platform \
         --format="get(digest)" | tail -n +6 | xargs -I {} gcloud container images delete \
-        --quiet gcr.io/$PROJECT_ID/threat-intelligence-platform@{} --force-delete-tags || true
+        --quiet gcr.io/primal-chariot-382610/threat-intelligence-platform@{} --force-delete-tags || true
 
 # Set a longer timeout for the build
 timeout: '1800s'
