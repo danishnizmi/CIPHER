@@ -21,7 +21,7 @@ spec:
         run.googleapis.com/execution-environment: "gen2"
         run.googleapis.com/cloudsql-instances: ""
     spec:
-      serviceAccountName: "threat-intelligence-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+      serviceAccountName: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       timeoutSeconds: 300
       containerConcurrency: 80
       containers:
