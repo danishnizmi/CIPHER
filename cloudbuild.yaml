@@ -92,7 +92,7 @@ steps:
     args: [
       'build',
       '--cache-from', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest',
-      '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$SHORT_SHA',
+      '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA',
       '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest',
       '.'
     ]
@@ -100,7 +100,7 @@ steps:
   # Push container
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
-    args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$SHORT_SHA']
+    args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA']
 
   # Setup secrets
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -194,10 +194,14 @@ steps:
         fi
       fi
 
-  # Deploy to Cloud Run with fixed deployment command
+  # Deploy to Cloud Run with hardcoded image reference
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     script: |
+      # Fix: Store COMMIT_SHA in a variable
+      COMMIT_SHA=${COMMIT_SHA}
+      echo "COMMIT_SHA: ${COMMIT_SHA}"
+      
       # Create service account variable with hardcoded project ID
       SERVICE_ACCOUNT="cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       echo "Using service account: $SERVICE_ACCOUNT"
@@ -216,13 +220,13 @@ steps:
         secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
-      # Deploy to Cloud Run with explicit image reference
-      # The key fix is ensuring that the SHA is properly expanded
-      image_name="gcr.io/primal-chariot-382610/threat-intelligence-platform:$SHORT_SHA"
-      echo "Deploying image: $image_name"
+      # FIX: Hardcode image name with explicit commit SHA
+      # This avoids any variable expansion issues
+      FULL_IMAGE_NAME="gcr.io/primal-chariot-382610/threat-intelligence-platform:${COMMIT_SHA}"
+      echo "Deploying image: ${FULL_IMAGE_NAME}"
       
       gcloud run deploy threat-intelligence-platform \
-        --image "$image_name" \
+        --image "${FULL_IMAGE_NAME}" \
         --region us-central1 \
         --platform managed \
         --allow-unauthenticated \
@@ -313,3 +317,7 @@ timeout: '1800s'
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
+
+# Fix: Add explicit substitutions
+substitutions:
+  _COMMIT_SHA: 'latest'  # Fallback value
