@@ -51,16 +51,12 @@ spec:
           value: "threat_intelligence"
         - name: PORT
           value: "8080"
-        - name: API_URL
-          value: "https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
         - name: PUBSUB_ANALYSIS_TOPIC
           value: "threat-analysis-events"
-        - name: REQUIRE_AUTH
-          value: "true"
         - name: VERSION
           value: "1.0.2"
         - name: DEBUG
@@ -78,8 +74,8 @@ spec:
         - name: ENSURE_GCP_RESOURCES
           value: "true"
         - name: IGNORE_PERMISSION_ERRORS 
-          value: "false"
-        # Secret references - corrected format
+          value: "true"
+        # Secret references
         - name: API_KEY
           valueFrom:
             secretKeyRef:
@@ -116,11 +112,47 @@ spec:
           mountPath: /tmp
         - name: app-data
           mountPath: /app/data
+        - name: api-keys-volume
+          mountPath: /app/secrets/api-keys
+          readOnly: true
+        - name: auth-config-volume
+          mountPath: /app/secrets/auth-config
+          readOnly: true
+        - name: feed-config-volume
+          mountPath: /app/secrets/feed-config
+          readOnly: true
+        - name: admin-password-volume
+          mountPath: /app/secrets/admin-password
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
       - name: app-data
         emptyDir: {}
+      - name: api-keys-volume
+        secret:
+          secretName: api-keys
+          items:
+          - key: latest
+            path: api-keys.json
+      - name: auth-config-volume
+        secret:
+          secretName: auth-config
+          items:
+          - key: latest
+            path: auth-config.json
+      - name: feed-config-volume
+        secret:
+          secretName: feed-config
+          items:
+          - key: latest
+            path: feed-config.json
+      - name: admin-password-volume
+        secret:
+          secretName: admin-initial-password
+          items:
+          - key: latest
+            path: admin-password.txt
   traffic:
   - percent: 100
     latestRevision: true
