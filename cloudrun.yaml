@@ -2,14 +2,18 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: threat-intelligence-platform
+  namespace: '561511062593'
   annotations:
     run.googleapis.com/client-name: "cloud-console"
     run.googleapis.com/launch-stage: "BETA"
     autoscaling.knative.dev/maxScale: "20"
     run.googleapis.com/cpu-throttling: "false"
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
   labels:
     app: threat-intelligence-platform
     environment: production
+    managed-by: cloudbuild
 spec:
   template:
     metadata:
@@ -19,6 +23,10 @@ spec:
         run.googleapis.com/cpu-throttling: "false"
         run.googleapis.com/startup-cpu-boost: "true"
         run.googleapis.com/execution-environment: "gen2"
+      labels:
+        app: threat-intelligence-platform
+        managed-by: cloudbuild
+        run.googleapis.com/startupProbeType: Default
     spec:
       serviceAccountName: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
       timeoutSeconds: 300
@@ -71,23 +79,23 @@ spec:
           value: "true"
         - name: IGNORE_PERMISSION_ERRORS 
           value: "false"
+        # Secret references - corrected format
         - name: API_KEY
           valueFrom:
             secretKeyRef:
               name: api-keys
-              key: platform_api_key
+              key: latest
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
               name: auth-config
-              key: session_secret
+              key: latest
         startupProbe:
-          httpGet:
-            path: /health
+          timeoutSeconds: 240
+          periodSeconds: 240
+          failureThreshold: 1
+          tcpSocket:
             port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 15
-          failureThreshold: 3
         livenessProbe:
           httpGet:
             path: /health
