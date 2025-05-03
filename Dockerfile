@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ENVIRONMENT=production \
     LOAD_SECRETS=true \
     ENSURE_GCP_RESOURCES=true \
-    GOOGLE_APPLICATION_CREDENTIALS="/tmp/keys/service-account.json"
+    IGNORE_PERMISSION_ERRORS=true
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +31,7 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
     && rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p static/dist templates data logs /tmp/keys
+RUN mkdir -p static/dist templates data logs /app/secrets /tmp/keys
 
 # Copy requirements first for better layer caching
 COPY requirements.txt .
@@ -64,14 +64,17 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '  else' >> /app/start.sh && \
     echo '    echo "Running on GCP with metadata server available"' >> /app/start.sh && \
     echo '    # Get service account from metadata' >> /app/start.sh && \
-    echo '    # The container will use the service account provided by Cloud Run' >> /app/start.sh && \
     echo '    export DETECTED_SA_EMAIL=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)' >> /app/start.sh && \
     echo '    echo "Using service account: $DETECTED_SA_EMAIL"' >> /app/start.sh && \
     echo '  fi' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
-    echo '# Initialize default feed configuration if not exists' >> /app/start.sh && \
-    echo 'if [ "$ENVIRONMENT" = "development" ]; then' >> /app/start.sh && \
+    echo '# Copy secrets to appropriate locations if they exist' >> /app/start.sh && \
+    echo 'if [ -f "/app/secrets/feed-config.json" ]; then' >> /app/start.sh && \
+    echo '  echo "Found feed-config secret, copying to data directory"' >> /app/start.sh && \
+    echo '  mkdir -p ./data' >> /app/start.sh && \
+    echo '  cp /app/secrets/feed-config.json ./data/feeds.json' >> /app/start.sh && \
+    echo 'elif [ "$ENVIRONMENT" = "development" ]; then' >> /app/start.sh && \
     echo '  echo "Setting up default development feed configuration..."' >> /app/start.sh && \
     echo '  mkdir -p ./data' >> /app/start.sh && \
     echo '  if [ ! -f ./data/feeds.json ]; then' >> /app/start.sh && \
