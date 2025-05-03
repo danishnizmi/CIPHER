@@ -62,8 +62,9 @@ fi
 # Create secrets directory
 RUN mkdir -p /secrets && chmod 755 /secrets
 
-# Create startup script - FIXED PORT VARIABLE ESCAPING
-RUN echo '#!/bin/bash
+# Create startup script using HEREDOC syntax instead of echo to avoid Dockerfile parse errors
+RUN cat > /app/docker-entrypoint.sh << 'EOFSCRIPT'
+#!/bin/bash
 set -e
 
 # Initialize
@@ -111,7 +112,8 @@ cd /app && exec gunicorn \
   --timeout 300 \
   --log-level info \
   app:app
-' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+EOFSCRIPT
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Setup non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser
