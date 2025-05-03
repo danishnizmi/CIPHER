@@ -102,7 +102,7 @@ steps:
     id: 'push-container'
     args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$SHORT_SHA']
 
-  # Setup secrets - FIXED VERSION
+  # Setup secrets
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-secrets'
     script: |
@@ -216,8 +216,8 @@ steps:
         secret_key_value=$(python3 -c "import secrets; print(secrets.token_hex(32))")
       fi
       
-      # Deploy to Cloud Run with simplified configuration
-      # Using fully specified image name with explicit SHORT_SHA variable
+      # Deploy to Cloud Run with explicit image reference
+      # The key fix is ensuring that the SHA is properly expanded
       image_name="gcr.io/primal-chariot-382610/threat-intelligence-platform:$SHORT_SHA"
       echo "Deploying image: $image_name"
       
