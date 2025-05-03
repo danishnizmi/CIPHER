@@ -45,8 +45,6 @@ spec:
           value: "threat-data-ingestion"
         - name: REQUIRE_AUTH
           value: "true"
-        - name: SERVICE_ACCOUNT
-          value: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         startupProbe:
           httpGet:
             path: /health
