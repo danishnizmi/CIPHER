@@ -5,14 +5,15 @@ import logging
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 
 # Google Cloud imports
 try:
     from google.cloud import secretmanager, storage, bigquery, pubsub_v1, error_reporting
     from google.cloud.logging_v2 import Client as LoggingClient
-    from google.api_core.exceptions import NotFound
-    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud.exceptions import NotFound, Forbidden, BadRequest
+    from google.api_core.exceptions import GoogleAPIError, PermissionDenied, ResourceExhausted
+    from google.auth.exceptions import DefaultCredentialsError, TransportError
     import google.auth
     HAS_GCP = True
 except ImportError:
@@ -34,42 +35,82 @@ DEFAULT_ADMIN_USERNAME = "admin"
 FEED_TYPES = ["indicators", "vulnerabilities", "threat_actors", "campaigns", "malware"]
 SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 
-def get_project_id():
-    """Get Google Cloud project ID from environment or GCP metadata."""
-    project_id = os.environ.get('GCP_PROJECT')
-    
-    if not project_id and HAS_GCP:
-        try:
-            # Try to get project ID from Google Cloud metadata
-            credentials, project_id = google.auth.default()
-        except DefaultCredentialsError:
-            logger.warning("Unable to determine GCP project ID from metadata")
-            project_id = None
-    
-    return project_id
+# Global clients
+_bigquery_client = None
+_storage_client = None
+_publisher = None
+_subscriber = None
+_logging_client = None
+_error_client = None
+_secret_client = None
 
-def access_secret(secret_id, version_id="latest"):
-    """Access secrets from Google Cloud Secret Manager."""
+def get_project_id() -> Optional[str]:
+    """Get Google Cloud project ID from environment or GCP metadata with improved error handling."""
+    # First try environment variable
+    project_id = os.environ.get('GCP_PROJECT')
+    if project_id:
+        return project_id
+    
+    # If not in environment, try to get from GCP metadata
+    if HAS_GCP:
+        try:
+            # Try to get project ID from metadata
+            credentials, project_id = google.auth.default()
+            if project_id:
+                # Cache this in environment for future calls
+                os.environ['GCP_PROJECT'] = project_id
+                return project_id
+        except DefaultCredentialsError:
+            logger.warning("Unable to determine GCP project ID from metadata (DefaultCredentialsError)")
+        except TransportError:
+            logger.warning("Unable to determine GCP project ID from metadata (TransportError)")
+        except Exception as e:
+            logger.warning(f"Unable to determine GCP project ID from metadata: {str(e)}")
+    
+    logger.error("No project ID found in environment or metadata")
+    return None
+
+def initialize_credentials():
+    """Initialize Google credentials with fallback options."""
+    if not HAS_GCP:
+        logger.warning("Google Cloud libraries not installed, cannot initialize credentials")
+        return None, None
+        
+    try:
+        # Try default credentials first
+        credentials, project_id = google.auth.default()
+        logger.info(f"Using default credentials with project: {project_id}")
+        return credentials, project_id
+    except DefaultCredentialsError:
+        logger.warning("Default credentials not found")
+        return None, None
+    except Exception as e:
+        logger.warning(f"Error initializing credentials: {str(e)}")
+        return None, None
+
+def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
+    """Access secrets from Google Cloud Secret Manager with robust error handling."""
+    global _secret_client
+    
     if not HAS_GCP:
         logger.warning("Google Cloud libraries not installed, cannot access secrets")
         return None
         
     project_id = get_project_id()
-    
-    # If not running in GCP or project ID not available, return None
     if not project_id:
         logger.warning(f"Unable to access secret {secret_id}: No project ID available")
         return None
     
     try:
-        # Create the Secret Manager client
-        client = secretmanager.SecretManagerServiceClient()
+        # Create the Secret Manager client if not already initialized
+        if _secret_client is None:
+            _secret_client = secretmanager.SecretManagerServiceClient()
         
         # Build the resource name of the secret version
         name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
         
         # Access the secret version
-        response = client.access_secret_version(request={"name": name})
+        response = _secret_client.access_secret_version(request={"name": name})
         
         # Return the decoded payload
         secret_data = response.payload.data.decode("UTF-8")
@@ -81,16 +122,37 @@ def access_secret(secret_id, version_id="latest"):
             # Return as plain string if not JSON
             return secret_data
             
+    except PermissionDenied:
+        logger.error(f"Permission denied when accessing secret {secret_id}. Ensure service account has Secret Manager Secret Accessor role.")
+        return None
+    except NotFound:
+        logger.error(f"Secret {secret_id} not found in project {project_id}")
+        return None
     except Exception as e:
         logger.error(f"Error accessing secret {secret_id}: {str(e)}")
         return None
+
+def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
+    """Get and cache configuration from Secret Manager."""
+    # Return from memory cache for subsequent calls
+    if hasattr(get_cached_config, f"_cached_{secret_id}") and not force_refresh:
+        return getattr(get_cached_config, f"_cached_{secret_id}")
+        
+    # Fetch from Secret Manager
+    config_data = access_secret(secret_id)
+    
+    # Cache for future use
+    if config_data:
+        setattr(get_cached_config, f"_cached_{secret_id}", config_data)
+        
+    return config_data
 
 def get_env_bool(var_name: str, default: bool = False) -> bool:
     """Get boolean value from environment variable."""
     val = os.environ.get(var_name, str(default)).lower()
     return val in ('true', 't', 'yes', 'y', '1')
 
-def get_env_list(var_name: str, default: List = None, separator: str = ',') -> List:
+def get_env_list(var_name: str, default: Optional[List] = None, separator: str = ',') -> List:
     """Get list from environment variable."""
     if default is None:
         default = []
@@ -99,7 +161,7 @@ def get_env_list(var_name: str, default: List = None, separator: str = ',') -> L
         return default
     return [item.strip() for item in val.split(separator) if item.strip()]
 
-def get_env_dict(var_name: str, default: Dict = None) -> Dict:
+def get_env_dict(var_name: str, default: Optional[Dict] = None) -> Dict:
     """Get dictionary from JSON-formatted environment variable."""
     if default is None:
         default = {}
@@ -243,7 +305,7 @@ class BaseConfig:
     # Initialization methods
     @classmethod
     def init_secrets(cls):
-        """Initialize configuration from Secret Manager."""
+        """Initialize configuration from Secret Manager with improved error handling."""
         # Only attempt to access secrets if we're in a GCP environment
         if not cls.GCP_PROJECT or not HAS_GCP:
             logger.info("Skipping secret initialization - not in GCP environment or missing libraries")
@@ -335,11 +397,15 @@ class BaseConfig:
         # Set up Cloud Logging if enabled
         if cls.LOG_TO_CLOUD and cls.GCP_PROJECT and HAS_GCP:
             try:
-                logging_client = LoggingClient(project=cls.GCP_PROJECT)
-                cloud_handler = logging_client.get_default_handler()
+                global _logging_client
+                if _logging_client is None:
+                    _logging_client = LoggingClient(project=cls.GCP_PROJECT)
+                cloud_handler = _logging_client.get_default_handler()
                 cloud_handler.setLevel(log_level)
                 root_logger.addHandler(cloud_handler)
                 logger.info("Cloud Logging enabled")
+            except PermissionDenied:
+                logger.error("Permission denied accessing Cloud Logging. Ensure service account has Logs Writer role.")
             except Exception as e:
                 logger.error(f"Failed to set up Cloud Logging: {str(e)}")
     
@@ -350,17 +416,23 @@ class BaseConfig:
             return None
             
         try:
-            client = error_reporting.Client(project=cls.GCP_PROJECT)
+            global _error_client
+            if _error_client is None:
+                _error_client = error_reporting.Client(project=cls.GCP_PROJECT)
             logger.info("Error reporting initialized")
-            return client
+            return _error_client
+        except PermissionDenied:
+            logger.error("Permission denied accessing Error Reporting. Service account may need Error Reporting Writer role.")
+            return None
         except Exception as e:
             logger.error(f"Failed to initialize error reporting: {str(e)}")
             return None
     
     @classmethod
     def validate_configuration(cls):
-        """Validate configuration values."""
+        """Validate configuration values and check GCP permissions."""
         warnings = []
+        errors = []
         
         # Check for insecure defaults in production
         if cls.ENVIRONMENT == 'production':
@@ -375,13 +447,60 @@ class BaseConfig:
         
         # Check for essential configuration
         if not cls.GCP_PROJECT:
-            warnings.append("GCP_PROJECT not set - some functionality may be limited")
+            errors.append("GCP_PROJECT not set - multiple GCP services will fail")
         
-        # Log all warnings
+        # Test service client initialization if in GCP environment
+        if cls.GCP_PROJECT and HAS_GCP:
+            # Check BigQuery access
+            try:
+                bq_client = initialize_bigquery()
+                if bq_client:
+                    # Try listing datasets as a permission check
+                    list(bq_client.list_datasets(max_results=1))
+                    logger.info("BigQuery permissions OK")
+                else:
+                    warnings.append("BigQuery client initialization failed")
+            except PermissionDenied:
+                errors.append("Permission denied accessing BigQuery - check service account roles")
+            except Exception as e:
+                warnings.append(f"BigQuery access check failed: {str(e)}")
+                
+            # Check Storage access
+            try:
+                storage_client = initialize_storage()
+                if storage_client:
+                    # Try listing buckets as a permission check
+                    list(storage_client.list_buckets(max_results=1))
+                    logger.info("Storage permissions OK")
+                else:
+                    warnings.append("Storage client initialization failed")
+            except PermissionDenied:
+                errors.append("Permission denied accessing Storage - check service account roles")
+            except Exception as e:
+                warnings.append(f"Storage access check failed: {str(e)}")
+                
+            # Check Pub/Sub access 
+            try:
+                publisher, _ = initialize_pubsub()
+                if publisher:
+                    # Try listing topics as a permission check
+                    publisher.list_topics(request={"project": f"projects/{cls.GCP_PROJECT}"})
+                    logger.info("Pub/Sub permissions OK")
+                else:
+                    warnings.append("Pub/Sub client initialization failed")
+            except PermissionDenied:
+                errors.append("Permission denied accessing Pub/Sub - check service account roles")
+            except Exception as e:
+                warnings.append(f"Pub/Sub access check failed: {str(e)}")
+        
+        # Log all warnings and errors
         for warning in warnings:
             logger.warning(warning)
             
-        return len(warnings) == 0
+        for error in errors:
+            logger.error(error)
+            
+        return len(errors) == 0
     
     @classmethod
     def get_feed_by_id(cls, feed_id):
@@ -438,6 +557,72 @@ class BaseConfig:
             return None
             
         return f"https://{cls.GCP_REGION}-{cls.GCP_PROJECT}.cloudfunctions.net/{function_name}"
+    
+    @classmethod
+    def ensure_gcp_resources(cls):
+        """Ensure required GCP resources exist."""
+        if not cls.GCP_PROJECT or not HAS_GCP:
+            logger.warning("Skipping GCP resource validation - not in GCP environment or missing libraries")
+            return False
+            
+        success = True
+        
+        # Ensure BigQuery dataset exists
+        try:
+            bq_client = initialize_bigquery()
+            if bq_client:
+                dataset_id = f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}"
+                try:
+                    bq_client.get_dataset(dataset_id)
+                    logger.info(f"BigQuery dataset {cls.BIGQUERY_DATASET} exists")
+                except NotFound:
+                    logger.warning(f"BigQuery dataset {cls.BIGQUERY_DATASET} not found, creating it")
+                    dataset = bigquery.Dataset(dataset_id)
+                    dataset.location = cls.BIGQUERY_LOCATION
+                    bq_client.create_dataset(dataset)
+                    logger.info(f"Created BigQuery dataset {cls.BIGQUERY_DATASET}")
+        except Exception as e:
+            logger.error(f"Error ensuring BigQuery dataset: {str(e)}")
+            success = False
+            
+        # Ensure GCS bucket exists
+        try:
+            storage_client = initialize_storage()
+            if storage_client:
+                bucket = storage_client.bucket(cls.GCS_BUCKET)
+                if not bucket.exists():
+                    logger.warning(f"GCS bucket {cls.GCS_BUCKET} not found, creating it")
+                    storage_client.create_bucket(bucket, location=cls.GCP_REGION)
+                    logger.info(f"Created GCS bucket {cls.GCS_BUCKET}")
+                else:
+                    logger.info(f"GCS bucket {cls.GCS_BUCKET} exists")
+        except Exception as e:
+            logger.error(f"Error ensuring GCS bucket: {str(e)}")
+            success = False
+            
+        # Ensure Pub/Sub topics exist
+        try:
+            publisher, _ = initialize_pubsub()
+            if publisher:
+                topics_to_check = [
+                    cls.PUBSUB_TOPIC,
+                    cls.PUBSUB_ANALYSIS_TOPIC
+                ]
+                
+                for topic_name in topics_to_check:
+                    topic_path = publisher.topic_path(cls.GCP_PROJECT, topic_name)
+                    try:
+                        publisher.get_topic(request={"topic": topic_path})
+                        logger.info(f"Pub/Sub topic {topic_name} exists")
+                    except NotFound:
+                        logger.warning(f"Pub/Sub topic {topic_name} not found, creating it")
+                        publisher.create_topic(request={"name": topic_path})
+                        logger.info(f"Created Pub/Sub topic {topic_name}")
+        except Exception as e:
+            logger.error(f"Error ensuring Pub/Sub topics: {str(e)}")
+            success = False
+            
+        return success
 
 class DevelopmentConfig(BaseConfig):
     """Development configuration."""
@@ -544,6 +729,9 @@ class ProductionConfig(BaseConfig):
         # Validate configuration
         cls.validate_configuration()
         
+        # Ensure GCP resources exist
+        cls.ensure_gcp_resources()
+        
         logger.info("Initialized production configuration")
 
 # Dictionary of environment configurations
@@ -573,39 +761,67 @@ def get_config():
 
 # Helper functions for other modules
 def initialize_bigquery():
-    """Initialize and return a BigQuery client."""
+    """Initialize and return a BigQuery client with error handling."""
+    global _bigquery_client
+    
+    if _bigquery_client is not None:
+        return _bigquery_client
+        
     if not HAS_GCP:
         logger.warning("Google Cloud libraries not installed, cannot initialize BigQuery")
         return None
         
     try:
-        return bigquery.Client(project=Config.GCP_PROJECT)
+        _bigquery_client = bigquery.Client(project=Config.GCP_PROJECT)
+        return _bigquery_client
+    except PermissionDenied:
+        logger.error("Permission denied initializing BigQuery client. Check service account roles.")
+        return None
     except Exception as e:
         logger.error(f"Failed to initialize BigQuery client: {str(e)}")
         return None
 
 def initialize_storage():
-    """Initialize and return a Cloud Storage client."""
+    """Initialize and return a Cloud Storage client with error handling."""
+    global _storage_client
+    
+    if _storage_client is not None:
+        return _storage_client
+        
     if not HAS_GCP:
         logger.warning("Google Cloud libraries not installed, cannot initialize Storage")
         return None
         
     try:
-        return storage.Client(project=Config.GCP_PROJECT)
+        _storage_client = storage.Client(project=Config.GCP_PROJECT)
+        return _storage_client
+    except PermissionDenied:
+        logger.error("Permission denied initializing Storage client. Check service account roles.")
+        return None
     except Exception as e:
         logger.error(f"Failed to initialize Storage client: {str(e)}")
         return None
 
 def initialize_pubsub():
-    """Initialize and return PubSub publisher and subscriber clients."""
+    """Initialize and return PubSub publisher and subscriber clients with error handling."""
+    global _publisher, _subscriber
+    
+    if _publisher is not None and _subscriber is not None:
+        return _publisher, _subscriber
+        
     if not HAS_GCP:
         logger.warning("Google Cloud libraries not installed, cannot initialize PubSub")
         return None, None
         
     try:
-        publisher = pubsub_v1.PublisherClient()
-        subscriber = pubsub_v1.SubscriberClient()
-        return publisher, subscriber
+        if _publisher is None:
+            _publisher = pubsub_v1.PublisherClient()
+        if _subscriber is None:
+            _subscriber = pubsub_v1.SubscriberClient()
+        return _publisher, _subscriber
+    except PermissionDenied:
+        logger.error("Permission denied initializing Pub/Sub clients. Check service account roles.")
+        return None, None
     except Exception as e:
         logger.error(f"Failed to initialize PubSub clients: {str(e)}")
         return None, None
@@ -623,8 +839,77 @@ def report_error(exception):
     if client:
         try:
             client.report_exception()
+        except PermissionDenied:
+            logger.error("Permission denied reporting error. Service account may need Error Reporting Writer role.")
         except Exception as e:
             logger.error(f"Failed to report error: {str(e)}")
+
+def check_gcp_permissions():
+    """Check if service account has the necessary GCP permissions."""
+    permissions = {
+        "bigquery": False,
+        "storage": False,
+        "pubsub": False,
+        "secretmanager": False,
+        "logging": False,
+        "errorreporting": False
+    }
+    
+    # Check BigQuery permissions
+    try:
+        bq_client = initialize_bigquery()
+        if bq_client:
+            list(bq_client.list_datasets(max_results=1))
+            permissions["bigquery"] = True
+    except Exception:
+        pass
+        
+    # Check Storage permissions
+    try:
+        storage_client = initialize_storage()
+        if storage_client:
+            list(storage_client.list_buckets(max_results=1))
+            permissions["storage"] = True
+    except Exception:
+        pass
+        
+    # Check Pub/Sub permissions
+    try:
+        publisher, _ = initialize_pubsub()
+        if publisher:
+            publisher.list_topics(request={"project": f"projects/{Config.GCP_PROJECT}"})
+            permissions["pubsub"] = True
+    except Exception:
+        pass
+        
+    # Check Secret Manager permissions
+    try:
+        secret = access_secret('api-keys', 'latest')
+        permissions["secretmanager"] = secret is not None
+    except Exception:
+        pass
+        
+    # Check Logging permissions
+    try:
+        if Config.LOG_TO_CLOUD and Config.GCP_PROJECT and HAS_GCP:
+            global _logging_client
+            if _logging_client is None:
+                _logging_client = LoggingClient(project=Config.GCP_PROJECT)
+            _logging_client.logger('test').log_text('Test log entry')
+            permissions["logging"] = True
+    except Exception:
+        pass
+        
+    # Check Error Reporting permissions
+    try:
+        if Config.ENABLE_ERROR_REPORTING and Config.GCP_PROJECT and HAS_GCP:
+            client = error_reporting.Client(project=Config.GCP_PROJECT)
+            client.report("Test error report")
+            permissions["errorreporting"] = True
+    except Exception:
+        pass
+        
+    return permissions
 
 # Module exports
 __all__ = [
@@ -634,5 +919,6 @@ __all__ = [
     'initialize_storage', 
     'initialize_pubsub',
     'get_error_client',
-    'report_error'
+    'report_error',
+    'check_gcp_permissions'
 ]
