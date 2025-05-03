@@ -101,7 +101,7 @@ def check_table_exists(table_name: str) -> bool:
     """Check if BigQuery table exists."""
     if not bq_client:
         return False
-    
+        
     try:
         full_table_id = Config.get_table_name(table_name)
         if not full_table_id:
@@ -681,23 +681,48 @@ def trigger_ingest():
         if feed_id and not Config.get_feed_by_id(feed_id):
             return jsonify({"error": f"Invalid feed_id: {feed_id}"}), 400
         
-        # Prepare message for Pub/Sub
-        message = {
-            "operation": "ingest",
-            "timestamp": datetime.utcnow().isoformat(),
-            "process_all": process_all,
-            "feed_id": feed_id
-        }
-        
-        # Publish message to trigger Cloud Function
-        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
-        
-        return jsonify({
-            "message": "Ingestion process triggered",
-            "message_id": message_id,
-            "process_all": process_all,
-            "feed_id": feed_id
-        })
+        # Import ingestion module
+        try:
+            import ingestion
+            
+            # Start ingestion in background thread for better responsiveness
+            if process_all:
+                # Process all feeds
+                thread = ingestion.trigger_ingestion_in_background()
+                return jsonify({
+                    "message": "Ingestion process triggered for all feeds",
+                    "status": "running"
+                })
+            elif feed_id:
+                # Process specific feed
+                result = ingestion.ingest_feed(feed_id)
+                return jsonify({
+                    "message": f"Processed feed {feed_id}",
+                    "status": result["status"],
+                    "details": result
+                })
+            else:
+                return jsonify({"error": "Must specify feed_id or set process_all=true"}), 400
+                
+        except ImportError:
+            # Fall back to Pub/Sub if ingestion module can't be imported directly
+            # Prepare message for Pub/Sub
+            message = {
+                "operation": "ingest",
+                "timestamp": datetime.utcnow().isoformat(),
+                "process_all": process_all,
+                "feed_id": feed_id
+            }
+            
+            # Publish message to trigger Cloud Function
+            message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
+            
+            return jsonify({
+                "message": "Ingestion process triggered",
+                "message_id": message_id,
+                "process_all": process_all,
+                "feed_id": feed_id
+            })
     
     except Exception as e:
         logger.error(f"Error triggering ingestion: {str(e)}")
@@ -723,24 +748,71 @@ def trigger_analysis():
                 "error": f"Too many indicators to analyze at once. Maximum is {Config.ANALYSIS_MAX_INDICATORS_PER_BATCH}"
             }), 400
         
-        # Prepare message for Pub/Sub
-        message = {
-            "operation": "analyze",
-            "timestamp": datetime.utcnow().isoformat(),
-            "analyze_all": analyze_all,
-            "force_reanalysis": force_reanalysis,
-            "indicator_ids": indicator_ids
-        }
-        
-        # Publish message to trigger Cloud Function
-        message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message)
-        
-        return jsonify({
-            "message": "Analysis process triggered",
-            "message_id": message_id,
-            "analyze_all": analyze_all,
-            "indicator_count": len(indicator_ids) if not analyze_all else "all"
-        })
+        # Try to import analysis module directly
+        try:
+            import analysis
+            
+            if analyze_all:
+                # Find indicators for analysis
+                indicators_to_analyze = analysis.find_indicators_for_analysis(
+                    limit=min(1000, Config.ANALYSIS_MAX_INDICATORS_PER_BATCH)
+                )
+                
+                if not indicators_to_analyze:
+                    return jsonify({
+                        "message": "No indicators found that need analysis",
+                        "status": "skipped"
+                    })
+                    
+                # Start analysis in background
+                thread = threading.Thread(
+                    target=analysis.analyze_threat_data,
+                    args=({
+                        "indicator_ids": indicators_to_analyze,
+                        "force_reanalysis": force_reanalysis
+                    },)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                return jsonify({
+                    "message": f"Analysis process triggered for {len(indicators_to_analyze)} indicators",
+                    "status": "running"
+                })
+                
+            else:
+                # Analyze specific indicators
+                result = analysis.analyze_threat_data({
+                    "indicator_ids": indicator_ids,
+                    "force_reanalysis": force_reanalysis
+                })
+                
+                return jsonify({
+                    "message": "Analysis process completed",
+                    "status": "success", 
+                    "results": result
+                })
+                
+        except ImportError:
+            # Fall back to Pub/Sub if analysis module can't be imported directly
+            # Prepare message for Pub/Sub
+            message = {
+                "operation": "analyze",
+                "timestamp": datetime.utcnow().isoformat(),
+                "analyze_all": analyze_all,
+                "force_reanalysis": force_reanalysis,
+                "indicator_ids": indicator_ids
+            }
+            
+            # Publish message to trigger Cloud Function
+            message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message)
+            
+            return jsonify({
+                "message": "Analysis process triggered",
+                "message_id": message_id,
+                "analyze_all": analyze_all,
+                "indicator_count": len(indicator_ids) if not analyze_all else "all"
+            })
     
     except Exception as e:
         logger.error(f"Error triggering analysis: {str(e)}")
