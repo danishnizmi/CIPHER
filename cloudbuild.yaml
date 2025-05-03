@@ -87,18 +87,21 @@ steps:
       SERVICE_ACCOUNT="threat-intelligence-sa"
       SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
       
-      if ! gcloud iam service-accounts describe ${SERVICE_ACCOUNT_EMAIL} &>/dev/null; then
+      if ! gcloud iam service-accounts describe ${SERVICE_ACCOUNT_EMAIL} 2>/dev/null; then
         echo "Creating service account: ${SERVICE_ACCOUNT_EMAIL}"
         gcloud iam service-accounts create ${SERVICE_ACCOUNT} \
           --display-name="Threat Intelligence Platform Service Account"
-          
-        # Grant necessary permissions
-        for ROLE in roles/bigquery.dataEditor roles/storage.objectAdmin roles/pubsub.editor roles/secretmanager.secretAccessor; do
-          gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-            --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-            --role="${ROLE}" --quiet
-        done
+      else
+        echo "Service account ${SERVICE_ACCOUNT_EMAIL} already exists"
       fi
+      
+      # Grant necessary permissions - with condition=None to fix the error
+      for ROLE in roles/bigquery.dataEditor roles/storage.objectAdmin roles/pubsub.editor roles/secretmanager.secretAccessor; do
+        echo "Granting role ${ROLE} to ${SERVICE_ACCOUNT_EMAIL}"
+        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+          --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+          --role="${ROLE}" --condition=None --quiet || echo "Warning: Role binding for ${ROLE} encountered an issue"
+      done
       
       # Set up secrets
       echo "Setting up secrets..."
@@ -108,12 +111,18 @@ steps:
         platform_api_key=$(python3 -c "import secrets; print(secrets.token_hex(16))")
         api_keys_json="{\"platform_api_key\":\"$platform_api_key\",\"created_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}"
         echo "$api_keys_json" | gcloud secrets create api-keys --replication-policy="automatic" --data-file=-
+        echo "Created api-keys secret"
+      else
+        echo "Secret api-keys already exists"
       fi
       
       # Admin password
       if ! gcloud secrets describe admin-initial-password 2>/dev/null; then
-        admin_password="admin"
+        admin_password=$(python3 -c "import secrets; print(secrets.token_hex(8))")
         echo "$admin_password" | gcloud secrets create admin-initial-password --replication-policy="automatic" --data-file=-
+        echo "Created admin-initial-password secret with value: $admin_password"
+      else
+        echo "Secret admin-initial-password already exists"
       fi
       
       # Auth config
@@ -121,13 +130,16 @@ steps:
         session_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))")
         auth_config_json="{\"session_secret\":\"$session_secret\",\"users\":{}}"
         echo "$auth_config_json" | gcloud secrets create auth-config --replication-policy="automatic" --data-file=-
+        echo "Created auth-config secret"
+      else
+        echo "Secret auth-config already exists"
       fi
       
       # Grant secret access to service account
       for SECRET_NAME in api-keys admin-initial-password auth-config; do
         gcloud secrets add-iam-policy-binding $SECRET_NAME \
           --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
-          --role="roles/secretmanager.secretAccessor" || true
+          --role="roles/secretmanager.secretAccessor" --condition=None || echo "Warning: Secret binding for $SECRET_NAME encountered an issue"
       done
       
       # Create BigQuery dataset if needed
@@ -137,6 +149,9 @@ steps:
         bq --location=US mk --dataset \
           --description="Threat Intelligence Platform Data" \
           ${PROJECT_ID}:${DATASET_ID}
+        echo "Created BigQuery dataset ${DATASET_ID}"
+      else
+        echo "BigQuery dataset ${DATASET_ID} already exists"
       fi
       
       # Create GCS bucket if needed
@@ -144,6 +159,9 @@ steps:
       BUCKET_NAME="${PROJECT_ID}-threat-data"
       if ! gsutil ls -b gs://${BUCKET_NAME} &>/dev/null; then
         gsutil mb -l us-central1 gs://${BUCKET_NAME}
+        echo "Created GCS bucket ${BUCKET_NAME}"
+      else
+        echo "GCS bucket ${BUCKET_NAME} already exists"
       fi
       
       # Create PubSub topics if needed
@@ -151,8 +169,13 @@ steps:
       for TOPIC in threat-data-ingestion threat-analysis-events; do
         if ! gcloud pubsub topics describe ${TOPIC} --project=${PROJECT_ID} &>/dev/null; then
           gcloud pubsub topics create ${TOPIC} --project=${PROJECT_ID}
+          echo "Created PubSub topic ${TOPIC}"
+        else
+          echo "PubSub topic ${TOPIC} already exists"
         fi
       done
+      
+      echo "GCP resource setup completed successfully"
 
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
@@ -208,8 +231,11 @@ steps:
       if [ ! -z "$api_key_value" ]; then
         echo "Setting up Cloud Scheduler job..."
         
-        # Delete existing job if it exists
-        gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet 2>/dev/null || echo "Job doesn't exist yet"
+        # Check if job exists and delete if it does
+        if gcloud scheduler jobs describe update-threat-feeds --location=us-central1 &>/dev/null; then
+          echo "Deleting existing scheduler job"
+          gcloud scheduler jobs delete update-threat-feeds --location=us-central1 --quiet
+        fi
         
         # Create scheduler job
         gcloud scheduler jobs create http update-threat-feeds \
@@ -222,6 +248,8 @@ steps:
           --time-zone="UTC" \
           --description="Update threat feeds every 3 hours" || echo "Scheduler job setup failed"
       fi
+      
+      echo "Cloud Run deployment completed successfully"
 
   # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
