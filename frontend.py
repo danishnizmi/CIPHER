@@ -41,7 +41,7 @@ logging.basicConfig(level=LOG_LEVEL,
                     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
 # Create Blueprint for the frontend module
-app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
+frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
 
 # ====== CSRF Protection Setup ======
 HAS_CSRF = False
@@ -54,7 +54,7 @@ except ImportError:
     logger.warning("CSRF protection not available - flask_wtf not installed")
     
     # Provide a dummy csrf_token function for templates
-    @app.context_processor
+    @frontend_app.context_processor
     def inject_csrf_token():
         return dict(csrf_token=lambda: "")
 
@@ -84,7 +84,7 @@ def get_secret_key() -> str:
     return hashlib.sha256(f"{time.time()}{secrets.token_hex(32)}".encode()).hexdigest()
 
 # Share GCP clients with the app context
-@app.before_request
+@frontend_app.before_request
 def setup_gcp_clients():
     """Share GCP clients from config module with application context"""
     if not hasattr(g, 'gcp_clients'):
@@ -463,14 +463,14 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 # ====== Route Handlers ======
-@app.route('/')
+@frontend_app.route('/')
 def index():
     """Root redirects to dashboard if logged in, otherwise to login"""
     if session.get('logged_in'):
         return redirect(url_for('frontend.dashboard'))
     return redirect(url_for('frontend.login'))
 
-@app.route('/login', methods=['GET', 'POST'])
+@frontend_app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page handler with comprehensive error handling"""
     error = None
@@ -536,7 +536,7 @@ def login():
     # For GET requests or failed logins
     return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
-@app.route('/logout')
+@frontend_app.route('/logout')
 def logout():
     """Logout route handler"""
     username = session.get('username')
@@ -548,8 +548,8 @@ def logout():
     flash('You have been logged out', 'info')
     return redirect(url_for('frontend.login'))
 
-@app.route('/dashboard')
-@app.route('/dashboard/<view>')
+@frontend_app.route('/dashboard')
+@frontend_app.route('/dashboard/<view>')
 @login_required
 def dashboard(view=None):
     """Dashboard view with dynamic content loading based on view type"""
@@ -729,7 +729,7 @@ def dashboard(view=None):
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('frontend.login'))
 
-@app.route('/refresh_feeds')
+@frontend_app.route('/refresh_feeds')
 @login_required
 def refresh_feeds():
     """Trigger feed refresh and redirect back to feeds view"""
@@ -761,7 +761,7 @@ def refresh_feeds():
         flash(f'Error refreshing feeds: {str(e)}', 'danger')
         return redirect(url_for('frontend.dashboard', view='feeds'))
 
-@app.route('/profile', methods=['GET', 'POST'])
+@frontend_app.route('/profile', methods=['GET', 'POST'])
 @login_required
 def profile():
     """User profile page"""
@@ -771,7 +771,7 @@ def profile():
     
     return render_template('auth.html', page_type='profile', username=username, user=user)
 
-@app.route('/change_password', methods=['POST'])
+@frontend_app.route('/change_password', methods=['POST'])
 @login_required
 def change_password():
     """Handle password change form submission"""
@@ -815,14 +815,14 @@ def change_password():
         flash('An error occurred while changing password. Please try again.', 'danger')
         return redirect(url_for('frontend.profile'))
 
-@app.route('/users')
+@frontend_app.route('/users')
 @admin_required
 def users():
     """User management page"""
     users = load_users()
     return render_template('content.html', page_type='users', users=users)
 
-@app.route('/user/add', methods=['GET', 'POST'])
+@frontend_app.route('/user/add', methods=['GET', 'POST'])
 @admin_required
 def add_user_route():
     """Add user page"""
@@ -861,7 +861,7 @@ def add_user_route():
         flash('An error occurred while adding user. Please try again.', 'danger')
         return redirect(url_for('frontend.users'))
 
-@app.route('/user/edit/<username>', methods=['GET', 'POST'])
+@frontend_app.route('/user/edit/<username>', methods=['GET', 'POST'])
 @admin_required
 def edit_user(username):
     """Edit user page"""
@@ -903,7 +903,7 @@ def edit_user(username):
         flash('An error occurred while editing user. Please try again.', 'danger')
         return redirect(url_for('frontend.users'))
 
-@app.route('/user/delete/<username>', methods=['POST'])
+@frontend_app.route('/user/delete/<username>', methods=['POST'])
 @admin_required
 def delete_user(username):
     """Delete user route"""
@@ -938,25 +938,25 @@ def delete_user(username):
         flash('An error occurred while deleting user. Please try again.', 'danger')
         return redirect(url_for('frontend.users'))
 
-@app.route('/feeds')
+@frontend_app.route('/feeds')
 @login_required
 def feeds():
     """Shortcut to feeds view"""
     return redirect(url_for('frontend.dashboard', view='feeds'))
 
-@app.route('/iocs')
+@frontend_app.route('/iocs')
 @login_required
 def iocs():
     """Shortcut to IOCs view"""
     return redirect(url_for('frontend.dashboard', view='iocs'))
 
-@app.route('/campaigns')
+@frontend_app.route('/campaigns')
 @login_required
 def campaigns():
     """Shortcut to campaigns view"""
     return redirect(url_for('frontend.dashboard', view='campaigns'))
 
-@app.route('/ingest_threat_data')
+@frontend_app.route('/ingest_threat_data')
 @login_required
 def ingest_threat_data():
     """Trigger data ingestion manually"""
@@ -994,7 +994,7 @@ def ingest_threat_data():
     
     return redirect(url_for('frontend.dashboard'))
 
-@app.route('/dynamic_content_detail/<content_type>/<identifier>')
+@frontend_app.route('/dynamic_content_detail/<content_type>/<identifier>')
 @login_required
 def dynamic_content_detail(content_type, identifier):
     """Dynamic content detail page for IOCs, campaigns, feeds, etc."""
@@ -1104,7 +1104,7 @@ def dynamic_content_detail(content_type, identifier):
         return redirect(url_for('frontend.dashboard'))
 
 # ====== API Passthrough ======
-@app.route('/api/refresh_feeds', methods=['POST'])
+@frontend_app.route('/api/refresh_feeds', methods=['POST'])
 @login_required
 def api_refresh_feeds():
     """API endpoint to trigger feed refresh"""
@@ -1125,7 +1125,7 @@ def api_refresh_feeds():
         logger.error(f"Error in API refresh_feeds: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/upload_csv', methods=['POST'])
+@frontend_app.route('/api/upload_csv', methods=['POST'])
 @login_required
 def api_upload_csv():
     """API endpoint to upload CSV data"""
@@ -1168,9 +1168,9 @@ def api_upload_csv():
         logger.error(f"Error in API upload_csv: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ====== Template Filters ======
+# ====== Template Filters - Moved to app.py ======
 
-@app.template_filter('datetime')
+# Define datetime formatter function that can be registered in app.py
 def format_datetime(value):
     """Format a datetime string for display"""
     if not value:
@@ -1186,13 +1186,13 @@ def format_datetime(value):
 
 # ====== Error Handlers ======
 
-@app.errorhandler(404)
+@frontend_app.errorhandler(404)
 def page_not_found(e):
     """Handle 404 errors"""
     logger.info(f"Page not found: {request.path}")
     return render_template('404.html'), 404
 
-@app.errorhandler(500)
+@frontend_app.errorhandler(500)
 def server_error(e):
     """Handle 500 errors"""
     logger.error(f"Server error: {str(e)}")
@@ -1201,7 +1201,7 @@ def server_error(e):
     return render_template('500.html'), 500
 
 # Special error handler for CSRF errors to make them more user-friendly
-@app.errorhandler(400)
+@frontend_app.errorhandler(400)
 def handle_csrf_error(e):
     logger.error(f"400 error: {str(e)}")
     # Check if this is a CSRF error
@@ -1213,7 +1213,7 @@ def handle_csrf_error(e):
 
 # ====== Context Processors ======
 
-@app.context_processor
+@frontend_app.context_processor
 def inject_global_data():
     """Inject global data into templates"""
     return {
@@ -1242,7 +1242,7 @@ MOCK_DATA = {
 }
 
 # Initialize detail.html template for content detail views
-@app.route('/detail')
+@frontend_app.route('/detail')
 @login_required
 def detail():
     """Detail page placeholder - for template testing purposes"""
@@ -1250,14 +1250,14 @@ def detail():
 
 # Add template for 404 and 500 error pages if they don't exist
 if not os.path.exists('templates/404.html'):
-    @app.route('/404')
+    @frontend_app.route('/404')
     def error_404_page():
         return render_template('base.html', 
                                title="Page Not Found", 
                                content="<h1>404 - Page Not Found</h1><p>The requested page does not exist.</p>")
 
 if not os.path.exists('templates/500.html'):
-    @app.route('/500')
+    @frontend_app.route('/500')
     def error_500_page():
         return render_template('base.html', 
                                title="Server Error", 
@@ -1265,6 +1265,7 @@ if not os.path.exists('templates/500.html'):
 
 # If this script is run directly, start a development server
 if __name__ == "__main__":
+    app = current_app
     app.run(debug=ENVIRONMENT != 'production', 
             host='0.0.0.0', 
             port=int(os.environ.get('PORT', 8080)))
