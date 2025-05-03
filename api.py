@@ -51,6 +51,84 @@ def require_api_key(f):
     
     return decorated_function
 
+# -------------------- Debug Endpoints --------------------
+
+@api_blueprint.route('/debug/auth', methods=['GET'])
+@require_api_key
+def debug_auth():
+    """Debug authentication and permissions."""
+    try:
+        import google.auth
+        import json
+        from google.cloud import storage, bigquery, pubsub_v1
+        from google.cloud.exceptions import NotFound
+        
+        # Get current credentials
+        credentials, project_id = google.auth.default()
+        service_account_email = getattr(credentials, 'service_account_email', 'Not available')
+        
+        # Test various services
+        results = {
+            "service_account": service_account_email,
+            "project_id": project_id,
+            "tests": {}
+        }
+        
+        # Test BigQuery
+        try:
+            bq_client = bigquery.Client()
+            dataset = f"{project_id}.threat_intelligence"
+            try:
+                bq_client.get_dataset(dataset)
+                results["tests"]["bigquery"] = "Success: Dataset exists"
+            except NotFound:
+                results["tests"]["bigquery"] = "Error: Dataset not found"
+        except Exception as e:
+            results["tests"]["bigquery"] = f"Error: {str(e)}"
+            
+        # Test Storage
+        try:
+            storage_client = storage.Client()
+            bucket_name = f"{project_id}-threat-data"
+            try:
+                bucket = storage_client.get_bucket(bucket_name)
+                results["tests"]["storage"] = "Success: Bucket exists"
+            except NotFound:
+                results["tests"]["storage"] = "Error: Bucket not found"
+        except Exception as e:
+            results["tests"]["storage"] = f"Error: {str(e)}"
+            
+        # Test Pub/Sub
+        try:
+            publisher = pubsub_v1.PublisherClient()
+            topic_path = publisher.topic_path(project_id, "threat-data-ingestion")
+            try:
+                publisher.get_topic(request={"topic": topic_path})
+                results["tests"]["pubsub"] = "Success: Topic exists"
+            except NotFound:
+                results["tests"]["pubsub"] = "Error: Topic not found"
+        except Exception as e:
+            results["tests"]["pubsub"] = f"Error: {str(e)}"
+            
+        # Test Secret Manager
+        try:
+            from google.cloud import secretmanager
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{project_id}/secrets/feed-config"
+            try:
+                client.get_secret(request={"name": name})
+                results["tests"]["secretmanager"] = "Success: Secret exists"
+            except Exception as e:
+                results["tests"]["secretmanager"] = f"Error: {str(e)}"
+        except Exception as e:
+            results["tests"]["secretmanager"] = f"Error: {str(e)}"
+            
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
 # -------------------- Helper Functions --------------------
 
 def format_bq_row(row: Dict) -> Dict:
