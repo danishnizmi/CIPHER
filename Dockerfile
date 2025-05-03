@@ -30,7 +30,9 @@ RUN mkdir -p scripts static/src static/dist templates functions/ingestion functi
 COPY requirements.txt .
 
 # Install dependencies in single layer with optimized flags
+# Pin numpy version to avoid compatibility issues with pandas
 RUN pip install --upgrade pip && \
+    pip install numpy==1.24.3 && \
     pip install --no-cache-dir -r requirements.txt
 
 # Create Python package structure
@@ -45,9 +47,8 @@ COPY . .
 # Ensure template directory exists and create it if needed
 RUN mkdir -p /app/templates
 
-# Ensure all required template files exist
-# This includes both files in your project and those referenced in the code
-RUN for template in auth.html base.html content.html dashboard.html 404.html 500.html login.html detail.html; do \
+# Ensure all required template files exist - ONLY check for the templates we have
+RUN for template in auth.html base.html content.html dashboard.html; do \
     if [ ! -f "/app/templates/$template" ]; then \
         echo "<!DOCTYPE html><html><head><title>Placeholder for $template</title></head><body><h1>Placeholder for $template</h1></body></html>" > "/app/templates/$template"; \
     fi; \
@@ -61,55 +62,55 @@ fi
 # Create secrets directory
 RUN mkdir -p /secrets && chmod 755 /secrets
 
-# Create startup script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Initialize\n\
-echo "Starting Threat Intelligence Platform..."\n\
-python --version\n\
-\n\
-# Verify critical files\n\
-if [ ! -f app.py ]; then\n\
-  echo "ERROR: app.py not found!"\n\
-  exit 1\n\
-fi\n\
-\n\
-# Ensure Python module structure\n\
-touch __init__.py\n\
-touch functions/__init__.py\n\
-touch functions/ingestion/__init__.py\n\
-touch functions/analysis/__init__.py\n\
-\n\
-# Set PYTHONPATH\n\
-export PYTHONPATH=/app:$PYTHONPATH\n\
-\n\
-# Ensure static files exist\n\
-mkdir -p static/dist\n\
-[ ! -f "static/dist/output.css" ] && echo "/* Default CSS */" > static/dist/output.css\n\
-\n\
-# Ensure templates exist\n\
-mkdir -p templates\n\
-for template in auth.html base.html content.html dashboard.html 404.html 500.html login.html detail.html; do\n\
-  if [ ! -f "templates/$template" ]; then\n\
-    echo "WARNING: Creating placeholder for $template"\n\
-    echo "<!DOCTYPE html><html><head><title>$template</title></head><body><h1>$template</h1></body></html>" > "templates/$template"\n\
-  fi\n\
-done\n\
-\n\
-# Verify imports\n\
-python -c "import flask; print(\"flask module found\")" || echo "WARNING: flask module not found"\n\
-python -c "import config; print(\"config module found\")" || echo "WARNING: config module not found"\n\
-\n\
-# Start gunicorn\n\
-echo "Starting gunicorn..."\n\
-cd /app && exec gunicorn \\\n\
-  --bind :$${PORT} \\\n\
-  --workers 2 \\\n\
-  --threads 8 \\\n\
-  --timeout 300 \\\n\
-  --log-level info \\\n\
-  app:app\n\
+# Create startup script - FIXED PORT VARIABLE ESCAPING
+RUN echo '#!/bin/bash
+set -e
+
+# Initialize
+echo "Starting Threat Intelligence Platform..."
+python --version
+
+# Verify critical files
+if [ ! -f app.py ]; then
+  echo "ERROR: app.py not found!"
+  exit 1
+fi
+
+# Ensure Python module structure
+touch __init__.py
+touch functions/__init__.py
+touch functions/ingestion/__init__.py
+touch functions/analysis/__init__.py
+
+# Set PYTHONPATH
+export PYTHONPATH=/app:$PYTHONPATH
+
+# Ensure static files exist
+mkdir -p static/dist
+[ ! -f "static/dist/output.css" ] && echo "/* Default CSS */" > static/dist/output.css
+
+# Ensure templates exist - ONLY check for the templates we have
+mkdir -p templates
+for template in auth.html base.html content.html dashboard.html; do
+  if [ ! -f "templates/$template" ]; then
+    echo "WARNING: Creating placeholder for $template"
+    echo "<!DOCTYPE html><html><head><title>$template</title></head><body><h1>$template</h1></body></html>" > "templates/$template"
+  fi
+done
+
+# Verify imports
+python -c "import flask; print(\"flask module found\")" || echo "WARNING: flask module not found"
+python -c "import config; print(\"config module found\")" || echo "WARNING: config module not found"
+
+# Start gunicorn with correct port reference
+echo "Starting gunicorn..."
+cd /app && exec gunicorn \
+  --bind :${PORT} \
+  --workers 2 \
+  --threads 8 \
+  --timeout 300 \
+  --log-level info \
+  app:app
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Setup non-root user
@@ -117,7 +118,7 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 RUN chown -R appuser:appuser /app /secrets
 
 # Expose port
-EXPOSE ${PORT}
+EXPOSE 8080
 
 # Set entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
