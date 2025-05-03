@@ -49,6 +49,7 @@ steps:
       requests==2.31.0
       python-dateutil==2.8.2
       numpy==1.24.3
+      pandas==1.5.3
       EOF
       
       # Setup BigQuery script
@@ -92,7 +93,7 @@ steps:
   - name: 'python:3.10'
     id: 'update-requirements'
     script: |
-      echo "Updating requirements.txt to pin numpy version..."
+      echo "Updating requirements.txt to fix numpy and pandas versions..."
       
       # Check if numpy is already in requirements.txt
       if grep -q "numpy==" requirements.txt; then
@@ -101,6 +102,15 @@ steps:
       else
         # Add numpy to requirements.txt
         echo "numpy==1.24.3" >> requirements.txt
+      fi
+      
+      # Update pandas version to be compatible with numpy 1.24.3
+      if grep -q "pandas==" requirements.txt; then
+        # Update pandas version
+        sed -i 's/pandas==.*/pandas==1.5.3/' requirements.txt
+      else
+        # Add pandas to requirements.txt
+        echo "pandas==1.5.3" >> requirements.txt
       fi
       
       echo "Updated requirements.txt:"
