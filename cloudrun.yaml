@@ -38,9 +38,7 @@ spec:
         - name: PORT
           value: "8080"
         - name: API_URL
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.annotations['run.googleapis.com/custom-domain']
+          value: "https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"
         - name: GCS_BUCKET
           value: "primal-chariot-382610-threat-data"
         - name: PUBSUB_TOPIC
