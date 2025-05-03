@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ENVIRONMENT=production \
     LOAD_SECRETS=true \
     ENSURE_GCP_RESOURCES=true \
-    IGNORE_PERMISSION_ERRORS=true
+    IGNORE_PERMISSION_ERRORS=false
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -69,13 +69,19 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '  fi' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
-    echo '# Copy secrets to appropriate locations if they exist' >> /app/start.sh && \
-    echo 'if [ -f "/app/secrets/feed-config.json" ]; then' >> /app/start.sh && \
-    echo '  echo "Found feed-config secret, copying to data directory"' >> /app/start.sh && \
+    echo '# Copy secrets from mounted volumes to appropriate locations' >> /app/start.sh && \
+    echo 'if [ -d "/app/secrets" ]; then' >> /app/start.sh && \
+    echo '  echo "Processing mounted secrets..."' >> /app/start.sh && \
     echo '  mkdir -p ./data' >> /app/start.sh && \
-    echo '  cp /app/secrets/feed-config.json ./data/feeds.json' >> /app/start.sh && \
-    echo 'elif [ "$ENVIRONMENT" = "development" ]; then' >> /app/start.sh && \
-    echo '  echo "Setting up default development feed configuration..."' >> /app/start.sh && \
+    echo '  # Copy feed configuration if available' >> /app/start.sh && \
+    echo '  if [ -f "/app/secrets/feed-config/feed-config.json" ]; then' >> /app/start.sh && \
+    echo '    echo "Found feed configuration, copying to data directory"' >> /app/start.sh && \
+    echo '    cp /app/secrets/feed-config/feed-config.json ./data/feeds.json' >> /app/start.sh && \
+    echo '  else' >> /app/start.sh && \
+    echo '    echo "No feed configuration found in mounted secrets"' >> /app/start.sh && \
+    echo '  fi' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '  echo "No secrets directory found, using default configurations"' >> /app/start.sh && \
     echo '  mkdir -p ./data' >> /app/start.sh && \
     echo '  if [ ! -f ./data/feeds.json ]; then' >> /app/start.sh && \
     echo '    echo "{\"feeds\": [{\"id\": \"test-feed\", \"name\": \"Test Feed\", \"url\": \"https://example.com/feed.txt\", \"format\": \"text\", \"enabled\": true}]}" > ./data/feeds.json' >> /app/start.sh && \
@@ -85,7 +91,7 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '# Ensure GCP resources are set up correctly' >> /app/start.sh && \
     echo 'if [ "$ENSURE_GCP_RESOURCES" = "true" ]; then' >> /app/start.sh && \
     echo '  echo "Ensuring GCP resources are properly set up..."' >> /app/start.sh && \
-    echo '  python -c "import config; config.Config.ensure_gcp_resources()" || echo "Warning: Could not ensure GCP resources"' >> /app/start.sh && \
+    echo '  python -c "import config; config.Config.ensure_gcp_resources()"' >> /app/start.sh && \
     echo 'else' >> /app/start.sh && \
     echo '  echo "Skipping GCP resource validation"' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
