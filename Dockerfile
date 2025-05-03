@@ -115,7 +115,6 @@ cd /app && exec gunicorn \\\n\
 # Setup non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 RUN chown -R appuser:appuser /app /secrets
-USER appuser
 
 # Expose port
 EXPOSE ${PORT}
