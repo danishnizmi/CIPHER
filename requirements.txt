@@ -1,15 +1,16 @@
-# Core dependencies
-flask==2.3.3
+# Core Python dependencies - compatible versions
+Flask==2.3.3
+Werkzeug==2.3.7
 flask-cors==4.0.0
 flask-limiter==3.5.0
 flask-wtf==1.2.1
 gunicorn==21.2.0
-werkzeug==2.3.7
 
-# Data processing
+# Data processing - versions that work well together
+numpy==1.24.3
 pandas==1.5.3
 
-# Google Cloud dependencies
+# Google Cloud libraries
 google-auth==2.23.0
 google-cloud-bigquery==3.11.4
 google-cloud-storage==2.10.0
@@ -17,7 +18,32 @@ google-cloud-pubsub==2.18.4
 google-cloud-secret-manager==2.17.0
 google-cloud-logging==3.8.0
 google-cloud-error-reporting==1.9.1
+google-api-core==2.11.1
 
-# Other dependencies
-python-dateutil==2.8.2
+# AI/ML libraries (optional - only if using Vertex AI)
+# google-cloud-aiplatform==1.26.0
+# vertexai==0.1.1
+
+# Utilities
 requests==2.31.0
+python-dateutil==2.8.2
+pytz==2023.3
+urllib3==1.26.16
+
+# Web utilities
+Jinja2==3.1.2
+MarkupSafe==2.1.3
+click==8.1.7
+itsdangerous==2.1.2
+
+# Security
+cryptography==41.0.4
+pyJWT==2.8.0
+
+# Database connectors (optional)
+# psycopg2-binary==2.9.7
+
+# Additional utilities
+redis==5.0.0
+dnspython==2.4.2
+email-validator==2.0.0
