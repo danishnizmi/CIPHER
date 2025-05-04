@@ -1,4 +1,64 @@
 steps:
+  # Install dependencies and run checks
+  - name: 'python:3.10'
+    id: 'setup-and-checks'
+    script: |
+      echo "Installing dependencies and running basic checks..."
+      pip install --upgrade pip
+      pip install --no-cache-dir -r requirements.txt
+
+  # Build frontend assets
+  - name: 'node:16'
+    id: 'build-frontend'
+    script: |
+      echo "Building frontend assets..."
+      
+      # Create directories and files
+      mkdir -p static/src static/dist templates
+      echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
+      
+      # Set up package.json for Tailwind
+      cat > package.json << 'EOF'
+      {
+        "name": "threat-intelligence-platform",
+        "version": "1.0.0",
+        "scripts": {
+          "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
+        },
+        "devDependencies": {
+          "tailwindcss": "^3.3.0",
+          "postcss": "^8.4.21",
+          "autoprefixer": "^10.4.14"
+        }
+      }
+      EOF
+      
+      # Set up Tailwind config  
+      cat > tailwind.config.js << 'EOF'
+      module.exports = {
+        content: ["./templates/**/*.html"],
+        theme: {
+          extend: {
+            colors: {
+              primary: '#0d6efd',
+              secondary: '#6c757d', 
+              success: '#198754',
+              info: '#0dcaf0',
+              warning: '#ffc107',
+              danger: '#dc3545',
+              light: '#f8f9fa',
+              dark: '#212529'
+            }
+          }
+        },
+        plugins: []
+      };
+      EOF
+      
+      # Install dependencies and build CSS
+      npm install
+      npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
+
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
@@ -25,9 +85,36 @@ steps:
       - |
         echo "Deploying to Cloud Run..."
         
-        gcloud run services replace cloudrun.yaml \
+        gcloud run deploy threat-intelligence-platform \
+          --image gcr.io/$PROJECT_ID/threat-intelligence-platform:latest \
+          --platform managed \
           --region us-central1 \
-          --project=$PROJECT_ID
+          --allow-unauthenticated \
+          --memory 4Gi \
+          --cpu 4 \
+          --timeout 900 \
+          --port 8080 \
+          --max-instances 20 \
+          --min-instances 1 \
+          --execution-environment gen2 \
+          --set-env-vars ENVIRONMENT=production \
+          --set-env-vars GCP_PROJECT=$PROJECT_ID \
+          --set-env-vars GCP_REGION=us-central1 \
+          --set-env-vars BIGQUERY_DATASET=threat_intelligence \
+          --set-env-vars GCS_BUCKET=$PROJECT_ID-threat-data \
+          --set-env-vars PUBSUB_TOPIC=threat-data-ingestion \
+          --set-env-vars PUBSUB_ANALYSIS_TOPIC=threat-analysis-events \
+          --set-env-vars VERSION=1.0.2 \
+          --set-env-vars DEBUG=false \
+          --set-env-vars PYTHONPATH=/app \
+          --set-env-vars LOAD_SECRETS=true \
+          --set-env-vars ENSURE_GCP_RESOURCES=true \
+          --set-env-vars IGNORE_PERMISSION_ERRORS=false \
+          --set-secrets=/app/secrets/api-keys=api-keys:latest \
+          --set-secrets=/app/secrets/auth-config=auth-config:latest \
+          --set-secrets=/app/secrets/feed-config=feed-config:latest \
+          --set-secrets=/app/secrets/admin-password=admin-initial-password:latest \
+          --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
         
         echo "Deployment complete!"
 
