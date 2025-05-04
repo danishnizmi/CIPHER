@@ -9,7 +9,7 @@ from flask_limiter.util import get_remote_address
 # Import your other modules (adjusted to fix the import error)
 import config
 from api import api_blueprint
-from frontend import app as frontend_blueprint, format_datetime  # Import both the blueprint and the filter function
+from frontend import frontend_app as frontend_blueprint, format_datetime
 
 # Configure logging
 logging.basicConfig(
