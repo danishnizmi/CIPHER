@@ -83,10 +83,6 @@ steps:
           --set-env-vars LOAD_SECRETS=true \
           --set-env-vars ENSURE_GCP_RESOURCES=true \
           --set-env-vars IGNORE_PERMISSION_ERRORS=false \
-          --set-secrets=/app/secrets/api-keys=api-keys:latest \
-          --set-secrets=/app/secrets/auth-config=auth-config:latest \
-          --set-secrets=/app/secrets/feed-config=feed-config:latest \
-          --set-secrets=/app/secrets/admin-password=admin-initial-password:latest \
           --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
   # Verify deployment
