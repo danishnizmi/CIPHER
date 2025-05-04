@@ -5,9 +5,6 @@ metadata:
   namespace: '561511062593'
   annotations:
     run.googleapis.com/client-name: "cloud-console"
-    run.googleapis.com/launch-stage: "BETA"
-    autoscaling.knative.dev/maxScale: "20"
-    run.googleapis.com/cpu-throttling: "false"
     run.googleapis.com/ingress: all
     run.googleapis.com/ingress-status: all
   labels:
@@ -28,7 +25,7 @@ spec:
         managed-by: cloudbuild
         run.googleapis.com/startupProbeType: Default
     spec:
-      serviceAccountName: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
+      serviceAccountName: "threat-intelligence-sa@primal-chariot-382610.iam.gserviceaccount.com"
       timeoutSeconds: 300
       containerConcurrency: 80
       containers:
@@ -84,20 +81,23 @@ spec:
             secretKeyRef:
               name: auth-config
               key: latest
+        # Health Check Probes - HTTP based
         startupProbe:
-          timeoutSeconds: 240
-          periodSeconds: 240
-          failureThreshold: 1
-          tcpSocket:
-            port: 8080
+          httpGet:
+            path: /health
+            port: http1
+          periodSeconds: 10
+          timeoutSeconds: 30
+          failureThreshold: 30
+          successThreshold: 1
         livenessProbe:
           httpGet:
             path: /health
-            port: 8080
+            port: http1
           periodSeconds: 30
-          timeoutSeconds: 5
+          timeoutSeconds: 10
           failureThreshold: 3
-        # Readiness probe removed - not available for this project
+        # Volume mounts
         volumeMounts:
         - name: tmp
           mountPath: /tmp
