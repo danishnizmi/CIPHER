@@ -16,7 +16,9 @@ _secret_client = None
 _redis_client = None
 _vertex_client = None
 
-# Google Cloud imports
+# Google Cloud imports with safe fallbacks
+HAS_GCP = True
+HAS_VERTEX = False
 try:
     from google.cloud import secretmanager, storage, bigquery, pubsub_v1, error_reporting
     from google.cloud.logging_v2 import Client as LoggingClient
@@ -30,12 +32,12 @@ try:
         HAS_VERTEX = True
     except ImportError:
         HAS_VERTEX = False
-    HAS_GCP = True
-except ImportError:
+except ImportError as e:
     HAS_GCP = False
-    HAS_VERTEX = False
+    print(f"Warning: Google Cloud libraries not installed: {e}")
 
 # Redis (for production caching)
+HAS_REDIS = False
 try:
     import redis
     HAS_REDIS = True
@@ -105,9 +107,9 @@ def get_project_id() -> Optional[str]:
                 os.environ['GCP_PROJECT'] = project_id
                 return project_id
         except (DefaultCredentialsError, TransportError) as e:
-            logger.warning(f"Unable to determine GCP project ID from metadata: {str(e)}")
+            logger.debug(f"Unable to determine GCP project ID from metadata: {str(e)}")
         except Exception as e:
-            logger.warning(f"Unexpected error getting project ID: {str(e)}")
+            logger.debug(f"Unexpected error getting project ID: {str(e)}")
     
     try:
         import requests
@@ -124,7 +126,7 @@ def get_project_id() -> Optional[str]:
         pass
     
     fallback_id = "primal-chariot-382610"
-    logger.warning(f"Unable to determine project ID, using fallback: {fallback_id}")
+    logger.info(f"Using fallback project ID: {fallback_id}")
     return fallback_id
 
 def get_env_bool(var_name: str, default: bool = False) -> bool:
@@ -295,7 +297,7 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
     """Access secrets from Google Cloud Secret Manager with robust error handling."""
     secret_client = initialize_secret_manager()
     if not secret_client:
-        logger.warning(f"Secret Manager client not available, cannot access secret {secret_id}")
+        logger.debug(f"Secret Manager client not available, checking environment variables for {secret_id}")
         env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
         if os.environ.get(env_var_name):
             logger.info(f"Using environment variable {env_var_name} as fallback for secret {secret_id}")
@@ -317,14 +319,15 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
         except json.JSONDecodeError:
             return secret_data
     except NotFound as e:
-        logger.warning(f"Secret {secret_id} not found in project {project_id}, attempting to create default")
+        logger.debug(f"Secret {secret_id} not found in project {project_id}")
+        # Try to create default config if it's a standard config secret
         if secret_id == 'feed-config':
             if create_default_feed_config():
                 return access_secret(secret_id, version_id)
         elif secret_id == 'auth-config':
             if create_default_auth_config():
                 return access_secret(secret_id, version_id)
-        logger.error(f"Secret {secret_id} not found in project {project_id}")
+        logger.debug(f"Secret {secret_id} not found and could not be created")
         return None
 
 # Cached Config Management
@@ -362,8 +365,8 @@ def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[D
     """Get and cache configuration from Secret Manager."""
     return ConfigCache.get(secret_id, force_refresh)
 
-# Configuration Classes
-class BaseConfig:
+# Configuration Class
+class Config:
     """Base configuration class with common settings."""
     
     # Basic Flask configuration
@@ -411,12 +414,8 @@ class BaseConfig:
         'PUBSUB_ANALYSIS_SUBSCRIPTION', 'threat-analysis-events-sub'
     )
     
-    # Cloud Functions configuration
-    INGEST_FUNCTION_NAME = 'ingest_threat_data'
-    ANALYSIS_FUNCTION_NAME = 'analyze_threat_data'
-    
     # API configuration
-    API_KEY = os.environ.get('API_KEY', access_secret('api-keys').get('platform_api_key', 'dev-api-key') if access_secret('api-keys') else 'dev-api-key')
+    API_KEY = os.environ.get('API_KEY', 'dev-api-key')
     API_VERSION = 'v1'
     API_PREFIX = f'/api/{API_VERSION}'
     API_RATE_LIMIT = os.environ.get('API_RATE_LIMIT', DEFAULT_API_RATE_LIMIT)
@@ -502,30 +501,33 @@ class BaseConfig:
     @classmethod
     def configure_logging(cls):
         """Configure logging based on settings."""
-        log_level = getattr(logging, cls.LOG_LEVEL.upper(), logging.INFO)
-        root_logger = logging.getLogger()
-        root_logger.setLevel(log_level)
-        
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
-        
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
-        formatter = logging.Formatter(cls.LOG_FORMAT)
-        console_handler.setFormatter(formatter)
-        root_logger.addHandler(console_handler)
-        
-        if cls.LOG_TO_CLOUD and cls.GCP_PROJECT and HAS_GCP:
-            try:
-                global _logging_client
-                if _logging_client is None:
-                    _logging_client = LoggingClient(project=cls.GCP_PROJECT)
-                cloud_handler = _logging_client.get_default_handler()
-                cloud_handler.setLevel(log_level)
-                root_logger.addHandler(cloud_handler)
-                logger.info("Cloud Logging enabled")
-            except Exception as e:
-                logger.error(f"Failed to set up Cloud Logging: {str(e)}")
+        try:
+            log_level = getattr(logging, cls.LOG_LEVEL.upper(), logging.INFO)
+            root_logger = logging.getLogger()
+            root_logger.setLevel(log_level)
+            
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+            
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(log_level)
+            formatter = logging.Formatter(cls.LOG_FORMAT)
+            console_handler.setFormatter(formatter)
+            root_logger.addHandler(console_handler)
+            
+            if cls.LOG_TO_CLOUD and cls.GCP_PROJECT and HAS_GCP:
+                try:
+                    global _logging_client
+                    if _logging_client is None:
+                        _logging_client = LoggingClient(project=cls.GCP_PROJECT)
+                    cloud_handler = _logging_client.get_default_handler()
+                    cloud_handler.setLevel(log_level)
+                    root_logger.addHandler(cloud_handler)
+                    logger.info("Cloud Logging enabled")
+                except Exception as e:
+                    logger.error(f"Failed to set up Cloud Logging: {str(e)}")
+        except Exception as e:
+            print(f"Error configuring logging: {str(e)}")
     
     @classmethod
     def initialize_error_reporting(cls):
@@ -662,7 +664,7 @@ class BaseConfig:
             # Load feed configuration
             feed_config = access_secret('feed-config')
             if feed_config and isinstance(feed_config, dict):
-                cls.FEEDS = feed_config.get('feeds', [])
+                cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
                 cls.FEED_UPDATE_INTERVAL = feed_config.get('update_interval_hours', cls.FEED_UPDATE_INTERVAL)
                 cls.FEED_DEFAULT_TAGS = feed_config.get('default_tags', [])
                 cls.FEED_USER_AGENT = feed_config.get('user_agent', f"ThreatIntelligencePlatform/{cls.VERSION}")
@@ -671,7 +673,9 @@ class BaseConfig:
                 
                 logger.info("Loaded feed configuration from Secret Manager")
             else:
-                create_default_feed_config()
+                # Use default feeds if no config found
+                cls.FEEDS = DEFAULT_FEED_CONFIGS
+                logger.info("Using default feed configuration")
             
             # Load admin password if available
             admin_password = access_secret('admin-initial-password')
@@ -687,111 +691,37 @@ class BaseConfig:
     
     @classmethod
     def init_app(cls):
-        """Initialize application configuration."""
-        cls.configure_logging()
+        """Initialize application configuration with fault tolerance."""
+        try:
+            cls.configure_logging()
+            logger.info("Logging configured")
+        except Exception as e:
+            print(f"Error configuring logging: {str(e)}")
         
-        if get_env_bool('LOAD_SECRETS', True):
-            cls.init_secrets()
+        try:
+            if get_env_bool('LOAD_SECRETS', True):
+                cls.init_secrets()
+                logger.info("Secrets initialized")
+        except Exception as e:
+            logger.warning(f"Error initializing secrets: {str(e)}")
+            # Continue without secrets if needed
         
-        cls.initialize_error_reporting()
-        cls.validate_configuration()
+        try:
+            cls.initialize_error_reporting()
+            logger.info("Error reporting initialized")
+        except Exception as e:
+            logger.warning(f"Error reporting initialization failed: {str(e)}")
+        
+        try:
+            valid = cls.validate_configuration()
+            if not valid:
+                logger.warning("Configuration validation failed but continuing")
+        except Exception as e:
+            logger.warning(f"Configuration validation failed: {str(e)}")
+        
         logger.info(f"Initialized {cls.ENVIRONMENT} configuration")
 
-# Configuration Subclasses
-class DevelopmentConfig(BaseConfig):
-    """Development configuration."""
-    DEBUG = True
-    TESTING = False
-    
-    BIGQUERY_DATASET = 'threat_intelligence_dev'
-    GCS_BUCKET = f"{BaseConfig.GCP_PROJECT}-threat-data-dev" if BaseConfig.GCP_PROJECT else 'threat-data-dev'
-    
-    TEMPLATES_AUTO_RELOAD = True
-    WTF_CSRF_ENABLED = True
-    SESSION_COOKIE_SECURE = False
-    LOG_LEVEL = 'DEBUG'
-    CACHE_TYPE = 'SimpleCache'
-    
-    @classmethod
-    def init_app(cls):
-        """Initialize development-specific configuration."""
-        cls.configure_logging()
-        
-        if get_env_bool('LOAD_SECRETS_IN_DEV', False):
-            cls.init_secrets()
-        
-        cls.validate_configuration()
-        logger.info("Initialized development configuration")
-
-class TestingConfig(BaseConfig):
-    """Testing configuration."""
-    DEBUG = False
-    TESTING = True
-    
-    BIGQUERY_DATASET = 'threat_intelligence_test'
-    GCS_BUCKET = f"{BaseConfig.GCP_PROJECT}-threat-data-test" if BaseConfig.GCP_PROJECT else 'threat-data-test'
-    
-    WTF_CSRF_ENABLED = False
-    SERVER_NAME = 'localhost'
-    PRESERVE_CONTEXT_ON_EXCEPTION = False
-    CACHE_TYPE = 'SimpleCache'
-    
-    @classmethod
-    def init_app(cls):
-        """Initialize testing-specific configuration."""
-        cls.configure_logging()
-        logger.info("Initialized testing configuration")
-
-class ProductionConfig(BaseConfig):
-    """Production configuration."""
-    DEBUG = False
-    TESTING = False
-    
-    PERMANENT_SESSION_LIFETIME = timedelta(hours=12)
-    SESSION_COOKIE_SECURE = True
-    SESSION_COOKIE_HTTPONLY = True
-    
-    WTF_CSRF_TIME_LIMIT = 3600  # 1 hour
-    
-    LOG_LEVEL = 'INFO'
-    LOG_TO_CLOUD = True
-    
-    ENABLE_ERROR_REPORTING = True
-    
-    @property
-    def CACHE_TYPE(self):
-        if HAS_REDIS and self.REDIS_HOST:
-            return 'RedisCache'
-        return 'SimpleCache'
-    
-    @classmethod
-    def init_app(cls):
-        """Initialize production-specific configuration."""
-        cls.configure_logging()
-        cls.init_secrets()
-        cls.initialize_error_reporting()
-        cls.validate_configuration()
-        logger.info("Initialized production configuration")
-
-# Dictionary of environment configurations
-config_by_name = {
-    'development': DevelopmentConfig,
-    'testing': TestingConfig,
-    'production': ProductionConfig,
-    'default': DevelopmentConfig
-}
-
-# Get the current environment
-current_env = os.environ.get('ENVIRONMENT', 'development').lower()
-
-# Load the appropriate configuration
-Config = config_by_name.get(current_env, config_by_name['default'])
-
-# Initialize environment-specific configuration
-if hasattr(Config, 'init_app'):
-    Config.init_app()
-
-# Helper Functions for other modules
+# Helper Functions
 def get_config():
     """Return the current configuration."""
     return Config
@@ -805,55 +735,38 @@ def get_gcp_clients():
         "error_reporting": initialize_error_reporting()
     }
 
-def check_gcp_permissions():
-    """Check if service account has the necessary GCP permissions."""
-    permissions = {
-        "bigquery": False,
-        "storage": False,
-        "pubsub": False,
-        "secretmanager": False,
-        "logging": False,
-        "errorreporting": False,
-        "vertexai": False
-    }
-    
-    # Check BigQuery permissions
+def create_default_feed_config() -> bool:
+    """Create a default feed configuration if it doesn't exist."""
     try:
-        bq_client = initialize_bigquery()
-        if bq_client:
-            list(bq_client.list_datasets(max_results=1))
-            permissions["bigquery"] = True
-    except Exception:
-        pass
-    
-    # Check Storage permissions
-    try:
-        storage_client = initialize_storage()
-        if storage_client:
-            list(storage_client.list_buckets(max_results=1))
-            permissions["storage"] = True
-    except Exception:
-        pass
-    
-    # Check Pub/Sub permissions
-    try:
-        publisher, _ = initialize_pubsub()
-        if publisher:
-            publisher.list_topics(request={"project": f"projects/{Config.GCP_PROJECT}"})
-            permissions["pubsub"] = True
-    except Exception:
-        pass
-    
-    # Check Secret Manager permissions
-    try:
-        secret = access_secret('api-keys', 'latest')
-        permissions["secretmanager"] = secret is not None
-    except Exception:
-        pass
-    
-    return permissions
+        feed_config = access_secret("feed-config")
+        if feed_config:
+            logger.info("Feed configuration already exists in Secret Manager")
+            return True
+        
+        feed_config = {
+            "feeds": DEFAULT_FEED_CONFIGS,
+            "update_interval_hours": 6,
+            "default_tags": [],
+            "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
+            "request_timeout": 30,
+            "max_retries": 3
+        }
+        
+        success = create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
+        if success:
+            logger.info("Created default feed-config in Secret Manager")
+            return True
+        
+        if should_ignore_permission_errors():
+            logger.warning("Using in-memory fallback for feed-config")
+            Config.FEEDS = DEFAULT_FEED_CONFIGS
+            return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error creating default feed config: {str(e)}")
+        return False
 
-# Helper function for user management (used by frontend.py)
 def create_default_auth_config() -> bool:
     """Create a default auth configuration if it doesn't exist."""
     try:
@@ -882,135 +795,13 @@ def create_default_auth_config() -> bool:
         
         if should_ignore_permission_errors():
             logger.warning("Using in-memory fallback for auth-config")
-            setattr(get_cached_config, "_cached_auth_config", auth_config)
+            Config.SECRET_KEY = session_secret
             return True
         
         return False
     except Exception as e:
         logger.error(f"Error creating default auth config: {str(e)}")
         return False
-
-def create_default_feed_config() -> bool:
-    """Create a default feed configuration if it doesn't exist."""
-    try:
-        feed_config = access_secret("feed-config")
-        if feed_config:
-            logger.info("Feed configuration already exists in Secret Manager")
-            return True
-        
-        feed_config = {
-            "feeds": DEFAULT_FEED_CONFIGS,
-            "update_interval_hours": 6,
-            "default_tags": [],
-            "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
-            "request_timeout": 30,
-            "max_retries": 3
-        }
-        
-        success = create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
-        if success:
-            logger.info("Created default feed-config in Secret Manager")
-            return True
-        
-        if should_ignore_permission_errors():
-            logger.warning("Using in-memory fallback for feed-config")
-            setattr(get_cached_config, "_cached_feed_config", feed_config)
-            return True
-        
-        return False
-    except Exception as e:
-        logger.error(f"Error creating default feed config: {str(e)}")
-        return False
-
-def add_user(username: str, password: str, role: str = "readonly") -> bool:
-    """Add a new user to auth config."""
-    try:
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        user_data = {
-            "password": hashed_password,
-            "role": role,
-            "created_at": datetime.utcnow().isoformat()
-        }
-        
-        return update_user(username, user_data)
-    except Exception as e:
-        logger.error(f"Error adding user {username}: {str(e)}")
-        return False
-
-def update_user(username: str, updates: Dict) -> bool:
-    """Update user data in auth config."""
-    if not HAS_GCP and not should_ignore_permission_errors():
-        logger.warning("Google Cloud libraries not installed, cannot update user data")
-        return False
-    
-    try:
-        auth_config = get_cached_config("auth-config", force_refresh=True)
-        if not auth_config or not isinstance(auth_config, dict):
-            auth_config = {"users": {}, "session_secret": os.urandom(32).hex()}
-        
-        if "users" not in auth_config:
-            auth_config["users"] = {}
-        
-        if username not in auth_config["users"]:
-            auth_config["users"][username] = {"role": "readonly"}
-        
-        for key, value in updates.items():
-            auth_config["users"][username][key] = value
-        
-        result = create_or_update_secret("auth-config", json.dumps(auth_config))
-        
-        if result:
-            if hasattr(get_cached_config, "_cached_auth_config"):
-                delattr(get_cached_config, "_cached_auth_config")
-        elif should_ignore_permission_errors():
-            setattr(get_cached_config, "_cached_auth_config", auth_config)
-            logger.warning("Unable to save auth config to Secret Manager, using in-memory fallback")
-            return True
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error updating user {username}: {str(e)}")
-        if should_ignore_permission_errors():
-            try:
-                auth_config = getattr(get_cached_config, "_cached_auth_config", {"users": {}, "session_secret": os.urandom(32).hex()})
-                if "users" not in auth_config:
-                    auth_config["users"] = {}
-                if username not in auth_config["users"]:
-                    auth_config["users"][username] = {"role": "readonly"}
-                for key, value in updates.items():
-                    auth_config["users"][username][key] = value
-                setattr(get_cached_config, "_cached_auth_config", auth_config)
-                logger.warning(f"Updated user {username} in memory only")
-                return True
-            except Exception as inner_e:
-                logger.error(f"Error updating in-memory user data: {str(inner_e)}")
-        return False
-
-def set_initial_admin_password() -> Optional[str]:
-    """Sets initial admin password if not already set."""
-    if not HAS_GCP:
-        logger.warning("Google Cloud libraries not installed, using default admin password")
-        return "admin"
-    
-    try:
-        admin_password = access_secret("admin-initial-password")
-        
-        if not admin_password:
-            import secrets
-            import string
-            admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
-            create_or_update_secret("admin-initial-password", admin_password)
-            logger.info("Created new admin password in Secret Manager")
-        else:
-            logger.info("Loaded admin password from Secret Manager")
-        
-        if os.environ.get('ENVIRONMENT', 'development') == 'development':
-            logger.info(f"Admin password: {admin_password}")
-        
-        return admin_password
-    except Exception as e:
-        logger.error(f"Error setting initial admin password: {str(e)}")
-        return "admin"
 
 def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
     """Create or update a secret in Secret Manager."""
@@ -1063,9 +854,6 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
         logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
         return False
 
-# Define a constant for GCP services availability
-GCP_SERVICES_AVAILABLE = HAS_GCP
-
 # Module exports
 __all__ = [
     'Config', 
@@ -1076,15 +864,12 @@ __all__ = [
     'initialize_error_reporting',
     'initialize_secret_manager',
     'report_error',
-    'check_gcp_permissions',
     'access_secret',
     'create_or_update_secret',
     'get_cached_config',
     'create_default_feed_config',
     'create_default_auth_config',
-    'add_user',
-    'update_user',
-    'set_initial_admin_password',
     'get_gcp_clients',
-    'GCP_SERVICES_AVAILABLE'
+    'GCP_SERVICES_AVAILABLE',
+    'HAS_GCP'
 ]
