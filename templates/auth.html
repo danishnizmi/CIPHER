@@ -142,7 +142,7 @@
             </div>
             {% endif %}
             
-            <form action="{{ url_for('login') }}" method="post" class="space-y-5">
+            <form action="{{ url_for('frontend.login') }}" method="post" class="space-y-5">
                 <!-- CSRF token field - critical for security -->
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
@@ -253,7 +253,7 @@
             
             <div class="border-t border-gray-200 my-6 pt-6">
                 <h3 class="text-lg font-medium text-gray-800 mb-4">Change Password</h3>
-                <form action="{{ url_for('change_password') }}" method="post" class="space-y-5" id="passwordForm">
+                <form action="{{ url_for('frontend.change_password') }}" method="post" class="space-y-5" id="passwordForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="form-group">
                         <label for="current_password" class="form-label">Current Password</label>
@@ -313,7 +313,7 @@
             </div>
             
             <div class="auth-footer">
-                <a href="{{ url_for('dashboard') }}" class="text-accent hover:underline flex items-center justify-center">
+                <a href="{{ url_for('frontend.dashboard') }}" class="text-accent hover:underline flex items-center justify-center">
                     <i class="fas fa-arrow-left mr-1"></i> Back to Dashboard
                 </a>
             </div>
@@ -345,7 +345,7 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('add_user_route') }}" method="post" class="space-y-5" id="userForm">
+            <form action="{{ url_for('frontend.add_user_route') }}" method="post" class="space-y-5" id="userForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
@@ -415,7 +415,7 @@
                     </div>
                 </div>
                 <div class="flex space-x-4">
-                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
+                    <a href="{{ url_for('frontend.users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
                         <i class="fas fa-times mr-2"></i> Cancel
                     </a>
                     <button type="submit" class="btn btn-primary flex-1 flex justify-center items-center" id="submitBtn">
@@ -451,7 +451,7 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('edit_user', username=username) }}" method="post" class="space-y-5">
+            <form action="{{ url_for('frontend.edit_user', username=username) }}" method="post" class="space-y-5">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
@@ -503,7 +503,7 @@
                 </div>
                 
                 <div class="flex space-x-4">
-                    <a href="{{ url_for('users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
+                    <a href="{{ url_for('frontend.users') }}" class="btn btn-secondary flex-1 text-center flex justify-center items-center">
                         <i class="fas fa-arrow-left mr-2"></i> Cancel
                     </a>
                     <button type="submit" class="btn btn-primary flex-1 flex justify-center items-center">
@@ -534,7 +534,7 @@
                     <p class="mb-6 text-gray-700">Are you sure you want to delete user <strong>{{ username }}</strong>? This action cannot be undone.</p>
                     <div class="flex justify-end space-x-3">
                         <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
-                        <form action="{{ url_for('delete_user', username=username) }}" method="post">
+                        <form action="{{ url_for('frontend.delete_user', username=username) }}" method="post">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn btn-danger">Delete User</button>
                         </form>
@@ -555,7 +555,7 @@
             </div>
             
             <div class="flex justify-center">
-                <a href="{{ url_for('dashboard') }}" class="btn btn-primary flex items-center">
+                <a href="{{ url_for('frontend.dashboard') }}" class="btn btn-primary flex items-center">
                     <i class="fas fa-home mr-2"></i> Back to Dashboard
                 </a>
             </div>
@@ -593,7 +593,7 @@
                 {% endif %}
             {% endwith %}
             
-            <form action="{{ url_for('login') }}" method="post" class="space-y-5">
+            <form action="{{ url_for('frontend.login') }}" method="post" class="space-y-5">
                 <!-- Critical: CSRF token field -->
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
