@@ -3,7 +3,7 @@ steps:
   - name: 'python:3.10'
     id: 'setup-and-checks'
     script: |
-      echo "Installing dependencies and running basic checks..."
+      echo "Installing dependencies..."
       pip install --upgrade pip
       pip install --no-cache-dir -r requirements.txt
 
@@ -12,12 +12,9 @@ steps:
     id: 'build-frontend'
     script: |
       echo "Building frontend assets..."
-      
-      # Create directories and files
       mkdir -p static/src static/dist templates
       echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
       
-      # Set up package.json for Tailwind
       cat > package.json << 'EOF'
       {
         "name": "threat-intelligence-platform",
@@ -26,55 +23,31 @@ steps:
           "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
         },
         "devDependencies": {
-          "tailwindcss": "^3.3.0",
-          "postcss": "^8.4.21",
-          "autoprefixer": "^10.4.14"
+          "tailwindcss": "^3.3.0"
         }
       }
       EOF
       
-      # Set up Tailwind config  
       cat > tailwind.config.js << 'EOF'
       module.exports = {
         content: ["./templates/**/*.html"],
-        theme: {
-          extend: {
-            colors: {
-              primary: '#0d6efd',
-              secondary: '#6c757d', 
-              success: '#198754',
-              info: '#0dcaf0',
-              warning: '#ffc107',
-              danger: '#dc3545',
-              light: '#f8f9fa',
-              dark: '#212529'
-            }
-          }
-        },
+        theme: { extend: {} },
         plugins: []
       };
       EOF
       
-      # Install dependencies and build CSS
       npm install
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
 
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
-    args: [
-      'build',
-      '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest',
-      '.'
-    ]
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', '.']
 
-  # Push container to Container Registry
+  # Push container to Container Registry  
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
-    args: [
-      'push', 
-      'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
-    ]
+    args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -85,10 +58,8 @@ steps:
       - |
         echo "Deploying to Cloud Run..."
         
-        PROJECT_ID=$(echo $PROJECT_ID | tr '[:upper:]' '[:lower:]')
-        
         gcloud run deploy threat-intelligence-platform \
-          --image gcr.io/$PROJECT_ID/threat-intelligence-platform:latest \
+          --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
           --platform managed \
           --region us-central1 \
           --allow-unauthenticated \
@@ -100,10 +71,10 @@ steps:
           --min-instances 1 \
           --execution-environment gen2 \
           --set-env-vars ENVIRONMENT=production \
-          --set-env-vars GCP_PROJECT=$PROJECT_ID \
+          --set-env-vars GCP_PROJECT=${PROJECT_ID} \
           --set-env-vars GCP_REGION=us-central1 \
           --set-env-vars BIGQUERY_DATASET=threat_intelligence \
-          --set-env-vars GCS_BUCKET=$PROJECT_ID-threat-data \
+          --set-env-vars GCS_BUCKET=${PROJECT_ID}-threat-data \
           --set-env-vars PUBSUB_TOPIC=threat-data-ingestion \
           --set-env-vars PUBSUB_ANALYSIS_TOPIC=threat-analysis-events \
           --set-env-vars VERSION=1.0.2 \
@@ -116,46 +87,45 @@ steps:
           --set-secrets=/app/secrets/auth-config=auth-config:latest \
           --set-secrets=/app/secrets/feed-config=feed-config:latest \
           --set-secrets=/app/secrets/admin-password=admin-initial-password:latest \
-          --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
-        
-        echo "Deployment complete!"
+          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
-  # Verify deployment  
+  # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Verifying deployment..."
-        
-        # Wait for service to be ready
+        echo "Waiting for service to be ready..."
         sleep 30
         
-        SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
+        CLOUD_RUN_URL=$$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
-          --project=$PROJECT_ID \
+          --project=${PROJECT_ID} \
           --format='value(status.url)')
         
-        echo "Service URL: $SERVICE_URL"
+        echo "Service deployed at: $$CLOUD_RUN_URL"
         
         # Test health endpoint
-        for i in {1..10}; do
-          echo "Health check attempt $i..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")
-          if [ "$HTTP_CODE" -eq 200 ]; then
+        for attempt in $$(seq 1 10); do
+          echo "Health check attempt $$attempt/10..."
+          STATUS_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$$CLOUD_RUN_URL/health")
+          
+          if [ "$$STATUS_CODE" -eq 200 ]; then
             echo "✅ Health check successful!"
+            echo "Web application is now running at: $$CLOUD_RUN_URL"
             exit 0
           else
-            echo "⚠️ Health check returned: $HTTP_CODE"
-            if [ $i -lt 10 ]; then
-              echo "Waiting 10 seconds..."
-              sleep 10
+            echo "⚠️ Health check returned: $$STATUS_CODE"
+            if [ $$attempt -lt 10 ]; then
+              echo "Waiting 15 seconds before next attempt..."
+              sleep 15
             fi
           fi
         done
         
         echo "❌ Health check failed after 10 attempts"
+        echo "Try accessing the service later at: $$CLOUD_RUN_URL"
         exit 1
 
 timeout: '1200s'
