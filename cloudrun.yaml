@@ -4,13 +4,11 @@ metadata:
   name: threat-intelligence-platform
   namespace: '561511062593'
   annotations:
-    run.googleapis.com/client-name: "cloud-console"
     run.googleapis.com/ingress: all
-    run.googleapis.com/ingress-status: all
+    run.googleapis.com/execution-environment: gen2
   labels:
     app: threat-intelligence-platform
     environment: production
-    managed-by: cloudbuild
 spec:
   template:
     metadata:
@@ -19,15 +17,13 @@ spec:
         autoscaling.knative.dev/maxScale: "20"
         run.googleapis.com/cpu-throttling: "false"
         run.googleapis.com/startup-cpu-boost: "true"
-        run.googleapis.com/execution-environment: "gen2"
       labels:
         app: threat-intelligence-platform
-        managed-by: cloudbuild
-        run.googleapis.com/startupProbeType: Default
+        environment: production
     spec:
-      serviceAccountName: "threat-intelligence-sa@primal-chariot-382610.iam.gserviceaccount.com"
-      timeoutSeconds: 300
       containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
       containers:
       - image: gcr.io/primal-chariot-382610/threat-intelligence-platform:latest
         ports:
@@ -35,13 +31,13 @@ spec:
           containerPort: 8080
         resources:
           limits:
-            cpu: "2"
-            memory: "2Gi"
+            cpu: "4"
+            memory: "4Gi"
         env:
-        - name: GCP_PROJECT
-          value: "primal-chariot-382610"
         - name: ENVIRONMENT
           value: "production"
+        - name: GCP_PROJECT
+          value: "primal-chariot-382610"
         - name: GCP_REGION
           value: "us-central1"
         - name: BIGQUERY_DATASET
@@ -54,23 +50,12 @@ spec:
           value: "threat-analysis-events"
         - name: VERSION
           value: "1.0.2"
-        - name: DEBUG
-          value: "false"
         - name: PYTHONPATH
           value: "/app"
-        - name: CLOUD_LOGGING
-          value: "true"
-        - name: ENABLE_ERROR_REPORTING
+        - name: LOAD_SECRETS
           value: "true"
         - name: LOG_LEVEL
           value: "INFO"
-        - name: LOAD_SECRETS
-          value: "true"
-        - name: ENSURE_GCP_RESOURCES
-          value: "true"
-        - name: IGNORE_PERMISSION_ERRORS 
-          value: "false"
-        # Secret references
         - name: API_KEY
           valueFrom:
             secretKeyRef:
@@ -81,69 +66,21 @@ spec:
             secretKeyRef:
               name: auth-config
               key: latest
-        # Health Check Probes - HTTP based
         startupProbe:
           httpGet:
             path: /health
-            port: http1
+            port: 8080
+          initialDelaySeconds: 10
           periodSeconds: 10
-          timeoutSeconds: 30
-          failureThreshold: 30
-          successThreshold: 1
+          timeoutSeconds: 5
+          failureThreshold: 10
         livenessProbe:
           httpGet:
             path: /health
-            port: http1
+            port: 8080
           periodSeconds: 30
-          timeoutSeconds: 10
+          timeoutSeconds: 5
           failureThreshold: 3
-        # Volume mounts
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        - name: app-data
-          mountPath: /app/data
-        - name: api-keys-volume
-          mountPath: /app/secrets/api-keys
-          readOnly: true
-        - name: auth-config-volume
-          mountPath: /app/secrets/auth-config
-          readOnly: true
-        - name: feed-config-volume
-          mountPath: /app/secrets/feed-config
-          readOnly: true
-        - name: admin-password-volume
-          mountPath: /app/secrets/admin-password
-          readOnly: true
-      volumes:
-      - name: tmp
-        emptyDir: {}
-      - name: app-data
-        emptyDir: {}
-      - name: api-keys-volume
-        secret:
-          secretName: api-keys
-          items:
-          - key: latest
-            path: api-keys.json
-      - name: auth-config-volume
-        secret:
-          secretName: auth-config
-          items:
-          - key: latest
-            path: auth-config.json
-      - name: feed-config-volume
-        secret:
-          secretName: feed-config
-          items:
-          - key: latest
-            path: feed-config.json
-      - name: admin-password-volume
-        secret:
-          secretName: admin-initial-password
-          items:
-          - key: latest
-            path: admin-password.txt
   traffic:
   - percent: 100
     latestRevision: true
