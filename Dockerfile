@@ -11,12 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FLASK_APP=app.py \
     FLASK_ENV=production \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    GUNICORN_WORKERS=2 \
-    GUNICORN_THREADS=4 \
-    GUNICORN_TIMEOUT=300 \
-    GUNICORN_WORKER_CLASS=gthread \
-    PORT=8080
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,20 +44,20 @@ RUN useradd -m -u 1000 -s /bin/bash appuser && \
 # Switch to non-root user
 USER appuser
 
-# Expose port 8080
+# Expose port 8080 (Cloud Run will override this)
 EXPOSE 8080
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+# Healthcheck - use dynamic PORT
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
-# Start the application using Gunicorn
+# Start the application using Gunicorn with dynamic port
 CMD exec gunicorn \
-    --bind "0.0.0.0:${PORT}" \
-    --workers "${GUNICORN_WORKERS}" \
-    --threads "${GUNICORN_THREADS}" \
-    --timeout "${GUNICORN_TIMEOUT}" \
-    --worker-class "${GUNICORN_WORKER_CLASS}" \
+    --bind "0.0.0.0:${PORT:-8080}" \
+    --workers "${GUNICORN_WORKERS:-2}" \
+    --threads "${GUNICORN_THREADS:-4}" \
+    --timeout "${GUNICORN_TIMEOUT:-300}" \
+    --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" \
     --worker-tmp-dir /tmp \
     --preload \
     --capture-output \
