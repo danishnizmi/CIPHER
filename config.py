@@ -44,6 +44,9 @@ try:
 except ImportError:
     HAS_REDIS = False
 
+# Add the missing GCP_SERVICES_AVAILABLE attribute
+GCP_SERVICES_AVAILABLE = HAS_GCP
+
 # Initialize logging
 logging.basicConfig(
     level=logging.INFO,
