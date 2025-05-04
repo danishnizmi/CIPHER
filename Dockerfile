@@ -27,9 +27,6 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p static/dist templates data logs
 
-# Create a minimal CSS file if needed
-RUN echo "/* Compiled CSS will go here */" > static/dist/output.css
-
 # Create startup script
 RUN echo '#!/bin/bash\n\
 set -e\n\
