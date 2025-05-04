@@ -3,14 +3,15 @@ import sys
 import logging
 import traceback
 from datetime import datetime
-from flask import Flask, jsonify, render_template, request, redirect, url_for
+from flask import Flask, jsonify, render_template, request, redirect, url_for, session
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-# Import your other modules
+# Import your modules
 import config
+from config import Config
 from api import api_blueprint
 from frontend import frontend_app as frontend_blueprint, format_datetime
 
@@ -24,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Create Flask app first
+# Create Flask app
 app = Flask(__name__)
 
 # Add proxy middleware to handle Cloud Run reverse proxy
@@ -33,7 +34,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Configure session settings before loading config
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'True').lower() == 'true',
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true',
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PREFERRED_URL_SCHEME='https',
@@ -44,7 +45,7 @@ app.config.update(
 )
 
 # Load environment-specific configuration
-app.config.from_object(config.Config)
+app.config.from_object(Config)
 
 # Setup CORS - be specific about origins in production
 cors_origins = os.environ.get('CORS_ORIGINS', '*')
@@ -53,7 +54,7 @@ if cors_origins == '*':
 else:
     CORS(app, origins=cors_origins.split(','))
 
-# Setup rate limiting with memory storage
+# Setup rate limiting with memory storage (simpler for Cloud Run)
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
@@ -78,18 +79,30 @@ def before_request():
         if not request.is_secure and request.headers.get('X-Forwarded-Proto', 'http') != 'https':
             url = request.url.replace('http://', 'https://', 1)
             return redirect(url, code=301)
+
+# After request middleware for security headers
+@app.after_request
+def after_request(response):
+    """Add security headers to responses."""
+    # Security headers
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     
-    # Add security headers
-    @app.after_request
-    def after_request(response):
-        # Security headers
-        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-        response.headers['X-XSS-Protection'] = '1; mode=block'
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-        response.headers['Content-Security-Policy'] = "default-src 'self' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://cdn.plot.ly https://fonts.googleapis.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://fonts.googleapis.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://cdn.plot.ly https://fonts.googleapis.com;"
-        
-        return response
+    # CSP header - updated to work with all dependencies
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self' https://*.googleapis.com https://*.gstatic.com https://*.googleusercontent.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com "
+        "https://cdn.plot.ly https://*.googletagmanager.com https://*.google-analytics.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com "
+        "https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+        "img-src 'self' data: https: blob:; "
+        "connect-src 'self' https://*.googleapis.com https://*.google-analytics.com;"
+    )
+    
+    return response
 
 # Health check endpoint for Cloud Run
 @app.route('/health', methods=['GET'])
@@ -113,14 +126,15 @@ def health_check():
             current_config = config.get_config()
             dependencies['config'] = 'loaded'
         except Exception as e:
-            dependencies['config'] = f'error: {str(e)}'
+            logger.warning(f"Config check failed: {str(e)}")
+            dependencies['config'] = f'error: {str(e)[:50]}'
         
         # Check database connections (if initialized)
-        if hasattr(config, '_clients'):
+        if hasattr(config, '_clients') and config._clients:
             clients = config._clients
             dependencies['bigquery'] = 'connected' if clients.get('bigquery') else 'not initialized'
             dependencies['storage'] = 'connected' if clients.get('storage') else 'not initialized'
-            dependencies['pubsub'] = 'connected' if 'pubsub' in clients else 'not initialized'
+            dependencies['pubsub'] = 'connected' if clients.get('_publisher') else 'not initialized'
         else:
             dependencies['gcp_clients'] = 'not initialized'
         
@@ -136,7 +150,7 @@ def health_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 503
 
-# Readiness probe (more thorough than health check)
+# Readiness probe
 @app.route('/ready', methods=['GET'])
 def readiness_check():
     """Readiness probe for Cloud Run."""
@@ -152,8 +166,17 @@ def readiness_check():
             from config import access_secret
             secret = access_secret('auth-config')
             ready_data['components']['secrets'] = 'accessible' if secret else 'not found'
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Secret check failed: {str(e)}")
             ready_data['components']['secrets'] = 'not accessible'
+        
+        # Check if services can be initialized
+        try:
+            config.initialize_bigquery()
+            ready_data['components']['bigquery'] = 'can connect'
+        except Exception as e:
+            logger.warning(f"BigQuery check failed: {str(e)}")
+            ready_data['components']['bigquery'] = 'error'
         
         all_ready = all(status != 'not accessible' for status in ready_data['components'].values())
         
@@ -171,7 +194,7 @@ def readiness_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 503
 
-# Debug endpoint (for troubleshooting)
+# Debug endpoint
 @app.route('/debug', methods=['GET'])
 def debug():
     """Debug endpoint to check application state."""
@@ -194,7 +217,8 @@ def debug():
                 'path': request.path,
                 'is_secure': request.is_secure,
                 'headers': dict(request.headers),
-            }
+            },
+            'session': dict(session) if session else {}
         }
         return jsonify(debug_info)
     else:
@@ -262,21 +286,59 @@ def initialize_app():
     try:
         logger.info("Initializing application...")
         
-        # Initialize configuration
-        config.Config.init_app()
+        # Initialize configuration with error handling
+        try:
+            Config.init_app()
+            logger.info("Configuration initialized successfully")
+        except Exception as e:
+            logger.error(f"Config initialization failed but continuing: {str(e)}")
+            # Don't fail the app if config init fails, some components can work without it
         
-        # Initialize other components if needed
-        # This is a good place to set up database connections, etc.
+        # Ensure required directories exist
+        os.makedirs('data', exist_ok=True)
+        os.makedirs('logs', exist_ok=True)
+        os.makedirs('static/dist', exist_ok=True)
+        os.makedirs('templates', exist_ok=True)
+        
+        # Initialize error reporting if enabled
+        if os.environ.get('ENABLE_ERROR_REPORTING', 'false').lower() == 'true':
+            try:
+                Config.initialize_error_reporting()
+                logger.info("Error reporting initialized")
+            except Exception as e:
+                logger.warning(f"Error reporting initialization failed: {str(e)}")
+        
+        # Start background services if in production
+        if os.environ.get('ENVIRONMENT') == 'production':
+            try:
+                # Start background ingestion if enabled
+                if os.environ.get('AUTO_INGEST', 'false').lower() == 'true':
+                    from ingestion import trigger_ingestion_in_background
+                    trigger_ingestion_in_background()
+                    logger.info("Background ingestion started")
+                
+                # Start background analysis if enabled
+                if os.environ.get('AUTO_ANALYZE', 'false').lower() == 'true':
+                    from analysis import start_background_analysis
+                    start_background_analysis()
+                    logger.info("Background analysis started")
+            except Exception as e:
+                logger.warning(f"Background services initialization failed: {str(e)}")
         
         logger.info("Application initialized successfully")
         return True
     except Exception as e:
         logger.error(f"Application initialization failed: {str(e)}")
         logger.error(traceback.format_exc())
+        # Don't fail the app - just log the error
         return False
 
 # Initialize when the module is imported (for Gunicorn)
-initialize_app()
+try:
+    initialize_app()
+except Exception as e:
+    logger.error(f"Error during module initialization: {str(e)}")
+    logger.error(traceback.format_exc())
 
 # Entry point for local development
 if __name__ == '__main__':
@@ -300,4 +362,4 @@ if __name__ == '__main__':
         logger.error(f"Failed to start application: {str(e)}")
         logger.error(traceback.format_exc())
         # Re-raise to ensure the container fails if it can't start
-        raise
+        sys.exit(1)
