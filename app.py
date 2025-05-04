@@ -85,7 +85,13 @@ def internal_server_error(e):
     return render_template('500.html'), 500
 
 if __name__ == '__main__':
-    # This is used when running locally only. When deploying to Cloud Run,
-    # a webserver process such as Gunicorn will serve the app.
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        # This is used when running locally only. When deploying to Cloud Run,
+        # a webserver process such as Gunicorn will serve the app.
+        port = int(os.environ.get('PORT', 8080))
+        app.run(host='0.0.0.0', port=port, debug=False)
+    except Exception as e:
+        logger.error(f"Failed to start application: {str(e)}")
+        logger.error(traceback.format_exc())
+        # Re-raise to ensure the container fails if it can't start
+        raise
