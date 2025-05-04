@@ -87,7 +87,7 @@ steps:
           --min-instances 1 \
           --execution-environment gen2 \
           --concurrency 80 \
-          --cpu-throttling=false \
+          --no-cpu-throttling \
           --startup-cpu-boost \
           --set-env-vars ENVIRONMENT=production \
           --set-env-vars GCP_PROJECT=${PROJECT_ID} \
