@@ -27,12 +27,16 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p static/dist templates data logs
 
-# Create startup script
-RUN echo '#!/bin/bash\nset -e\n\necho "Starting Threat Intelligence Platform..."\necho "Environment: $ENVIRONMENT"\necho "Port: $PORT"\n\n# Ensure directories exist\nmkdir -p data logs static/dist\n\n# Start the application\nexec gunicorn \\\n    --bind 0.0.0.0:$PORT \\\n    --workers 2 \\\n    --threads 4 \\\n    --timeout 120 \\\n    --preload \\\n    --access-logfile - \\\n    --error-logfile - \\\n    app:app' > /app/start.sh && \
-    chmod +x /app/start.sh
-
 # Expose port 8080
 EXPOSE 8080
 
-# Run the application
-CMD ["/app/start.sh"]
+# Start the application directly with Gunicorn
+CMD gunicorn \
+    --bind 0.0.0.0:${PORT:-8080} \
+    --workers 2 \
+    --threads 4 \
+    --timeout 120 \
+    --preload \
+    --access-logfile - \
+    --error-logfile - \
+    app:app
