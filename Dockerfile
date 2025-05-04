@@ -13,21 +13,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install only essential system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    python3-dev \
     curl \
-    libssl-dev \
-    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
+# Copy requirements and install dependencies first (for caching)
 COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
@@ -44,28 +37,21 @@ RUN useradd -m -u 1000 -s /bin/bash appuser && \
 # Switch to non-root user
 USER appuser
 
-# Expose port 8080 (Cloud Run will override this)
+# Expose port 8080
 EXPOSE 8080
 
-# Healthcheck - use dynamic PORT
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# Minimal healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
-# Start the application using Gunicorn with dynamic port
+# Start the application with simpler config
 CMD exec gunicorn \
     --bind "0.0.0.0:${PORT:-8080}" \
-    --workers "${GUNICORN_WORKERS:-2}" \
-    --threads "${GUNICORN_THREADS:-4}" \
-    --timeout "${GUNICORN_TIMEOUT:-300}" \
-    --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" \
-    --worker-tmp-dir /tmp \
-    --preload \
-    --capture-output \
-    --enable-stdio-inheritance \
+    --workers 2 \
+    --threads 4 \
+    --timeout 30 \
+    --worker-class gthread \
     --access-logfile - \
     --error-logfile - \
-    --log-level "${LOG_LEVEL:-info}" \
-    --keepalive 30 \
-    --max-requests 1000 \
-    --max-requests-jitter 50 \
+    --log-level info \
     "app:app"
