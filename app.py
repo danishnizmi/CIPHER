@@ -7,6 +7,7 @@ from flask import Flask, jsonify, render_template, request, redirect, url_for, s
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Configure logging FIRST
@@ -36,7 +37,13 @@ app.config.update(
     APPLICATION_ROOT=None,
     PERMANENT_SESSION_LIFETIME=43200,
     MAX_CONTENT_LENGTH=16 * 1024 * 1024,
+    WTF_CSRF_ENABLED=True,
+    WTF_CSRF_SECRET_KEY=os.environ.get('WTF_CSRF_SECRET_KEY', os.environ.get('SECRET_KEY', 'dev-secret-key')),
+    WTF_CSRF_TIME_LIMIT=3600
 )
+
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
 
 # Setup CORS - simple for Cloud Run
 CORS(app)
