@@ -21,8 +21,8 @@ google-cloud-error-reporting==1.9.1
 google-api-core==2.11.1
 
 # AI/ML libraries (optional - only if using Vertex AI)
-# google-cloud-aiplatform==1.26.0
-# vertexai==0.1.1
+google-cloud-aiplatform==1.26.0
+vertexai==0.1.1
 
 # Utilities
 requests==2.31.0
