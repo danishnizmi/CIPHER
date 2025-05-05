@@ -22,7 +22,7 @@ spec:
         environment: production
     spec:
       containerConcurrency: 80
-      timeoutSeconds: 300
+      timeoutSeconds: 900
       serviceAccountName: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
       containers:
       - image: gcr.io/primal-chariot-382610/threat-intelligence-platform:latest
@@ -49,13 +49,27 @@ spec:
         - name: PUBSUB_ANALYSIS_TOPIC
           value: "threat-analysis-events"
         - name: VERSION
-          value: "1.0.2"
+          value: "1.0.3"
         - name: PYTHONPATH
           value: "/app"
         - name: LOAD_SECRETS
           value: "true"
         - name: LOG_LEVEL
           value: "INFO"
+        - name: SESSION_COOKIE_SECURE
+          value: "true"
+        - name: SESSION_COOKIE_HTTPONLY
+          value: "true"
+        - name: SESSION_COOKIE_SAMESITE
+          value: "Lax"
+        - name: SESSION_USE_SIGNER
+          value: "true"
+        - name: SESSION_KEY_PREFIX
+          value: "threat_intel:"
+        - name: PREFERRED_URL_SCHEME
+          value: "https"
+        - name: SESSION_PROTECTION
+          value: "basic"
         - name: API_KEY
           valueFrom:
             secretKeyRef:
