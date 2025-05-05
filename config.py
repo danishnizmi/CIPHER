@@ -440,14 +440,22 @@ class Config:
     ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
     ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', None)
     
-    # Session configuration
+    # Session configuration - Cloud-based
     PERMANENT_SESSION_LIFETIME = timedelta(seconds=AUTH_SESSION_TIMEOUT)
-    SESSION_TYPE = 'filesystem'
-    SESSION_FILE_DIR = os.environ.get('SESSION_FILE_DIR', tempfile.gettempdir())
     SESSION_COOKIE_NAME = 'threat_intelligence_session'
-    SESSION_COOKIE_SECURE = get_env_bool('SESSION_COOKIE_SECURE', False)
+    SESSION_COOKIE_SECURE = get_env_bool('SESSION_COOKIE_SECURE', True)
     SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
     SESSION_USE_SIGNER = True
+    SESSION_KEY_PREFIX = 'threat_intel:'
+    SESSION_COOKIE_DOMAIN = None
+    SESSION_COOKIE_PATH = '/'
+    SESSION_REFRESH_EACH_REQUEST = False
+    REMEMBER_COOKIE_DURATION = timedelta(seconds=AUTH_SESSION_TIMEOUT)
+    REMEMBER_COOKIE_SECURE = True
+    REMEMBER_COOKIE_HTTPONLY = True
+    REMEMBER_COOKIE_REFRESH_EACH_REQUEST = False
+    SESSION_PROTECTION = 'basic'
     
     # Security configuration
     WTF_CSRF_ENABLED = True
@@ -658,6 +666,15 @@ class Config:
                 
                 if cls.SESSION_SECRET:
                     cls.SECRET_KEY = cls.SESSION_SECRET
+                    cls.WTF_CSRF_SECRET_KEY = cls.SESSION_SECRET
+                    logger.info("Loaded session secret from Secret Manager")
+                else:
+                    # Generate a secure session secret if not provided
+                    import secrets
+                    cls.SESSION_SECRET = secrets.token_hex(32)
+                    cls.SECRET_KEY = cls.SESSION_SECRET
+                    cls.WTF_CSRF_SECRET_KEY = cls.SESSION_SECRET
+                    logger.warning("Generated new session secret - this should be stored in Secret Manager")
                 
                 if 'providers' in auth_config:
                     cls.AUTH_PROVIDERS = auth_config['providers']
@@ -799,6 +816,7 @@ def create_default_auth_config() -> bool:
         if should_ignore_permission_errors():
             logger.warning("Using in-memory fallback for auth-config")
             Config.SECRET_KEY = session_secret
+            Config.WTF_CSRF_SECRET_KEY = session_secret
             return True
         
         return False
