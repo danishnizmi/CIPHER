@@ -26,7 +26,7 @@ app = Flask(__name__)
 # Add proxy middleware to handle Cloud Run reverse proxy
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Basic configuration - fixed for Cloud Run
+# Basic configuration - fixed for Cloud Run with cloud-based sessions
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
     SESSION_COOKIE_SECURE=True,  # Enable for Cloud Run (HTTPS)
@@ -40,10 +40,18 @@ app.config.update(
     WTF_CSRF_ENABLED=True,
     WTF_CSRF_SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
     WTF_CSRF_TIME_LIMIT=3600,
-    SESSION_TYPE='filesystem',
-    SESSION_FILE_DIR='/tmp/flask_session',
+    # Cloud-based session configuration
+    SESSION_COOKIE_NAME='_threat_session',
+    SESSION_COOKIE_DOMAIN=None,
     SESSION_COOKIE_PATH='/',
-    SESSION_PROTECTION='strong'
+    SESSION_REFRESH_EACH_REQUEST=False,
+    SESSION_USE_SIGNER=True,
+    SESSION_KEY_PREFIX='threat_intel:',
+    REMEMBER_COOKIE_DURATION=43200,
+    REMEMBER_COOKIE_SECURE=True,
+    REMEMBER_COOKIE_HTTPONLY=True,
+    REMEMBER_COOKIE_REFRESH_EACH_REQUEST=False,
+    SESSION_PROTECTION='basic'
 )
 
 # Initialize CSRF protection
