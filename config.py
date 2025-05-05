@@ -180,6 +180,7 @@ def handle_gcp_errors(func):
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {str(e)}")
             if os.environ.get('ENVIRONMENT') != 'production':
+                import traceback
                 logger.error(traceback.format_exc())
             return None
     return wrapper
@@ -799,10 +800,11 @@ def create_default_auth_config() -> bool:
         session_secret = secrets.token_hex(32)
         auth_config = {
             "session_secret": session_secret,
+            "enabled": True,
             "users": {
                 "admin": {
                     "password": hashlib.sha256("admin".encode()).hexdigest(),
-                    "role": "admin",
+                    "role": "admin", 
                     "created_at": datetime.utcnow().isoformat()
                 }
             }
