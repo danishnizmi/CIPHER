@@ -55,32 +55,9 @@ app.config.update(
     SESSION_TYPE='filesystem'
 )
 
-# Health check endpoint defined FIRST
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Minimal health check for startup."""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'app_ready': True
-    }), 200
-
-# Readiness probe  
-@app.route('/ready', methods=['GET'])
-def readiness_check():
-    """Readiness probe for Cloud Run."""
-    return jsonify({
-        'status': 'ready',
-        'timestamp': datetime.utcnow().isoformat()
-    }), 200
-
-# Initialize CSRF protection AFTER health check
+# Initialize CSRF protection before any routes
 csrf = CSRFProtect()
 csrf.init_app(app)
-
-# Exempt health and ready endpoints from CSRF
-csrf.exempt(health_check)
-csrf.exempt(readiness_check)
 
 # Setup CORS for both frontend and API
 CORS(app, resources={
@@ -96,6 +73,27 @@ limiter = Limiter(
     storage_uri="memory://",
     swallow_errors=True
 )
+
+# Health check endpoint - exempt from CSRF
+@app.route('/health', methods=['GET'])
+@csrf.exempt
+def health_check():
+    """Minimal health check for startup."""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'app_ready': True
+    }), 200
+
+# Readiness probe - exempt from CSRF  
+@app.route('/ready', methods=['GET'])
+@csrf.exempt
+def readiness_check():
+    """Readiness probe for Cloud Run."""
+    return jsonify({
+        'status': 'ready',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
 
 # Delayed registration of blueprints
 def register_late_components():
