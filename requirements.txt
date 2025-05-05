@@ -20,8 +20,8 @@ google-cloud-logging==3.10.0
 google-cloud-error-reporting==1.11.0
 google-api-core==2.16.1
 
-# AI/ML libraries (for Vertex AI support)
-google-cloud-aiplatform==1.59.0
+# AI/ML libraries (for Vertex AI support) - MATCHING VERSIONS
+google-cloud-aiplatform==1.71.1
 vertexai==1.71.1
 
 # Utilities
