@@ -37,18 +37,17 @@ limiter = Limiter(
 # -------------------- Authentication & Authorization --------------------
 
 def require_api_key(f):
-    """Decorator to require API key for routes."""
+    """Decorator to require API key for routes with improved session handling for Cloud Run."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         # Get API key from request
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
-        # For internal requests, check if user is logged in
-        if request.remote_addr in ['127.0.0.1', '::1'] or request.headers.get('X-Forwarded-For', '').startswith('127.0.0.1'):
-            # Internal request from frontend
-            from flask import session
-            if session.get('logged_in'):
-                return f(*args, **kwargs)
+        # Check if user is logged in (for internal requests from frontend)
+        # This works better for Cloud Run than IP-based checking
+        from flask import session
+        if session.get('logged_in'):
+            return f(*args, **kwargs)
         
         # Check if API key is valid
         if not api_key or api_key != Config.API_KEY:
