@@ -95,7 +95,7 @@ steps:
           --set-env-vars GCS_BUCKET=${PROJECT_ID}-threat-data \
           --set-env-vars PUBSUB_TOPIC=threat-data-ingestion \
           --set-env-vars PUBSUB_ANALYSIS_TOPIC=threat-analysis-events \
-          --set-env-vars VERSION=1.0.2 \
+          --set-env-vars VERSION=1.0.3 \
           --set-env-vars DEBUG=false \
           --set-env-vars PYTHONPATH=/app \
           --set-env-vars PYTHONDONTWRITEBYTECODE=1 \
@@ -104,7 +104,7 @@ steps:
           --set-env-vars ENSURE_GCP_RESOURCES=true \
           --set-env-vars IGNORE_PERMISSION_ERRORS=false \
           --set-env-vars AUTH_ENABLED=true \
-          --set-env-vars SESSION_COOKIE_SECURE=true \
+          --set-env-vars SESSION_COOKIE_SECURE=false \
           --set-env-vars SESSION_COOKIE_HTTPONLY=true \
           --set-env-vars SESSION_COOKIE_SAMESITE=Lax \
           --set-env-vars PREFERRED_URL_SCHEME=https \
@@ -195,15 +195,13 @@ steps:
           --format=yaml | head -n 50
         
         echo -e "\n=== Latest Logs ==="
-        gcloud run logs read threat-intelligence-platform \
-          --region=us-central1 \
+        gcloud logs read "threat-intelligence-platform" \
           --limit=20 \
           --since=5m \
           --project=${PROJECT_ID}
         
         echo -e "\n=== Error Logs ==="
-        gcloud run logs read threat-intelligence-platform \
-          --region=us-central1 \
+        gcloud logs read "threat-intelligence-platform" \
           --limit=10 \
           --since=5m \
           --project=${PROJECT_ID} | grep -i error || echo "No errors found"
