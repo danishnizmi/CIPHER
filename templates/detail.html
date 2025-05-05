@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}
+{{ content_type|title }} Detail - Threat Intelligence Platform
+{% endblock %}
+
+{% block content %}
+<div class="page-header mb-6">
+    <h1 class="text-2xl font-bold mb-2 flex items-center">
+        <i class="fas fa-info-circle text-accent mr-3"></i>
+        {{ content_type|title }} Details
+    </h1>
+    <p class="text-gray-600">Details for {{ identifier }}</p>
+</div>
+
+<div class="panel">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-database panel-icon"></i>
+            Information
+        </h3>
+    </div>
+    <div class="p-6">
+        <p class="text-gray-500">Detailed view for {{ content_type }}: {{ identifier }}</p>
+        <p class="mt-4 text-sm text-gray-400">This is a placeholder detail page. Full implementation coming soon.</p>
+    </div>
+</div>
+
+<div class="mt-6">
+    <a href="javascript:history.back()" class="btn btn-secondary">
+        <i class="fas fa-arrow-left mr-2"></i> Back
+    </a>
+</div>
+{% endblock %}
