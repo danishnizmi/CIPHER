@@ -1,6 +1,6 @@
 """
-Threat Intelligence Platform - Frontend Module (Fixed Version)
-Handles web interface, user authentication, and dashboard views with improved session and CSRF handling.
+Threat Intelligence Platform - Frontend Module
+Handles web interface, user authentication, and dashboard views.
 """
 
 import os
@@ -25,7 +25,7 @@ import config
 from config import Config
 
 # Environment settings
-VERSION = os.environ.get("VERSION", "1.0.2")
+VERSION = os.environ.get("VERSION", "1.0.3")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
@@ -51,19 +51,13 @@ frontend_app = Blueprint('frontend', __name__, template_folder='templates', stat
 def before_request():
     """Ensure session is properly established with robust error handling."""
     try:
-        # Force session creation
+        # Only create session ID if not present
         if '_id' not in session:
             session.permanent = True
             session['_id'] = secrets.token_hex(16)
-            session['csrf_token'] = secrets.token_hex(16)
             logger.debug(f"New session created: {session.get('_id')}")
         
-        # Ensure CSRF token exists in session
-        if 'csrf_token' not in session:
-            session['csrf_token'] = secrets.token_hex(16)
-            logger.debug("CSRF token added to session")
-        
-        # Add session debug info
+        # Add session debug info in development
         if DEBUG_MODE:
             logger.debug(f"Session data: {dict(session)}")
             logger.debug(f"Request headers: {dict(request.headers)}")
@@ -71,37 +65,6 @@ def before_request():
     except Exception as e:
         logger.error(f"Error in before_request: {str(e)}")
         logger.error(traceback.format_exc())
-
-# Custom CSRF token validation
-def validate_csrf_token():
-    """Validate CSRF token with improved error handling."""
-    if request.method not in ['POST', 'PUT', 'DELETE', 'PATCH']:
-        return True
-    
-    try:
-        # Skip CSRF check for health endpoints
-        if request.path.startswith('/health') or request.path.startswith('/api/health'):
-            return True
-        
-        # Get token from form or headers
-        token = request.form.get('csrf_token')
-        if not token:
-            token = request.headers.get('X-CSRF-Token')
-        
-        session_token = session.get('csrf_token')
-        
-        if DEBUG_MODE:
-            logger.debug(f"CSRF check - Form token: {token}, Session token: {session_token}")
-        
-        if not token or not session_token or token != session_token:
-            logger.error(f"CSRF validation failed. Token: {token}, Session: {session_token}")
-            return False
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error validating CSRF token: {str(e)}")
-        return False
 
 # ====== Helper Functions ======
 def safe_report_exception():
@@ -383,17 +346,12 @@ def index():
 
 @frontend_app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Login page handler with comprehensive error handling and CSRF protection"""
+    """Login page handler with Flask-WTF CSRF protection"""
     error = None
     
     try:
         if request.method == 'POST':
-            # CSRF validation
-            if not validate_csrf_token():
-                logger.error("CSRF validation failed for login attempt")
-                flash('Your session has expired or there was a security issue. Please try again.', 'danger')
-                return redirect(url_for('frontend.login'))
-            
+            # Flask-WTF automatically handles CSRF validation
             username = request.form.get('username')
             password = request.form.get('password')
             remember = request.form.get('remember') == 'on'
@@ -404,8 +362,7 @@ def login():
             # Validate inputs
             if not username or not password:
                 error = "Username and password are required"
-                return render_template('auth.html', page_type='login', error=error, 
-                                     now=datetime.now(), csrf_token=session.get('csrf_token'))
+                return render_template('auth.html', page_type='login', error=error, now=datetime.now())
             
             # Load users
             users = load_users()
@@ -422,7 +379,6 @@ def login():
                     session['logged_in'] = True
                     session['username'] = username
                     session['role'] = user.get('role', 'readonly')
-                    session['csrf_token'] = secrets.token_hex(16)  # Generate new CSRF token
                     session['_id'] = secrets.token_hex(16)  # Generate new session ID
                     
                     # Update last login
@@ -455,8 +411,7 @@ def login():
         error = f"An unexpected error occurred: {str(e)}"
     
     # For GET requests or failed logins
-    return render_template('auth.html', page_type='login', error=error, 
-                         now=datetime.now(), csrf_token=session.get('csrf_token'))
+    return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
 @frontend_app.route('/logout')
 def logout():
@@ -586,7 +541,6 @@ def dashboard(view=None):
                 campaigns_list = (campaigns_response.get('campaigns', []) 
                                  if isinstance(campaigns_response, dict) else [])
                 
-                # FIX: Safely handle list slicing by checking if list exists first
                 if campaigns_list:
                     context['campaigns'] = campaigns_list[:3]
                 else:
@@ -597,7 +551,6 @@ def dashboard(view=None):
                 iocs_list = (iocs_response.get('records', []) 
                             if isinstance(iocs_response, dict) else [])
                 
-                # FIX: Safely handle list slicing here too
                 if iocs_list:
                     context['top_iocs'] = iocs_list[:4]
                 else:
@@ -722,7 +675,6 @@ def inject_global_data():
         'version': VERSION,
         'project_id': getattr(Config, 'GCP_PROJECT', None),
         'debug_mode': DEBUG_MODE,
-        'csrf_token': session.get('csrf_token', ''),
     }
 
 # ====== Template Function ======
@@ -755,15 +707,10 @@ def utility_processor():
         except:
             return 40
     
-    # Make csrf_token accessible in templates as a variable, not function
-    def csrf_token():
-        return session.get('csrf_token', '')
-    
     return dict(
         format_number=format_number,
         get_severity_class=get_severity_class,
         get_confidence_width=get_confidence_width,
-        csrf_token=csrf_token,  # Add as function so templates can call it directly
     )
 
 # If this script is run directly, start a development server
