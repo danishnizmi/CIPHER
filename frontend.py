@@ -203,7 +203,14 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         
         if response is None:
             # All retries failed
-            return {"error": "Failed to connect to API after multiple retries"}
+            return {
+                "error": "Failed to connect to API after multiple retries",
+                # Add default structure to prevent template errors
+                "feeds": {"total_sources": 0},
+                "iocs": {"total": 0, "types": []},
+                "campaigns": {"total_campaigns": 0},
+                "analyses": {"total_analyses": 0}
+            }
         
         # Log response time
         request_time = time.time() - start_time
@@ -215,7 +222,12 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
             return {
                 "error": f"API request failed with status {response.status_code}",
-                "status_code": response.status_code
+                "status_code": response.status_code,
+                # Add default structure to prevent template errors
+                "feeds": {"total_sources": 0},
+                "iocs": {"total": 0, "types": []},
+                "campaigns": {"total_campaigns": 0},
+                "analyses": {"total_analyses": 0}
             }
         
         # Parse and return JSON
@@ -224,7 +236,15 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
                 return response.json()
             except json.JSONDecodeError:
                 logger.warning(f"Invalid JSON response: {response.text[:100]}")
-                return {"error": "Invalid JSON response", "raw_response": response.text[:500]}
+                return {
+                    "error": "Invalid JSON response", 
+                    "raw_response": response.text[:500],
+                    # Add default structure to prevent template errors
+                    "feeds": {"total_sources": 0},
+                    "iocs": {"total": 0, "types": []},
+                    "campaigns": {"total_campaigns": 0},
+                    "analyses": {"total_analyses": 0}
+                }
         
         return {}
     
@@ -237,10 +257,25 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             if status_code:
                 error_msg += f" (status code: {status_code})"
             
-            return {"error": error_msg, "status_code": status_code}
+            return {
+                "error": error_msg, 
+                "status_code": status_code,
+                # Add default structure to prevent template errors
+                "feeds": {"total_sources": 0},
+                "iocs": {"total": 0, "types": []},
+                "campaigns": {"total_campaigns": 0},
+                "analyses": {"total_analyses": 0}
+            }
         else:
             logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
-            return {"error": f"Unexpected error: {str(e)}"}
+            return {
+                "error": f"Unexpected error: {str(e)}",
+                # Add default structure to prevent template errors
+                "feeds": {"total_sources": 0},
+                "iocs": {"total": 0, "types": []},
+                "campaigns": {"total_campaigns": 0},
+                "analyses": {"total_analyses": 0}
+            }
 
 # ====== Authentication Functions ======
 def login_required(f):
@@ -493,10 +528,18 @@ def dashboard(view=None):
         try:
             # Get statistics using the helper function
             stats_response = _api_request('stats', params={"days": days}) or {}
-            context['stats'] = stats_response
+            
+            # Ensure stats has the expected structure even if API fails
+            context['stats'] = {
+                'feeds': stats_response.get('feeds', {'total_sources': 0}),
+                'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
+                'campaigns': stats_response.get('campaigns', {'total_campaigns': 0}),
+                'analyses': stats_response.get('analyses', {'total_analyses': 0}),
+                'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
+            }
             
             # Extract trends from statistics - use real data
-            if isinstance(stats_response, dict):
+            if isinstance(stats_response, dict) and 'feeds' in stats_response:
                 context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
                 context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
                 context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
