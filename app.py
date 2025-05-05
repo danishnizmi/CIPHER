@@ -97,11 +97,18 @@ def register_late_components():
         # Import modules
         import config
         from config import Config
+        
+        # CRITICAL: Load configuration first to ensure SECRET_KEY is available
+        Config.init_app()
+        
+        # Update app config with the loaded secret key
+        if hasattr(Config, 'SECRET_KEY') and Config.SECRET_KEY:
+            app.config['SECRET_KEY'] = Config.SECRET_KEY
+            app.config['WTF_CSRF_SECRET_KEY'] = Config.SECRET_KEY
+            logger.info("Updated app configuration with loaded SECRET_KEY")
+        
         from api import api_blueprint
         from frontend import frontend_app as frontend_blueprint, format_datetime
-        
-        # Load configuration
-        Config.init_app()
         
         # Register blueprints
         app.register_blueprint(api_blueprint, url_prefix='/api')
@@ -124,7 +131,7 @@ def page_not_found(e):
     logger.warning(f"Page not found: {request.url}")
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': str(e)}), 404
-    return render_template('404.html'), 404
+    return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
 
 @app.errorhandler(500)
 def internal_server_error(e):
