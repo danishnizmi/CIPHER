@@ -29,6 +29,7 @@ try:
     try:
         import vertexai
         from vertexai.language_models import TextGenerationModel
+        from vertexai.preview.generative_models import GenerativeModel
         HAS_VERTEX = True
     except ImportError:
         HAS_VERTEX = False
