@@ -40,6 +40,8 @@ COPY . .
 
 # Create necessary directories with proper permissions
 RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/secrets && \
+    mkdir -p /tmp/flask_session && \
+    chmod -R 777 /tmp/flask_session && \
     chmod -R 755 /app
 
 # Create Tailwind CSS file
@@ -47,7 +49,8 @@ RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/sta
 
 # Create non-root user for security
 RUN useradd -m -u 1000 -s /bin/bash appuser && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /tmp/flask_session
 
 # Expose port 8080
 EXPOSE 8080
