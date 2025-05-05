@@ -143,8 +143,8 @@
             {% endif %}
             
             <form action="{{ url_for('frontend.login') }}" method="post" class="space-y-5">
-                <!-- CSRF token field - critical for security -->
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <!-- Use Flask-WTF's built-in CSRF token -->
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
@@ -254,7 +254,7 @@
             <div class="border-t border-gray-200 my-6 pt-6">
                 <h3 class="text-lg font-medium text-gray-800 mb-4">Change Password</h3>
                 <form action="{{ url_for('frontend.change_password') }}" method="post" class="space-y-5" id="passwordForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="form-group">
                         <label for="current_password" class="form-label">Current Password</label>
                         <div class="input-icon-wrapper">
@@ -346,7 +346,7 @@
             {% endwith %}
             
             <form action="{{ url_for('frontend.add_user_route') }}" method="post" class="space-y-5" id="userForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
                     <div class="input-icon-wrapper">
@@ -452,7 +452,7 @@
             {% endwith %}
             
             <form action="{{ url_for('frontend.edit_user', username=username) }}" method="post" class="space-y-5">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
                     <div class="input-icon-wrapper">
@@ -535,7 +535,7 @@
                     <div class="flex justify-end space-x-3">
                         <button type="button" id="cancelDeleteBtn" class="btn btn-secondary">Cancel</button>
                         <form action="{{ url_for('frontend.delete_user', username=username) }}" method="post">
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn btn-danger">Delete User</button>
                         </form>
                     </div>
@@ -595,7 +595,7 @@
             
             <form action="{{ url_for('frontend.login') }}" method="post" class="space-y-5">
                 <!-- Critical: CSRF token field -->
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 
                 <div class="form-group">
                     <label for="username" class="form-label">Username</label>
