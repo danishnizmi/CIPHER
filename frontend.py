@@ -1,6 +1,6 @@
 """
-Threat Intelligence Platform - Frontend Module
-Handles web interface, user authentication, and dashboard views.
+Threat Intelligence Platform - Frontend Module (Fixed Version)
+Handles web interface, user authentication, and dashboard views with improved session and CSRF handling.
 """
 
 import os
@@ -18,6 +18,7 @@ from typing import Dict, List, Any, Optional, Union
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
 from flask import flash, session, abort, g, Response, current_app
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.exceptions import BadRequest
 
 # Import config module for centralized configuration
 import config
@@ -43,39 +44,64 @@ logging.basicConfig(level=LOG_LEVEL,
 # Create Blueprint for the frontend module
 frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
 
-# ====== Secret Key for Sessions ======
-def get_secret_key() -> str:
-    """Get secret key for Flask sessions using config module"""
-    try:
-        # Try config module first
-        auth_config = config.get_cached_config('auth-config')
-        if auth_config and 'session_secret' in auth_config:
-            return auth_config['session_secret']
-        
-        # Try environment variable
-        secret_key = os.environ.get('SECRET_KEY')
-        if secret_key:
-            return secret_key
-        
-        # Try Secret Manager via config module
-        secret = config.access_secret("flask-secret-key")
-        if secret:
-            return secret
-    except Exception as e:
-        logger.error(f"Error retrieving secret key: {str(e)}")
-    
-    # Generate a secure key if all else fails
-    logger.warning("Generating temporary secret key - sessions will be invalidated on restart")
-    return hashlib.sha256(f"{time.time()}{secrets.token_hex(32)}".encode()).hexdigest()
+# ====== Session and Security Configuration ======
 
-# Share GCP clients with the app context
+# Force session creation before requests
 @frontend_app.before_request
-def setup_gcp_clients():
-    """Share GCP clients from config module with application context"""
-    if not hasattr(g, 'gcp_clients'):
-        g.gcp_clients = config.get_gcp_clients()
-    if not hasattr(g, 'gcp_services_available'):
-        g.gcp_services_available = config.GCP_SERVICES_AVAILABLE
+def before_request():
+    """Ensure session is properly established with robust error handling."""
+    try:
+        # Force session creation
+        if '_id' not in session:
+            session.permanent = True
+            session['_id'] = secrets.token_hex(16)
+            session['csrf_token'] = secrets.token_hex(16)
+            logger.debug(f"New session created: {session.get('_id')}")
+        
+        # Ensure CSRF token exists in session
+        if 'csrf_token' not in session:
+            session['csrf_token'] = secrets.token_hex(16)
+            logger.debug("CSRF token added to session")
+        
+        # Add session debug info
+        if DEBUG_MODE:
+            logger.debug(f"Session data: {dict(session)}")
+            logger.debug(f"Request headers: {dict(request.headers)}")
+    
+    except Exception as e:
+        logger.error(f"Error in before_request: {str(e)}")
+        logger.error(traceback.format_exc())
+
+# Custom CSRF token validation
+def validate_csrf_token():
+    """Validate CSRF token with improved error handling."""
+    if request.method not in ['POST', 'PUT', 'DELETE', 'PATCH']:
+        return True
+    
+    try:
+        # Skip CSRF check for health endpoints
+        if request.path.startswith('/health') or request.path.startswith('/api/health'):
+            return True
+        
+        # Get token from form or headers
+        token = request.form.get('csrf_token')
+        if not token:
+            token = request.headers.get('X-CSRF-Token')
+        
+        session_token = session.get('csrf_token')
+        
+        if DEBUG_MODE:
+            logger.debug(f"CSRF check - Form token: {token}, Session token: {session_token}")
+        
+        if not token or not session_token or token != session_token:
+            logger.error(f"CSRF validation failed. Token: {token}, Session: {session_token}")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error validating CSRF token: {str(e)}")
+        return False
 
 # ====== Helper Functions ======
 def safe_report_exception():
@@ -285,8 +311,10 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            # Remember where the user was trying to go
-            return redirect(url_for('frontend.login', next=request.url))
+            # Save the requested URL
+            session['next_url'] = request.url
+            flash('Please log in to continue', 'info')
+            return redirect(url_for('frontend.login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -295,7 +323,9 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            return redirect(url_for('frontend.login', next=request.url))
+            session['next_url'] = request.url
+            flash('Please log in to continue', 'info')
+            return redirect(url_for('frontend.login'))
         if session.get('role') != 'admin':
             flash('Admin privileges required', 'danger')
             return render_template('auth.html', page_type='not_authorized')
@@ -310,14 +340,9 @@ def load_users() -> Dict[str, Dict]:
         if auth_config and 'users' in auth_config and auth_config['users']:
             return auth_config.get('users', {})
         
-        # No users exist yet, ensure admin user is created
-        admin_password = config.set_initial_admin_password()
-        if admin_password and ENVIRONMENT == 'development':
-            print(f"\n=== ADMIN PASSWORD: {admin_password} ===\n")
-            
-        # Reload auth config after setup
-        auth_config = config.get_cached_config('auth-config', force_refresh=True)
-        return auth_config.get('users', {})
+        # If no users exist, create default admin
+        logger.warning("No users found in auth config")
+        return {}
     except Exception as e:
         logger.error(f"Failed to load users: {str(e)}")
         return {}
@@ -358,11 +383,17 @@ def index():
 
 @frontend_app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Login page handler with comprehensive error handling"""
+    """Login page handler with comprehensive error handling and CSRF protection"""
     error = None
     
     try:
         if request.method == 'POST':
+            # CSRF validation
+            if not validate_csrf_token():
+                logger.error("CSRF validation failed for login attempt")
+                flash('Your session has expired or there was a security issue. Please try again.', 'danger')
+                return redirect(url_for('frontend.login'))
+            
             username = request.form.get('username')
             password = request.form.get('password')
             remember = request.form.get('remember') == 'on'
@@ -373,7 +404,8 @@ def login():
             # Validate inputs
             if not username or not password:
                 error = "Username and password are required"
-                return render_template('auth.html', page_type='login', error=error, now=datetime.now())
+                return render_template('auth.html', page_type='login', error=error, 
+                                     now=datetime.now(), csrf_token=session.get('csrf_token'))
             
             # Load users
             users = load_users()
@@ -385,10 +417,13 @@ def login():
                 # Verify password
                 if verify_password(stored_password, password):
                     # Login successful
+                    session.clear()  # Clear previous session data
+                    session.permanent = remember
                     session['logged_in'] = True
                     session['username'] = username
                     session['role'] = user.get('role', 'readonly')
-                    session.permanent = remember
+                    session['csrf_token'] = secrets.token_hex(16)  # Generate new CSRF token
+                    session['_id'] = secrets.token_hex(16)  # Generate new session ID
                     
                     # Update last login
                     try:
@@ -403,7 +438,7 @@ def login():
                     flash(f'Welcome, {username}!', 'success')
                     
                     # Redirect to requested page or dashboard
-                    next_page = request.args.get('next')
+                    next_page = session.pop('next_url', None) or request.args.get('next')
                     if next_page and next_page.startswith('/'):
                         return redirect(next_page)
                     return redirect(url_for('frontend.dashboard'))
@@ -420,7 +455,8 @@ def login():
         error = f"An unexpected error occurred: {str(e)}"
     
     # For GET requests or failed logins
-    return render_template('auth.html', page_type='login', error=error, now=datetime.now())
+    return render_template('auth.html', page_type='login', error=error, 
+                         now=datetime.now(), csrf_token=session.get('csrf_token'))
 
 @frontend_app.route('/logout')
 def logout():
@@ -615,7 +651,7 @@ def dashboard(view=None):
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('frontend.login'))
 
-# ====== Template Filters - Moved to app.py ======
+# ====== Template Filters ======
 
 # Define datetime formatter function that can be registered in app.py
 def format_datetime(value):
@@ -658,14 +694,22 @@ def server_error(e):
                                content="<h1>500 - Server Error</h1><p>An unexpected error occurred.</p>"), 500
 
 @frontend_app.errorhandler(400)
-def handle_csrf_error(e):
+def handle_bad_request(e):
+    """Handle 400 errors including CSRF errors"""
     logger.error(f"400 error: {str(e)}")
+    logger.error(traceback.format_exc())
+    
     # Check if this is a CSRF error
-    if 'CSRF' in str(e):
+    if isinstance(e, BadRequest) and 'CSRF' in str(e):
+        logger.error("CSRF validation failed")
         flash('Your session has expired or there was a security issue. Please try again.', 'danger')
         return redirect(url_for('frontend.login'))
-    # For other 400 errors, use the default handler
-    return str(e), 400
+    
+    # For other 400 errors
+    error_msg = str(e)
+    return render_template('500.html', 
+                           title="Bad Request", 
+                           content=f"<h1>400 - Bad Request</h1><p>{error_msg}</p>"), 400
 
 # ====== Context Processors ======
 
@@ -678,8 +722,44 @@ def inject_global_data():
         'version': VERSION,
         'project_id': getattr(Config, 'GCP_PROJECT', None),
         'debug_mode': DEBUG_MODE,
-        'csrf_token': lambda: '', 
+        'csrf_token': session.get('csrf_token', ''),
     }
+
+# ====== Template Function ======
+@frontend_app.context_processor
+def utility_processor():
+    """Add utility functions to template context"""
+    def format_number(value):
+        """Format numbers with commas"""
+        try:
+            return "{:,}".format(int(value)) if value else "0"
+        except:
+            return str(value)
+    
+    def get_severity_class(severity):
+        """Get CSS class for severity levels"""
+        severity_map = {
+            'critical': 'bg-red-600 text-white',
+            'high': 'bg-orange-500 text-white',
+            'medium': 'bg-amber-400 text-gray-800',
+            'low': 'bg-teal-500 text-white'
+        }
+        return severity_map.get(str(severity).lower(), 'bg-gray-300 text-gray-800')
+    
+    def get_confidence_width(value):
+        """Get width percentage for confidence bar"""
+        try:
+            if isinstance(value, (int, float)):
+                return min(100, max(0, int(value)))
+            return 40  # Default
+        except:
+            return 40
+    
+    return dict(
+        format_number=format_number,
+        get_severity_class=get_severity_class,
+        get_confidence_width=get_confidence_width
+    )
 
 # If this script is run directly, start a development server
 if __name__ == "__main__":
