@@ -49,47 +49,22 @@ frontend_app = Blueprint('frontend', __name__, template_folder='templates', stat
 # Force session creation before requests
 @frontend_app.before_request
 def before_request():
-    """Ensure session is properly established with cloud-based storage."""
+    """Ensure session is properly established with cloud-based session."""
     try:
-        # Force session creation if needed - this works with cloud-based sessions
-        if '_creation_time' not in session:
+        # Force session creation if needed
+        if '_id' not in session:
             session.permanent = True
-            session['_creation_time'] = datetime.utcnow().isoformat()
             session['_id'] = secrets.token_hex(16)
             logger.debug(f"New session created: {session.get('_id')}")
         
         # Add session debug info in development
         if DEBUG_MODE:
             logger.debug(f"Session data: {dict(session)}")
-            logger.debug(f"Session ID: {session.get('_id')}")
-            logger.debug(f"Session creation time: {session.get('_creation_time')}")
             logger.debug(f"Request headers: {dict(request.headers)}")
-            logger.debug(f"Cookies: {dict(request.cookies)}")
     
     except Exception as e:
         logger.error(f"Error in before_request: {str(e)}")
         logger.error(traceback.format_exc())
-
-# Enhanced session handling specifically for login
-@frontend_app.before_app_request
-def check_session_health():
-    """Check and repair session if needed"""
-    try:
-        # Ensure we have proper session attributes
-        if 'logged_in' not in session:
-            session['logged_in'] = False
-        
-        # Reset session if it's malformed
-        if '_creation_time' not in session:
-            session.clear()
-            session.permanent = True
-            session['_creation_time'] = datetime.utcnow().isoformat()
-            session['_id'] = secrets.token_hex(16)
-            session['logged_in'] = False
-            logger.info("Reset malformed session")
-    
-    except Exception as e:
-        logger.error(f"Error checking session health: {str(e)}")
 
 # ====== Helper Functions ======
 def safe_report_exception():
@@ -98,26 +73,6 @@ def safe_report_exception():
         config.report_error(Exception("Frontend error"))
     except Exception as e:
         logger.warning(f"Failed to report exception: {e}")
-
-def generate_trend_data(days: int, base: int = 50, variance: int = 15) -> List[int]:
-    """Generate a smooth trend line for charts when real data isn't available"""
-    import random
-    from math import sin, pi
-    
-    # Generate a more natural-looking trend
-    cycle = days / 4  # Cyclical component
-    
-    trend = []
-    for i in range(days):
-        # Combine base, cyclical component, and random noise
-        cycle_component = sin(i * 2 * pi / cycle) * 20
-        value = max(5, int(base + cycle_component + (random.randint(-variance, variance))))
-        trend.append(value)
-        
-        # Adjust base for next iteration (slight upward trend)
-        base += random.randint(-2, 3) / 10
-    
-    return trend
 
 def get_cache_key(func_name: str, **params) -> str:
     """Generate a cache key for a function call"""
@@ -137,6 +92,10 @@ def api_cache(timeout: int = CACHE_TIMEOUT):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # Skip cache for authenticated users for real-time data
+            if session.get('logged_in'):
+                return func(*args, **kwargs)
+            
             # Generate cache key
             cache_key = get_cache_key(func.__name__, **kwargs)
             
@@ -152,20 +111,6 @@ def api_cache(timeout: int = CACHE_TIMEOUT):
             # Update cache
             API_CACHE[cache_key] = result
             API_CACHE_TIMESTAMP[cache_key] = time.time()
-            
-            # Clean up old cache entries if too many
-            if len(API_CACHE) > 100:
-                # Find 10 oldest entries
-                oldest_keys = sorted(
-                    API_CACHE_TIMESTAMP, 
-                    key=API_CACHE_TIMESTAMP.get
-                )[:10]
-                
-                # Remove them
-                for k in oldest_keys:
-                    if k in API_CACHE:
-                        del API_CACHE[k]
-                        del API_CACHE_TIMESTAMP[k]
             
             return result
         return wrapper
@@ -379,13 +324,7 @@ def login():
     error = None
     
     try:
-        # Debug session state before login
-        logger.debug(f"Login attempt - Session before: {dict(session)}")
-        
         if request.method == 'POST':
-            # Debug CSRF token
-            logger.debug(f"CSRF token in form: {request.form.get('csrf_token')}")
-            
             # Flask-WTF automatically handles CSRF validation
             username = request.form.get('username')
             password = request.form.get('password')
@@ -408,22 +347,21 @@ def login():
                 
                 # Verify password
                 if verify_password(stored_password, password):
-                    # Clear the session before setting new data
-                    session.clear()
-                    
-                    # Login successful - establish new session
+                    # Login successful
+                    session.clear()  # Clear previous session data
                     session.permanent = remember
                     session['logged_in'] = True
                     session['username'] = username
                     session['role'] = user.get('role', 'readonly')
                     session['_id'] = secrets.token_hex(16)  # Generate new session ID
-                    session['_login_time'] = datetime.utcnow().isoformat()
                     
                     # Log the successful login
                     logger.info(f"Successful login: {username}")
-                    logger.debug(f"Session after login: {dict(session)}")
                     
                     flash(f'Welcome, {username}!', 'success')
+                    
+                    # Clear cache for this user
+                    clear_api_cache()
                     
                     # Redirect to requested page or dashboard
                     next_page = session.pop('next_url', None) or request.args.get('next')
@@ -551,13 +489,13 @@ def dashboard(view=None):
                 'page_icon': 'tachometer-alt'
             })
         
-        # Load statistics for all views with safety checks
+        # Load statistics for all views
         try:
             # Get statistics using the helper function
             stats_response = _api_request('stats', params={"days": days}) or {}
             context['stats'] = stats_response
             
-            # Extract trends from statistics - use real data if available or defaults if not
+            # Extract trends from statistics - use real data
             if isinstance(stats_response, dict):
                 context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
                 context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
@@ -567,20 +505,11 @@ def dashboard(view=None):
                 # Extract IOC type data for charts
                 context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
                 context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
-            else:
-                # Set defaults if stats_response is not a dict
-                context['feed_trend'] = 0
-                context['ioc_trend'] = 0
-                context['campaign_trend'] = 0
-                context['analysis_trend'] = 0
-                context['ioc_type_labels'] = []
-                context['ioc_type_values'] = []
             
-            # Load view-specific data with safety checks
+            # Load view-specific data
             if current_view == 'feeds':
                 feeds_response = _api_request('feeds') or {}
-                context['feed_items'] = (feeds_response.get('feed_details', []) 
-                                        if isinstance(feeds_response, dict) else [])
+                context['feed_items'] = feeds_response.get('feed_details', [])
                 context['feed_type_descriptions'] = {
                     feed.get('name', ''): feed.get('description', 'Threat Intelligence Feed') 
                     for feed in context['feed_items'] if isinstance(feed, dict) and 'name' in feed
@@ -588,16 +517,14 @@ def dashboard(view=None):
                 
             elif current_view == 'iocs':
                 iocs_response = _api_request('iocs', params={"days": days}) or {}
-                context['ioc_items'] = (iocs_response.get('records', []) 
-                                       if isinstance(iocs_response, dict) else [])
+                context['ioc_items'] = iocs_response.get('records', [])
                 
             elif current_view == 'campaigns':
                 campaigns_response = _api_request('campaigns', params={"days": days}) or {}
-                context['campaigns'] = (campaigns_response.get('campaigns', []) 
-                                       if isinstance(campaigns_response, dict) else [])
+                context['campaigns'] = campaigns_response.get('campaigns', [])
                 
             else:
-                # Dashboard view - load additional data with safety checks
+                # Dashboard view - load additional data
                 # Get date range for activity chart
                 today = datetime.now().date()
                 date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
@@ -618,12 +545,11 @@ def dashboard(view=None):
                     context['activity_counts'] = counts
                 else:
                     # Generate a basic trend if no visualization data
-                    context['activity_counts'] = generate_trend_data(days)
+                    context['activity_counts'] = [20 + i * 2 for i in range(days)]
                 
-                # Load campaigns for dashboard - safely handle list slicing
+                # Load campaigns for dashboard
                 campaigns_response = _api_request('campaigns', params={"days": days}) or {}
-                campaigns_list = (campaigns_response.get('campaigns', []) 
-                                 if isinstance(campaigns_response, dict) else [])
+                campaigns_list = campaigns_response.get('campaigns', [])
                 
                 if campaigns_list:
                     context['campaigns'] = campaigns_list[:3]
@@ -632,8 +558,7 @@ def dashboard(view=None):
                 
                 # Load IOCs for dashboard
                 iocs_response = _api_request('iocs', params={"days": days}) or {}
-                iocs_list = (iocs_response.get('records', []) 
-                            if isinstance(iocs_response, dict) else [])
+                iocs_list = iocs_response.get('records', [])
                 
                 if iocs_list:
                     context['top_iocs'] = iocs_list[:4]
@@ -646,7 +571,7 @@ def dashboard(view=None):
                 
                 # Load geo data for map
                 geo_stats = _api_request(f"iocs/geo", params={"days": days}) or {}
-                context['geo_stats'] = geo_stats.get('countries', []) if isinstance(geo_stats, dict) else []
+                context['geo_stats'] = geo_stats.get('countries', [])
                 
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
@@ -673,7 +598,7 @@ def dashboard(view=None):
                 # Dashboard view
                 today = datetime.now().date()
                 context['activity_dates'] = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
-                context['activity_counts'] = generate_trend_data(days)
+                context['activity_counts'] = [20 + i * 2 for i in range(days)]
                 context['campaigns'] = []
                 context['top_iocs'] = []
                 context['geo_stats'] = []
