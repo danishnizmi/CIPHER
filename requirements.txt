@@ -11,18 +11,18 @@ numpy==1.24.3
 pandas==1.5.3
 
 # Google Cloud libraries
-google-auth==2.23.0
-google-cloud-bigquery==3.11.4
-google-cloud-storage==2.10.0
-google-cloud-pubsub==2.18.4
-google-cloud-secret-manager==2.17.0
-google-cloud-logging==3.8.0
-google-cloud-error-reporting==1.9.1
-google-api-core==2.11.1
+google-auth==2.27.0
+google-cloud-bigquery==3.19.0
+google-cloud-storage==2.16.0
+google-cloud-pubsub==2.19.1
+google-cloud-secret-manager==2.18.1
+google-cloud-logging==3.10.0
+google-cloud-error-reporting==1.11.0
+google-api-core==2.16.1
 
-# AI/ML libraries (optional - only if using Vertex AI)
-google-cloud-aiplatform==1.26.0
-vertexai==0.1.1
+# AI/ML libraries (for Vertex AI support)
+google-cloud-aiplatform==1.59.0
+vertexai==1.58.0
 
 # Utilities
 requests==2.31.0
