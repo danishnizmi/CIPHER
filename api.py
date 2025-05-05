@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import traceback
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
@@ -58,84 +59,6 @@ def require_api_key(f):
     
     return decorated_function
 
-# -------------------- Debug Endpoints --------------------
-
-@api_blueprint.route('/debug/auth', methods=['GET'])
-@require_api_key
-def debug_auth():
-    """Debug authentication and permissions."""
-    try:
-        import google.auth
-        import json
-        from google.cloud import storage, bigquery, pubsub_v1
-        from google.cloud.exceptions import NotFound
-        
-        # Get current credentials
-        credentials, project_id = google.auth.default()
-        service_account_email = getattr(credentials, 'service_account_email', 'Not available')
-        
-        # Test various services
-        results = {
-            "service_account": service_account_email,
-            "project_id": project_id,
-            "tests": {}
-        }
-        
-        # Test BigQuery
-        try:
-            bq_client = bigquery.Client()
-            dataset = f"{project_id}.threat_intelligence"
-            try:
-                bq_client.get_dataset(dataset)
-                results["tests"]["bigquery"] = "Success: Dataset exists"
-            except NotFound:
-                results["tests"]["bigquery"] = "Error: Dataset not found"
-        except Exception as e:
-            results["tests"]["bigquery"] = f"Error: {str(e)}"
-            
-        # Test Storage
-        try:
-            storage_client = storage.Client()
-            bucket_name = f"{project_id}-threat-data"
-            try:
-                bucket = storage_client.get_bucket(bucket_name)
-                results["tests"]["storage"] = "Success: Bucket exists"
-            except NotFound:
-                results["tests"]["storage"] = "Error: Bucket not found"
-        except Exception as e:
-            results["tests"]["storage"] = f"Error: {str(e)}"
-            
-        # Test Pub/Sub
-        try:
-            publisher = pubsub_v1.PublisherClient()
-            topic_path = publisher.topic_path(project_id, "threat-data-ingestion")
-            try:
-                publisher.get_topic(request={"topic": topic_path})
-                results["tests"]["pubsub"] = "Success: Topic exists"
-            except NotFound:
-                results["tests"]["pubsub"] = "Error: Topic not found"
-        except Exception as e:
-            results["tests"]["pubsub"] = f"Error: {str(e)}"
-            
-        # Test Secret Manager
-        try:
-            from google.cloud import secretmanager
-            client = secretmanager.SecretManagerServiceClient()
-            name = f"projects/{project_id}/secrets/feed-config"
-            try:
-                client.get_secret(request={"name": name})
-                results["tests"]["secretmanager"] = "Success: Secret exists"
-            except Exception as e:
-                results["tests"]["secretmanager"] = f"Error: {str(e)}"
-        except Exception as e:
-            results["tests"]["secretmanager"] = f"Error: {str(e)}"
-            
-        return jsonify(results)
-    except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
-
 # -------------------- Helper Functions --------------------
 
 def format_bq_row(row: Dict) -> Dict:
@@ -150,7 +73,7 @@ def format_bq_row(row: Dict) -> Dict:
             formatted[key] = value
     return formatted
 
-def execute_bq_query(query: str, params: Optional[Dict] = None) -> List[Dict]:
+def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
     """Execute BigQuery query and return formatted results."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
@@ -281,7 +204,7 @@ def api_health_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 503
 
-# -------------------- Mock Data Endpoints for Development --------------------
+# -------------------- Stats Endpoint --------------------
 
 @api_blueprint.route('/stats', methods=['GET'])
 @require_api_key
@@ -290,85 +213,120 @@ def get_stats():
     try:
         days = int(request.args.get('days', 30))
         
-        # Mock data for development
+        # Get actual stats from BigQuery
         stats = {
-            'feeds': {
-                'total_sources': 12,
-                'growth_rate': 15.3
-            },
-            'iocs': {
-                'total': 24389,
-                'growth_rate': 8.7,
-                'types': [
-                    {'type': 'domain', 'count': 10250},
-                    {'type': 'ip', 'count': 8150},
-                    {'type': 'url', 'count': 4500},
-                    {'type': 'hash', 'count': 1489}
-                ]
-            },
-            'campaigns': {
-                'total_campaigns': 47,
-                'growth_rate': 5.2
-            },
-            'analyses': {
-                'total_analyses': 1234,
-                'growth_rate': 12.5
-            },
+            'feeds': {'total_sources': 0, 'growth_rate': 0},
+            'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
+            'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
+            'analyses': {'total_analyses': 0, 'growth_rate': 0},
             'timestamp': datetime.utcnow().isoformat(),
             'visualization_data': {
-                'daily_counts': [
-                    {'date': (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'), 'count': 100 + i * 5}
-                    for i in range(days)
-                ]
+                'daily_counts': []
             }
         }
+        
+        # Query for feeds count
+        feed_query = """
+        SELECT COUNT(DISTINCT source) as total_sources
+        FROM `{table_id}`
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        feed_results = execute_bq_query(feed_query)
+        if feed_results:
+            stats['feeds']['total_sources'] = feed_results[0].get('total_sources', 0)
+        
+        # Query for IOCs count and types
+        ioc_query = """
+        SELECT 
+            COUNT(*) as total,
+            type,
+            COUNT(*) as count
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY type
+        ORDER BY count DESC
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        ioc_results = execute_bq_query(ioc_query)
+        if ioc_results:
+            stats['iocs']['total'] = sum(row.get('count', 0) for row in ioc_results)
+            stats['iocs']['types'] = [
+                {'type': row['type'], 'count': row['count']} 
+                for row in ioc_results
+            ]
+        
+        # Query for daily activity
+        daily_query = """
+        SELECT 
+            DATE(created_at) as date,
+            COUNT(*) as count
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY date
+        ORDER BY date
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        daily_results = execute_bq_query(daily_query)
+        if daily_results:
+            stats['visualization_data']['daily_counts'] = [
+                {'date': str(row['date']), 'count': row['count']}
+                for row in daily_results
+            ]
         
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- Feeds Endpoint --------------------
 
 @api_blueprint.route('/feeds', methods=['GET'])
 @require_api_key
 def get_feeds():
     """Get feed information."""
     try:
-        # Mock feed data
-        feeds = [
-            {
-                'id': 'phishtank',
-                'name': 'PhishTank',
-                'description': 'Phishing URLs database',
-                'record_count': 15420,
-                'last_updated': datetime.utcnow().isoformat(),
-                'enabled': True
-            },
-            {
-                'id': 'urlhaus',
-                'name': 'URLhaus',
-                'description': 'Malware URL database',
-                'record_count': 8960,
-                'last_updated': datetime.utcnow().isoformat(),
-                'enabled': True
-            },
-            {
-                'id': 'threatfox',
-                'name': 'ThreatFox',
-                'description': 'IOC database',
-                'record_count': 12400,
-                'last_updated': datetime.utcnow().isoformat(),
-                'enabled': True
+        # Get feed details from configuration
+        feed_details = []
+        for feed in Config.FEEDS:
+            feed_detail = {
+                'id': feed.get('id'),
+                'name': feed.get('name'),
+                'description': feed.get('description'),
+                'record_count': 0,
+                'last_updated': None,
+                'enabled': feed.get('enabled', True)
             }
-        ]
+            
+            # Query for feed record count
+            feed_query = """
+            SELECT 
+                COUNT(*) as count,
+                MAX(created_at) as last_updated
+            FROM `{table_id}`
+            WHERE source = @feed_id
+            """.format(table_id=Config.get_table_name('indicators'))
+            
+            params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed.get('id'))]
+            feed_results = execute_bq_query(feed_query, params)
+            
+            if feed_results:
+                feed_detail['record_count'] = feed_results[0].get('count', 0)
+                feed_detail['last_updated'] = feed_results[0].get('last_updated', None)
+            
+            feed_details.append(feed_detail)
         
         return jsonify({
-            'feeds': feeds,
-            'count': len(feeds),
-            'feed_details': feeds
+            'feeds': feed_details,
+            'count': len(feed_details),
+            'feed_details': feed_details
         })
     except Exception as e:
         logger.error(f"Error getting feeds: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- IOCs Endpoint --------------------
 
 @api_blueprint.route('/iocs', methods=['GET'])
 @require_api_key
@@ -376,55 +334,47 @@ def get_iocs():
     """Get IOC data."""
     try:
         days = int(request.args.get('days', 30))
+        limit = int(request.args.get('limit', 100))
+        offset = int(request.args.get('offset', 0))
         
-        # Mock IOC data
-        iocs = [
-            {
-                'id': '1',
-                'type': 'domain',
-                'value': 'malicious-domain.com',
-                'source': 'PhishTank',
-                'sources': 3,
-                'first_seen': (datetime.utcnow() - timedelta(days=5)).isoformat(),
-                'confidence': 85
-            },
-            {
-                'id': '2',
-                'type': 'ip',
-                'value': '192.168.1.100',
-                'source': 'URLhaus',
-                'sources': 1,
-                'first_seen': (datetime.utcnow() - timedelta(days=3)).isoformat(),
-                'confidence': 75
-            },
-            {
-                'id': '3',
-                'type': 'url',
-                'value': 'http://malicious-site.com/phish',
-                'source': 'ThreatFox',
-                'sources': 2,
-                'first_seen': (datetime.utcnow() - timedelta(days=1)).isoformat(),
-                'confidence': 95
-            },
-            {
-                'id': '4',
-                'type': 'hash',
-                'value': 'a1b2c3d4e5f6...',
-                'source': 'PhishTank',
-                'sources': 4,
-                'first_seen': (datetime.utcnow() - timedelta(days=7)).isoformat(),
-                'confidence': 90
-            }
-        ]
+        # Query for IOCs
+        ioc_query = """
+        SELECT *
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        ORDER BY created_at DESC
+        LIMIT {limit}
+        OFFSET {offset}
+        """.format(
+            table_id=Config.get_table_name('indicators'),
+            days=days,
+            limit=limit,
+            offset=offset
+        )
+        
+        iocs = execute_bq_query(ioc_query)
+        
+        # Query for total count
+        count_query = """
+        SELECT COUNT(*) as total
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        count_results = execute_bq_query(count_query)
+        total_count = count_results[0].get('total', 0) if count_results else 0
         
         return jsonify({
             'records': iocs,
             'count': len(iocs),
-            'total_count': 24389
+            'total_count': total_count
         })
     except Exception as e:
         logger.error(f"Error getting IOCs: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- Campaigns Endpoint --------------------
 
 @api_blueprint.route('/campaigns', methods=['GET'])
 @require_api_key
@@ -432,85 +382,218 @@ def get_campaigns():
     """Get campaign data."""
     try:
         days = int(request.args.get('days', 30))
+        limit = int(request.args.get('limit', 100))
         
-        # Mock campaign data
-        campaigns = [
-            {
-                'campaign_id': 'campaign-001',
-                'campaign_name': 'Operation Phishing Storm',
-                'threat_actor': 'APT-29',
-                'source_count': 15,
-                'severity': 'high',
-                'first_seen': (datetime.utcnow() - timedelta(days=10)).isoformat(),
-                'last_seen': (datetime.utcnow() - timedelta(days=1)).isoformat()
-            },
-            {
-                'campaign_id': 'campaign-002',
-                'campaign_name': 'Crypto Mining Botnet',
-                'threat_actor': 'Unknown',
-                'source_count': 8,
-                'severity': 'medium',
-                'first_seen': (datetime.utcnow() - timedelta(days=5)).isoformat(),
-                'last_seen': (datetime.utcnow() - timedelta(days=2)).isoformat()
-            },
-            {
-                'campaign_id': 'campaign-003',
-                'campaign_name': 'Ransomware Wave',
-                'threat_actor': 'REvil',
-                'source_count': 22,
-                'severity': 'critical',
-                'first_seen': (datetime.utcnow() - timedelta(days=3)).isoformat(),
-                'last_seen': datetime.utcnow().isoformat()
-            }
-        ]
+        # Query for campaigns
+        campaign_query = """
+        SELECT 
+            campaign_id,
+            campaign_name,
+            threat_actor,
+            COUNT(*) as source_count,
+            MAX(confidence) as max_confidence,
+            MIN(created_at) as first_seen,
+            MAX(created_at) as last_seen
+        FROM `{table_id}`
+        WHERE campaign_id IS NOT NULL
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY campaign_id, campaign_name, threat_actor
+        ORDER BY source_count DESC
+        LIMIT {limit}
+        """.format(table_id=Config.get_table_name('indicators'), days=days, limit=limit)
+        
+        campaign_results = execute_bq_query(campaign_query)
+        
+        # Add severity based on confidence and source count
+        campaigns = []
+        for campaign in campaign_results:
+            campaign_data = dict(campaign)
+            confidence = campaign_data.get('max_confidence', 0)
+            source_count = campaign_data.get('source_count', 0)
+            
+            # Determine severity
+            if confidence >= 90 or source_count >= 10:
+                campaign_data['severity'] = 'critical'
+            elif confidence >= 70 or source_count >= 5:
+                campaign_data['severity'] = 'high'
+            elif confidence >= 50 or source_count >= 3:
+                campaign_data['severity'] = 'medium'
+            else:
+                campaign_data['severity'] = 'low'
+            
+            campaigns.append(campaign_data)
+        
+        # Query for total campaigns count
+        count_query = """
+        SELECT COUNT(DISTINCT campaign_id) as total
+        FROM `{table_id}`
+        WHERE campaign_id IS NOT NULL
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        count_results = execute_bq_query(count_query)
+        total_campaigns = count_results[0].get('total', 0) if count_results else 0
         
         return jsonify({
             'campaigns': campaigns,
             'count': len(campaigns),
-            'total_campaigns': 47
+            'total_campaigns': total_campaigns
         })
     except Exception as e:
         logger.error(f"Error getting campaigns: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- Threat Summary Endpoint --------------------
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
 @require_api_key
 def get_threat_summary():
     """Get threat summary data."""
     try:
-        # Mock threat summary
+        days = int(request.args.get('days', 30))
+        
+        # Query for high-risk indicators
+        risk_query = """
+        SELECT COUNT(*) as count
+        FROM `{table_id}`
+        WHERE confidence >= 80
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        risk_results = execute_bq_query(risk_query)
+        high_risk_indicators = risk_results[0].get('count', 0) if risk_results else 0
+        
+        # Query for active campaigns
+        campaign_query = """
+        SELECT COUNT(DISTINCT campaign_id) as count
+        FROM `{table_id}`
+        WHERE campaign_id IS NOT NULL
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        campaign_results = execute_bq_query(campaign_query)
+        active_campaigns = campaign_results[0].get('count', 0) if campaign_results else 0
+        
+        # Query for recent detections
+        recent_query = """
+        SELECT COUNT(*) as count
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        recent_results = execute_bq_query(recent_query)
+        recent_detections = recent_results[0].get('count', 0) if recent_results else 0
+        
         summary = {
-            'high_risk_indicators': 156,
-            'active_campaigns': 3,
-            'recent_detections': 47,
+            'high_risk_indicators': high_risk_indicators,
+            'active_campaigns': active_campaigns,
+            'recent_detections': recent_detections,
             'timestamp': datetime.utcnow().isoformat()
         }
         
         return jsonify(summary)
     except Exception as e:
         logger.error(f"Error getting threat summary: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- Geo Stats Endpoint --------------------
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
 @require_api_key
 def get_geo_stats():
     """Get geographical IOC distribution."""
     try:
-        # Mock geographical data
-        geo_stats = {
-            'countries': [
-                {'country': 'USA', 'count': 850},
-                {'country': 'RUS', 'count': 620},
-                {'country': 'CHN', 'count': 450},
-                {'country': 'IND', 'count': 380},
-                {'country': 'BRA', 'count': 250}
-            ]
-        }
+        days = int(request.args.get('days', 30))
         
-        return jsonify(geo_stats)
+        # Query for geographical distribution
+        geo_query = """
+        SELECT 
+            enrichment_country as country,
+            COUNT(*) as count
+        FROM `{table_id}`
+        WHERE enrichment_country IS NOT NULL
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY enrichment_country
+        ORDER BY count DESC
+        LIMIT 10
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        geo_results = execute_bq_query(geo_query)
+        
+        countries = [
+            {'country': row['country'], 'count': row['count']}
+            for row in geo_results
+        ]
+        
+        return jsonify({'countries': countries})
     except Exception as e:
         logger.error(f"Error getting geo stats: {str(e)}")
+        report_error(e)
         return jsonify({"error": str(e)}), 500
+
+# -------------------- Admin Endpoints --------------------
+
+@api_blueprint.route('/admin/ingest', methods=['POST'])
+@require_api_key
+def trigger_ingest():
+    """Trigger data ingestion."""
+    try:
+        # Get request data
+        req_data = request.get_json() or {}
+        process_all = req_data.get('process_all', True)
+        
+        # Trigger ingestion via Pub/Sub
+        message_data = {
+            'process_all': process_all,
+            'triggered_by': 'api',
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message_data)
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Ingestion triggered successfully',
+            'message_id': message_id
+        })
+    except Exception as e:
+        logger.error(f"Error triggering ingestion: {str(e)}")
+        report_error(e)
+        return jsonify({'error': str(e)}), 500
+
+@api_blueprint.route('/admin/analyze', methods=['POST'])
+@require_api_key
+def trigger_analysis():
+    """Trigger data analysis."""
+    try:
+        # Get request data
+        req_data = request.get_json() or {}
+        analyze_all = req_data.get('analyze_all', False)
+        indicator_ids = req_data.get('indicator_ids', [])
+        force_reanalysis = req_data.get('force_reanalysis', False)
+        
+        # Trigger analysis via Pub/Sub
+        message_data = {
+            'analyze_all': analyze_all,
+            'indicator_ids': indicator_ids,
+            'force_reanalysis': force_reanalysis,
+            'triggered_by': 'api',
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message_data)
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Analysis triggered successfully',
+            'message_id': message_id
+        })
+    except Exception as e:
+        logger.error(f"Error triggering analysis: {str(e)}")
+        report_error(e)
+        return jsonify({'error': str(e)}), 500
 
 # -------------------- API Information Endpoints --------------------
 
@@ -524,11 +607,12 @@ def get_api_info():
         'endpoints': [
             {'path': '/api/health', 'method': 'GET', 'description': 'API health check'},
             {'path': '/api/info', 'method': 'GET', 'description': 'API information'},
-            {'path': '/api/indicators', 'method': 'GET', 'description': 'Get indicators of compromise'},
-            {'path': '/api/vulnerabilities', 'method': 'GET', 'description': 'Get vulnerability information'},
-            {'path': '/api/threat_actors', 'method': 'GET', 'description': 'Get threat actor information'},
+            {'path': '/api/stats', 'method': 'GET', 'description': 'Get platform statistics'},
+            {'path': '/api/feeds', 'method': 'GET', 'description': 'Get threat feeds information'},
+            {'path': '/api/iocs', 'method': 'GET', 'description': 'Get indicators of compromise'},
             {'path': '/api/campaigns', 'method': 'GET', 'description': 'Get campaign information'},
-            {'path': '/api/malware', 'method': 'GET', 'description': 'Get malware information'},
+            {'path': '/api/threat_summary', 'method': 'GET', 'description': 'Get threat summary'},
+            {'path': '/api/iocs/geo', 'method': 'GET', 'description': 'Get geographical distribution'},
             {'path': '/api/admin/ingest', 'method': 'POST', 'description': 'Trigger data ingestion'},
             {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'}
         ]
