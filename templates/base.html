@@ -276,8 +276,8 @@
             {% endwith %}
             
             <!-- CSRF Token for forms -->
-            {% if csrf_token %}
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if csrf_token() %}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {% endif %}
             
             <!-- Page Content -->
