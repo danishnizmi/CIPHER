@@ -58,12 +58,12 @@ steps:
   # Build container
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', '.']
 
   # Push container to Container Registry  
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
-    args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
+    args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -75,7 +75,7 @@ steps:
         echo "Deploying to Cloud Run..."
         
         gcloud run deploy threat-intelligence-platform \
-          --image gcr.io/$PROJECT_ID/threat-intelligence-platform:latest \
+          --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
           --platform managed \
           --region us-central1 \
           --allow-unauthenticated \
@@ -89,10 +89,10 @@ steps:
           --no-cpu-throttling \
           --cpu-boost \
           --set-env-vars ENVIRONMENT=production \
-          --set-env-vars GCP_PROJECT=$PROJECT_ID \
+          --set-env-vars GCP_PROJECT=${PROJECT_ID} \
           --set-env-vars GCP_REGION=us-central1 \
           --set-env-vars BIGQUERY_DATASET=threat_intelligence \
-          --set-env-vars GCS_BUCKET=$PROJECT_ID-threat-data \
+          --set-env-vars GCS_BUCKET=${PROJECT_ID}-threat-data \
           --set-env-vars PUBSUB_TOPIC=threat-data-ingestion \
           --set-env-vars PUBSUB_ANALYSIS_TOPIC=threat-analysis-events \
           --set-env-vars VERSION=1.0.3 \
@@ -123,7 +123,7 @@ steps:
           --set-env-vars ENABLE_ERROR_REPORTING=true \
           --set-env-vars AUTO_INGEST=false \
           --set-env-vars AUTO_ANALYZE=false \
-          --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
+          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
   # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -135,49 +135,49 @@ steps:
         echo "Waiting for service to be ready..."
         sleep 60
         
-        CLOUD_RUN_URL=$(gcloud run services describe threat-intelligence-platform \
+        CLOUD_RUN_URL=$$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
-          --project=$PROJECT_ID \
+          --project=${PROJECT_ID} \
           --format='value(status.url)')
         
-        echo "Service deployed at: $CLOUD_RUN_URL"
+        echo "Service deployed at: $$CLOUD_RUN_URL"
         
         # Test health endpoint with more retries
         echo "Testing health endpoint..."
-        for attempt in $(seq 1 30); do
-          echo "Health check attempt $attempt/30..."
+        for attempt in $$(seq 1 30); do
+          echo "Health check attempt $$attempt/30..."
           
-          RESPONSE=$(curl -s -w "\n%{http_code}" "$CLOUD_RUN_URL/health")
-          STATUS_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | head -n-1)
+          RESPONSE=$$(curl -s -w "\n%{http_code}" "$$CLOUD_RUN_URL/health")
+          STATUS_CODE=$$(echo "$$RESPONSE" | tail -n1)
+          BODY=$$(echo "$$RESPONSE" | head -n-1)
           
-          echo "Response code: $STATUS_CODE"
-          echo "Response body: $BODY"
+          echo "Response code: $$STATUS_CODE"
+          echo "Response body: $$BODY"
           
-          if [ "$STATUS_CODE" -eq 200 ]; then
+          if [ "$$STATUS_CODE" -eq 200 ]; then
             echo "✅ Health check successful!"
             
             # Also test the root endpoint
             echo "Testing root endpoint..."
-            ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$CLOUD_RUN_URL/")
-            echo "Root endpoint status: $ROOT_STATUS"
+            ROOT_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/")
+            echo "Root endpoint status: $$ROOT_STATUS"
             
             # Test login endpoint
             echo "Testing login endpoint..."
-            LOGIN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$CLOUD_RUN_URL/login")
-            echo "Login endpoint status: $LOGIN_STATUS"
+            LOGIN_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/login")
+            echo "Login endpoint status: $$LOGIN_STATUS"
             
             # Test API endpoints
             echo "Testing API health endpoint..."
-            API_HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$CLOUD_RUN_URL/api/health")
-            echo "API health endpoint status: $API_HEALTH_STATUS"
+            API_HEALTH_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/api/health")
+            echo "API health endpoint status: $$API_HEALTH_STATUS"
             
             echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $CLOUD_RUN_URL"
+            echo "Access the application at: $$CLOUD_RUN_URL"
             exit 0
           else
-            echo "⚠️ Health check returned: $STATUS_CODE"
-            if [ $attempt -lt 30 ]; then
+            echo "⚠️ Health check returned: $$STATUS_CODE"
+            if [ $$attempt -lt 30 ]; then
               echo "Waiting 10 seconds before next attempt..."
               sleep 10
             fi
@@ -186,7 +186,7 @@ steps:
         
         echo "❌ Health check failed after 30 attempts"
         echo "Checking latest logs..."
-        echo "Logs URL: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID"
+        echo "Logs URL: https://console.cloud.google.com/logs/viewer?project=${PROJECT_ID}"
         exit 1
 
   # Debug information
@@ -199,32 +199,32 @@ steps:
         echo "=== Service Status ==="
         gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
-          --project=$PROJECT_ID \
+          --project=${PROJECT_ID} \
           --format=yaml | head -n 50
         
         echo -e "\n=== Latest Logs ==="
         gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\"" \
           --limit=20 \
           --freshness=5m \
-          --project=$PROJECT_ID
+          --project=${PROJECT_ID}
         
         echo -e "\n=== Error Logs ==="
         gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND severity>=ERROR" \
           --limit=10 \
           --freshness=5m \
-          --project=$PROJECT_ID || echo "No errors found"
+          --project=${PROJECT_ID} || echo "No errors found"
         
         echo -e "\n=== Authentication Debug ==="
         gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND (\"auth\" OR \"login\" OR \"unexpected error\" OR \"Failed to save changes\")" \
           --limit=5 \
           --freshness=15m \
-          --project=$PROJECT_ID
+          --project=${PROJECT_ID}
         
         echo -e "\n=== Session Debug ==="
         gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND (\"session\" OR \"CSRF\" OR \"cookie\")" \
           --limit=5 \
           --freshness=15m \
-          --project=$PROJECT_ID
+          --project=${PROJECT_ID}
 
 timeout: '1200s'
 options:
