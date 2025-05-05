@@ -755,10 +755,15 @@ def utility_processor():
         except:
             return 40
     
+    # Make csrf_token accessible in templates as a variable, not function
+    def csrf_token():
+        return session.get('csrf_token', '')
+    
     return dict(
         format_number=format_number,
         get_severity_class=get_severity_class,
-        get_confidence_width=get_confidence_width
+        get_confidence_width=get_confidence_width,
+        csrf_token=csrf_token,  # Add as function so templates can call it directly
     )
 
 # If this script is run directly, start a development server
