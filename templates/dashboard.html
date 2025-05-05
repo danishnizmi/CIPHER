@@ -151,19 +151,19 @@
                 </h3>
             </div>
             <div class="p-4 space-y-2">
-                <a href="{{ url_for('iocs') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
+                <a href="{{ url_for('frontend.iocs') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
                     <div class="rounded-lg bg-blue-100 p-2 mr-3">
                         <i class="fas fa-search text-blue-600"></i>
                     </div>
                     <span>Search IOCs</span>
                 </a>
-                <a href="{{ url_for('ingest_threat_data') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
+                <a href="{{ url_for('frontend.ingest_threat_data') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
                     <div class="rounded-lg bg-green-100 p-2 mr-3">
                         <i class="fas fa-sync text-green-600"></i>
                     </div>
                     <span>Refresh Threat Data</span>
                 </a>
-                <a href="{{ url_for('campaigns') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
+                <a href="{{ url_for('frontend.campaigns') }}" class="flex items-center p-3 border border-gray-100 rounded-lg hover:bg-gray-50 hover:border-gray-200 transition shadow-sm hover:shadow">
                     <div class="rounded-lg bg-purple-100 p-2 mr-3">
                         <i class="fas fa-project-diagram text-purple-600"></i>
                     </div>
@@ -215,7 +215,7 @@
                 <i class="fas fa-chart-pie panel-icon"></i>
                 IOC Types Distribution
             </h3>
-            <a href="{{ url_for('iocs') }}" class="text-sm text-accent hover:underline flex items-center">
+            <a href="{{ url_for('frontend.iocs') }}" class="text-sm text-accent hover:underline flex items-center">
                 <span>View All</span>
                 <i class="fas fa-arrow-right ml-1"></i>
             </a>
@@ -227,7 +227,7 @@
                     <div class="text-center">
                         <i class="fas fa-chart-pie text-gray-300 text-4xl mb-3"></i>
                         <p>No IOC type data available</p>
-                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-accent hover:underline inline-block">
+                        <a href="{{ url_for('frontend.ingest_threat_data') }}" class="mt-2 text-accent hover:underline inline-block">
                             <i class="fas fa-sync mr-1"></i> Refresh Data
                         </a>
                     </div>
@@ -244,7 +244,7 @@
                 <i class="fas fa-chart-line panel-icon"></i>
                 Intelligence Collection Trends
             </h3>
-            <a href="{{ url_for('feeds') }}" class="text-sm text-accent hover:underline flex items-center">
+            <a href="{{ url_for('frontend.feeds') }}" class="text-sm text-accent hover:underline flex items-center">
                 <span>View Feeds</span>
                 <i class="fas fa-arrow-right ml-1"></i>
             </a>
@@ -256,7 +256,7 @@
                     <div class="text-center">
                         <i class="fas fa-chart-line text-gray-300 text-4xl mb-3"></i>
                         <p>No activity data available</p>
-                        <a href="{{ url_for('ingest_threat_data') }}" class="mt-2 text-accent hover:underline inline-block">
+                        <a href="{{ url_for('frontend.ingest_threat_data') }}" class="mt-2 text-accent hover:underline inline-block">
                             <i class="fas fa-sync mr-1"></i> Refresh Data
                         </a>
                     </div>
@@ -276,7 +276,7 @@
                 <i class="fas fa-project-diagram panel-icon"></i>
                 Recent Campaigns
             </h3>
-            <a href="{{ url_for('campaigns') }}" class="text-sm text-accent hover:underline flex items-center">
+            <a href="{{ url_for('frontend.campaigns') }}" class="text-sm text-accent hover:underline flex items-center">
                 <span>View All</span>
                 <i class="fas fa-arrow-right ml-1"></i>
             </a>
@@ -298,7 +298,7 @@
                         <tr>
                             <td>
                                 {% if campaign is mapping and campaign.campaign_id is defined and campaign.campaign_name is defined %}
-                                <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-accent hover:underline font-medium">
+                                <a href="{{ url_for('frontend.dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-accent hover:underline font-medium">
                                     {{ campaign.campaign_name }}
                                 </a>
                                 {% else %}
@@ -323,7 +323,7 @@
                             <div class="py-6">
                                 <i class="fas fa-project-diagram text-gray-300 text-4xl mb-3"></i>
                                 <p>No campaigns detected yet</p>
-                                <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                <a href="{{ url_for('frontend.ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
                                     <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
                                 </a>
                             </div>
@@ -342,7 +342,7 @@
                 <i class="fas fa-fingerprint panel-icon"></i>
                 Top Indicators of Compromise
             </h3>
-            <a href="{{ url_for('iocs') }}" class="text-sm text-accent hover:underline flex items-center">
+            <a href="{{ url_for('frontend.iocs') }}" class="text-sm text-accent hover:underline flex items-center">
                 <span>View All</span>
                 <i class="fas fa-arrow-right ml-1"></i>
             </a>
@@ -370,7 +370,7 @@
                             </td>
                             <td>
                                 {% if ioc is mapping and ioc.type is defined and ioc.value is defined %}
-                                <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-accent hover:underline">
+                                <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-accent hover:underline">
                                     {{ ioc.value }}
                                 </a>
                                 {% else %}
@@ -412,7 +412,7 @@
                             <div class="py-6">
                                 <i class="fas fa-fingerprint text-gray-300 text-4xl mb-3"></i>
                                 <p>No IOCs available</p>
-                                <a href="{{ url_for('ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
+                                <a href="{{ url_for('frontend.ingest_threat_data') }}" class="mt-3 btn btn-primary btn-sm inline-block">
                                     <i class="fas fa-sync-alt mr-1"></i> Refresh Threat Data
                                 </a>
                             </div>
@@ -433,7 +433,7 @@
             <i class="fas fa-rss panel-icon"></i>
             Threat Intelligence Feeds
         </h3>
-        <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary btn-sm">
+        <a href="{{ url_for('frontend.ingest_threat_data') }}" class="btn btn-primary btn-sm">
             <i class="fas fa-sync-alt mr-1"></i> Refresh Feeds
         </a>
     </div>
@@ -474,7 +474,7 @@
                             {{ feed.last_updated|default('Never')|datetime }}
                         </td>
                         <td class="px-6 py-4 text-right text-sm font-medium">
-                            <a href="{{ url_for('dynamic_content_detail', content_type='feed', identifier=feed.name) }}" class="text-accent hover:text-accent-dark">
+                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.name) }}" class="text-accent hover:text-accent-dark">
                                 <i class="fas fa-eye mr-1"></i> View
                             </a>
                         </td>
@@ -490,7 +490,7 @@
             </div>
             <h3 class="text-xl font-semibold text-gray-800 mb-2">No Feeds Available</h3>
             <p class="text-gray-600 mb-6">No threat intelligence feeds have been configured or ingested yet.</p>
-            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+            <a href="{{ url_for('frontend.ingest_threat_data') }}" class="btn btn-primary">
                 <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
             </a>
         </div>
@@ -544,7 +544,7 @@
                             <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">{{ ioc.type|default('unknown') }}</span>
                         </td>
                         <td class="px-6 py-4">
-                            <a href="{{ url_for('dynamic_content_detail', content_type='ioc', identifier=ioc.type|default('unknown') + '/' + ioc.value|default('unknown')) }}" class="text-accent hover:underline truncate max-w-xs block">
+                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type|default('unknown') + '/' + ioc.value|default('unknown')) }}" class="text-accent hover:underline truncate max-w-xs block">
                                 {{ ioc.value|default('Unknown') }}
                             </a>
                         </td>
@@ -572,7 +572,7 @@
             </div>
             <h3 class="text-xl font-semibold text-gray-800 mb-2">No IOCs Available</h3>
             <p class="text-gray-600 mb-6">No indicators of compromise have been collected or processed yet.</p>
-            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+            <a href="{{ url_for('frontend.ingest_threat_data') }}" class="btn btn-primary">
                 <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
             </a>
         </div>
@@ -633,7 +633,7 @@
                                 </div>
                                 <div class="ml-4">
                                     <div class="text-sm font-medium text-gray-900">
-                                        <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="hover:underline text-accent">
+                                        <a href="{{ url_for('frontend.dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="hover:underline text-accent">
                                             {{ campaign.campaign_name }}
                                         </a>
                                     </div>
@@ -651,7 +651,7 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-right text-sm font-medium">
-                            <a href="{{ url_for('dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-accent hover:text-accent-dark">
+                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='campaign', identifier=campaign.campaign_id) }}" class="text-accent hover:text-accent-dark">
                                 <i class="fas fa-eye mr-1"></i> View
                             </a>
                         </td>
@@ -667,7 +667,7 @@
             </div>
             <h3 class="text-xl font-semibold text-gray-800 mb-2">No Campaigns Available</h3>
             <p class="text-gray-600 mb-6">No threat campaigns have been detected yet. Campaigns are automatically detected when multiple related threat indicators are identified.</p>
-            <a href="{{ url_for('ingest_threat_data') }}" class="btn btn-primary">
+            <a href="{{ url_for('frontend.ingest_threat_data') }}" class="btn btn-primary">
                 <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
             </a>
         </div>
