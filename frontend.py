@@ -164,14 +164,13 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         base_url = request.url_root.rstrip('/')
         api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # For internal calls from frontend, we don't need the API key if user is logged in
+        # Always include API key for internal requests
         headers = {"Content-Type": "application/json"}
-        
-        # If not logged in, use API key
-        if not session.get('logged_in'):
-            api_key = get_api_key()
-            if api_key:
-                headers["X-API-Key"] = api_key
+        api_key = get_api_key()
+        if api_key:
+            headers["X-API-Key"] = api_key
+        else:
+            logger.warning("No API key available for internal request")
         
         # Make the request
         logger.debug(f"API request: {method} {api_url}")
