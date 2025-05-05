@@ -19,7 +19,7 @@
                 </h1>
                 <p class="text-gray-600">Manage platform users and permissions</p>
             </div>
-            <a href="{{ url_for('add_user_route') }}" class="btn btn-primary">
+            <a href="{{ url_for('frontend.add_user_route') }}" class="btn btn-primary">
                 <i class="fas fa-user-plus mr-2"></i> Add User
             </a>
         </div>
@@ -95,7 +95,7 @@
                                             {{ user.created_at|default('Unknown')|datetime if user.created_at else 'Unknown' }}
                                         </td>
                                         <td class="px-6 py-4 text-right text-sm font-medium">
-                                            <a href="{{ url_for('edit_user', username=username) }}" class="text-accent hover:text-accent-dark mr-4">
+                                            <a href="{{ url_for('frontend.edit_user', username=username) }}" class="text-accent hover:text-accent-dark mr-4">
                                                 <i class="fas fa-edit"></i> Edit
                                             </a>
                                             {% if username != 'admin' and username != session.get('username') %}
@@ -116,7 +116,7 @@
                         </div>
                         <h3 class="text-xl font-semibold text-gray-800 mb-2">No Users Found</h3>
                         <p class="text-gray-600 mb-6">There are no users in the system yet or there was an error loading the user data.</p>
-                        <a href="{{ url_for('add_user_route') }}" class="btn btn-primary">
+                        <a href="{{ url_for('frontend.add_user_route') }}" class="btn btn-primary">
                             <i class="fas fa-user-plus mr-2"></i> Add First User
                         </a>
                     </div>
