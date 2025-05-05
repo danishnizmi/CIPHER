@@ -1,6 +1,7 @@
 """
 Ingestion module for threat intelligence feeds.
 Handles downloading, processing, and storing threat intelligence data.
+Also ensures BigQuery resources are properly initialized.
 """
 
 import os
@@ -316,6 +317,114 @@ def ensure_table_exists(table_id: str, schema: List[bigquery.SchemaField]) -> bo
         logger.error(f"Error ensuring table exists: {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        return False
+
+
+def initialize_bigquery_tables():
+    """Initialize all required BigQuery tables and datasets."""
+    if not bq_client:
+        logger.error("Cannot initialize BigQuery tables - client not available")
+        return False
+    
+    try:
+        # First ensure the dataset exists
+        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        if not ensure_dataset_exists(dataset_id):
+            logger.error(f"Failed to create dataset {dataset_id}")
+            return False
+        
+        # Define indicators table schema
+        indicators_schema = [
+            bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("type", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("value", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("source", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("feed_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("first_seen", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("last_seen", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("confidence", "INTEGER", mode="NULLABLE"),
+            bigquery.SchemaField("tags", "STRING", mode="REPEATED"),
+            bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("campaign_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("campaign_name", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("threat_actor", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("report_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("raw_data", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("enrichment_geo", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("enrichment_country", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("last_analyzed", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("risk_score", "INTEGER", mode="NULLABLE"),
+            bigquery.SchemaField("analysis_summary", "STRING", mode="NULLABLE"),
+        ]
+        
+        # Create all required tables
+        table_configs = {
+            'indicators': indicators_schema,
+            'vulnerabilities': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("cve_id", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("severity", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("published_date", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("modified_date", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'threat_actors': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("aliases", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("first_observed", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("last_observed", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'campaigns': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("start_date", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("end_date", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("threat_actor", "STRING", mode="NULLABLE"),
+            ],
+            'malware': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("type", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("first_seen", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("last_seen", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'users': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("username", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("password_hash", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("role", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("last_login", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'audit_log': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("user_id", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("action", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("resource", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("timestamp", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("details", "STRING", mode="NULLABLE"),
+            ]
+        }
+        
+        all_created = True
+        for table_name, schema in table_configs.items():
+            table_id = f"{dataset_id}.{table_name}"
+            if not ensure_table_exists(table_id, schema):
+                logger.error(f"Failed to create table {table_name}")
+                all_created = False
+            else:
+                logger.info(f"Table {table_name} is ready")
+        
+        return all_created
+    
+    except Exception as e:
+        logger.error(f"Error initializing BigQuery tables: {str(e)}")
+        logger.error(traceback.format_exc())
         return False
 
 
@@ -1377,6 +1486,12 @@ if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and not getattr
     startup_thread = threading.Thread(target=delayed_start)
     startup_thread.daemon = True
     startup_thread.start()
+
+# Initialize database tables on module import
+if initialize_bigquery_tables():
+    logger.info("BigQuery tables initialized successfully")
+else:
+    logger.warning("Some BigQuery tables could not be initialized")
 
 if __name__ == "__main__":
     # When run as a script, ingest all feeds and print the results
