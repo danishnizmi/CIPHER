@@ -55,9 +55,32 @@ app.config.update(
     SESSION_TYPE='filesystem'
 )
 
-# Initialize CSRF protection
+# Health check endpoint defined FIRST
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Minimal health check for startup."""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'app_ready': True
+    }), 200
+
+# Readiness probe  
+@app.route('/ready', methods=['GET'])
+def readiness_check():
+    """Readiness probe for Cloud Run."""
+    return jsonify({
+        'status': 'ready',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
+
+# Initialize CSRF protection AFTER health check
 csrf = CSRFProtect()
 csrf.init_app(app)
+
+# Exempt health and ready endpoints from CSRF
+csrf.exempt(health_check)
+csrf.exempt(readiness_check)
 
 # Setup CORS for both frontend and API
 CORS(app, resources={
@@ -74,73 +97,7 @@ limiter = Limiter(
     swallow_errors=True
 )
 
-# Health check endpoint - exempt from CSRF
-@app.route('/health', methods=['GET'])
-@csrf.exempt
-def health_check():
-    """Minimal health check for startup."""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'app_ready': True
-    }), 200
-
-# Readiness probe - exempt from CSRF  
-@app.route('/ready', methods=['GET'])
-@csrf.exempt
-def readiness_check():
-    """Readiness probe for Cloud Run."""
-    return jsonify({
-        'status': 'ready',
-        'timestamp': datetime.utcnow().isoformat()
-    }), 200
-
-# Before request handler to ensure session is established
-@app.before_request
-def before_request():
-    """Ensure session is properly established."""
-    # Force session to be created
-    if '_id' not in session:
-        session.permanent = True
-        session['_id'] = datetime.utcnow().isoformat()
-
-# Error handlers
-@app.errorhandler(404)
-def page_not_found(e):
-    """Handle 404 errors."""
-    logger.warning(f"Page not found: {request.url}")
-    return jsonify({'error': 'Not found', 'message': str(e)}), 404
-
-@app.errorhandler(500)
-def internal_server_error(e):
-    """Handle 500 errors."""
-    logger.error(f"Internal server error: {request.url}")
-    logger.error(traceback.format_exc())
-    return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
-
-# CSRF error handler
-@app.errorhandler(400)
-def handle_bad_request(e):
-    """Handle 400 errors including CSRF errors."""
-    logger.error(f"400 error: {str(e)}")
-    error_desc = str(e.description) if hasattr(e, 'description') else str(e)
-    
-    if 'CSRF' in error_desc:
-        # Clear session on CSRF error to force fresh session
-        session.clear()
-        return redirect(url_for('frontend.login'))
-    
-    return jsonify({'error': 'Bad request', 'message': error_desc}), 400
-
-# Custom CSRF error handler
-@csrf.error_handler
-def csrf_error(reason):
-    """Handle CSRF validation errors."""
-    logger.error(f"CSRF error: {reason}")
-    session.clear()
-    return redirect(url_for('frontend.login'))
-
-# Register late components
+# Delayed registration of blueprints
 def register_late_components():
     """Register components that require configuration after app startup."""
     try:
@@ -166,6 +123,50 @@ def register_late_components():
         logger.error(f"Failed to register late components: {str(e)}")
         logger.error(traceback.format_exc())
         return False
+
+# Before request handler to ensure session is established
+@app.before_request
+def before_request():
+    """Ensure session is properly established."""
+    # Force session to be created
+    if '_id' not in session:
+        session.permanent = True
+        session['_id'] = datetime.utcnow().isoformat()
+
+# Error handlers
+@app.errorhandler(404)
+def page_not_found(e):
+    """Handle 404 errors."""
+    logger.warning(f"Page not found: {request.url}")
+    return jsonify({'error': 'Not found', 'message': str(e)}), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    """Handle 500 errors."""
+    logger.error(f"Internal server error: {request.url}")
+    logger.error(traceback.format_exc())
+    return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
+
+@app.errorhandler(400)
+def handle_bad_request(e):
+    """Handle 400 errors including CSRF errors."""
+    logger.error(f"400 error: {str(e)}")
+    error_desc = str(e.description) if hasattr(e, 'description') else str(e)
+    
+    if 'CSRF' in error_desc:
+        # Clear session on CSRF error to force fresh session
+        session.clear()
+        return redirect(url_for('frontend.login'))
+    
+    return jsonify({'error': 'Bad request', 'message': error_desc}), 400
+
+# Custom CSRF error handler
+@csrf.error_handler
+def csrf_error(reason):
+    """Handle CSRF validation errors."""
+    logger.error(f"CSRF error: {reason}")
+    session.clear()
+    return redirect(url_for('frontend.login'))
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
