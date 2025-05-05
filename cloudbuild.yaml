@@ -104,7 +104,7 @@ steps:
           --set-env-vars ENSURE_GCP_RESOURCES=true \
           --set-env-vars IGNORE_PERMISSION_ERRORS=false \
           --set-env-vars AUTH_ENABLED=true \
-          --set-env-vars SESSION_COOKIE_SECURE=false \
+          --set-env-vars SESSION_COOKIE_SECURE=true \
           --set-env-vars SESSION_COOKIE_HTTPONLY=true \
           --set-env-vars SESSION_COOKIE_SAMESITE=Lax \
           --set-env-vars PREFERRED_URL_SCHEME=https \
@@ -195,16 +195,22 @@ steps:
           --format=yaml | head -n 50
         
         echo -e "\n=== Latest Logs ==="
-        gcloud logs read "threat-intelligence-platform" \
+        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\"" \
           --limit=20 \
-          --since=5m \
+          --freshness=5m \
           --project=${PROJECT_ID}
         
         echo -e "\n=== Error Logs ==="
-        gcloud logs read "threat-intelligence-platform" \
+        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND severity>=ERROR" \
           --limit=10 \
-          --since=5m \
-          --project=${PROJECT_ID} | grep -i error || echo "No errors found"
+          --freshness=5m \
+          --project=${PROJECT_ID} || echo "No errors found"
+        
+        echo -e "\n=== Authentication Debug ==="
+        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND (\"auth\" OR \"login\" OR \"Failed to save changes\")" \
+          --limit=5 \
+          --freshness=15m \
+          --project=${PROJECT_ID}
 
 timeout: '1200s'
 options:
