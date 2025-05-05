@@ -187,20 +187,27 @@ def get_api_key() -> str:
 def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
     """Make an internal API request with caching and enhanced error handling"""
     try:
-        # Import requests here to avoid global dependency
+        # Use absolute URL for Cloud Run internal calls
+        api_url = f"{request.url_root.rstrip('/')}/api/{endpoint.lstrip('/')}"
+        
+        # For internal calls from frontend, we don't need the API key if user is logged in
+        headers = {"Content-Type": "application/json"}
+        
+        # If not logged in, use API key
+        if not session.get('logged_in'):
+            api_key = get_api_key()
+            if api_key:
+                headers["X-API-Key"] = api_key
+        
+        # Log the request details
+        logger.debug(f"API request: {method} {api_url}")
+        logger.debug(f"Headers: {headers}")
+        logger.debug(f"Data: {data}")
+        logger.debug(f"Params: {params}")
+        
         import requests
         
-        # Construct base URL
-        base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
-        
-        # Add API key in headers
-        api_key = get_api_key()
-        headers = {"X-API-Key": api_key} if api_key else {}
-        headers["Content-Type"] = "application/json"
-        
         # Make the request
-        logger.debug(f"API request: {method} {api_url}")
         start_time = time.time()
         
         # Add retry logic for resilience
@@ -239,6 +246,15 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         # Check for errors
         if response.status_code != 200:
             logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
+            # Return default data structure for common endpoints
+            if endpoint == 'stats':
+                return {
+                    'feeds': {'total_sources': 0, 'growth_rate': 0},
+                    'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
+                    'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
+                    'analyses': {'total_analyses': 0, 'growth_rate': 0},
+                    'visualization_data': {'daily_counts': []}
+                }
             return {
                 "error": f"API request failed with status {response.status_code}",
                 "status_code": response.status_code
@@ -255,8 +271,9 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         return {}
     
     except Exception as e:
+        logger.error(f"API request error ({endpoint}): {str(e)}")
+        logger.error(traceback.format_exc())
         if 'requests' in locals() and isinstance(e, requests.RequestException):
-            logger.error(f"API request error ({endpoint}): {str(e)}")
             status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
             
             error_msg = f"API error: {str(e)}"
@@ -265,7 +282,15 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             
             return {"error": error_msg, "status_code": status_code}
         else:
-            logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
+            # Return default data structure for common endpoints to prevent frontend crashes
+            if endpoint == 'stats':
+                return {
+                    'feeds': {'total_sources': 0, 'growth_rate': 0},
+                    'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
+                    'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
+                    'analyses': {'total_analyses': 0, 'growth_rate': 0},
+                    'visualization_data': {'daily_counts': []}
+                }
             return {"error": f"Unexpected error: {str(e)}"}
 
 # ====== Authentication Functions ======
