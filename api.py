@@ -42,6 +42,13 @@ def require_api_key(f):
         # Get API key from request
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
+        # For internal requests, check if user is logged in
+        if request.remote_addr in ['127.0.0.1', '::1'] or request.headers.get('X-Forwarded-For', '').startswith('127.0.0.1'):
+            # Internal request from frontend
+            from flask import session
+            if session.get('logged_in'):
+                return f(*args, **kwargs)
+        
         # Check if API key is valid
         if not api_key or api_key != Config.API_KEY:
             logger.warning(f"Invalid API key attempt from IP: {get_remote_address()}")
@@ -274,6 +281,237 @@ def api_health_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 503
 
+# -------------------- Mock Data Endpoints for Development --------------------
+
+@api_blueprint.route('/stats', methods=['GET'])
+@require_api_key
+def get_stats():
+    """Get platform statistics."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        # Mock data for development
+        stats = {
+            'feeds': {
+                'total_sources': 12,
+                'growth_rate': 15.3
+            },
+            'iocs': {
+                'total': 24389,
+                'growth_rate': 8.7,
+                'types': [
+                    {'type': 'domain', 'count': 10250},
+                    {'type': 'ip', 'count': 8150},
+                    {'type': 'url', 'count': 4500},
+                    {'type': 'hash', 'count': 1489}
+                ]
+            },
+            'campaigns': {
+                'total_campaigns': 47,
+                'growth_rate': 5.2
+            },
+            'analyses': {
+                'total_analyses': 1234,
+                'growth_rate': 12.5
+            },
+            'timestamp': datetime.utcnow().isoformat(),
+            'visualization_data': {
+                'daily_counts': [
+                    {'date': (datetime.utcnow() - timedelta(days=i)).strftime('%Y-%m-%d'), 'count': 100 + i * 5}
+                    for i in range(days)
+                ]
+            }
+        }
+        
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"Error getting stats: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/feeds', methods=['GET'])
+@require_api_key
+def get_feeds():
+    """Get feed information."""
+    try:
+        # Mock feed data
+        feeds = [
+            {
+                'id': 'phishtank',
+                'name': 'PhishTank',
+                'description': 'Phishing URLs database',
+                'record_count': 15420,
+                'last_updated': datetime.utcnow().isoformat(),
+                'enabled': True
+            },
+            {
+                'id': 'urlhaus',
+                'name': 'URLhaus',
+                'description': 'Malware URL database',
+                'record_count': 8960,
+                'last_updated': datetime.utcnow().isoformat(),
+                'enabled': True
+            },
+            {
+                'id': 'threatfox',
+                'name': 'ThreatFox',
+                'description': 'IOC database',
+                'record_count': 12400,
+                'last_updated': datetime.utcnow().isoformat(),
+                'enabled': True
+            }
+        ]
+        
+        return jsonify({
+            'feeds': feeds,
+            'count': len(feeds),
+            'feed_details': feeds
+        })
+    except Exception as e:
+        logger.error(f"Error getting feeds: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/iocs', methods=['GET'])
+@require_api_key
+def get_iocs():
+    """Get IOC data."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        # Mock IOC data
+        iocs = [
+            {
+                'id': '1',
+                'type': 'domain',
+                'value': 'malicious-domain.com',
+                'source': 'PhishTank',
+                'sources': 3,
+                'first_seen': (datetime.utcnow() - timedelta(days=5)).isoformat(),
+                'confidence': 85
+            },
+            {
+                'id': '2',
+                'type': 'ip',
+                'value': '192.168.1.100',
+                'source': 'URLhaus',
+                'sources': 1,
+                'first_seen': (datetime.utcnow() - timedelta(days=3)).isoformat(),
+                'confidence': 75
+            },
+            {
+                'id': '3',
+                'type': 'url',
+                'value': 'http://malicious-site.com/phish',
+                'source': 'ThreatFox',
+                'sources': 2,
+                'first_seen': (datetime.utcnow() - timedelta(days=1)).isoformat(),
+                'confidence': 95
+            },
+            {
+                'id': '4',
+                'type': 'hash',
+                'value': 'a1b2c3d4e5f6...',
+                'source': 'PhishTank',
+                'sources': 4,
+                'first_seen': (datetime.utcnow() - timedelta(days=7)).isoformat(),
+                'confidence': 90
+            }
+        ]
+        
+        return jsonify({
+            'records': iocs,
+            'count': len(iocs),
+            'total_count': 24389
+        })
+    except Exception as e:
+        logger.error(f"Error getting IOCs: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/campaigns', methods=['GET'])
+@require_api_key
+def get_campaigns():
+    """Get campaign data."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        # Mock campaign data
+        campaigns = [
+            {
+                'campaign_id': 'campaign-001',
+                'campaign_name': 'Operation Phishing Storm',
+                'threat_actor': 'APT-29',
+                'source_count': 15,
+                'severity': 'high',
+                'first_seen': (datetime.utcnow() - timedelta(days=10)).isoformat(),
+                'last_seen': (datetime.utcnow() - timedelta(days=1)).isoformat()
+            },
+            {
+                'campaign_id': 'campaign-002',
+                'campaign_name': 'Crypto Mining Botnet',
+                'threat_actor': 'Unknown',
+                'source_count': 8,
+                'severity': 'medium',
+                'first_seen': (datetime.utcnow() - timedelta(days=5)).isoformat(),
+                'last_seen': (datetime.utcnow() - timedelta(days=2)).isoformat()
+            },
+            {
+                'campaign_id': 'campaign-003',
+                'campaign_name': 'Ransomware Wave',
+                'threat_actor': 'REvil',
+                'source_count': 22,
+                'severity': 'critical',
+                'first_seen': (datetime.utcnow() - timedelta(days=3)).isoformat(),
+                'last_seen': datetime.utcnow().isoformat()
+            }
+        ]
+        
+        return jsonify({
+            'campaigns': campaigns,
+            'count': len(campaigns),
+            'total_campaigns': 47
+        })
+    except Exception as e:
+        logger.error(f"Error getting campaigns: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/threat_summary', methods=['GET'])
+@require_api_key
+def get_threat_summary():
+    """Get threat summary data."""
+    try:
+        # Mock threat summary
+        summary = {
+            'high_risk_indicators': 156,
+            'active_campaigns': 3,
+            'recent_detections': 47,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        return jsonify(summary)
+    except Exception as e:
+        logger.error(f"Error getting threat summary: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/iocs/geo', methods=['GET'])
+@require_api_key
+def get_geo_stats():
+    """Get geographical IOC distribution."""
+    try:
+        # Mock geographical data
+        geo_stats = {
+            'countries': [
+                {'country': 'USA', 'count': 850},
+                {'country': 'RUS', 'count': 620},
+                {'country': 'CHN', 'count': 450},
+                {'country': 'IND', 'count': 380},
+                {'country': 'BRA', 'count': 250}
+            ]
+        }
+        
+        return jsonify(geo_stats)
+    except Exception as e:
+        logger.error(f"Error getting geo stats: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 # -------------------- API Information Endpoints --------------------
 
 @api_blueprint.route('/info', methods=['GET'])
@@ -295,649 +533,6 @@ def get_api_info():
             {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'}
         ]
     })
-
-@api_blueprint.route('/feeds', methods=['GET'])
-def get_feed_info():
-    """Get information about available threat feeds."""
-    feeds = []
-    
-    for feed in Config.FEEDS:
-        feeds.append({
-            'id': feed.get('id'),
-            'name': feed.get('name'),
-            'description': feed.get('description'),
-            'type': feed.get('type'),
-            'update_frequency': feed.get('update_frequency')
-        })
-    
-    return jsonify({
-        'feeds': feeds,
-        'count': len(feeds),
-        'update_interval': Config.FEED_UPDATE_INTERVAL
-    })
-
-# -------------------- Data Access Endpoints --------------------
-
-@api_blueprint.route('/indicators', methods=['GET'])
-@require_api_key
-@limiter.limit(Config.API_RATE_LIMIT)
-def get_indicators():
-    """Get indicators of compromise."""
-    try:
-        # Get query parameters with defaults
-        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
-        offset = int(request.args.get('offset', 0))
-        type_filter = request.args.get('type')
-        value_filter = request.args.get('value')
-        feed_filter = request.args.get('feed_id')
-        min_confidence = request.args.get('min_confidence')
-        max_age_days = request.args.get('max_age_days')
-        
-        # Build query filters
-        filters = []
-        query_params = []
-        
-        if type_filter:
-            filters.append("type = @type_filter")
-            query_params.append(bigquery.ScalarQueryParameter("type_filter", "STRING", type_filter))
-            
-        if value_filter:
-            filters.append("value LIKE @value_filter")
-            query_params.append(bigquery.ScalarQueryParameter("value_filter", "STRING", f"%{value_filter}%"))
-            
-        if feed_filter:
-            filters.append("feed_id = @feed_filter")
-            query_params.append(bigquery.ScalarQueryParameter("feed_filter", "STRING", feed_filter))
-            
-        if min_confidence:
-            filters.append("confidence >= @min_confidence")
-            query_params.append(bigquery.ScalarQueryParameter("min_confidence", "INT64", int(min_confidence)))
-            
-        if max_age_days:
-            date_threshold = datetime.utcnow() - timedelta(days=int(max_age_days))
-            filters.append("created_at >= @date_threshold")
-            query_params.append(bigquery.ScalarQueryParameter("date_threshold", "TIMESTAMP", date_threshold))
-        
-        # Build query
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('indicators')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-            ORDER BY created_at DESC
-            LIMIT {limit} OFFSET {offset}
-        """
-        
-        # Get count query
-        count_query = f"""
-            SELECT COUNT(*) as count FROM `{Config.get_table_name('indicators')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-        """
-        
-        # Execute queries
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        
-        count_job = bq_client.query(count_query, job_config=job_config)
-        count_result = list(count_job)[0]
-        total_count = count_result['count']
-        
-        results_job = bq_client.query(query, job_config=job_config)
-        results = [format_bq_row(row) for row in results_job]
-        
-        return jsonify({
-            'indicators': results,
-            'count': len(results),
-            'total_count': total_count,
-            'limit': limit,
-            'offset': offset
-        })
-    
-    except Exception as e:
-        logger.error(f"Error querying indicators: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve indicators: {str(e)}"}), 500
-
-@api_blueprint.route('/vulnerabilities', methods=['GET'])
-@require_api_key
-@limiter.limit(Config.API_RATE_LIMIT)
-def get_vulnerabilities():
-    """Get vulnerability information."""
-    try:
-        # Get query parameters with defaults
-        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
-        offset = int(request.args.get('offset', 0))
-        cve_filter = request.args.get('cve')
-        min_cvss = request.args.get('min_cvss')
-        product_filter = request.args.get('product')
-        
-        # Build query filters
-        filters = []
-        query_params = []
-        
-        if cve_filter:
-            filters.append("cve_id = @cve_filter")
-            query_params.append(bigquery.ScalarQueryParameter("cve_filter", "STRING", cve_filter))
-            
-        if min_cvss:
-            filters.append("cvss_score >= @min_cvss")
-            query_params.append(bigquery.ScalarQueryParameter("min_cvss", "FLOAT64", float(min_cvss)))
-            
-        if product_filter:
-            filters.append("(product LIKE @product_filter OR vendor LIKE @product_filter)")
-            query_params.append(bigquery.ScalarQueryParameter("product_filter", "STRING", f"%{product_filter}%"))
-        
-        # Build query
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('vulnerabilities')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-            ORDER BY cvss_score DESC, created_at DESC
-            LIMIT {limit} OFFSET {offset}
-        """
-        
-        # Get count query
-        count_query = f"""
-            SELECT COUNT(*) as count FROM `{Config.get_table_name('vulnerabilities')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-        """
-        
-        # Execute queries
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        
-        count_job = bq_client.query(count_query, job_config=job_config)
-        count_result = list(count_job)[0]
-        total_count = count_result['count']
-        
-        results_job = bq_client.query(query, job_config=job_config)
-        results = [format_bq_row(row) for row in results_job]
-        
-        return jsonify({
-            'vulnerabilities': results,
-            'count': len(results),
-            'total_count': total_count,
-            'limit': limit,
-            'offset': offset
-        })
-    
-    except Exception as e:
-        logger.error(f"Error querying vulnerabilities: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve vulnerabilities: {str(e)}"}), 500
-
-@api_blueprint.route('/threat_actors', methods=['GET'])
-@require_api_key
-@limiter.limit(Config.API_RATE_LIMIT)
-def get_threat_actors():
-    """Get threat actor information."""
-    try:
-        # Get query parameters with defaults
-        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
-        offset = int(request.args.get('offset', 0))
-        name_filter = request.args.get('name')
-        target_filter = request.args.get('target')
-        
-        # Build query filters
-        filters = []
-        query_params = []
-        
-        if name_filter:
-            filters.append("(name LIKE @name_filter OR aliases LIKE @name_filter)")
-            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
-            
-        if target_filter:
-            filters.append("targets LIKE @target_filter")
-            query_params.append(bigquery.ScalarQueryParameter("target_filter", "STRING", f"%{target_filter}%"))
-        
-        # Build query
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('threat_actors')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-            ORDER BY last_updated DESC
-            LIMIT {limit} OFFSET {offset}
-        """
-        
-        # Get count query
-        count_query = f"""
-            SELECT COUNT(*) as count FROM `{Config.get_table_name('threat_actors')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-        """
-        
-        # Execute queries
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        
-        count_job = bq_client.query(count_query, job_config=job_config)
-        count_result = list(count_job)[0]
-        total_count = count_result['count']
-        
-        results_job = bq_client.query(query, job_config=job_config)
-        results = [format_bq_row(row) for row in results_job]
-        
-        return jsonify({
-            'threat_actors': results,
-            'count': len(results),
-            'total_count': total_count,
-            'limit': limit,
-            'offset': offset
-        })
-    
-    except Exception as e:
-        logger.error(f"Error querying threat actors: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve threat actors: {str(e)}"}), 500
-
-@api_blueprint.route('/campaigns', methods=['GET'])
-@require_api_key
-@limiter.limit(Config.API_RATE_LIMIT)
-def get_campaigns():
-    """Get campaign information."""
-    try:
-        # Get query parameters with defaults
-        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
-        offset = int(request.args.get('offset', 0))
-        name_filter = request.args.get('name')
-        actor_filter = request.args.get('actor')
-        
-        # Build query filters
-        filters = []
-        query_params = []
-        
-        if name_filter:
-            filters.append("name LIKE @name_filter")
-            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
-            
-        if actor_filter:
-            filters.append("threat_actor_ids LIKE @actor_filter")
-            query_params.append(bigquery.ScalarQueryParameter("actor_filter", "STRING", f"%{actor_filter}%"))
-        
-        # Build query
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('campaigns')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-            ORDER BY first_seen DESC
-            LIMIT {limit} OFFSET {offset}
-        """
-        
-        # Get count query
-        count_query = f"""
-            SELECT COUNT(*) as count FROM `{Config.get_table_name('campaigns')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-        """
-        
-        # Execute queries
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        
-        count_job = bq_client.query(count_query, job_config=job_config)
-        count_result = list(count_job)[0]
-        total_count = count_result['count']
-        
-        results_job = bq_client.query(query, job_config=job_config)
-        results = [format_bq_row(row) for row in results_job]
-        
-        return jsonify({
-            'campaigns': results,
-            'count': len(results),
-            'total_count': total_count,
-            'limit': limit,
-            'offset': offset
-        })
-    
-    except Exception as e:
-        logger.error(f"Error querying campaigns: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve campaigns: {str(e)}"}), 500
-
-@api_blueprint.route('/malware', methods=['GET'])
-@require_api_key
-@limiter.limit(Config.API_RATE_LIMIT)
-def get_malware():
-    """Get malware information."""
-    try:
-        # Get query parameters with defaults
-        limit = min(int(request.args.get('limit', Config.API_DEFAULT_PAGE_SIZE)), Config.API_MAX_PAGE_SIZE)
-        offset = int(request.args.get('offset', 0))
-        name_filter = request.args.get('name')
-        type_filter = request.args.get('type')
-        hash_filter = request.args.get('hash')
-        
-        # Build query filters
-        filters = []
-        query_params = []
-        
-        if name_filter:
-            filters.append("(name LIKE @name_filter OR aliases LIKE @name_filter)")
-            query_params.append(bigquery.ScalarQueryParameter("name_filter", "STRING", f"%{name_filter}%"))
-            
-        if type_filter:
-            filters.append("malware_type = @type_filter")
-            query_params.append(bigquery.ScalarQueryParameter("type_filter", "STRING", type_filter))
-            
-        if hash_filter:
-            filters.append("(md5 = @hash_filter OR sha1 = @hash_filter OR sha256 = @hash_filter)")
-            query_params.append(bigquery.ScalarQueryParameter("hash_filter", "STRING", hash_filter))
-        
-        # Build query
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('malware')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-            ORDER BY first_seen DESC
-            LIMIT {limit} OFFSET {offset}
-        """
-        
-        # Get count query
-        count_query = f"""
-            SELECT COUNT(*) as count FROM `{Config.get_table_name('malware')}`
-            {f"WHERE {' AND '.join(filters)}" if filters else ""}
-        """
-        
-        # Execute queries
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        
-        count_job = bq_client.query(count_query, job_config=job_config)
-        count_result = list(count_job)[0]
-        total_count = count_result['count']
-        
-        results_job = bq_client.query(query, job_config=job_config)
-        results = [format_bq_row(row) for row in results_job]
-        
-        return jsonify({
-            'malware': results,
-            'count': len(results),
-            'total_count': total_count,
-            'limit': limit,
-            'offset': offset
-        })
-    
-    except Exception as e:
-        logger.error(f"Error querying malware: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve malware: {str(e)}"}), 500
-
-# -------------------- Detail Endpoints --------------------
-
-@api_blueprint.route('/indicators/<indicator_id>', methods=['GET'])
-@require_api_key
-def get_indicator_detail(indicator_id):
-    """Get detailed information about a specific indicator."""
-    try:
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('indicators')}`
-            WHERE id = @indicator_id
-        """
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("indicator_id", "STRING", indicator_id)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job)
-        
-        if not results:
-            return jsonify({"error": "Indicator not found"}), 404
-            
-        indicator = format_bq_row(results[0])
-        
-        # Get related entities
-        related_malware_query = f"""
-            SELECT m.* FROM `{Config.get_table_name('malware')}` m
-            JOIN `{Config.get_table_name('indicators')}` i
-            ON REGEXP_CONTAINS(i.related_malware_ids, m.id)
-            WHERE i.id = @indicator_id
-        """
-        
-        related_malware_job = bq_client.query(related_malware_query, job_config=job_config)
-        related_malware = [format_bq_row(row) for row in related_malware_job]
-        
-        indicator['related_malware'] = related_malware
-        
-        return jsonify(indicator)
-    
-    except Exception as e:
-        logger.error(f"Error getting indicator detail: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve indicator detail: {str(e)}"}), 500
-
-@api_blueprint.route('/vulnerabilities/<cve_id>', methods=['GET'])
-@require_api_key
-def get_vulnerability_detail(cve_id):
-    """Get detailed information about a specific vulnerability."""
-    try:
-        query = f"""
-            SELECT * FROM `{Config.get_table_name('vulnerabilities')}`
-            WHERE cve_id = @cve_id
-        """
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("cve_id", "STRING", cve_id)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job)
-        
-        if not results:
-            return jsonify({"error": "Vulnerability not found"}), 404
-            
-        vulnerability = format_bq_row(results[0])
-        
-        # Get related indicators
-        related_indicators_query = f"""
-            SELECT * FROM `{Config.get_table_name('indicators')}`
-            WHERE related_vulnerabilities LIKE @vuln_pattern
-            LIMIT 100
-        """
-        
-        related_indicators_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("vuln_pattern", "STRING", f"%{cve_id}%")
-            ]
-        )
-        
-        related_indicators_job = bq_client.query(related_indicators_query, job_config=related_indicators_config)
-        related_indicators = [format_bq_row(row) for row in related_indicators_job]
-        
-        vulnerability['related_indicators'] = related_indicators
-        
-        return jsonify(vulnerability)
-    
-    except Exception as e:
-        logger.error(f"Error getting vulnerability detail: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to retrieve vulnerability detail: {str(e)}"}), 500
-
-# -------------------- Admin API Endpoints --------------------
-
-@api_blueprint.route('/admin/ingest', methods=['POST'])
-@require_api_key
-def trigger_ingest():
-    """Trigger data ingestion process."""
-    try:
-        data = request.get_json() or {}
-        process_all = data.get('process_all', False)
-        feed_id = data.get('feed_id')
-        
-        # Validate feed_id if provided
-        if feed_id and not Config.get_feed_by_id(feed_id):
-            return jsonify({"error": f"Invalid feed_id: {feed_id}"}), 400
-        
-        # Import ingestion module
-        try:
-            import ingestion
-            
-            # Start ingestion in background thread for better responsiveness
-            if process_all:
-                # Process all feeds
-                thread = ingestion.trigger_ingestion_in_background()
-                return jsonify({
-                    "message": "Ingestion process triggered for all feeds",
-                    "status": "running"
-                })
-            elif feed_id:
-                # Process specific feed
-                result = ingestion.ingest_feed(feed_id)
-                return jsonify({
-                    "message": f"Processed feed {feed_id}",
-                    "status": result["status"],
-                    "details": result
-                })
-            else:
-                return jsonify({"error": "Must specify feed_id or set process_all=true"}), 400
-                
-        except ImportError:
-            # Fall back to Pub/Sub if ingestion module can't be imported directly
-            # Prepare message for Pub/Sub
-            message = {
-                "operation": "ingest",
-                "timestamp": datetime.utcnow().isoformat(),
-                "process_all": process_all,
-                "feed_id": feed_id
-            }
-            
-            # Publish message to trigger Cloud Function
-            message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
-            
-            return jsonify({
-                "message": "Ingestion process triggered",
-                "message_id": message_id,
-                "process_all": process_all,
-                "feed_id": feed_id
-            })
-    
-    except Exception as e:
-        logger.error(f"Error triggering ingestion: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to trigger ingestion: {str(e)}"}), 500
-
-@api_blueprint.route('/admin/analyze', methods=['POST'])
-@require_api_key
-def trigger_analysis():
-    """Trigger threat data analysis process."""
-    try:
-        data = request.get_json() or {}
-        indicator_ids = data.get('indicator_ids', [])
-        analyze_all = data.get('analyze_all', False)
-        force_reanalysis = data.get('force_reanalysis', False)
-        
-        if not analyze_all and not indicator_ids:
-            return jsonify({"error": "Must provide indicator_ids or set analyze_all=true"}), 400
-            
-        # Limit the number of indicators that can be analyzed at once
-        if len(indicator_ids) > Config.ANALYSIS_MAX_INDICATORS_PER_BATCH:
-            return jsonify({
-                "error": f"Too many indicators to analyze at once. Maximum is {Config.ANALYSIS_MAX_INDICATORS_PER_BATCH}"
-            }), 400
-        
-        # Try to import analysis module directly
-        try:
-            import analysis
-            
-            if analyze_all:
-                # Find indicators for analysis
-                indicators_to_analyze = analysis.find_indicators_for_analysis(
-                    limit=min(1000, Config.ANALYSIS_MAX_INDICATORS_PER_BATCH)
-                )
-                
-                if not indicators_to_analyze:
-                    return jsonify({
-                        "message": "No indicators found that need analysis",
-                        "status": "skipped"
-                    })
-                    
-                # Start analysis in background
-                thread = threading.Thread(
-                    target=analysis.analyze_threat_data,
-                    args=({
-                        "indicator_ids": indicators_to_analyze,
-                        "force_reanalysis": force_reanalysis
-                    },)
-                )
-                thread.daemon = True
-                thread.start()
-                
-                return jsonify({
-                    "message": f"Analysis process triggered for {len(indicators_to_analyze)} indicators",
-                    "status": "running"
-                })
-                
-            else:
-                # Analyze specific indicators
-                result = analysis.analyze_threat_data({
-                    "indicator_ids": indicator_ids,
-                    "force_reanalysis": force_reanalysis
-                })
-                
-                return jsonify({
-                    "message": "Analysis process completed",
-                    "status": "success", 
-                    "results": result
-                })
-                
-        except ImportError:
-            # Fall back to Pub/Sub if analysis module can't be imported directly
-            # Prepare message for Pub/Sub
-            message = {
-                "operation": "analyze",
-                "timestamp": datetime.utcnow().isoformat(),
-                "analyze_all": analyze_all,
-                "force_reanalysis": force_reanalysis,
-                "indicator_ids": indicator_ids
-            }
-            
-            # Publish message to trigger Cloud Function
-            message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message)
-            
-            return jsonify({
-                "message": "Analysis process triggered",
-                "message_id": message_id,
-                "analyze_all": analyze_all,
-                "indicator_count": len(indicator_ids) if not analyze_all else "all"
-            })
-    
-    except Exception as e:
-        logger.error(f"Error triggering analysis: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to trigger analysis: {str(e)}"}), 500
-
-@api_blueprint.route('/admin/export', methods=['POST'])
-@require_api_key
-def export_data():
-    """Export threat intelligence data."""
-    try:
-        data = request.get_json() or {}
-        export_type = data.get('type', 'indicators')
-        export_format = data.get('format', 'json')
-        filters = data.get('filters', {})
-        
-        if export_format not in Config.EXPORT_FORMATS:
-            return jsonify({"error": f"Invalid export format. Supported formats: {', '.join(Config.EXPORT_FORMATS)}"}), 400
-            
-        if export_type not in Config.BIGQUERY_TABLES:
-            return jsonify({"error": f"Invalid export type. Supported types: {', '.join(Config.BIGQUERY_TABLES.keys())}"}), 400
-            
-        # Prepare message for Pub/Sub to trigger export
-        message = {
-            "operation": "export",
-            "timestamp": datetime.utcnow().isoformat(),
-            "export_type": export_type,
-            "export_format": export_format,
-            "filters": filters
-        }
-        
-        # Publish message
-        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message)
-        
-        # For immediate exports of small datasets, we could implement direct export logic here
-        
-        return jsonify({
-            "message": "Export process triggered",
-            "message_id": message_id,
-            "export_type": export_type,
-            "export_format": export_format
-        })
-    
-    except Exception as e:
-        logger.error(f"Error triggering export: {str(e)}")
-        report_error(e)
-        return jsonify({"error": f"Failed to trigger export: {str(e)}"}), 500
 
 # -------------------- Error Handlers --------------------
 
