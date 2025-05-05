@@ -29,7 +29,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Basic configuration - minimal for now
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true',
+    SESSION_COOKIE_SECURE=True,  # Always True for Cloud Run (HTTPS)
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PREFERRED_URL_SCHEME='https',
@@ -87,7 +87,14 @@ def register_late_components():
         from frontend import frontend_app as frontend_blueprint, format_datetime
         
         # Load configuration
-        app.config.from_object(Config)
+        Config.init_app()
+        
+        # Apply config values to app
+        app.config.update({
+            'SECRET_KEY': Config.SECRET_KEY,
+            'SESSION_SECRET': Config.SECRET_KEY,
+            'WTF_CSRF_SECRET_KEY': Config.SECRET_KEY,
+        })
         
         # Register blueprints
         app.register_blueprint(api_blueprint, url_prefix='/api')
@@ -95,9 +102,6 @@ def register_late_components():
         
         # Register template filters
         app.template_filter('datetime')(format_datetime)
-        
-        # Initialize config
-        Config.init_app()
         
         logger.info("Late components registered successfully")
         return True
@@ -119,6 +123,14 @@ def internal_server_error(e):
     logger.error(f"Internal server error: {request.url}")
     logger.error(traceback.format_exc())
     return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
+
+@app.errorhandler(400)
+def handle_bad_request(e):
+    """Handle 400 errors including CSRF errors."""
+    logger.error(f"400 error: {str(e)}")
+    if 'CSRF' in str(e):
+        return redirect(url_for('frontend.login'))
+    return jsonify({'error': 'Bad request', 'message': str(e)}), 400
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
