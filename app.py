@@ -3,7 +3,7 @@ import sys
 import logging
 import traceback
 from datetime import datetime
-from flask import Flask, jsonify, render_template, request, redirect, url_for, session
+from flask import Flask, jsonify, render_template, request, redirect, url_for, session, current_app
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -26,29 +26,46 @@ app = Flask(__name__)
 # Add proxy middleware to handle Cloud Run reverse proxy
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Basic configuration - minimal for now
+# Get environment variables with proper defaults
+ENV_VARS = {
+    'ENVIRONMENT': os.environ.get('ENVIRONMENT', 'development'),
+    'SECRET_KEY': os.environ.get('SECRET_KEY', 'dev-secret-key'),
+    'SESSION_COOKIE_SECURE': os.environ.get('SESSION_COOKIE_SECURE', 'true').lower() == 'true',
+    'SESSION_COOKIE_HTTPONLY': os.environ.get('SESSION_COOKIE_HTTPONLY', 'true').lower() == 'true',
+    'SESSION_COOKIE_SAMESITE': os.environ.get('SESSION_COOKIE_SAMESITE', 'Lax'),
+    'PREFERRED_URL_SCHEME': os.environ.get('PREFERRED_URL_SCHEME', 'https')
+}
+
+# Basic configuration - fixed for Cloud Run
 app.config.update(
-    SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    SESSION_COOKIE_SECURE=True,  # Always True for Cloud Run (HTTPS)
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    PREFERRED_URL_SCHEME='https',
+    SECRET_KEY=ENV_VARS['SECRET_KEY'],
+    SESSION_COOKIE_SECURE=ENV_VARS['SESSION_COOKIE_SECURE'],
+    SESSION_COOKIE_HTTPONLY=ENV_VARS['SESSION_COOKIE_HTTPONLY'],
+    SESSION_COOKIE_SAMESITE=ENV_VARS['SESSION_COOKIE_SAMESITE'],
+    PREFERRED_URL_SCHEME=ENV_VARS['PREFERRED_URL_SCHEME'],
     SERVER_NAME=None,
     APPLICATION_ROOT=None,
     PERMANENT_SESSION_LIFETIME=43200,
     MAX_CONTENT_LENGTH=16 * 1024 * 1024,
     WTF_CSRF_ENABLED=True,
-    WTF_CSRF_SECRET_KEY=os.environ.get('WTF_CSRF_SECRET_KEY', os.environ.get('SECRET_KEY', 'dev-secret-key')),
-    WTF_CSRF_TIME_LIMIT=3600
+    WTF_CSRF_SECRET_KEY=ENV_VARS['SECRET_KEY'],
+    WTF_CSRF_TIME_LIMIT=3600,
+    WTF_CSRF_CHECK_DEFAULT=True,
+    SESSION_PROTECTION='strong',
+    SESSION_TYPE='filesystem'
 )
 
-# Initialize CSRF protection
-csrf = CSRFProtect(app)
+# Initialize CSRF protection before any routes
+csrf = CSRFProtect()
+csrf.init_app(app)
 
-# Setup CORS - simple for Cloud Run
-CORS(app)
+# Setup CORS for both frontend and API
+CORS(app, resources={
+    r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]},
+    r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}
+}, supports_credentials=True)
 
-# Setup rate limiting with memory storage (simpler for Cloud Run)
+# Setup rate limiting with memory storage
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
@@ -57,8 +74,9 @@ limiter = Limiter(
     swallow_errors=True
 )
 
-# Health check endpoint FIRST - this needs to work immediately
+# Health check endpoint - exempt from CSRF
 @app.route('/health', methods=['GET'])
+@csrf.exempt
 def health_check():
     """Minimal health check for startup."""
     return jsonify({
@@ -67,8 +85,9 @@ def health_check():
         'app_ready': True
     }), 200
 
-# Readiness probe
+# Readiness probe - exempt from CSRF  
 @app.route('/ready', methods=['GET'])
+@csrf.exempt
 def readiness_check():
     """Readiness probe for Cloud Run."""
     return jsonify({
@@ -89,14 +108,7 @@ def register_late_components():
         # Load configuration
         Config.init_app()
         
-        # Apply config values to app
-        app.config.update({
-            'SECRET_KEY': Config.SECRET_KEY,
-            'SESSION_SECRET': Config.SECRET_KEY,
-            'WTF_CSRF_SECRET_KEY': Config.SECRET_KEY,
-        })
-        
-        # Register blueprints
+        # Register blueprints AFTER config is loaded
         app.register_blueprint(api_blueprint, url_prefix='/api')
         app.register_blueprint(frontend_blueprint)
         
@@ -109,6 +121,15 @@ def register_late_components():
         logger.error(f"Failed to register late components: {str(e)}")
         logger.error(traceback.format_exc())
         return False
+
+# Before request handler to ensure session is established
+@app.before_request
+def before_request():
+    """Ensure session is properly established."""
+    # Force session to be created
+    if '_id' not in session:
+        session.permanent = True
+        session['_id'] = datetime.utcnow().isoformat()
 
 # Error handlers
 @app.errorhandler(404)
@@ -124,17 +145,31 @@ def internal_server_error(e):
     logger.error(traceback.format_exc())
     return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
 
+# CSRF error handler
 @app.errorhandler(400)
 def handle_bad_request(e):
     """Handle 400 errors including CSRF errors."""
     logger.error(f"400 error: {str(e)}")
-    if 'CSRF' in str(e):
+    error_desc = str(e.description) if hasattr(e, 'description') else str(e)
+    
+    if 'CSRF' in error_desc:
+        # Clear session on CSRF error to force fresh session
+        session.clear()
         return redirect(url_for('frontend.login'))
-    return jsonify({'error': 'Bad request', 'message': str(e)}), 400
+    
+    return jsonify({'error': 'Bad request', 'message': error_desc}), 400
+
+# Custom CSRF error handler
+@csrf.error_handler
+def csrf_error(reason):
+    """Handle CSRF validation errors."""
+    logger.error(f"CSRF error: {reason}")
+    session.clear()
+    return redirect(url_for('frontend.login'))
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
-    # Register late components after Flask app is created
+    # Register late components
     success = register_late_components()
     if not success:
         logger.warning("Some components failed to register, but app will continue")
