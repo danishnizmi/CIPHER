@@ -381,13 +381,6 @@ def login():
                     session['role'] = user.get('role', 'readonly')
                     session['_id'] = secrets.token_hex(16)  # Generate new session ID
                     
-                    # Update last login
-                    try:
-                        last_login = {'last_login': datetime.utcnow().isoformat()}
-                        config.update_user(username, last_login)
-                    except Exception as e:
-                        logger.warning(f"Could not update last login: {str(e)}")
-                    
                     # Log the successful login
                     logger.info(f"Successful login: {username}")
                     
@@ -669,6 +662,7 @@ def handle_bad_request(e):
 @frontend_app.context_processor
 def inject_global_data():
     """Inject global data into templates"""
+    # Remove CSRF token injection - Flask-WTF handles this automatically
     return {
         'now': datetime.now(),
         'environment': ENVIRONMENT,
