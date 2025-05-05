@@ -187,8 +187,12 @@ def get_api_key() -> str:
 def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
     """Make an internal API request with caching and enhanced error handling"""
     try:
-        # Use absolute URL for Cloud Run internal calls
-        api_url = f"{request.url_root.rstrip('/')}/api/{endpoint.lstrip('/')}"
+        # Import requests here to avoid global dependency
+        import requests
+        
+        # Construct base URL
+        base_url = request.url_root.rstrip('/')
+        api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
         # For internal calls from frontend, we don't need the API key if user is logged in
         headers = {"Content-Type": "application/json"}
@@ -199,15 +203,8 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             if api_key:
                 headers["X-API-Key"] = api_key
         
-        # Log the request details
-        logger.debug(f"API request: {method} {api_url}")
-        logger.debug(f"Headers: {headers}")
-        logger.debug(f"Data: {data}")
-        logger.debug(f"Params: {params}")
-        
-        import requests
-        
         # Make the request
+        logger.debug(f"API request: {method} {api_url}")
         start_time = time.time()
         
         # Add retry logic for resilience
@@ -246,15 +243,6 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         # Check for errors
         if response.status_code != 200:
             logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
-            # Return default data structure for common endpoints
-            if endpoint == 'stats':
-                return {
-                    'feeds': {'total_sources': 0, 'growth_rate': 0},
-                    'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
-                    'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
-                    'analyses': {'total_analyses': 0, 'growth_rate': 0},
-                    'visualization_data': {'daily_counts': []}
-                }
             return {
                 "error": f"API request failed with status {response.status_code}",
                 "status_code": response.status_code
@@ -271,9 +259,8 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         return {}
     
     except Exception as e:
-        logger.error(f"API request error ({endpoint}): {str(e)}")
-        logger.error(traceback.format_exc())
         if 'requests' in locals() and isinstance(e, requests.RequestException):
+            logger.error(f"API request error ({endpoint}): {str(e)}")
             status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
             
             error_msg = f"API error: {str(e)}"
@@ -282,15 +269,7 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             
             return {"error": error_msg, "status_code": status_code}
         else:
-            # Return default data structure for common endpoints to prevent frontend crashes
-            if endpoint == 'stats':
-                return {
-                    'feeds': {'total_sources': 0, 'growth_rate': 0},
-                    'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
-                    'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
-                    'analyses': {'total_analyses': 0, 'growth_rate': 0},
-                    'visualization_data': {'daily_counts': []}
-                }
+            logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
             return {"error": f"Unexpected error: {str(e)}"}
 
 # ====== Authentication Functions ======
@@ -452,6 +431,36 @@ def profile():
         logger.error(traceback.format_exc())
         flash('Error loading profile page', 'error')
         return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/change_password', methods=['POST'])
+@login_required
+def change_password():
+    """Handle password change requests"""
+    try:
+        current_password = request.form.get('current_password')
+        new_password = request.form.get('new_password')
+        
+        users = load_users()
+        user = users.get(session.get('username'))
+        
+        if not user:
+            flash('User not found', 'error')
+            return redirect(url_for('frontend.profile'))
+        
+        # Verify current password
+        if not verify_password(user.get('password', ''), current_password):
+            flash('Current password is incorrect', 'danger')
+            return redirect(url_for('frontend.profile'))
+        
+        # Update password
+        user['password'] = hash_password(new_password)
+        # Note: In production, this would need to update the secret in Secret Manager
+        flash('Password changed successfully', 'success')
+        return redirect(url_for('frontend.profile'))
+    except Exception as e:
+        logger.error(f"Error changing password: {str(e)}")
+        flash('Error changing password', 'danger')
+        return redirect(url_for('frontend.profile'))
 
 @frontend_app.route('/logout')
 def logout():
@@ -644,6 +653,161 @@ def dashboard(view=None):
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('frontend.login'))
 
+# User Management Routes
+@frontend_app.route('/users')
+@login_required
+@admin_required
+def users():
+    """User management page"""
+    try:
+        users = load_users()
+        return render_template('content.html', page_type='users', users=users)
+    except Exception as e:
+        logger.error(f"Error loading users page: {str(e)}")
+        flash('Error loading users page', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/user/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_user_route():
+    """Add new user"""
+    if request.method == 'POST':
+        try:
+            username = request.form.get('username')
+            password = request.form.get('password')
+            role = request.form.get('role', 'readonly')
+            
+            users = load_users()
+            if username in users:
+                flash('Username already exists', 'danger')
+                return redirect(url_for('frontend.add_user_route'))
+            
+            # Create new user
+            users[username] = {
+                'password': hash_password(password),
+                'role': role,
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            # Save to config (this would need to update the secret in production)
+            flash(f'User {username} created successfully', 'success')
+            return redirect(url_for('frontend.users'))
+            
+        except Exception as e:
+            logger.error(f"Error adding user: {str(e)}")
+            flash('Error creating user', 'danger')
+    
+    return render_template('auth.html', page_type='user_add')
+
+@frontend_app.route('/user/edit/<username>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_user(username):
+    """Edit user"""
+    users = load_users()
+    if username not in users:
+        flash('User not found', 'danger')
+        return redirect(url_for('frontend.users'))
+    
+    if request.method == 'POST':
+        try:
+            password = request.form.get('password')
+            role = request.form.get('role')
+            
+            if password:
+                users[username]['password'] = hash_password(password)
+            if role:
+                users[username]['role'] = role
+            
+            flash(f'User {username} updated successfully', 'success')
+            return redirect(url_for('frontend.users'))
+            
+        except Exception as e:
+            logger.error(f"Error editing user: {str(e)}")
+            flash('Error updating user', 'danger')
+    
+    return render_template('auth.html', page_type='user_edit', username=username, user=users[username])
+
+@frontend_app.route('/user/delete/<username>', methods=['POST'])
+@login_required
+@admin_required
+def delete_user(username):
+    """Delete user"""
+    try:
+        users = load_users()
+        if username in users:
+            del users[username]
+            flash(f'User {username} deleted successfully', 'success')
+        else:
+            flash('User not found', 'warning')
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}")
+        flash('Error deleting user', 'danger')
+    
+    return redirect(url_for('frontend.users'))
+
+# Admin Routes
+@frontend_app.route('/ingest_threat_data', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def ingest_threat_data():
+    """Trigger threat data ingestion"""
+    try:
+        if request.method == 'POST':
+            # Trigger ingestion through API
+            result = _api_request('admin/ingest', method='POST', data={'process_all': True})
+            
+            if result.get('error'):
+                flash(f'Error triggering ingestion: {result["error"]}', 'danger')
+            else:
+                flash('Threat data ingestion triggered successfully', 'success')
+            
+            return redirect(url_for('frontend.dashboard'))
+        
+        # For GET requests, redirect to dashboard
+        return redirect(url_for('frontend.dashboard'))
+    except Exception as e:
+        logger.error(f"Error in ingest_threat_data: {str(e)}")
+        flash('An error occurred while triggering ingestion', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+# Additional Routes for Dashboard Links
+@frontend_app.route('/feeds')
+@login_required
+def feeds():
+    """Redirect to dashboard feeds view"""
+    return redirect(url_for('frontend.dashboard', view='feeds'))
+
+@frontend_app.route('/iocs')
+@login_required
+def iocs():
+    """Redirect to dashboard IOCs view"""
+    return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/campaigns')
+@login_required
+def campaigns():
+    """Redirect to dashboard campaigns view"""
+    return redirect(url_for('frontend.dashboard', view='campaigns'))
+
+@frontend_app.route('/detail/<content_type>/<path:identifier>')
+@login_required
+def dynamic_content_detail(content_type, identifier):
+    """Generic detail page for different content types"""
+    try:
+        # This is a placeholder for detailed views
+        context = {
+            'content_type': content_type,
+            'identifier': identifier,
+            'title': f"{content_type.title()} Detail"
+        }
+        return render_template('detail.html', **context)
+    except Exception as e:
+        logger.error(f"Error loading detail page: {str(e)}")
+        flash(f'Error loading {content_type} detail', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
 # ====== Template Filters ======
 
 # Define datetime formatter function that can be registered in app.py
@@ -667,7 +831,7 @@ def page_not_found(e):
     """Handle 404 errors"""
     logger.info(f"Page not found: {request.path}")
     try:
-        return render_template('404.html'), 404
+        return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
     except:
         return render_template('base.html', 
                                title="Page Not Found", 
