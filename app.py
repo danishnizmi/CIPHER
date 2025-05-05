@@ -29,7 +29,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Basic configuration - fixed for Cloud Run
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    SESSION_COOKIE_SECURE=False,  # Disabled for Cloud Run
+    SESSION_COOKIE_SECURE=True,  # Enable for Cloud Run (HTTPS)
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PREFERRED_URL_SCHEME='https',
@@ -114,22 +114,32 @@ def register_late_components():
 def page_not_found(e):
     """Handle 404 errors."""
     logger.warning(f"Page not found: {request.url}")
-    return jsonify({'error': 'Not found', 'message': str(e)}), 404
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Not found', 'message': str(e)}), 404
+    return render_template('404.html'), 404
 
 @app.errorhandler(500)
 def internal_server_error(e):
     """Handle 500 errors."""
     logger.error(f"Internal server error: {request.url}")
     logger.error(traceback.format_exc())
-    return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
+    return render_template('500.html'), 500
 
 @app.errorhandler(400)
 def handle_bad_request(e):
     """Handle 400 errors including CSRF errors."""
     logger.error(f"400 error: {str(e)}")
     if 'CSRF' in str(e):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'CSRF validation failed', 'message': 'Invalid or missing CSRF token'}), 400
         return redirect(url_for('frontend.login'))
-    return jsonify({'error': 'Bad request', 'message': str(e)}), 400
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Bad request', 'message': str(e)}), 400
+    return render_template('500.html', 
+                         title="Bad Request", 
+                         content=f"<h1>400 - Bad Request</h1><p>{e}</p>"), 400
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
