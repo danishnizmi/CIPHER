@@ -406,6 +406,28 @@ def login():
     # For GET requests or failed logins
     return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
+@frontend_app.route('/profile')
+@login_required
+def profile():
+    """User profile page handler"""
+    try:
+        users = load_users()
+        user = users.get(session.get('username'))
+        
+        if not user:
+            flash('User not found', 'error')
+            return redirect(url_for('frontend.dashboard'))
+        
+        return render_template('auth.html', 
+                             page_type='profile', 
+                             username=session.get('username'),
+                             user=user)
+    except Exception as e:
+        logger.error(f"Error loading profile: {str(e)}")
+        logger.error(traceback.format_exc())
+        flash('Error loading profile page', 'error')
+        return redirect(url_for('frontend.dashboard'))
+
 @frontend_app.route('/logout')
 def logout():
     """Logout route handler"""
