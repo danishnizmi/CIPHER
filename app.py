@@ -55,7 +55,7 @@ app.config.update(
     SESSION_TYPE='filesystem'
 )
 
-# Initialize CSRF protection before any routes
+# Initialize CSRF protection
 csrf = CSRFProtect()
 csrf.init_app(app)
 
@@ -94,33 +94,6 @@ def readiness_check():
         'status': 'ready',
         'timestamp': datetime.utcnow().isoformat()
     }), 200
-
-# Delayed registration of blueprints
-def register_late_components():
-    """Register components that require configuration after app startup."""
-    try:
-        # Import modules
-        import config
-        from config import Config
-        from api import api_blueprint
-        from frontend import frontend_app as frontend_blueprint, format_datetime
-        
-        # Load configuration
-        Config.init_app()
-        
-        # Register blueprints AFTER config is loaded
-        app.register_blueprint(api_blueprint, url_prefix='/api')
-        app.register_blueprint(frontend_blueprint)
-        
-        # Register template filters
-        app.template_filter('datetime')(format_datetime)
-        
-        logger.info("Late components registered successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to register late components: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
 
 # Before request handler to ensure session is established
 @app.before_request
@@ -166,6 +139,33 @@ def csrf_error(reason):
     logger.error(f"CSRF error: {reason}")
     session.clear()
     return redirect(url_for('frontend.login'))
+
+# Register late components
+def register_late_components():
+    """Register components that require configuration after app startup."""
+    try:
+        # Import modules
+        import config
+        from config import Config
+        from api import api_blueprint
+        from frontend import frontend_app as frontend_blueprint, format_datetime
+        
+        # Load configuration
+        Config.init_app()
+        
+        # Register blueprints AFTER config is loaded
+        app.register_blueprint(api_blueprint, url_prefix='/api')
+        app.register_blueprint(frontend_blueprint)
+        
+        # Register template filters
+        app.template_filter('datetime')(format_datetime)
+        
+        logger.info("Late components registered successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to register late components: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
