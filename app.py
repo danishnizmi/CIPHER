@@ -29,7 +29,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Basic configuration - fixed for Cloud Run
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=False,  # Disabled for Cloud Run
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PREFERRED_URL_SCHEME='https',
@@ -39,7 +39,11 @@ app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024 * 1024,
     WTF_CSRF_ENABLED=True,
     WTF_CSRF_SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
-    WTF_CSRF_TIME_LIMIT=3600
+    WTF_CSRF_TIME_LIMIT=3600,
+    SESSION_TYPE='filesystem',
+    SESSION_FILE_DIR='/tmp/flask_session',
+    SESSION_COOKIE_PATH='/',
+    SESSION_PROTECTION='strong'
 )
 
 # Initialize CSRF protection
@@ -59,6 +63,7 @@ limiter = Limiter(
 
 # Health check endpoint - must work immediately
 @app.route('/health', methods=['GET'])
+@csrf.exempt
 def health_check():
     """Minimal health check for startup."""
     return jsonify({
@@ -69,6 +74,7 @@ def health_check():
 
 # Readiness probe
 @app.route('/ready', methods=['GET'])
+@csrf.exempt
 def readiness_check():
     """Readiness probe for Cloud Run."""
     return jsonify({
@@ -102,15 +108,6 @@ def register_late_components():
         logger.error(f"Failed to register late components: {str(e)}")
         logger.error(traceback.format_exc())
         return False
-
-# Before request handler to ensure session is established
-@app.before_request
-def before_request():
-    """Ensure session is properly established."""
-    # Force session to be created
-    if '_id' not in session:
-        session.permanent = True
-        session['_id'] = datetime.utcnow().isoformat()
 
 # Error handlers
 @app.errorhandler(404)
