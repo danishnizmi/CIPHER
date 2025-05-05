@@ -49,22 +49,47 @@ frontend_app = Blueprint('frontend', __name__, template_folder='templates', stat
 # Force session creation before requests
 @frontend_app.before_request
 def before_request():
-    """Ensure session is properly established with robust error handling."""
+    """Ensure session is properly established with cloud-based storage."""
     try:
-        # Only create session ID if not present
-        if '_id' not in session:
+        # Force session creation if needed - this works with cloud-based sessions
+        if '_creation_time' not in session:
             session.permanent = True
+            session['_creation_time'] = datetime.utcnow().isoformat()
             session['_id'] = secrets.token_hex(16)
             logger.debug(f"New session created: {session.get('_id')}")
         
         # Add session debug info in development
         if DEBUG_MODE:
             logger.debug(f"Session data: {dict(session)}")
+            logger.debug(f"Session ID: {session.get('_id')}")
+            logger.debug(f"Session creation time: {session.get('_creation_time')}")
             logger.debug(f"Request headers: {dict(request.headers)}")
+            logger.debug(f"Cookies: {dict(request.cookies)}")
     
     except Exception as e:
         logger.error(f"Error in before_request: {str(e)}")
         logger.error(traceback.format_exc())
+
+# Enhanced session handling specifically for login
+@frontend_app.before_app_request
+def check_session_health():
+    """Check and repair session if needed"""
+    try:
+        # Ensure we have proper session attributes
+        if 'logged_in' not in session:
+            session['logged_in'] = False
+        
+        # Reset session if it's malformed
+        if '_creation_time' not in session:
+            session.clear()
+            session.permanent = True
+            session['_creation_time'] = datetime.utcnow().isoformat()
+            session['_id'] = secrets.token_hex(16)
+            session['logged_in'] = False
+            logger.info("Reset malformed session")
+    
+    except Exception as e:
+        logger.error(f"Error checking session health: {str(e)}")
 
 # ====== Helper Functions ======
 def safe_report_exception():
@@ -354,7 +379,13 @@ def login():
     error = None
     
     try:
+        # Debug session state before login
+        logger.debug(f"Login attempt - Session before: {dict(session)}")
+        
         if request.method == 'POST':
+            # Debug CSRF token
+            logger.debug(f"CSRF token in form: {request.form.get('csrf_token')}")
+            
             # Flask-WTF automatically handles CSRF validation
             username = request.form.get('username')
             password = request.form.get('password')
@@ -377,16 +408,20 @@ def login():
                 
                 # Verify password
                 if verify_password(stored_password, password):
-                    # Login successful
-                    session.clear()  # Clear previous session data
+                    # Clear the session before setting new data
+                    session.clear()
+                    
+                    # Login successful - establish new session
                     session.permanent = remember
                     session['logged_in'] = True
                     session['username'] = username
                     session['role'] = user.get('role', 'readonly')
                     session['_id'] = secrets.token_hex(16)  # Generate new session ID
+                    session['_login_time'] = datetime.utcnow().isoformat()
                     
                     # Log the successful login
                     logger.info(f"Successful login: {username}")
+                    logger.debug(f"Session after login: {dict(session)}")
                     
                     flash(f'Welcome, {username}!', 'success')
                     
