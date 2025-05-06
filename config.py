@@ -22,7 +22,7 @@ HAS_VERTEX = False
 try:
     from google.cloud import secretmanager, storage, bigquery, pubsub_v1, error_reporting
     from google.cloud.logging_v2 import Client as LoggingClient
-    from google.cloud.exceptions import NotFound, Forbidden, BadRequest
+    from google.cloud.exceptions import NotFound, Forbidden, BadRequest, Conflict
     from google.api_core.exceptions import GoogleAPIError, PermissionDenied, ResourceExhausted, NotFound as ApiNotFound
     from google.auth.exceptions import DefaultCredentialsError, TransportError
     import google.auth
@@ -183,6 +183,7 @@ def handle_gcp_errors(func):
             if os.environ.get('ENVIRONMENT') != 'production':
                 import traceback
                 logger.error(traceback.format_exc())
+            report_error(e)
             return None
     return wrapper
 
@@ -192,7 +193,7 @@ def cache_client(client_name: str):
         @wraps(func)
         def wrapper(*args, **kwargs):
             global _clients
-            if client_name in _clients:
+            if client_name in _clients and _clients[client_name] is not None:
                 return _clients[client_name]
             
             client = func(*args, **kwargs)
@@ -228,13 +229,35 @@ class ClientManager:
 @cache_client('bigquery')
 @handle_gcp_errors
 def initialize_bigquery():
-    """Initialize and return a BigQuery client with error handling."""
+    """Initialize and return a BigQuery client with improved error handling."""
     project_id = get_project_id()
     if not project_id:
         logger.error("Project ID not available, cannot initialize BigQuery client")
         return None
     
-    return bigquery.Client(project=project_id)
+    try:
+        # Create the client with explicit location
+        client = bigquery.Client(
+            project=project_id, 
+            location=Config.BIGQUERY_LOCATION if hasattr(Config, 'BIGQUERY_LOCATION') else 'US'
+        )
+        
+        # Test client by running a simple query
+        test_query = "SELECT 1"
+        test_job = client.query(test_query)
+        test_result = list(test_job.result())
+        
+        if test_result and len(test_result) == 1 and test_result[0][0] == 1:
+            logger.info("BigQuery client initialized and tested successfully")
+            return client
+        else:
+            logger.error("BigQuery client test query failed")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to initialize BigQuery client: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
 
 @cache_client('storage')
 @handle_gcp_errors
@@ -253,17 +276,24 @@ def initialize_pubsub():
     """Initialize and return PubSub publisher and subscriber clients with error handling."""
     global _publisher, _subscriber
     
-    if '_publisher' in _clients and '_subscriber' in _clients:
+    if ('_publisher' in _clients and _clients['_publisher'] is not None and 
+        '_subscriber' in _clients and _clients['_subscriber'] is not None):
         return _clients['_publisher'], _clients['_subscriber']
     
-    _publisher = pubsub_v1.PublisherClient()
-    _subscriber = pubsub_v1.SubscriberClient()
-    
-    _clients['_publisher'] = _publisher
-    _clients['_subscriber'] = _subscriber
-    
-    logger.info("PubSub clients initialized successfully")
-    return _publisher, _subscriber
+    try:
+        _publisher = pubsub_v1.PublisherClient()
+        _subscriber = pubsub_v1.SubscriberClient()
+        
+        _clients['_publisher'] = _publisher
+        _clients['_subscriber'] = _subscriber
+        
+        logger.info("PubSub clients initialized successfully")
+        return _publisher, _subscriber
+    except Exception as e:
+        logger.error(f"Failed to initialize PubSub clients: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
 
 @cache_client('error_reporting')
 @handle_gcp_errors
@@ -334,6 +364,9 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
                 return access_secret(secret_id, version_id)
         logger.debug(f"Secret {secret_id} not found and could not be created")
         return None
+    except Exception as e:
+        logger.error(f"Error accessing secret {secret_id}: {str(e)}")
+        return None
 
 # Cached Config Management
 class ConfigCache:
@@ -364,6 +397,16 @@ class ConfigCache:
             cls._cache[cache_key] = config_data
         
         return config_data
+    
+    @classmethod
+    def clear(cls, key: Optional[str] = None):
+        """Clear cached configuration."""
+        if key:
+            cache_key = f"_cached_{key.replace('-', '_')}"
+            if cache_key in cls._cache:
+                del cls._cache[cache_key]
+        else:
+            cls._cache.clear()
 
 # Simplified config access function
 def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
@@ -569,6 +612,12 @@ class Config:
         if not cls.GCP_PROJECT:
             errors.append("GCP_PROJECT not set - multiple GCP services will fail")
         
+        # Test BigQuery connection if configuration is critical
+        if cls.GCP_PROJECT and HAS_GCP:
+            bq_client = initialize_bigquery()
+            if not bq_client:
+                warnings.append("Could not initialize BigQuery client")
+        
         for warning in warnings:
             logger.warning(warning)
         
@@ -742,6 +791,50 @@ class Config:
             logger.warning(f"Configuration validation failed: {str(e)}")
         
         logger.info(f"Initialized {cls.ENVIRONMENT} configuration")
+    
+    @classmethod
+    def test_bigquery_connection(cls):
+        """Test BigQuery connection and create dataset if it doesn't exist."""
+        if not cls.GCP_PROJECT:
+            logger.warning("Cannot test BigQuery connection: No project ID available")
+            return False
+        
+        try:
+            bq_client = initialize_bigquery()
+            if not bq_client:
+                logger.error("Failed to initialize BigQuery client")
+                return False
+            
+            # Test simple query
+            try:
+                query_job = bq_client.query("SELECT 1")
+                query_job.result()
+                logger.info("BigQuery connection test successful")
+            except Exception as e:
+                logger.error(f"BigQuery query test failed: {str(e)}")
+                return False
+            
+            # Try to create dataset if it doesn't exist
+            try:
+                dataset_id = f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}"
+                try:
+                    bq_client.get_dataset(dataset_id)
+                    logger.info(f"BigQuery dataset {cls.BIGQUERY_DATASET} already exists")
+                except NotFound:
+                    # Create dataset
+                    dataset = bigquery.Dataset(dataset_id)
+                    dataset.location = cls.BIGQUERY_LOCATION
+                    bq_client.create_dataset(dataset)
+                    logger.info(f"Created BigQuery dataset {cls.BIGQUERY_DATASET}")
+            except Exception as e:
+                logger.warning(f"Failed to ensure BigQuery dataset exists: {str(e)}")
+                if not cls.IGNORE_PERMISSION_ERRORS:
+                    return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error testing BigQuery connection: {str(e)}")
+            return False
 
 # Helper Functions
 def get_config():
@@ -878,6 +971,72 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
         logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
         return False
 
+def ensure_resource_exists():
+    """Ensure GCP resources exist for the application."""
+    if not HAS_GCP or not Config.GCP_PROJECT:
+        logger.warning("Cannot ensure GCP resources: GCP libraries not available or project ID not set")
+        return False
+    
+    resources_created = True
+    
+    # Test BigQuery connection and create dataset
+    if not Config.test_bigquery_connection():
+        logger.warning("Failed to ensure BigQuery resources exist")
+        resources_created = False
+    
+    # Ensure GCS bucket exists
+    try:
+        storage_client = initialize_storage()
+        if storage_client:
+            bucket = storage_client.bucket(Config.GCS_BUCKET)
+            if not bucket.exists():
+                # Create bucket
+                storage_client.create_bucket(bucket, location=Config.GCP_REGION)
+                logger.info(f"Created GCS bucket: {Config.GCS_BUCKET}")
+                
+                # Create necessary folder structure
+                for folder in ['raw', 'processed', 'cache', 'exports', 'feeds']:
+                    blob = bucket.blob(f"{folder}/")
+                    blob.upload_from_string('')
+            else:
+                logger.info(f"GCS bucket {Config.GCS_BUCKET} already exists")
+        else:
+            logger.warning("Could not initialize Storage client to check bucket")
+            resources_created = False
+    except Exception as e:
+        logger.warning(f"Failed to ensure GCS bucket exists: {str(e)}")
+        resources_created = False
+    
+    # Ensure Pub/Sub topics exist
+    try:
+        publisher, _ = initialize_pubsub()
+        if publisher:
+            # Check and create main ingestion topic
+            topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
+            try:
+                publisher.get_topic(request={"topic": topic_path})
+                logger.info(f"Pub/Sub topic {Config.PUBSUB_TOPIC} already exists")
+            except NotFound:
+                publisher.create_topic(request={"name": topic_path})
+                logger.info(f"Created Pub/Sub topic: {Config.PUBSUB_TOPIC}")
+            
+            # Check and create analysis topic
+            analysis_topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_ANALYSIS_TOPIC)
+            try:
+                publisher.get_topic(request={"topic": analysis_topic_path})
+                logger.info(f"Pub/Sub topic {Config.PUBSUB_ANALYSIS_TOPIC} already exists")
+            except NotFound:
+                publisher.create_topic(request={"name": analysis_topic_path})
+                logger.info(f"Created Pub/Sub topic: {Config.PUBSUB_ANALYSIS_TOPIC}")
+        else:
+            logger.warning("Could not initialize Pub/Sub clients to check topics")
+            resources_created = False
+    except Exception as e:
+        logger.warning(f"Failed to ensure Pub/Sub topics exist: {str(e)}")
+        resources_created = False
+    
+    return resources_created
+
 # Module exports
 __all__ = [
     'Config', 
@@ -894,6 +1053,19 @@ __all__ = [
     'create_default_feed_config',
     'create_default_auth_config',
     'get_gcp_clients',
+    'ensure_resource_exists',
     'GCP_SERVICES_AVAILABLE',
     'HAS_GCP'
 ]
+
+# Initialize resources if requested
+if __name__ != "__main__" and get_env_bool('ENSURE_GCP_RESOURCES', False):
+    # Wait until imported to avoid startup issues
+    logger.info("Auto-initializing GCP resources")
+    def delayed_resource_init():
+        time.sleep(2)  # Small delay to allow other initialization
+        ensure_resource_exists()
+    
+    init_thread = threading.Thread(target=delayed_resource_init)
+    init_thread.daemon = True
+    init_thread.start()
