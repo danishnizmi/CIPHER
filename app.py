@@ -153,8 +153,8 @@ def handle_bad_request(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Bad request', 'message': str(e)}), 400
     return render_template('500.html', 
-                         title="Bad Request", 
-                         content=f"<h1>400 - Bad Request</h1><p>{e}</p>"), 400
+                         error_code=400, 
+                         error_message=f"Bad Request: {str(e)}"), 400
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
