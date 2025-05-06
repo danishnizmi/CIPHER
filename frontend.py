@@ -46,7 +46,6 @@ frontend_app = Blueprint('frontend', __name__, template_folder='templates', stat
 
 # ====== Session and Security Configuration ======
 
-# Force session creation before requests
 @frontend_app.before_request
 def before_request():
     """Ensure session is properly established with cloud-based session."""
@@ -60,19 +59,23 @@ def before_request():
         # Add session debug info in development
         if DEBUG_MODE:
             logger.debug(f"Session data: {dict(session)}")
-            logger.debug(f"Request headers: {dict(request.headers)}")
+            logger.debug(f"Request path: {request.path}")
+            logger.debug(f"Request method: {request.method}")
     
     except Exception as e:
         logger.error(f"Error in before_request: {str(e)}")
         logger.error(traceback.format_exc())
 
 # ====== Helper Functions ======
-def safe_report_exception():
+def safe_report_exception(e=None):
     """Safely report exception using config module"""
     try:
-        config.report_error(Exception("Frontend error"))
-    except Exception as e:
-        logger.warning(f"Failed to report exception: {e}")
+        if e:
+            config.report_error(e)
+        else:
+            config.report_error(Exception("Frontend error"))
+    except Exception as err:
+        logger.warning(f"Failed to report exception: {err}")
 
 def get_cache_key(func_name: str, **params) -> str:
     """Generate a cache key for a function call"""
@@ -172,6 +175,11 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
         else:
             logger.warning("No API key available for internal request")
         
+        # Add CSRF token if available
+        csrf_token = session.get('csrf_token')
+        if csrf_token:
+            headers["X-CSRF-Token"] = csrf_token
+        
         # Make the request
         logger.debug(f"API request: {method} {api_url}")
         start_time = time.time()
@@ -267,6 +275,7 @@ def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: 
             }
         else:
             logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
+            safe_report_exception(e)
             return {
                 "error": f"Unexpected error: {str(e)}",
                 # Add default structure to prevent template errors
@@ -311,11 +320,56 @@ def load_users() -> Dict[str, Dict]:
         if auth_config and 'users' in auth_config and auth_config['users']:
             return auth_config.get('users', {})
         
-        # If no users exist, create default admin
-        logger.warning("No users found in auth config")
+        # If no users found in config, check for default admin user in environment
+        admin_password = os.environ.get('ADMIN_PASSWORD')
+        if admin_password:
+            default_admin = {
+                'admin': {
+                    'password': hash_password(admin_password),
+                    'role': 'admin',
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
+            return default_admin
+            
+        # As a last resort, try hardcoded admin (for development only)
+        if ENVIRONMENT != 'production':
+            logger.warning("No users found in auth config, using default admin")
+            return {
+                'admin': {
+                    'password': hash_password('admin'),
+                    'role': 'admin',
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
+        
+        # For production, look for admin password in config
+        if hasattr(Config, 'ADMIN_PASSWORD') and Config.ADMIN_PASSWORD:
+            logger.info("Using admin password from Config")
+            return {
+                'admin': {
+                    'password': hash_password(Config.ADMIN_PASSWORD),
+                    'role': 'admin',
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
+            
+        logger.error("No user accounts found or configured")
         return {}
     except Exception as e:
         logger.error(f"Failed to load users: {str(e)}")
+        logger.error(traceback.format_exc())
+        safe_report_exception(e)
+        
+        # In development, provide a fallback admin account
+        if ENVIRONMENT != 'production':
+            return {
+                'admin': {
+                    'password': hash_password('admin'),
+                    'role': 'admin',
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
         return {}
 
 def verify_password(stored_password: str, provided_password: str) -> bool:
@@ -348,6 +402,7 @@ def hash_password(password: str) -> str:
 @frontend_app.route('/')
 def index():
     """Root redirects to dashboard if logged in, otherwise to login"""
+    logger.debug("Accessed root route")
     if session.get('logged_in'):
         return redirect(url_for('frontend.dashboard'))
     return redirect(url_for('frontend.login'))
@@ -356,6 +411,7 @@ def index():
 def login():
     """Login page handler with Flask-WTF CSRF protection"""
     error = None
+    logger.debug("Accessed login route")
     
     try:
         if request.method == 'POST':
@@ -389,6 +445,15 @@ def login():
                     session['role'] = user.get('role', 'readonly')
                     session['_id'] = secrets.token_hex(16)  # Generate new session ID
                     
+                    # Update last login time
+                    try:
+                        auth_config = config.get_cached_config('auth-config', force_refresh=True)
+                        if auth_config and 'users' in auth_config and username in auth_config['users']:
+                            auth_config['users'][username]['last_login'] = datetime.utcnow().isoformat()
+                            config.create_or_update_secret('auth-config', json.dumps(auth_config))
+                    except Exception as e:
+                        logger.warning(f"Could not update last login time: {str(e)}")
+                    
                     # Log the successful login
                     logger.info(f"Successful login: {username}")
                     
@@ -411,7 +476,7 @@ def login():
     except Exception as e:
         logger.error(f"Unexpected error in login: {str(e)}")
         logger.error(traceback.format_exc())
-        safe_report_exception()
+        safe_report_exception(e)
         error = f"An unexpected error occurred: {str(e)}"
     
     # For GET requests or failed logins
@@ -437,6 +502,7 @@ def profile():
         logger.error(f"Error loading profile: {str(e)}")
         logger.error(traceback.format_exc())
         flash('Error loading profile page', 'error')
+        safe_report_exception(e)
         return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/change_password', methods=['POST'])
@@ -461,11 +527,23 @@ def change_password():
         
         # Update password
         user['password'] = hash_password(new_password)
-        # Note: In production, this would need to update the secret in Secret Manager
+        
+        # Update in Secret Manager if possible
+        try:
+            auth_config = config.get_cached_config('auth-config')
+            if auth_config and 'users' in auth_config:
+                auth_config['users'][session.get('username')]['password'] = hash_password(new_password)
+                # Save back to Secret Manager
+                config.create_or_update_secret('auth-config', json.dumps(auth_config))
+        except Exception as e:
+            logger.warning(f"Failed to update password in Secret Manager: {str(e)}")
+            # Continue anyway as we've updated the in-memory version
+        
         flash('Password changed successfully', 'success')
         return redirect(url_for('frontend.profile'))
     except Exception as e:
         logger.error(f"Error changing password: {str(e)}")
+        safe_report_exception(e)
         flash('Error changing password', 'danger')
         return redirect(url_for('frontend.profile'))
 
@@ -487,6 +565,7 @@ def logout():
 def dashboard(view=None):
     """Dashboard view with dynamic content loading based on view type"""
     try:
+        logger.debug(f"Accessing dashboard with view: {view}")
         # Get and validate the view and timeframe
         current_view = view or request.args.get('view', 'dashboard')
         days = int(request.args.get('days', '30'))
@@ -618,7 +697,7 @@ def dashboard(view=None):
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
             logger.error(traceback.format_exc())
-            safe_report_exception()
+            safe_report_exception(e)
             
             # Initialize empty data structures on error
             context['stats'] = {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}}
@@ -651,7 +730,7 @@ def dashboard(view=None):
     except Exception as e:
         logger.error(f"Unexpected error in dashboard: {str(e)}")
         logger.error(traceback.format_exc())
-        safe_report_exception()
+        safe_report_exception(e)
         flash('An unexpected error occurred. Please try again later.', 'danger')
         return redirect(url_for('frontend.login'))
 
@@ -666,6 +745,7 @@ def users():
         return render_template('content.html', page_type='users', users=users)
     except Exception as e:
         logger.error(f"Error loading users page: {str(e)}")
+        safe_report_exception(e)
         flash('Error loading users page', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
@@ -692,12 +772,23 @@ def add_user_route():
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            # Save to config (this would need to update the secret in production)
+            # Save to Secret Manager if possible
+            try:
+                auth_config = config.get_cached_config('auth-config')
+                if auth_config and 'users' in auth_config:
+                    auth_config['users'][username] = users[username]
+                    # Save back to Secret Manager
+                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
+            except Exception as e:
+                logger.warning(f"Failed to save new user to Secret Manager: {str(e)}")
+                # Continue anyway as we've updated the in-memory version
+            
             flash(f'User {username} created successfully', 'success')
             return redirect(url_for('frontend.users'))
             
         except Exception as e:
             logger.error(f"Error adding user: {str(e)}")
+            safe_report_exception(e)
             flash('Error creating user', 'danger')
     
     return render_template('auth.html', page_type='user_add')
@@ -722,11 +813,26 @@ def edit_user(username):
             if role:
                 users[username]['role'] = role
             
+            # Save to Secret Manager if possible
+            try:
+                auth_config = config.get_cached_config('auth-config')
+                if auth_config and 'users' in auth_config:
+                    if password:
+                        auth_config['users'][username]['password'] = hash_password(password)
+                    if role:
+                        auth_config['users'][username]['role'] = role
+                    # Save back to Secret Manager
+                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
+            except Exception as e:
+                logger.warning(f"Failed to update user in Secret Manager: {str(e)}")
+                # Continue anyway as we've updated the in-memory version
+            
             flash(f'User {username} updated successfully', 'success')
             return redirect(url_for('frontend.users'))
             
         except Exception as e:
             logger.error(f"Error editing user: {str(e)}")
+            safe_report_exception(e)
             flash('Error updating user', 'danger')
     
     return render_template('auth.html', page_type='user_edit', username=username, user=users[username])
@@ -740,11 +846,24 @@ def delete_user(username):
         users = load_users()
         if username in users:
             del users[username]
+            
+            # Delete from Secret Manager if possible
+            try:
+                auth_config = config.get_cached_config('auth-config')
+                if auth_config and 'users' in auth_config and username in auth_config['users']:
+                    del auth_config['users'][username]
+                    # Save back to Secret Manager
+                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
+            except Exception as e:
+                logger.warning(f"Failed to delete user from Secret Manager: {str(e)}")
+                # Continue anyway as we've updated the in-memory version
+            
             flash(f'User {username} deleted successfully', 'success')
         else:
             flash('User not found', 'warning')
     except Exception as e:
         logger.error(f"Error deleting user: {str(e)}")
+        safe_report_exception(e)
         flash('Error deleting user', 'danger')
     
     return redirect(url_for('frontend.users'))
@@ -767,10 +886,27 @@ def ingest_threat_data():
             
             return redirect(url_for('frontend.dashboard'))
         
-        # For GET requests, redirect to dashboard
-        return redirect(url_for('frontend.dashboard'))
+        # For GET requests, trigger POST to the same endpoint using autosubmit form
+        return render_template('base.html', 
+                              title="Triggering Data Ingestion", 
+                              content="""
+                              <div class="text-center py-8">
+                                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-accent mb-4"></div>
+                                <h1 class="text-2xl font-bold mb-4">Triggering Threat Data Ingestion</h1>
+                                <p class="mb-6">Please wait while we process your request...</p>
+                                <form id="ingestForm" method="post">
+                                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                </form>
+                                <script>
+                                  document.addEventListener('DOMContentLoaded', function() {
+                                    document.getElementById('ingestForm').submit();
+                                  });
+                                </script>
+                              </div>
+                              """)
     except Exception as e:
         logger.error(f"Error in ingest_threat_data: {str(e)}")
+        safe_report_exception(e)
         flash('An error occurred while triggering ingestion', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
@@ -807,6 +943,7 @@ def dynamic_content_detail(content_type, identifier):
         return render_template('detail.html', **context)
     except Exception as e:
         logger.error(f"Error loading detail page: {str(e)}")
+        safe_report_exception(e)
         flash(f'Error loading {content_type} detail', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
@@ -834,29 +971,58 @@ def page_not_found(e):
     logger.info(f"Page not found: {request.path}")
     try:
         return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
-    except:
-        return render_template('base.html', 
-                               title="Page Not Found", 
-                               content="<h1>404 - Page Not Found</h1><p>The requested page does not exist.</p>"), 404
+    except Exception as render_error:
+        logger.error(f"Error rendering 404 page: {str(render_error)}")
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found</title>
+            <style>
+                body { font-family: sans-serif; text-align: center; padding: 50px; }
+                h1 { color: #d63031; }
+            </style>
+        </head>
+        <body>
+            <h1>404 - Page Not Found</h1>
+            <p>The requested page does not exist.</p>
+            <p><a href="/">Return to Home</a></p>
+        </body>
+        </html>
+        """, 404
 
 @frontend_app.errorhandler(500)
 def server_error(e):
     """Handle 500 errors"""
     logger.error(f"Server error: {str(e)}")
     logger.error(traceback.format_exc())
-    safe_report_exception()
+    safe_report_exception(e)
     try:
         return render_template('500.html'), 500
-    except:
-        return render_template('base.html', 
-                               title="Server Error", 
-                               content="<h1>500 - Server Error</h1><p>An unexpected error occurred.</p>"), 500
+    except Exception as render_error:
+        logger.error(f"Error rendering 500 page: {str(render_error)}")
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Server Error</title>
+            <style>
+                body { font-family: sans-serif; text-align: center; padding: 50px; }
+                h1 { color: #d63031; }
+            </style>
+        </head>
+        <body>
+            <h1>500 - Server Error</h1>
+            <p>An unexpected error occurred.</p>
+            <p><a href="/">Return to Home</a></p>
+        </body>
+        </html>
+        """, 500
 
 @frontend_app.errorhandler(400)
 def handle_bad_request(e):
     """Handle 400 errors including CSRF errors"""
     logger.error(f"400 error: {str(e)}")
-    logger.error(traceback.format_exc())
     
     # Check if this is a CSRF error
     if isinstance(e, BadRequest) and 'CSRF' in str(e):
@@ -865,17 +1031,36 @@ def handle_bad_request(e):
         return redirect(url_for('frontend.login'))
     
     # For other 400 errors
-    error_msg = str(e)
-    return render_template('500.html', 
-                           title="Bad Request", 
-                           content=f"<h1>400 - Bad Request</h1><p>{error_msg}</p>"), 400
+    try:
+        return render_template('500.html', 
+                            error_code=400,
+                            error_message=f"Bad Request: {str(e)}"), 400
+    except Exception as render_error:
+        logger.error(f"Error rendering 400 page: {str(render_error)}")
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Bad Request</title>
+            <style>
+                body {{ font-family: sans-serif; text-align: center; padding: 50px; }}
+                h1 {{ color: #d63031; }}
+            </style>
+        </head>
+        <body>
+            <h1>400 - Bad Request</h1>
+            <p>{str(e)}</p>
+            <p><a href="/">Return to Home</a></p>
+        </body>
+        </html>
+        """, 400
 
 # ====== Context Processors ======
 
 @frontend_app.context_processor
 def inject_global_data():
     """Inject global data into templates"""
-    # Remove CSRF token injection - Flask-WTF handles this automatically
+    # Flask-WTF handles CSRF token automatically
     return {
         'now': datetime.now(),
         'environment': ENVIRONMENT,
@@ -920,9 +1105,5 @@ def utility_processor():
         get_confidence_width=get_confidence_width,
     )
 
-# If this script is run directly, start a development server
-if __name__ == "__main__":
-    app = current_app
-    app.run(debug=ENVIRONMENT != 'production', 
-            host='0.0.0.0', 
-            port=int(os.environ.get('PORT', 8080)))
+# Initialize module
+logger.info("Frontend module initialized successfully")
