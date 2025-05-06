@@ -73,7 +73,7 @@ def format_bq_row(row: Dict) -> Dict:
     return formatted
 
 def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
-    """Execute BigQuery query and return formatted results."""
+    """Execute BigQuery query and return formatted results with improved error handling."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
         raise Exception("Database connection unavailable")
@@ -82,10 +82,17 @@ def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
         query_parameters=params if params else []
     )
     
-    query_job = bq_client.query(query, job_config=job_config)
-    results = [format_bq_row(row) for row in query_job]
-    
-    return results
+    try:
+        query_job = bq_client.query(query, job_config=job_config)
+        results = [format_bq_row(row) for row in query_job]
+        return results
+    except Exception as e:
+        logger.error(f"Error executing BigQuery query: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        report_error(e)
+        # Return empty result instead of raising, to prevent API errors
+        return []
 
 def publish_to_topic(topic_name: str, message_data: Dict) -> str:
     """Publish message to Pub/Sub topic."""
@@ -105,7 +112,7 @@ def publish_to_topic(topic_name: str, message_data: Dict) -> str:
         raise
 
 def check_table_exists(table_name: str) -> bool:
-    """Check if BigQuery table exists."""
+    """Check if BigQuery table exists with improved reliability."""
     if not bq_client:
         return False
         
@@ -122,13 +129,39 @@ def check_table_exists(table_name: str) -> bool:
         table_ref = dataset_ref.table(table_id)
         
         # Try to get table
-        bq_client.get_table(table_ref)
+        table = bq_client.get_table(table_ref)
+        
+        # Try a simple query to verify the table can be queried
+        test_query = f"SELECT COUNT(*) as count FROM `{full_table_id}` LIMIT 1"
+        bq_client.query(test_query).result()
+        
         return True
     except NotFound:
         return False
     except Exception as e:
         logger.error(f"Error checking table {table_name}: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
         return False
+
+def verify_bigquery_tables() -> bool:
+    """Verify that all required BigQuery tables exist and are queryable."""
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return False
+    
+    required_tables = ['indicators', 'vulnerabilities', 'threat_actors', 'campaigns', 'malware']
+    missing_tables = []
+    
+    for table_name in required_tables:
+        if not check_table_exists(table_name):
+            missing_tables.append(table_name)
+    
+    if missing_tables:
+        logger.warning(f"The following tables are missing or not accessible: {', '.join(missing_tables)}")
+        return False
+    
+    return True
 
 # -------------------- Health Check Endpoint --------------------
 
@@ -211,6 +244,15 @@ def get_stats():
     """Get platform statistics."""
     try:
         days = int(request.args.get('days', 30))
+        
+        # First verify BigQuery tables exist
+        if not verify_bigquery_tables():
+            # Try to trigger initialization through ingestion module
+            try:
+                from ingestion import initialize_bigquery_tables
+                initialize_bigquery_tables()
+            except Exception as import_err:
+                logger.error(f"Error importing initialization function: {str(import_err)}")
         
         # Get actual stats from BigQuery
         stats = {
@@ -542,10 +584,12 @@ def trigger_ingest():
         # Get request data
         req_data = request.get_json() or {}
         process_all = req_data.get('process_all', True)
+        force_tables = req_data.get('force_tables', False)
         
         # Trigger ingestion via Pub/Sub
         message_data = {
             'process_all': process_all,
+            'force_tables': force_tables,
             'triggered_by': 'api',
             'timestamp': datetime.utcnow().isoformat()
         }
@@ -594,6 +638,63 @@ def trigger_analysis():
         report_error(e)
         return jsonify({'error': str(e)}), 500
 
+@api_blueprint.route('/admin/initialize_tables', methods=['POST'])
+@require_api_key
+def initialize_tables():
+    """Manually trigger BigQuery table initialization."""
+    try:
+        # Import from ingestion module
+        from ingestion import initialize_bigquery_tables, force_update_bigquery_tables
+        
+        # First try normal initialization
+        logger.info("Attempting to initialize BigQuery tables via API request")
+        result = initialize_bigquery_tables()
+        
+        if not result:
+            # If normal initialization fails, try forced update
+            logger.warning("Normal table initialization failed, trying forced update")
+            result = force_update_bigquery_tables()
+        
+        if result:
+            logger.info("Successfully initialized BigQuery tables via API request")
+            return jsonify({
+                'status': 'success',
+                'message': 'BigQuery tables initialized successfully'
+            })
+        else:
+            logger.error("Failed to initialize BigQuery tables via API request")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to initialize BigQuery tables'
+            }), 500
+    except ImportError:
+        logger.error("Could not import initialization functions from ingestion module")
+        # Alternative approach - use Pub/Sub to trigger initialization
+        try:
+            message_data = {
+                'process_all': False,
+                'force_tables': True,
+                'triggered_by': 'api',
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            message_id = publish_to_topic(Config.PUBSUB_TOPIC, message_data)
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'BigQuery tables initialization triggered via Pub/Sub',
+                'message_id': message_id
+            })
+        except Exception as pub_err:
+            logger.error(f"Error triggering table initialization via Pub/Sub: {str(pub_err)}")
+            return jsonify({'error': f"Failed to initialize tables: {str(pub_err)}"}), 500
+    except Exception as e:
+        logger.error(f"Error initializing tables: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        report_error(e)
+        return jsonify({'error': str(e)}), 500
+
 # -------------------- API Information Endpoints --------------------
 
 @api_blueprint.route('/info', methods=['GET'])
@@ -613,7 +714,8 @@ def get_api_info():
             {'path': '/api/threat_summary', 'method': 'GET', 'description': 'Get threat summary'},
             {'path': '/api/iocs/geo', 'method': 'GET', 'description': 'Get geographical distribution'},
             {'path': '/api/admin/ingest', 'method': 'POST', 'description': 'Trigger data ingestion'},
-            {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'}
+            {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'},
+            {'path': '/api/admin/initialize_tables', 'method': 'POST', 'description': 'Initialize BigQuery tables'}
         ]
     })
 
