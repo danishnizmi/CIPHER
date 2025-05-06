@@ -555,6 +555,10 @@ class Config:
     # Ignore permission errors
     IGNORE_PERMISSION_ERRORS = get_env_bool('IGNORE_PERMISSION_ERRORS', False)
     
+    # Auto ingestion and analysis flags
+    AUTO_INGEST = get_env_bool('AUTO_INGEST', True)  # Changed default to True
+    AUTO_ANALYZE = get_env_bool('AUTO_ANALYZE', True)  # Changed default to True
+    
     # Centralized Methods
     @classmethod
     def configure_logging(cls):
@@ -687,6 +691,74 @@ class Config:
         return f"projects/{cls.GCP_PROJECT}/subscriptions/{subscription_name}"
     
     @classmethod
+    def get_feed_config_from_secret(cls):
+        """Retrieve feed configuration from Secret Manager with improved error handling."""
+        try:
+            # Try to get config from Secret Manager
+            feed_config = access_secret("feed-config")
+            
+            if feed_config and isinstance(feed_config, dict):
+                logger.info("Successfully loaded feed configuration from Secret Manager")
+                return feed_config
+            else:
+                logger.warning("Failed to load valid feed configuration from Secret Manager")
+                return None
+        except Exception as e:
+            logger.error(f"Error retrieving feed configuration: {str(e)}")
+            return None
+    
+    @classmethod
+    def ensure_feed_configuration(cls):
+        """Ensure feed configuration is properly loaded."""
+        # First check if FEEDS is already populated
+        if cls.FEEDS and len(cls.FEEDS) > 0:
+            logger.info(f"Using existing feed configuration with {len(cls.FEEDS)} feeds")
+            return True
+        
+        # Try to load from Secret Manager
+        feed_config = cls.get_feed_config_from_secret()
+        if feed_config and 'feeds' in feed_config and feed_config['feeds']:
+            cls.FEEDS = feed_config['feeds']
+            logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
+            return True
+        
+        # Fall back to environment variable
+        if os.environ.get('FEED_CONFIG'):
+            try:
+                feed_config = json.loads(os.environ.get('FEED_CONFIG'))
+                if 'feeds' in feed_config and feed_config['feeds']:
+                    cls.FEEDS = feed_config['feeds']
+                    logger.info(f"Loaded {len(cls.FEEDS)} feeds from environment variable")
+                    return True
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse feed configuration from environment variable")
+        
+        # Last resort: use default feeds
+        try:
+            # Import here to avoid circular import
+            from ingestion import DEFAULT_FEEDS
+            cls.FEEDS = DEFAULT_FEEDS
+            logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
+        except ImportError:
+            # If import fails, use the constants defined at the top of this file
+            cls.FEEDS = DEFAULT_FEED_CONFIGS
+            logger.info(f"Using builtin default feed configuration with {len(cls.FEEDS)} feeds")
+        
+        # Try to save this configuration to Secret Manager for future use
+        try:
+            feed_config = {
+                "feeds": cls.FEEDS,
+                "update_interval_hours": cls.FEED_UPDATE_INTERVAL,
+                "default_tags": cls.FEED_DEFAULT_TAGS if hasattr(cls, 'FEED_DEFAULT_TAGS') else []
+            }
+            create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
+            logger.info("Saved default feed configuration to Secret Manager")
+        except Exception as e:
+            logger.warning(f"Failed to save feed configuration to Secret Manager: {str(e)}")
+        
+        return True
+    
+    @classmethod
     def init_secrets(cls):
         """Initialize configuration from Secret Manager."""
         if not cls.GCP_PROJECT or not HAS_GCP:
@@ -734,21 +806,8 @@ class Config:
                 
                 logger.info("Loaded authentication configuration from Secret Manager")
             
-            # Load feed configuration
-            feed_config = access_secret('feed-config')
-            if feed_config and isinstance(feed_config, dict):
-                cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
-                cls.FEED_UPDATE_INTERVAL = feed_config.get('update_interval_hours', cls.FEED_UPDATE_INTERVAL)
-                cls.FEED_DEFAULT_TAGS = feed_config.get('default_tags', [])
-                cls.FEED_USER_AGENT = feed_config.get('user_agent', f"ThreatIntelligencePlatform/{cls.VERSION}")
-                cls.FEED_REQUEST_TIMEOUT = feed_config.get('request_timeout', 30)
-                cls.FEED_MAX_RETRIES = feed_config.get('max_retries', 3)
-                
-                logger.info("Loaded feed configuration from Secret Manager")
-            else:
-                # Use default feeds if no config found
-                cls.FEEDS = DEFAULT_FEED_CONFIGS
-                logger.info("Using default feed configuration")
+            # Ensure feed configuration is loaded
+            cls.ensure_feed_configuration()
             
             # Load admin password if available
             admin_password = access_secret('admin-initial-password')
@@ -973,69 +1032,144 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
         logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
         return False
 
-def ensure_resource_exists():
-    """Ensure GCP resources exist for the application."""
+def ensure_resource_exists(retry_on_failure=True):
+    """Ensure GCP resources exist for the application with improved error reporting."""
     if not HAS_GCP or not Config.GCP_PROJECT:
         logger.warning("Cannot ensure GCP resources: GCP libraries not available or project ID not set")
         return False
     
     resources_created = True
+    errors = []
     
     # Test BigQuery connection and create dataset
-    if not Config.test_bigquery_connection():
-        logger.warning("Failed to ensure BigQuery resources exist")
+    try:
+        logger.info("Ensuring BigQuery resources...")
+        if Config.test_bigquery_connection():
+            logger.info("✅ BigQuery resources verified")
+        else:
+            error_msg = "Failed to verify BigQuery resources"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
+            resources_created = False
+            
+            # Try force updating tables on failure
+            if retry_on_failure:
+                logger.info("Attempting to force update BigQuery tables...")
+                from ingestion import force_update_bigquery_tables
+                if force_update_bigquery_tables():
+                    logger.info("✅ Successfully forced BigQuery tables update")
+                    resources_created = True
+                else:
+                    logger.error("❌ Failed to force update BigQuery tables")
+    except Exception as e:
+        error_msg = f"Error ensuring BigQuery resources: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        errors.append(error_msg)
         resources_created = False
     
     # Ensure GCS bucket exists
     try:
+        logger.info("Ensuring GCS bucket exists...")
         storage_client = initialize_storage()
         if storage_client:
             bucket = storage_client.bucket(Config.GCS_BUCKET)
             if not bucket.exists():
                 # Create bucket
                 storage_client.create_bucket(bucket, location=Config.GCP_REGION)
-                logger.info(f"Created GCS bucket: {Config.GCS_BUCKET}")
+                logger.info(f"✅ Created GCS bucket: {Config.GCS_BUCKET}")
                 
                 # Create necessary folder structure
                 for folder in ['raw', 'processed', 'cache', 'exports', 'feeds']:
                     blob = bucket.blob(f"{folder}/")
                     blob.upload_from_string('')
+                    logger.info(f"✅ Created folder: {folder}/")
             else:
-                logger.info(f"GCS bucket {Config.GCS_BUCKET} already exists")
+                logger.info(f"✅ GCS bucket {Config.GCS_BUCKET} already exists")
         else:
-            logger.warning("Could not initialize Storage client to check bucket")
+            error_msg = "Could not initialize Storage client to check bucket"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
             resources_created = False
     except Exception as e:
-        logger.warning(f"Failed to ensure GCS bucket exists: {str(e)}")
+        error_msg = f"Failed to ensure GCS bucket exists: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        errors.append(error_msg)
         resources_created = False
     
     # Ensure Pub/Sub topics exist
     try:
+        logger.info("Ensuring Pub/Sub topics exist...")
         publisher, _ = initialize_pubsub()
         if publisher:
             # Check and create main ingestion topic
             topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
             try:
                 publisher.get_topic(request={"topic": topic_path})
-                logger.info(f"Pub/Sub topic {Config.PUBSUB_TOPIC} already exists")
+                logger.info(f"✅ Pub/Sub topic {Config.PUBSUB_TOPIC} already exists")
             except NotFound:
                 publisher.create_topic(request={"name": topic_path})
-                logger.info(f"Created Pub/Sub topic: {Config.PUBSUB_TOPIC}")
+                logger.info(f"✅ Created Pub/Sub topic: {Config.PUBSUB_TOPIC}")
             
             # Check and create analysis topic
             analysis_topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_ANALYSIS_TOPIC)
             try:
                 publisher.get_topic(request={"topic": analysis_topic_path})
-                logger.info(f"Pub/Sub topic {Config.PUBSUB_ANALYSIS_TOPIC} already exists")
+                logger.info(f"✅ Pub/Sub topic {Config.PUBSUB_ANALYSIS_TOPIC} already exists")
             except NotFound:
                 publisher.create_topic(request={"name": analysis_topic_path})
-                logger.info(f"Created Pub/Sub topic: {Config.PUBSUB_ANALYSIS_TOPIC}")
+                logger.info(f"✅ Created Pub/Sub topic: {Config.PUBSUB_ANALYSIS_TOPIC}")
+                
+            # Publish a test message to verify permissions
+            try:
+                test_message = {
+                    "operation": "resource_test",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                future = publisher.publish(
+                    topic_path,
+                    json.dumps(test_message).encode('utf-8'),
+                    operation="test"
+                )
+                message_id = future.result()
+                logger.info(f"✅ Successfully published test message (ID: {message_id}) to {Config.PUBSUB_TOPIC}")
+            except Exception as e:
+                error_msg = f"Failed to publish test message: {str(e)}"
+                logger.warning(f"⚠️ {error_msg}")
+                # Don't fail on this
         else:
-            logger.warning("Could not initialize Pub/Sub clients to check topics")
+            error_msg = "Could not initialize Pub/Sub clients to check topics"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
             resources_created = False
     except Exception as e:
-        logger.warning(f"Failed to ensure Pub/Sub topics exist: {str(e)}")
+        error_msg = f"Failed to ensure Pub/Sub topics exist: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        errors.append(error_msg)
         resources_created = False
+    
+    # Ensure feed configuration
+    try:
+        logger.info("Ensuring feed configuration...")
+        if Config.ensure_feed_configuration():
+            logger.info(f"✅ Feed configuration verified with {len(Config.FEEDS)} feeds")
+        else:
+            error_msg = "Failed to ensure feed configuration"
+            logger.error(f"❌ {error_msg}")
+            errors.append(error_msg)
+            resources_created = False
+    except Exception as e:
+        error_msg = f"Error ensuring feed configuration: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        errors.append(error_msg)
+        resources_created = False
+    
+    # Summary
+    if resources_created:
+        logger.info("✅ All resources verified successfully")
+    else:
+        logger.error(f"❌ Resource verification failed with {len(errors)} errors")
+        for i, error in enumerate(errors):
+            logger.error(f"  Error {i+1}: {error}")
     
     return resources_created
 
