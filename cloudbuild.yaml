@@ -178,7 +178,7 @@ steps:
           --update-secrets=API_KEY=api-keys:latest \
           --update-secrets=SECRET_KEY=auth-config:latest
 
-  # Verify deployment - more efficient with fewer retries
+  # Verify deployment - with proper variable escaping
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: bash
@@ -188,38 +188,39 @@ steps:
         echo "Waiting for service to be ready..."
         sleep 30
         
-        CLOUD_RUN_URL=$(gcloud run services describe threat-intelligence-platform \
+        # Properly escaped with double dollar signs ($$)
+        SERVICE_URL=$$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "Service deployed at: $CLOUD_RUN_URL"
+        echo "Service deployed at: $$SERVICE_URL"
         
         # Test health endpoint with more retries
         echo "Testing health endpoint..."
-        for attempt in $(seq 1 10); do
-          echo "Health check attempt $attempt/10..."
+        for ATTEMPT in $$(seq 1 10); do
+          echo "Health check attempt $$ATTEMPT/10..."
           
-          RESPONSE=$(curl -s -w "\n%{http_code}" "$CLOUD_RUN_URL/health")
-          STATUS_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | head -n-1)
+          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health")
+          HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
+          HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
           
-          echo "Response code: $STATUS_CODE"
-          echo "Response body: $BODY"
+          echo "Response code: $$HTTP_CODE"
+          echo "Response body: $$HTTP_BODY"
           
-          if [ "$STATUS_CODE" -eq 200 ]; then
+          if [ "$$HTTP_CODE" -eq 200 ]; then
             echo "✅ Health check successful!"
             
             # Also test the root endpoint
             echo "Testing root endpoint..."
-            ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$CLOUD_RUN_URL/")
-            echo "Root endpoint status: $ROOT_STATUS"
+            ROOT_CODE=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$SERVICE_URL/")
+            echo "Root endpoint status: $$ROOT_CODE"
             
             echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $CLOUD_RUN_URL"
+            echo "Access the application at: $$SERVICE_URL"
             exit 0
           else
-            echo "⚠️ Health check returned: $STATUS_CODE"
-            if [ $attempt -lt 10 ]; then
+            echo "⚠️ Health check returned: $$HTTP_CODE"
+            if [ $$ATTEMPT -lt 10 ]; then
               echo "Waiting 10 seconds before next attempt..."
               sleep 10
             fi
