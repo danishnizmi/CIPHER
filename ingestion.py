@@ -297,31 +297,59 @@ def ensure_dataset_exists(dataset_id: str) -> bool:
 
 
 def ensure_table_exists(table_id: str, schema: List[bigquery.SchemaField]) -> bool:
-    """Ensure the BigQuery table exists and create it if it doesn't."""
+    """Ensure the BigQuery table exists and create it if it doesn't with better error handling."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
         return False
     
     try:
         try:
-            bq_client.get_table(table_id)
+            table = bq_client.get_table(table_id)
             logger.debug(f"Table {table_id} already exists")
+            
+            # Check if schema needs update
+            existing_schema = {field.name: field for field in table.schema}
+            new_schema_fields = [field for field in schema if field.name not in existing_schema]
+            
+            if new_schema_fields:
+                logger.info(f"Updating table {table_id} schema with {len(new_schema_fields)} new fields")
+                table.schema = list(table.schema) + new_schema_fields
+                table = bq_client.update_table(table, ["schema"])
+                logger.info(f"Updated schema for table {table_id}")
+            
+            # Test query to verify table is accessible
+            test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
+            bq_client.query(test_query).result()
+            
             return True
+            
         except NotFound:
             # Create table
+            logger.info(f"Table {table_id} not found, creating new table")
             table = bigquery.Table(table_id, schema=schema)
-            bq_client.create_table(table)
+            created_table = bq_client.create_table(table)
             logger.info(f"Created table {table_id}")
+            
+            # Verify table creation with test query
+            test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
+            bq_client.query(test_query).result()
+            logger.info(f"Verified table {table_id} is accessible")
+            
             return True
+    except Conflict:
+        # Table might have been created by another process
+        logger.warning(f"Conflict creating table {table_id}, it may already exist")
+        return True
     except Exception as e:
         logger.error(f"Error ensuring table exists: {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        config.report_error(e)
         return False
 
 
 def initialize_bigquery_tables():
-    """Initialize all required BigQuery tables and datasets."""
+    """Initialize all required BigQuery tables and datasets with improved error handling."""
     if not bq_client:
         logger.error("Cannot initialize BigQuery tables - client not available")
         return False
@@ -329,6 +357,8 @@ def initialize_bigquery_tables():
     try:
         # First ensure the dataset exists
         dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        logger.info(f"Ensuring dataset exists: {dataset_id}")
+        
         if not ensure_dataset_exists(dataset_id):
             logger.error(f"Failed to create dataset {dataset_id}")
             return False
@@ -414,17 +444,78 @@ def initialize_bigquery_tables():
         all_created = True
         for table_name, schema in table_configs.items():
             table_id = f"{dataset_id}.{table_name}"
+            logger.info(f"Ensuring table exists: {table_id}")
             if not ensure_table_exists(table_id, schema):
                 logger.error(f"Failed to create table {table_name}")
                 all_created = False
             else:
-                logger.info(f"Table {table_name} is ready")
+                # Verify table was actually created by checking if we can query it
+                try:
+                    test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
+                    bq_client.query(test_query).result()
+                    logger.info(f"Successfully verified table {table_name} exists and is queryable")
+                except Exception as e:
+                    logger.error(f"Table {table_name} created but not queryable: {str(e)}")
+                    if Config.ENVIRONMENT != 'production':
+                        logger.error(traceback.format_exc())
+                    all_created = False
         
         return all_created
     
     except Exception as e:
         logger.error(f"Error initializing BigQuery tables: {str(e)}")
         logger.error(traceback.format_exc())
+        config.report_error(e)
+        return False
+
+
+def force_update_bigquery_tables() -> bool:
+    """Force update of all BigQuery tables (call this when table issues are suspected)."""
+    if not bq_client:
+        logger.error("Cannot update BigQuery tables - client not available")
+        return False
+    
+    try:
+        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        logger.info(f"Force updating tables in dataset {dataset_id}")
+        
+        # First drop any tables that exist with problems
+        tables_to_force = ['indicators', 'vulnerabilities', 'threat_actors', 'campaigns', 'malware', 'users', 'audit_log']
+        
+        for table_name in tables_to_force:
+            table_id = f"{dataset_id}.{table_name}"
+            try:
+                logger.info(f"Checking table {table_id} for force update")
+                bq_client.get_table(table_id)
+                
+                # Try to query the table
+                try:
+                    test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
+                    bq_client.query(test_query).result()
+                    logger.info(f"Table {table_id} passed validation, no need to recreate")
+                except Exception as e:
+                    # Table exists but has issues, delete and recreate
+                    logger.warning(f"Table {table_id} has issues, deleting for recreation: {str(e)}")
+                    bq_client.delete_table(table_id)
+                    logger.info(f"Deleted table {table_id} for recreation")
+            except NotFound:
+                # Table doesn't exist, will be created below
+                logger.info(f"Table {table_id} not found, will be created")
+        
+        # Now reinitialize all tables
+        result = initialize_bigquery_tables()
+        
+        if result:
+            logger.info("Successfully forced update of all BigQuery tables")
+        else:
+            logger.error("Failed to force update all BigQuery tables")
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error in force_update_bigquery_tables: {str(e)}")
+        logger.error(traceback.format_exc())
+        config.report_error(e)
         return False
 
 
@@ -459,6 +550,7 @@ def upload_blob_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes]
         logger.error(f"Error uploading data to GCS: {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        config.report_error(e)
         return None
 
 
@@ -483,11 +575,12 @@ def download_blob_from_gcs(bucket_name: str, blob_name: str) -> Optional[bytes]:
         logger.error(f"Error downloading data from GCS: {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        config.report_error(e)
         return None
 
 
 def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
-    """Upload records to BigQuery table and return the job ID."""
+    """Upload records to BigQuery table with enhanced error handling and retries."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
         return None
@@ -497,7 +590,7 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
         return None
     
     try:
-        # Prepare data
+        # Prepare data with datetime handling
         processed_records = []
         for record in records:
             # Convert any datetime objects to strings
@@ -508,15 +601,23 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
                 else:
                     processed_record[key] = value
             processed_records.append(processed_record)
-            
-        # Write data to a temporary file
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as temp_file:
-            for record in processed_records:
-                temp_file.write(json.dumps(record) + "\n")
-                
-            temp_file_name = temp_file.name
-            
-        # Configure the load job
+        
+        # Write records to temp file with better error handling
+        temp_file_name = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as temp_file:
+                for record in processed_records:
+                    temp_file.write(json.dumps(record) + "\n")
+                temp_file_name = temp_file.name
+                logger.debug(f"Wrote {len(processed_records)} records to temp file {temp_file_name}")
+        except Exception as e:
+            logger.error(f"Error writing records to temp file: {str(e)}")
+            if temp_file_name and os.path.exists(temp_file_name):
+                os.unlink(temp_file_name)
+            config.report_error(e)
+            return None
+        
+        # Configure the load job with retry settings
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             schema_update_options=[
@@ -524,29 +625,71 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
             ],
             write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
             autodetect=True,
+            max_bad_records=10,  # Allow some bad records
         )
         
-        # Load the data
-        with open(temp_file_name, "rb") as source_file:
-            job = bq_client.load_table_from_file(
-                source_file, 
-                table_id, 
-                job_config=job_config
-            )
+        # Add retry logic for the upload
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        job = None
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                with open(temp_file_name, "rb") as source_file:
+                    # Load the data
+                    job = bq_client.load_table_from_file(
+                        source_file, 
+                        table_id, 
+                        job_config=job_config
+                    )
                 
-        # Wait for the job to complete
-        job.result()
+                # Wait for the job to complete
+                job.result()
+                
+                # Check for errors
+                if job.errors:
+                    logger.error(f"Job completed with errors: {job.errors}")
+                    last_error = f"Job errors: {job.errors}"
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying upload (attempt {attempt+1}/{max_retries})...")
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    else:
+                        logger.error("Max retries reached, giving up")
+                        break
+                else:
+                    logger.info(f"Successfully uploaded {len(records)} records to BigQuery table {table_id}")
+                    break
+                    
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"Error in upload attempt {attempt+1}: {last_error}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying upload (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error("Max retries reached, giving up")
+                    config.report_error(e)
         
         # Clean up the temporary file
-        os.unlink(temp_file_name)
+        if temp_file_name and os.path.exists(temp_file_name):
+            os.unlink(temp_file_name)
         
-        logger.info(f"Uploaded {len(records)} records to BigQuery table {table_id}")
-        return job.job_id
-    
+        if job and not job.errors:
+            return job.job_id
+        
+        if last_error:
+            logger.error(f"Failed to upload records after {max_retries} attempts: {last_error}")
+        
+        return None
+        
     except Exception as e:
         logger.error(f"Error uploading records to BigQuery: {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        config.report_error(e)
         return None
 
 
@@ -1128,36 +1271,47 @@ def process_feed(feed_config: Dict) -> Dict:
         result["processed_uri"] = processed_uri
         result["record_count"] = len(deduplicated_data)
         
-        # Step 9: Upload to BigQuery
-        # First ensure dataset exists
+        # Step 9: First ensure BigQuery tables exist
         dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
         if not ensure_dataset_exists(dataset_id):
             result["error"] = "Failed to ensure BigQuery dataset exists"
             return result
         
-        # Create table name based on feed name
-        # Replace hyphens and other invalid characters
-        table_name = re.sub(r'[^a-zA-Z0-9_]', '_', feed_name.lower())
-        table_id = f"{dataset_id}.{table_name}"
+        if not initialize_bigquery_tables():
+            logger.warning("BigQuery tables initialization reported issues, attempting to continue")
+        
+        # Step 10: Upload to main indicators table
+        indicators_table_id = f"{dataset_id}.indicators"
+        job_id = upload_records_to_bigquery(indicators_table_id, deduplicated_data)
+        if not job_id:
+            # Try force-updating tables and retry upload
+            logger.warning("Failed to upload data to main indicators table, attempting to force update tables")
+            force_update_bigquery_tables()
+            job_id = upload_records_to_bigquery(indicators_table_id, deduplicated_data)
+            if not job_id:
+                result["error"] = "Failed to upload data to BigQuery even after table force update"
+                return result
+        
+        result["bigquery_job_id"] = job_id
+        
+        # Step 11: Also create a feed-specific table for reference (optional)
+        feed_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', feed_name.lower())
+        feed_table_id = f"{dataset_id}.{feed_table_name}"
         
         # Infer schema from first record
         if deduplicated_data:
             schema = infer_schema_from_record(deduplicated_data[0])
             
-            # Ensure table exists
-            if not ensure_table_exists(table_id, schema):
-                result["error"] = "Failed to ensure BigQuery table exists"
-                return result
-            
-            # Upload data to BigQuery
-            job_id = upload_records_to_bigquery(table_id, deduplicated_data)
-            if not job_id:
-                result["error"] = "Failed to upload data to BigQuery"
-                return result
-            
-            result["bigquery_job_id"] = job_id
+            # Ensure feed-specific table exists
+            if ensure_table_exists(feed_table_id, schema):
+                feed_job_id = upload_records_to_bigquery(feed_table_id, deduplicated_data)
+                if feed_job_id:
+                    result["feed_table_job_id"] = feed_job_id
+                    logger.info(f"Also uploaded data to feed-specific table {feed_table_id}")
+            else:
+                logger.warning(f"Failed to create feed-specific table {feed_table_id}")
         
-        # Step 10: Publish to Pub/Sub if publisher is available
+        # Step 12: Publish to Pub/Sub if publisher is available
         if publisher:
             topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
             
@@ -1194,6 +1348,7 @@ def process_feed(feed_config: Dict) -> Dict:
         logger.error(f"Unhandled error processing feed '{feed_name}': {str(e)}")
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
+        config.report_error(e)
         
         result["error"] = str(e)
         result["end_time"] = datetime.datetime.utcnow().isoformat()
@@ -1307,6 +1462,13 @@ def ingest_all_feeds() -> List[Dict]:
         "errors": []
     }
     
+    # Ensure BigQuery resources are initialized
+    if not initialize_bigquery_tables():
+        logger.warning("Failed to initialize BigQuery tables completely, will attempt to continue")
+        # Try force update as well
+        if not force_update_bigquery_tables():
+            logger.error("Failed to force update BigQuery tables, ingestion may have issues")
+    
     # Define a getter for enabled feeds if it doesn't exist
     if not hasattr(Config, 'get_enabled_feeds'):
         # Default implementation - consider all feeds enabled unless explicitly disabled
@@ -1336,6 +1498,7 @@ def ingest_all_feeds() -> List[Dict]:
             logger.error(f"Error processing feed '{feed_name}': {str(e)}")
             if Config.ENVIRONMENT != 'production':
                 logger.error(traceback.format_exc())
+            config.report_error(e)
             
             results.append({
                 "feed_name": feed_name,
@@ -1349,7 +1512,7 @@ def ingest_all_feeds() -> List[Dict]:
     ingestion_status["running"] = False
     
     # Print summary
-    success_count = sum(1 for r in results if r["status"] == "success")
+    success_count = sum(1 for r in results if r.get("status") == "success")
     logger.info(f"All feeds processed: {success_count}/{len(results)} feeds processed successfully")
     
     return results
@@ -1373,12 +1536,23 @@ def trigger_ingestion_in_background() -> threading.Thread:
     def ingestion_thread():
         try:
             logger.info("Starting background ingestion thread")
+            # First ensure BigQuery tables are properly initialized
+            if not initialize_bigquery_tables():
+                logger.warning("BigQuery tables initialization reported issues")
+                # Try force updating tables
+                if force_update_bigquery_tables():
+                    logger.info("Successfully forced BigQuery tables update")
+                else:
+                    logger.error("Failed to update BigQuery tables, ingestion may have issues")
+            
+            # Proceed with ingestion
             ingest_all_feeds()
             logger.info("Background ingestion thread completed")
         except Exception as e:
             logger.error(f"Error in background ingestion thread: {str(e)}")
             if Config.ENVIRONMENT != 'production':
                 logger.error(traceback.format_exc())
+            config.report_error(e)
     
     # Start ingestion in a separate thread
     thread = threading.Thread(target=ingestion_thread)
@@ -1404,7 +1578,13 @@ def ingest_from_pubsub(event, context):
         # Process based on message data
         process_all = message_data.get('process_all', False)
         feed_id = message_data.get('feed_id')
+        force_tables = message_data.get('force_tables', False)
         
+        # Check if we need to force BigQuery table updates
+        if force_tables:
+            logger.info("Forcing BigQuery tables update as requested")
+            force_update_bigquery_tables()
+            
         if process_all:
             results = ingest_all_feeds()
             logger.info(f"Processed all feeds: {len(results)} feeds")
@@ -1481,6 +1661,9 @@ if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and not getattr
     
     def delayed_start():
         time.sleep(10)  # Wait 10 seconds for app startup
+        # First ensure BigQuery tables
+        initialize_bigquery_tables()
+        # Then start ingestion
         trigger_ingestion_in_background()
         
     startup_thread = threading.Thread(target=delayed_start)
@@ -1491,11 +1674,23 @@ if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and not getattr
 if initialize_bigquery_tables():
     logger.info("BigQuery tables initialized successfully")
 else:
-    logger.warning("Some BigQuery tables could not be initialized")
+    logger.warning("Some BigQuery tables could not be initialized, will retry when needed")
+    # Don't force update here to avoid slowing startup, will be handled during ingestion
 
 if __name__ == "__main__":
     # When run as a script, ingest all feeds and print the results
     logger.info("Running ingestion.py as standalone script")
+    
+    # First force tables to be properly initialized
+    logger.info("Ensuring BigQuery tables are properly initialized")
+    if not initialize_bigquery_tables():
+        logger.warning("BigQuery tables initialization reported issues")
+        if force_update_bigquery_tables():
+            logger.info("Successfully forced BigQuery tables update")
+        else:
+            logger.error("Failed to update BigQuery tables, ingestion may have issues")
+    
+    # Run the ingestion
     results = ingest_all_feeds()
     
     # Print summary
