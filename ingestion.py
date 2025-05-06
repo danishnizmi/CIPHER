@@ -129,9 +129,12 @@ class DataSanitizer:
                 return None
                 
         elif ioc_type == 'url':
-            # Ensure valid URL format
-            url_pattern = r'^(http|https|ftp)://[^\s/$.?#].[^\s]*$'
+            # Ensure valid URL format - more lenient to catch more URLs
+            url_pattern = r'^(https?|ftp)://.+$'
             if not re.match(url_pattern, value.lower()):
+                # Try to fix common URL format issues
+                if re.match(r'^www\.', value.lower()):
+                    return "http://" + value
                 return None
                 
         elif ioc_type in ['md5', 'sha1', 'sha256']:
@@ -296,7 +299,7 @@ def ensure_dataset_exists(dataset_id: str) -> bool:
         return False
 
 
-def ensure_table_exists(table_id: str, schema: List[bigquery.SchemaField]) -> bool:
+def ensure_table_exists(table_id: str, schema: List[bigquery.SchemaField], force_update: bool = False) -> bool:
     """Ensure the BigQuery table exists and create it if it doesn't with better error handling."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
@@ -307,15 +310,26 @@ def ensure_table_exists(table_id: str, schema: List[bigquery.SchemaField]) -> bo
             table = bq_client.get_table(table_id)
             logger.debug(f"Table {table_id} already exists")
             
-            # Check if schema needs update
-            existing_schema = {field.name: field for field in table.schema}
-            new_schema_fields = [field for field in schema if field.name not in existing_schema]
-            
-            if new_schema_fields:
-                logger.info(f"Updating table {table_id} schema with {len(new_schema_fields)} new fields")
-                table.schema = list(table.schema) + new_schema_fields
-                table = bq_client.update_table(table, ["schema"])
-                logger.info(f"Updated schema for table {table_id}")
+            # Check if schema needs update or force updating
+            if force_update:
+                logger.info(f"Forcing schema update for table {table_id}")
+                table.schema = schema
+                try:
+                    bq_client.update_table(table, ["schema"])
+                    logger.info(f"Updated schema for table {table_id}")
+                except Exception as update_error:
+                    logger.warning(f"Could not update schema for existing table: {str(update_error)}")
+            else:
+                # Check for missing fields
+                existing_schema = {field.name: field for field in table.schema}
+                new_schema_fields = [field for field in schema if field.name not in existing_schema]
+                
+                if new_schema_fields:
+                    logger.info(f"Updating table {table_id} schema with {len(new_schema_fields)} new fields")
+                    updated_schema = list(table.schema) + new_schema_fields
+                    table.schema = updated_schema
+                    bq_client.update_table(table, ["schema"])
+                    logger.info(f"Updated schema for table {table_id}")
             
             # Test query to verify table is accessible
             test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
@@ -608,7 +622,10 @@ def download_blob_from_gcs(bucket_name: str, blob_name: str) -> Optional[bytes]:
 
 
 def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
-    """Upload records to BigQuery table with enhanced error handling and retries."""
+    """Upload records to BigQuery table with enhanced error handling and retries.
+    
+    COMPLETELY REWRITTEN for robustness and reliability.
+    """
     if not bq_client:
         logger.error("BigQuery client not initialized")
         return None
@@ -617,107 +634,139 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
         logger.warning(f"No records to upload to {table_id}")
         return None
     
+    # Process 100 records at a time to avoid issues with large uploads
+    batch_size = 100
+    success_count = 0
+    error_count = 0
+    job_ids = []
+    
+    # Log record structure for debugging
     try:
-        # Prepare data with datetime handling
-        processed_records = []
-        for record in records:
-            # Convert any datetime objects to strings
-            processed_record = {}
-            for key, value in record.items():
-                if isinstance(value, (datetime.datetime, datetime.date)):
-                    processed_record[key] = value.isoformat()
-                else:
-                    processed_record[key] = value
-            processed_records.append(processed_record)
+        sample_record = records[0]
+        logger.info(f"Sample record structure: {list(sample_record.keys())}")
+    except (IndexError, TypeError) as e:
+        logger.warning(f"Could not log sample record structure: {str(e)}")
+    
+    # Split records into batches
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i+batch_size]
         
-        # Write records to temp file with better error handling
-        temp_file_name = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as temp_file:
-                for record in processed_records:
-                    temp_file.write(json.dumps(record) + "\n")
-                temp_file_name = temp_file.name
-                logger.debug(f"Wrote {len(processed_records)} records to temp file {temp_file_name}")
-        except Exception as e:
-            logger.error(f"Error writing records to temp file: {str(e)}")
-            if temp_file_name and os.path.exists(temp_file_name):
-                os.unlink(temp_file_name)
-            config.report_error(e)
-            return None
-        
-        # Configure the load job with retry settings
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            schema_update_options=[
-                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
-            ],
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            autodetect=True,
-            max_bad_records=10,  # Allow some bad records
-        )
-        
-        # Add retry logic for the upload
-        max_retries = 3
-        retry_delay = 2  # seconds
-        
-        job = None
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                with open(temp_file_name, "rb") as source_file:
-                    # Load the data
-                    job = bq_client.load_table_from_file(
-                        source_file, 
-                        table_id, 
+            # Step 1: Prepare data with proper datetime handling
+            processed_batch = []
+            for record in batch:
+                processed_record = {}
+                
+                # Process each field with special handling for timestamps
+                for key, value in record.items():
+                    # Handle datetime objects
+                    if isinstance(value, (datetime.datetime, datetime.date)):
+                        # Convert to ISO format string for BigQuery
+                        processed_record[key] = value.isoformat()
+                    
+                    # Handle string timestamps
+                    elif key in ['created_at', 'first_seen', 'last_seen', 'timestamp'] and isinstance(value, str):
+                        try:
+                            # Try to parse and normalize the timestamp format
+                            dt = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                            processed_record[key] = dt.isoformat()
+                        except ValueError:
+                            # If can't parse, use as is
+                            processed_record[key] = value
+                    
+                    # Handle tags/array fields
+                    elif key == 'tags' and isinstance(value, list):
+                        # Ensure all items are strings
+                        processed_record[key] = [str(item) for item in value]
+                    
+                    # Handle empty arrays that should not be null
+                    elif isinstance(value, list) and not value:
+                        if key == 'tags':
+                            processed_record[key] = []
+                        else:
+                            processed_record[key] = value
+                    
+                    # Handle JSON objects stored as strings
+                    elif key == 'raw_data' and isinstance(value, (dict, list)):
+                        processed_record[key] = json.dumps(value)
+                    
+                    # All other values pass through
+                    else:
+                        processed_record[key] = value
+                
+                # Ensure required fields
+                if 'id' not in processed_record:
+                    processed_record['id'] = hashlib.md5(str(record).encode()).hexdigest()
+                
+                # Add record to batch
+                processed_batch.append(processed_record)
+            
+            # Step 2: Upload directly to BigQuery using load_table_from_json
+            # This avoids file I/O issues and is more reliable
+            job_config = bigquery.LoadJobConfig(
+                schema_update_options=[
+                    bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
+                ],
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            )
+            
+            # Convert to newline-delimited JSON
+            json_data = "\n".join([json.dumps(record) for record in processed_batch])
+            
+            # Upload with retries
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    job = bq_client.load_table_from_json(
+                        processed_batch,  # Use the processed records directly 
+                        table_id,
                         job_config=job_config
                     )
-                
-                # Wait for the job to complete
-                job.result()
-                
-                # Check for errors
-                if job.errors:
-                    logger.error(f"Job completed with errors: {job.errors}")
-                    last_error = f"Job errors: {job.errors}"
-                    if attempt < max_retries - 1:
-                        logger.info(f"Retrying upload (attempt {attempt+1}/{max_retries})...")
-                        time.sleep(retry_delay * (attempt + 1))
-                        continue
-                    else:
-                        logger.error("Max retries reached, giving up")
-                        break
-                else:
-                    logger.info(f"Successfully uploaded {len(records)} records to BigQuery table {table_id}")
-                    break
                     
-            except Exception as e:
-                last_error = str(e)
-                logger.error(f"Error in upload attempt {attempt+1}: {last_error}")
-                if attempt < max_retries - 1:
-                    logger.info(f"Retrying upload (attempt {attempt+1}/{max_retries})...")
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    logger.error("Max retries reached, giving up")
-                    config.report_error(e)
-        
-        # Clean up the temporary file
-        if temp_file_name and os.path.exists(temp_file_name):
-            os.unlink(temp_file_name)
-        
-        if job and not job.errors:
-            return job.job_id
-        
-        if last_error:
-            logger.error(f"Failed to upload records after {max_retries} attempts: {last_error}")
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error uploading records to BigQuery: {str(e)}")
-        if Config.ENVIRONMENT != 'production':
-            logger.error(traceback.format_exc())
-        config.report_error(e)
+                    # Wait for job to complete with timeout
+                    result = job.result(timeout=60)  # 60 second timeout
+                    
+                    if job.errors:
+                        logger.error(f"Errors in batch {i//batch_size + 1}: {job.errors}")
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # Exponential backoff
+                            logger.info(f"Retrying batch in {wait_time} seconds...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            error_count += 1
+                    else:
+                        job_ids.append(job.job_id)
+                        success_count += 1
+                        logger.info(f"Successfully uploaded batch {i//batch_size + 1} ({len(batch)} records) to {table_id}")
+                    
+                    # Break retry loop on success
+                    break
+                        
+                except Exception as e:
+                    logger.error(f"Error uploading batch {i//batch_size + 1} to BigQuery: {str(e)}")
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        logger.info(f"Retrying batch in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Failed to upload batch {i//batch_size + 1} after {max_retries} attempts")
+                        error_count += 1
+            
+        except Exception as e:
+            logger.error(f"Unexpected error processing batch {i//batch_size + 1}: {str(e)}")
+            if Config.ENVIRONMENT != 'production':
+                logger.error(traceback.format_exc())
+            error_count += 1
+    
+    # Report results
+    total_batches = (len(records) + batch_size - 1) // batch_size
+    logger.info(f"BigQuery upload complete: {success_count}/{total_batches} batches successful")
+    
+    if success_count > 0:
+        return job_ids[0]  # Return first job ID on success
+    else:
         return None
 
 
@@ -854,13 +903,34 @@ def parse_feed_data(content: bytes, format_type: str, parser_config: Dict) -> Li
         else:
             # Auto-detect format
             logger.warning(f"Unknown format type: {format_type}, attempting auto-detection")
+            
+            # Try to detect format from content
             try:
-                return parse_json_feed(content, parser_config)
-            except Exception:
-                try:
+                # Check if content looks like JSON
+                content_start = content[:100].strip()
+                if content_start.startswith(b'{') or content_start.startswith(b'['):
+                    logger.info("Content appears to be JSON, parsing as JSON")
+                    return parse_json_feed(content, parser_config)
+                
+                # Check if content looks like CSV
+                if b',' in content_start and b'\n' in content[:1000]:
+                    logger.info("Content appears to be CSV, parsing as CSV")
                     return parse_csv_feed(content, parser_config)
+                
+                # Default to text
+                logger.info("Content format not detected, parsing as text")
+                return parse_text_feed(content, parser_config)
+            except Exception as detect_error:
+                logger.warning(f"Auto-detection failed: {str(detect_error)}")
+                
+                # Try each format in order
+                try:
+                    return parse_json_feed(content, parser_config)
                 except Exception:
-                    return parse_text_feed(content, parser_config)
+                    try:
+                        return parse_csv_feed(content, parser_config)
+                    except Exception:
+                        return parse_text_feed(content, parser_config)
     
     except Exception as e:
         logger.error(f"Error parsing feed data: {str(e)}")
@@ -870,15 +940,43 @@ def parse_feed_data(content: bytes, format_type: str, parser_config: Dict) -> Li
 
 
 def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
-    """Parse JSON formatted content."""
+    """Parse JSON formatted content with improved error handling."""
     try:
-        # First try to decode the JSON
+        # Try different decoding approaches
         try:
+            # First try direct JSON decoding
             data = json.loads(content)
-        except json.JSONDecodeError as e:
-            # Try again with utf-8 decoding in case of encoding issues
-            content_str = content.decode('utf-8', errors='replace')
-            data = json.loads(content_str)
+        except json.JSONDecodeError:
+            # Try decoding with utf-8 first
+            try:
+                content_str = content.decode('utf-8', errors='replace')
+                data = json.loads(content_str)
+            except json.JSONDecodeError:
+                # Try with different encodings
+                for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        content_str = content.decode(encoding, errors='replace')
+                        data = json.loads(content_str)
+                        logger.info(f"Successfully decoded JSON with {encoding} encoding")
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    # If all decodings fail, try a more lenient approach
+                    content_str = content.decode('utf-8', errors='ignore')
+                    
+                    # Look for JSON start/end markers
+                    json_start = content_str.find('{')
+                    json_array_start = content_str.find('[')
+                    
+                    if json_start >= 0 and (json_array_start < 0 or json_start < json_array_start):
+                        # Try to find matching closing brace
+                        data = json.loads(content_str[json_start:])
+                    elif json_array_start >= 0:
+                        # Try to find matching closing bracket
+                        data = json.loads(content_str[json_array_start:])
+                    else:
+                        raise Exception("Could not find valid JSON content")
         
         # Handle case where the data is nested under a root element
         root_element = parser_config.get("root_element")
@@ -898,25 +996,53 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
                             item_copy["threat_id"] = key
                             processed_data.append(item_copy)
                     else:
-                        # It's a single item, wrap in a list
-                        data = [data]
+                        # For non-list values, special handling
+                        if key != 'meta' and key != 'info':  # Skip meta information
+                            processed_data.append({"value": str(value), "type": "unknown", "key": key})
                 
                 if processed_data:
                     data = processed_data
+                else:
+                    # If no usable data found, wrap the original dict
+                    data = [data]
             else:
                 # Wrap in list if it's a primitive value
                 data = [{"value": data}]
         
-        return data
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON data: {str(e)}")
+        # Clean up the records
+        cleaned_data = []
+        for item in data:
+            if isinstance(item, dict):
+                # Only include valid records with minimally required data
+                if item:  # Non-empty dict
+                    cleaned_data.append(item)
+            elif item is not None:
+                # Convert non-dict items to dicts
+                cleaned_data.append({"value": str(item)})
+        
+        return cleaned_data
+    except Exception as e:
+        logger.error(f"Error parsing JSON feed: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
         raise Exception(f"Failed to parse JSON data: {str(e)}")
 
 
 def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
-    """Parse CSV formatted content."""
+    """Parse CSV formatted content with improved error handling."""
     try:
-        content_str = content.decode('utf-8', errors='replace')
+        # Try to decode with different encodings
+        content_str = None
+        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                content_str = content.decode(encoding, errors='replace')
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content_str is None:
+            # If all specific encodings fail, use utf-8 with replace error handler
+            content_str = content.decode('utf-8', errors='replace')
         
         # Skip header lines if specified
         skip_lines = parser_config.get("skip_lines", 0)
@@ -924,34 +1050,149 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             lines = content_str.splitlines()
             if len(lines) > skip_lines:
                 content_str = '\n'.join(lines[skip_lines:])
-                
-        # Parse CSV with DictReader or regular reader based on config
+        
+        # Parse with different CSV dialects if needed
+        csv_data = None
+        dialects = [csv.excel, csv.unix_dialect, csv.excel_tab]
+        
         if parser_config.get("has_header", True):
-            csv_reader = csv.DictReader(io.StringIO(content_str))
-            data = list(csv_reader)
-        else:
+            # Try with header
+            for dialect in dialects:
+                try:
+                    csv_reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
+                    csv_data = list(csv_reader)
+                    if csv_data:
+                        break
+                except Exception:
+                    continue
+        
+        # If no data with header, try without header
+        if not csv_data:
             # For CSV without headers, use field names from config or generate them
             field_names = parser_config.get("field_names", [])
             if not field_names:
                 # Generate field names as column1, column2, etc.
-                first_row = next(csv.reader(io.StringIO(content_str)))
-                field_names = [f"column{i+1}" for i in range(len(first_row))]
-                # Reset the reader
-                content_str = content.decode('utf-8', errors='replace')
+                try:
+                    sniffer = csv.Sniffer()
+                    dialect = sniffer.sniff(content_str[:1024])
+                    first_row = next(csv.reader(io.StringIO(content_str), dialect))
+                    field_names = [f"column{i+1}" for i in range(len(first_row))]
+                except Exception:
+                    # If sniffer fails, make a best guess
+                    first_line = content_str.split('\n')[0]
+                    if ',' in first_line:
+                        field_names = [f"column{i+1}" for i in range(first_line.count(',') + 1)]
+                    elif '\t' in first_line:
+                        field_names = [f"column{i+1}" for i in range(first_line.count('\t') + 1)]
+                    else:
+                        field_names = ["value"]
             
-            csv_reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names)
-            data = list(csv_reader)
+            for dialect in dialects:
+                try:
+                    csv_reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names, dialect=dialect)
+                    csv_data = list(csv_reader)
+                    if csv_data:
+                        break
+                except Exception:
+                    continue
         
-        return data
+        # If we still have no data, use a fallback approach
+        if not csv_data:
+            logger.warning("Standard CSV parsing failed, using fallback row splitting")
+            data = []
+            lines = content_str.splitlines()
+            
+            # Try to determine delimiter
+            delimiters = [',', '\t', ';', '|']
+            delimiter = ','  # Default
+            
+            # Count occurrences of each delimiter in first line
+            if lines:
+                first_line = lines[0]
+                counts = {d: first_line.count(d) for d in delimiters}
+                if counts:
+                    delimiter = max(counts.keys(), key=lambda k: counts[k])
+            
+            # Parse with simple delimiter splitting
+            if parser_config.get("has_header", True) and lines:
+                header = [h.strip() for h in lines[0].split(delimiter)]
+                
+                for line in lines[1:]:
+                    if not line.strip():
+                        continue
+                        
+                    values = line.split(delimiter)
+                    row = {}
+                    
+                    # Map values to header names
+                    for i, val in enumerate(values):
+                        if i < len(header):
+                            row[header[i]] = val.strip()
+                        else:
+                            row[f"column{i+1}"] = val.strip()
+                    
+                    data.append(row)
+                    
+                csv_data = data
+            else:
+                # No header, use column names
+                for line in lines:
+                    if not line.strip():
+                        continue
+                        
+                    values = line.split(delimiter)
+                    row = {}
+                    
+                    for i, val in enumerate(values):
+                        row[f"column{i+1}"] = val.strip()
+                    
+                    data.append(row)
+                    
+                csv_data = data
+        
+        # Filter out empty records
+        if csv_data:
+            csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
+        
+        # Add 'value' field if missing for compatibility
+        for row in csv_data:
+            # Try to identify a suitable value field based on common naming patterns
+            if 'value' not in row:
+                for key in ['ioc', 'indicator', 'ip', 'domain', 'url', 'hash', 'md5', 'sha1', 'sha256']:
+                    if key in row and row[key]:
+                        row['value'] = row[key]
+                        break
+                else:
+                    # If no suitable field found, use the first non-empty field
+                    for key, val in row.items():
+                        if val and isinstance(val, str) and val.strip():
+                            row['value'] = val
+                            break
+        
+        return csv_data
     except Exception as e:
         logger.error(f"Error parsing CSV data: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
         raise Exception(f"Failed to parse CSV data: {str(e)}")
 
 
 def parse_text_feed(content: bytes, parser_config: Dict) -> List[Dict]:
     """Parse plain text content (usually line by line)."""
     try:
-        content_str = content.decode('utf-8', errors='replace')
+        # Try various encodings
+        content_str = None
+        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                content_str = content.decode(encoding, errors='replace')
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content_str is None:
+            # If all specific encodings fail, use utf-8 with replace error handler
+            content_str = content.decode('utf-8', errors='replace')
+        
         lines = [line.strip() for line in content_str.splitlines() if line.strip()]
         
         # Skip lines if specified
@@ -973,15 +1214,24 @@ def parse_text_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             # Extract data using regex if provided
             line_regex = parser_config.get("line_regex")
             if line_regex:
-                match = re.match(line_regex, line)
-                if match:
-                    record.update(match.groupdict())
+                try:
+                    match = re.search(line_regex, line)
+                    if match:
+                        record.update(match.groupdict())
+                except re.error:
+                    logger.warning(f"Invalid regex pattern: {line_regex}")
+            
+            # Try to determine IOC type based on content
+            if 'type' not in record:
+                record['type'] = determine_ioc_type(line)
             
             data.append(record)
             
         return data
     except Exception as e:
         logger.error(f"Error parsing text data: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
         raise Exception(f"Failed to parse text data: {str(e)}")
 
 
@@ -1063,11 +1313,14 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
         if 'value' not in record:
             continue
         
+        # Ensure value is a string
+        value = str(record['value'])
+        
         # Create normalized indicator record
         indicator = {
-            "id": hashlib.md5(f"{feed_name}:{record['value']}".encode()).hexdigest(),
-            "value": record['value'],
-            "type": record.get('type') or determine_ioc_type(record['value']),
+            "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+            "value": value,
+            "type": record.get('type') or determine_ioc_type(value),
             "source": feed_name,
             "feed_id": feed_name,
             "created_at": datetime.datetime.utcnow().isoformat(),
@@ -1088,20 +1341,25 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
 
 
 def determine_ioc_type(value: str) -> str:
-    """Determine the IOC type based on value format."""
-    # IP address pattern
-    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    """Determine the IOC type based on value format with improved pattern matching."""
+    if not value or not isinstance(value, str):
+        return 'unknown'
+        
+    value = value.strip()
+    
+    # IP address pattern - more comprehensive
+    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$'
     if re.match(ip_pattern, value):
         return 'ip'
     
-    # Domain pattern
+    # Domain pattern - more lenient
     domain_pattern = r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
     if re.match(domain_pattern, value.lower()):
         return 'domain'
     
-    # URL pattern
-    url_pattern = r'^(http|https|ftp)://[^\s/$.?#].[^\s]*$'
-    if re.match(url_pattern, value.lower()):
+    # URL pattern - more inclusive
+    url_pattern = r'^(https?|ftp)://.+$'
+    if re.search(url_pattern, value.lower()):
         return 'url'
     
     # Hash patterns
@@ -1120,6 +1378,11 @@ def determine_ioc_type(value: str) -> str:
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     if re.match(email_pattern, value):
         return 'email'
+    
+    # Filename pattern
+    filename_pattern = r'\.(exe|dll|bat|ps1|vbs|js|py|sh|pl|jar)$'
+    if re.search(filename_pattern, value.lower()):
+        return 'filename'
     
     # Default if no pattern matches
     return 'unknown'
@@ -1140,7 +1403,11 @@ def get_cached_hashes(feed_name: str) -> List[str]:
         
         if blob.exists():
             content = blob.download_as_text()
-            return json.loads(content)
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in cached hashes for {feed_name}")
+                return []
         
         return []
     except Exception as e:
@@ -1222,7 +1489,7 @@ def process_feed(feed_config: Dict) -> Dict:
         storage_path = feed_config.get("storage_path", f"feeds/{feed_name}")
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Determine file extension
+        # Determine file extension and content type
         format_type = feed_config.get("format", "")
         if format_type == "json":
             file_extension = ".json"
@@ -1266,6 +1533,10 @@ def process_feed(feed_config: Dict) -> Dict:
                 result["status"] = "success"  # Still considered success, just empty
                 result["warning"] = "No valid records found"
                 return result
+            
+            # Log summary of parsed data
+            logger.info(f"Successfully parsed {len(parsed_data)} records from {feed_name}")
+            
         except Exception as e:
             result["error"] = f"Parsing failed: {str(e)}"
             return result
@@ -1275,6 +1546,7 @@ def process_feed(feed_config: Dict) -> Dict:
         
         # Step 6: Normalize data to common format
         normalized_data = normalize_indicators(transformed_data, feed_name)
+        logger.info(f"Normalized {len(normalized_data)} indicators from {feed_name}")
         
         # Step 7: Deduplicate records
         existing_hashes = get_cached_hashes(feed_name)
@@ -1327,11 +1599,13 @@ def process_feed(feed_config: Dict) -> Dict:
         # Step 10: Upload to main indicators table
         indicators_table_id = f"{dataset_id}.indicators"
         job_id = upload_records_to_bigquery(indicators_table_id, deduplicated_data)
+        
         if not job_id:
             # Try force-updating tables and retry upload
             logger.warning("Failed to upload data to main indicators table, attempting to force update tables")
             force_update_bigquery_tables()
             job_id = upload_records_to_bigquery(indicators_table_id, deduplicated_data)
+            
             if not job_id:
                 result["error"] = "Failed to upload data to BigQuery even after table force update"
                 return result
@@ -1344,16 +1618,20 @@ def process_feed(feed_config: Dict) -> Dict:
         
         # Infer schema from first record
         if deduplicated_data:
-            schema = infer_schema_from_record(deduplicated_data[0])
-            
-            # Ensure feed-specific table exists
-            if ensure_table_exists(feed_table_id, schema):
-                feed_job_id = upload_records_to_bigquery(feed_table_id, deduplicated_data)
-                if feed_job_id:
-                    result["feed_table_job_id"] = feed_job_id
-                    logger.info(f"Also uploaded data to feed-specific table {feed_table_id}")
-            else:
-                logger.warning(f"Failed to create feed-specific table {feed_table_id}")
+            try:
+                schema = infer_schema_from_record(deduplicated_data[0])
+                
+                # Ensure feed-specific table exists
+                if ensure_table_exists(feed_table_id, schema):
+                    feed_job_id = upload_records_to_bigquery(feed_table_id, deduplicated_data)
+                    if feed_job_id:
+                        result["feed_table_job_id"] = feed_job_id
+                        logger.info(f"Also uploaded data to feed-specific table {feed_table_id}")
+                else:
+                    logger.warning(f"Failed to create feed-specific table {feed_table_id}")
+            except Exception as feed_table_error:
+                logger.warning(f"Error with feed-specific table: {str(feed_table_error)}")
+                # Continue with main process - this is optional
         
         # Step 12: Publish to Pub/Sub if publisher is available
         if publisher:
@@ -1370,9 +1648,10 @@ def process_feed(feed_config: Dict) -> Dict:
             }
             
             try:
+                message_json = json.dumps(message_data)
                 future = publisher.publish(
                     topic_path, 
-                    json.dumps(message_data).encode("utf-8"),
+                    message_json.encode("utf-8"),
                     feed_id=feed_id
                 )
                 message_id = future.result()
@@ -1644,6 +1923,62 @@ def ingest_from_pubsub(event, context):
             logger.error(traceback.format_exc())
         config.report_error(e)
 
+# -------------------- Testing Functions --------------------
+
+def test_bigquery_connectivity():
+    """Test BigQuery connectivity by inserting a test record."""
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return False
+        
+    try:
+        # First ensure tables exist
+        if not initialize_bigquery_tables():
+            logger.error("Failed to initialize BigQuery tables")
+            return False
+            
+        # Create a test record
+        test_record = {
+            "id": f"test-{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            "type": "test",
+            "value": "test-indicator",
+            "source": "test-source",
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        
+        # Upload to indicators table
+        table_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}.indicators"
+        job_id = upload_records_to_bigquery(table_id, [test_record])
+        
+        if job_id:
+            logger.info("Successfully inserted test record into BigQuery")
+            
+            # Verify the record was inserted
+            query = f"""
+            SELECT * FROM `{table_id}`
+            WHERE id = '{test_record['id']}'
+            LIMIT 1
+            """
+            
+            query_job = bq_client.query(query)
+            results = list(query_job)
+            
+            if results:
+                logger.info("Successfully verified test record in BigQuery")
+                return True
+            else:
+                logger.error("Test record not found in BigQuery after insertion")
+                return False
+        else:
+            logger.error("Failed to insert test record into BigQuery")
+            return False
+    except Exception as e:
+        logger.error(f"Error testing BigQuery connectivity: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        return False
+
+
 # -------------------- Default Feeds and Sample Data --------------------
 
 # Define some hardcoded default feed configurations for testing and development
@@ -1717,9 +2052,19 @@ if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and not getattr
 # Initialize database tables on module import
 if initialize_bigquery_tables():
     logger.info("BigQuery tables initialized successfully")
+    
+    # Test BigQuery connectivity to verify it's working
+    if test_bigquery_connectivity():
+        logger.info("BigQuery connectivity test passed successfully")
+    else:
+        logger.warning("BigQuery connectivity test failed, ingestion may have issues")
 else:
     logger.warning("Some BigQuery tables could not be initialized, will retry when needed")
-    # Don't force update here to avoid slowing startup, will be handled during ingestion
+    # Force update to fix any issues
+    if force_update_bigquery_tables():
+        logger.info("Successfully forced update of BigQuery tables")
+    else:
+        logger.error("Failed to force update BigQuery tables, ingestion may have issues")
 
 if __name__ == "__main__":
     # When run as a script, ingest all feeds and print the results
