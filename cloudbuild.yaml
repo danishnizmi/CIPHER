@@ -55,6 +55,36 @@ steps:
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
       echo "Frontend build complete!"
 
+  # Create required secrets if they don't exist
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'create-secrets'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Checking and creating required secrets..."
+        
+        PROJECT_ID=${PROJECT_ID}
+        
+        # Function to create secret if it doesn't exist
+        create_secret_if_missing() {
+          SECRET_NAME=$1
+          DEFAULT_VALUE=$2
+          
+          if ! gcloud secrets describe $SECRET_NAME --project=$PROJECT_ID > /dev/null 2>&1; then
+            echo "Creating secret $SECRET_NAME..."
+            echo $DEFAULT_VALUE | gcloud secrets create $SECRET_NAME --data-file=- --project=$PROJECT_ID
+          else
+            echo "Secret $SECRET_NAME already exists"
+          fi
+        }
+        
+        # Create all required secrets with default values
+        create_secret_if_missing "api-keys" '{"platform_api_key":"dev-api-key"}'
+        create_secret_if_missing "auth-config" '{"session_secret":"dev-secret-key","enabled":true}'
+        create_secret_if_missing "feed-config" '{"feeds":[]}'
+        create_secret_if_missing "admin-initial-password" 'admin'
+
   # Build container with cache optimization
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
@@ -189,6 +219,5 @@ steps:
 timeout: '900s'
 options:
   logging: CLOUD_LOGGING_ONLY
-  # Use a valid Cloud Build machine type
   machineType: 'E2_HIGHCPU_8'
   disk_size_gb: 10
