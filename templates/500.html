@@ -8,9 +8,9 @@ Server Error - Threat Intelligence Platform
 <div class="page-header mb-6">
     <h1 class="text-2xl font-bold mb-2 flex items-center">
         <i class="fas fa-exclamation-triangle text-red-600 mr-3"></i>
-        Internal Server Error
+        {% if error_code %}{{ error_code }} - {% endif %}Error
     </h1>
-    <p class="text-gray-600">An unexpected error occurred</p>
+    <p class="text-gray-600">{{ error_message|default("An unexpected error occurred") }}</p>
 </div>
 
 <div class="auth-card max-w-lg mx-auto">
@@ -23,7 +23,7 @@ Server Error - Threat Intelligence Platform
     </div>
     
     <div class="flex justify-center space-x-4">
-        <a href="{{ url_for('frontend.dashboard') }}" class="btn btn-primary flex items-center">
+        <a href="/" class="btn btn-primary flex items-center">
             <i class="fas fa-home mr-2"></i> Go to Dashboard
         </a>
         <a href="javascript:window.history.back()" class="btn btn-secondary flex items-center">
