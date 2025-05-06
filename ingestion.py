@@ -520,7 +520,10 @@ def force_update_bigquery_tables() -> bool:
 
 
 def upload_blob_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes], content_type: str = None) -> Optional[str]:
-    """Upload data to GCS bucket and return its URI."""
+    """Upload data to GCS bucket and return its URI.
+    
+    Fixed version to ensure content types match between metadata and the upload.
+    """
     if not storage_client:
         logger.error("Storage client not initialized")
         return None
@@ -529,21 +532,46 @@ def upload_blob_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes]
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         
-        # Convert string to bytes if needed
+        # Determine the proper content type based on data and extension
+        if content_type is None:
+            # Default content type based on file extension
+            if blob_name.endswith('.json'):
+                content_type = 'application/json'
+            elif blob_name.endswith('.csv'):
+                content_type = 'text/csv'
+            elif blob_name.endswith('.txt'):
+                content_type = 'text/plain'
+            else:
+                # Default to binary data
+                content_type = 'application/octet-stream'
+        
+        # Ensure the data matches the content type
         if isinstance(data, str):
+            # For JSON content type, ensure data is valid JSON
+            if content_type == 'application/json' and not blob_name.endswith('.json'):
+                try:
+                    # Verify it's valid JSON by parsing it
+                    json.loads(data)
+                except json.JSONDecodeError:
+                    # If not valid JSON, use a different content type
+                    content_type = 'text/plain'
+            
+            # Convert string to properly encoded bytes
             data_to_upload = data.encode('utf-8')
         else:
             data_to_upload = data
             
-        # Set content type if provided
-        if content_type:
-            blob.content_type = content_type
+        # Set content type on the blob
+        blob.content_type = content_type
             
-        # Upload data
-        blob.upload_from_string(data_to_upload)
+        # Upload data - FIXED: Now explicitly passes content_type to avoid mismatch
+        blob.upload_from_string(
+            data_to_upload,
+            content_type=content_type  # Use same content type for both metadata and upload
+        )
         
         gcs_uri = f"gs://{bucket_name}/{blob_name}"
-        logger.info(f"Uploaded data to {gcs_uri}")
+        logger.info(f"Uploaded data to {gcs_uri} with content type {content_type}")
         return gcs_uri
     
     except Exception as e:
@@ -844,7 +872,13 @@ def parse_feed_data(content: bytes, format_type: str, parser_config: Dict) -> Li
 def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
     """Parse JSON formatted content."""
     try:
-        data = json.loads(content)
+        # First try to decode the JSON
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            # Try again with utf-8 decoding in case of encoding issues
+            content_str = content.decode('utf-8', errors='replace')
+            data = json.loads(content_str)
         
         # Handle case where the data is nested under a root element
         root_element = parser_config.get("root_element")
@@ -1131,7 +1165,9 @@ def store_cached_hashes(feed_name: str, hashes: List[str]) -> bool:
         if len(hashes) > 10000:
             hashes = hashes[-10000:]
             
-        blob.upload_from_string(json.dumps(hashes), content_type="application/json")
+        # Fixed: Explicitly match content type with upload for consistency
+        json_content = json.dumps(hashes)
+        blob.upload_from_string(json_content, content_type="application/json")
         return True
     except Exception as e:
         logger.warning(f"Error storing cached hashes: {str(e)}")
@@ -1190,24 +1226,31 @@ def process_feed(feed_config: Dict) -> Dict:
         format_type = feed_config.get("format", "")
         if format_type == "json":
             file_extension = ".json"
+            content_type_to_use = "application/json"
         elif format_type == "csv":
             file_extension = ".csv"
+            content_type_to_use = "text/csv"
         elif format_type == "text":
             file_extension = ".txt"
+            content_type_to_use = "text/plain"
         else:
             # Determine from content type
             if 'json' in content_type.lower():
                 file_extension = '.json'
+                content_type_to_use = "application/json"
             elif 'csv' in content_type.lower():
                 file_extension = '.csv'
+                content_type_to_use = "text/csv"
             elif 'text/plain' in content_type.lower():
                 file_extension = '.txt'
+                content_type_to_use = "text/plain"
             else:
                 file_extension = '.dat'
+                content_type_to_use = "application/octet-stream"
         
-        # Store raw data
+        # Store raw data - ensure correct content type
         raw_blob_name = f"{storage_path}/raw/{timestamp}{file_extension}"
-        raw_uri = upload_blob_to_gcs(bucket_name, raw_blob_name, content, content_type)
+        raw_uri = upload_blob_to_gcs(bucket_name, raw_blob_name, content, content_type_to_use)
         if not raw_uri:
             result["error"] = "Failed to store raw feed data"
             return result
@@ -1245,7 +1288,7 @@ def process_feed(feed_config: Dict) -> Dict:
                 deduplicated_data.append(record)
                 new_hashes.append(record_hash)
         
-        # Store hashes for future deduplication
+        # Store hashes for future deduplication - with fixed content type
         store_cached_hashes(feed_name, existing_hashes + new_hashes)
         
         # If no records after deduplication, return success with warning
@@ -1255,13 +1298,14 @@ def process_feed(feed_config: Dict) -> Dict:
             result["warning"] = "No new records after deduplication"
             return result
         
-        # Step 8: Store processed data
+        # Step 8: Store processed data - with fixed content type
         processed_blob_name = f"{storage_path}/processed/{timestamp}.json"
+        processed_data_json = json.dumps(deduplicated_data, indent=2)
         processed_uri = upload_blob_to_gcs(
             bucket_name, 
-            processed_blob_name, 
-            json.dumps(deduplicated_data, indent=2),
-            "application/json"
+            processed_blob_name,
+            processed_data_json,
+            "application/json"  # Explicitly set to JSON content type
         )
         
         if not processed_uri:
