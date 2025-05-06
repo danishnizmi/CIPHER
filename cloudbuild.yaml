@@ -189,5 +189,5 @@ steps:
 timeout: '900s'
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_4'
+  machineType: 'e2-highcpu-4'
   disk_size_gb: 10
