@@ -81,16 +81,26 @@ spec:
           value: "true"
         - name: BIGQUERY_MAX_BYTES_BILLED
           value: "1073741824"
+        # API key as environment variable first (Cloud Run will use Secret if available)
         - name: API_KEY
+          value: "dev-api-key"
+        # Also include as Secret reference if exists
+        - name: API_KEY_FROM_SECRET
           valueFrom:
             secretKeyRef:
               name: api-keys
               key: latest
+              optional: true
+        # Secret key as environment variable first
         - name: SECRET_KEY
+          value: "dev-secret-key"  
+        # Also include as Secret reference if exists
+        - name: SECRET_KEY_FROM_SECRET
           valueFrom:
             secretKeyRef:
               name: auth-config
               key: latest
+              optional: true
         startupProbe:
           httpGet:
             path: /health
@@ -111,18 +121,6 @@ spec:
           mountPath: /tmp
         - name: app-data
           mountPath: /app/data
-        - name: api-keys-volume
-          readOnly: true
-          mountPath: /app/secrets/api-keys
-        - name: auth-config-volume
-          readOnly: true
-          mountPath: /app/secrets/auth-config
-        - name: feed-config-volume
-          readOnly: true
-          mountPath: /app/secrets/feed-config
-        - name: admin-password-volume
-          readOnly: true
-          mountPath: /app/secrets/admin-password
       volumes:
       - name: tmp
         emptyDir:
@@ -130,30 +128,6 @@ spec:
       - name: app-data
         emptyDir:
           medium: Memory
-      - name: api-keys-volume
-        secret:
-          secretName: api-keys
-          items:
-          - key: latest
-            path: api-keys.json
-      - name: auth-config-volume
-        secret:
-          secretName: auth-config
-          items:
-          - key: latest
-            path: auth-config.json
-      - name: feed-config-volume
-        secret:
-          secretName: feed-config
-          items:
-          - key: latest
-            path: feed-config.json
-      - name: admin-password-volume
-        secret:
-          secretName: admin-initial-password
-          items:
-          - key: latest
-            path: admin-password.txt
   traffic:
   - percent: 100
     latestRevision: true
