@@ -2,7 +2,7 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: threat-intelligence-platform
-  namespace: '561511062593'
+  namespace: '${PROJECT_ID}'
   annotations:
     run.googleapis.com/ingress: all
     run.googleapis.com/execution-environment: gen2
@@ -23,16 +23,16 @@ spec:
     spec:
       containerConcurrency: 80
       timeoutSeconds: 900
-      serviceAccountName: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+      serviceAccountName: cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
       containers:
-      - image: gcr.io/primal-chariot-382610/threat-intelligence-platform:latest
+      - image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
         ports:
         - name: http1
           containerPort: 8080
         resources:
           limits:
-            cpu: "2"
-            memory: "2Gi"
+            cpu: "4"
+            memory: "4Gi"
           requests:
             cpu: "1"
             memory: "1Gi"
@@ -40,13 +40,13 @@ spec:
         - name: ENVIRONMENT
           value: "production"
         - name: GCP_PROJECT
-          value: "primal-chariot-382610"
+          value: "${PROJECT_ID}"
         - name: GCP_REGION
           value: "us-central1"
         - name: BIGQUERY_DATASET
           value: "threat_intelligence"
         - name: GCS_BUCKET
-          value: "primal-chariot-382610-threat-data"
+          value: "${PROJECT_ID}-threat-data"
         - name: PUBSUB_TOPIC
           value: "threat-data-ingestion"
         - name: PUBSUB_ANALYSIS_TOPIC
@@ -74,7 +74,7 @@ spec:
         - name: SESSION_PROTECTION
           value: "basic"
         - name: GUNICORN_WORKERS
-          value: "1"
+          value: "2"
         - name: GUNICORN_THREADS
           value: "4"
         - name: USE_ENV_VARS_FOR_SECRETS
@@ -106,6 +106,54 @@ spec:
           periodSeconds: 30
           timeoutSeconds: 5
           failureThreshold: 3
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: app-data
+          mountPath: /app/data
+        - name: api-keys-volume
+          readOnly: true
+          mountPath: /app/secrets/api-keys
+        - name: auth-config-volume
+          readOnly: true
+          mountPath: /app/secrets/auth-config
+        - name: feed-config-volume
+          readOnly: true
+          mountPath: /app/secrets/feed-config
+        - name: admin-password-volume
+          readOnly: true
+          mountPath: /app/secrets/admin-password
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+      - name: app-data
+        emptyDir:
+          medium: Memory
+      - name: api-keys-volume
+        secret:
+          secretName: api-keys
+          items:
+          - key: latest
+            path: api-keys.json
+      - name: auth-config-volume
+        secret:
+          secretName: auth-config
+          items:
+          - key: latest
+            path: auth-config.json
+      - name: feed-config-volume
+        secret:
+          secretName: feed-config
+          items:
+          - key: latest
+            path: feed-config.json
+      - name: admin-password-volume
+        secret:
+          secretName: admin-initial-password
+          items:
+          - key: latest
+            path: admin-password.txt
   traffic:
   - percent: 100
     latestRevision: true
