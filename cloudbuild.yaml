@@ -55,10 +55,15 @@ steps:
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
       echo "Frontend build complete!"
 
-  # Build container
+  # Build container with cache optimization
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
-    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', '.']
+    args: [
+      'build', 
+      '--cache-from', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', 
+      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', 
+      '.'
+    ]
 
   # Push container to Container Registry  
   - name: 'gcr.io/cloud-builders/docker'
@@ -79,8 +84,8 @@ steps:
           --platform managed \
           --region us-central1 \
           --allow-unauthenticated \
-          --memory 4Gi \
-          --cpu 4 \
+          --memory 2Gi \
+          --cpu 2 \
           --timeout 900 \
           --max-instances 20 \
           --min-instances 1 \
@@ -111,7 +116,7 @@ steps:
           --set-env-vars SESSION_KEY_PREFIX=threat_intel: \
           --set-env-vars SESSION_PROTECTION=basic \
           --set-env-vars PREFERRED_URL_SCHEME=https \
-          --set-env-vars GUNICORN_WORKERS=2 \
+          --set-env-vars GUNICORN_WORKERS=1 \
           --set-env-vars GUNICORN_THREADS=4 \
           --set-env-vars GUNICORN_TIMEOUT=120 \
           --set-env-vars GUNICORN_PRELOAD=true \
@@ -123,9 +128,11 @@ steps:
           --set-env-vars ENABLE_ERROR_REPORTING=true \
           --set-env-vars AUTO_INGEST=true \
           --set-env-vars AUTO_ANALYZE=true \
+          --set-env-vars USE_ENV_VARS_FOR_SECRETS=true \
+          --set-env-vars BIGQUERY_MAX_BYTES_BILLED=1073741824 \
           --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
-  # Verify deployment
+  # Verify deployment - more efficient with fewer retries
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: 'bash'
@@ -133,7 +140,7 @@ steps:
       - '-c'
       - |
         echo "Waiting for service to be ready..."
-        sleep 60
+        sleep 30
         
         CLOUD_RUN_URL=$$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
@@ -144,8 +151,8 @@ steps:
         
         # Test health endpoint with more retries
         echo "Testing health endpoint..."
-        for attempt in $$(seq 1 30); do
-          echo "Health check attempt $$attempt/30..."
+        for attempt in $$(seq 1 10); do
+          echo "Health check attempt $$attempt/10..."
           
           RESPONSE=$$(curl -s -w "\n%{http_code}" "$$CLOUD_RUN_URL/health")
           STATUS_CODE=$$(echo "$$RESPONSE" | tail -n1)
@@ -162,72 +169,25 @@ steps:
             ROOT_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/")
             echo "Root endpoint status: $$ROOT_STATUS"
             
-            # Test login endpoint
-            echo "Testing login endpoint..."
-            LOGIN_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/login")
-            echo "Login endpoint status: $$LOGIN_STATUS"
-            
-            # Test API endpoints
-            echo "Testing API health endpoint..."
-            API_HEALTH_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$CLOUD_RUN_URL/api/health")
-            echo "API health endpoint status: $$API_HEALTH_STATUS"
-            
             echo "✅ Deployment verified successfully!"
             echo "Access the application at: $$CLOUD_RUN_URL"
             exit 0
           else
             echo "⚠️ Health check returned: $$STATUS_CODE"
-            if [ $$attempt -lt 30 ]; then
+            if [ $$attempt -lt 10 ]; then
               echo "Waiting 10 seconds before next attempt..."
               sleep 10
             fi
           fi
         done
         
-        echo "❌ Health check failed after 30 attempts"
+        echo "❌ Health check failed after 10 attempts"
         echo "Checking latest logs..."
         echo "Logs URL: https://console.cloud.google.com/logs/viewer?project=${PROJECT_ID}"
         exit 1
 
-  # Debug information
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'debug-info'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "=== Service Status ==="
-        gcloud run services describe threat-intelligence-platform \
-          --region=us-central1 \
-          --project=${PROJECT_ID} \
-          --format=yaml | head -n 50
-        
-        echo -e "\n=== Latest Logs ==="
-        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\"" \
-          --limit=20 \
-          --freshness=5m \
-          --project=${PROJECT_ID}
-        
-        echo -e "\n=== Error Logs ==="
-        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND severity>=ERROR" \
-          --limit=10 \
-          --freshness=5m \
-          --project=${PROJECT_ID} || echo "No errors found"
-        
-        echo -e "\n=== Authentication Debug ==="
-        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND (\"auth\" OR \"login\" OR \"unexpected error\" OR \"Failed to save changes\")" \
-          --limit=5 \
-          --freshness=15m \
-          --project=${PROJECT_ID}
-        
-        echo -e "\n=== Session Debug ==="
-        gcloud logging read "resource.type=\"cloud_run_revision\" resource.labels.service_name=\"threat-intelligence-platform\" AND (\"session\" OR \"CSRF\" OR \"cookie\")" \
-          --limit=5 \
-          --freshness=15m \
-          --project=${PROJECT_ID}
-
-timeout: '1200s'
+timeout: '900s'
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'
-  disk_size_gb: 20
+  machineType: 'E2_HIGHCPU_4'
+  disk_size_gb: 10
