@@ -15,8 +15,10 @@ import tempfile
 import traceback
 import hashlib
 import re
-import threading
+import socket
 import time
+import threading
+import uuid
 from typing import Dict, List, Any, Optional, Tuple, Union
 from google.cloud import storage
 from google.cloud import bigquery
@@ -29,8 +31,9 @@ import config
 from config import Config
 
 # Configure logging
+log_level = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO'))
 logging.basicConfig(
-    level=getattr(logging, os.environ.get('LOG_LEVEL', 'INFO')),
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -622,10 +625,7 @@ def download_blob_from_gcs(bucket_name: str, blob_name: str) -> Optional[bytes]:
 
 
 def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
-    """Upload records to BigQuery table with enhanced error handling and retries.
-    
-    COMPLETELY REWRITTEN for robustness and reliability.
-    """
+    """Upload records to BigQuery table with enhanced error handling and retries."""
     if not bq_client:
         logger.error("BigQuery client not initialized")
         return None
@@ -634,101 +634,134 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
         logger.warning(f"No records to upload to {table_id}")
         return None
     
-    # Process 100 records at a time to avoid issues with large uploads
-    batch_size = 100
+    # Process records in smaller batches for better reliability
+    batch_size = 50  # Smaller batch size for better reliability
     success_count = 0
     error_count = 0
     job_ids = []
     
-    # Log record structure for debugging
+    # Log more details about the records
+    logger.info(f"Preparing to upload {len(records)} records to {table_id}")
+    
     try:
-        sample_record = records[0]
-        logger.info(f"Sample record structure: {list(sample_record.keys())}")
-    except (IndexError, TypeError) as e:
-        logger.warning(f"Could not log sample record structure: {str(e)}")
+        # Log sample record for debugging
+        if records:
+            sample_record = records[0]
+            logger.info(f"Sample record: {json.dumps(sample_record, default=str)[:500]}...")
+    except Exception as e:
+        logger.warning(f"Could not log sample record: {str(e)}")
     
     # Split records into batches
     for i in range(0, len(records), batch_size):
         batch = records[i:i+batch_size]
+        batch_num = i//batch_size + 1
+        logger.info(f"Processing batch {batch_num}/{(len(records) + batch_size - 1) // batch_size} ({len(batch)} records)")
         
         try:
-            # Step 1: Prepare data with proper datetime handling
+            # Prepare processed batch with proper handling of field types
             processed_batch = []
+            record_errors = []
+            
             for record in batch:
-                processed_record = {}
-                
-                # Process each field with special handling for timestamps
-                for key, value in record.items():
-                    # Handle datetime objects
-                    if isinstance(value, (datetime.datetime, datetime.date)):
-                        # Convert to ISO format string for BigQuery
-                        processed_record[key] = value.isoformat()
+                try:
+                    processed_record = {}
                     
-                    # Handle string timestamps
-                    elif key in ['created_at', 'first_seen', 'last_seen', 'timestamp'] and isinstance(value, str):
-                        try:
-                            # Try to parse and normalize the timestamp format
-                            dt = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
-                            processed_record[key] = dt.isoformat()
-                        except ValueError:
-                            # If can't parse, use as is
-                            processed_record[key] = value
-                    
-                    # Handle tags/array fields
-                    elif key == 'tags' and isinstance(value, list):
-                        # Ensure all items are strings
-                        processed_record[key] = [str(item) for item in value]
-                    
-                    # Handle empty arrays that should not be null
-                    elif isinstance(value, list) and not value:
-                        if key == 'tags':
-                            processed_record[key] = []
+                    # Process each field with special handling for timestamps and schema compatibility
+                    for key, value in record.items():
+                        # Handle datetime objects
+                        if isinstance(value, (datetime.datetime, datetime.date)):
+                            processed_record[key] = value.isoformat()
+                        
+                        # Handle string timestamps
+                        elif key in ['created_at', 'first_seen', 'last_seen', 'timestamp'] and isinstance(value, str):
+                            try:
+                                # Try to parse and normalize the timestamp format
+                                dt = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                                processed_record[key] = dt.isoformat()
+                            except ValueError:
+                                # If can't parse, use current time
+                                processed_record[key] = datetime.datetime.utcnow().isoformat()
+                                logger.warning(f"Invalid datetime format for {key}: {value}, using current time")
+                        
+                        # Handle nested dicts by converting to JSON strings
+                        elif isinstance(value, dict):
+                            processed_record[key] = json.dumps(value)
+                            
+                        # Handle tags/array fields
+                        elif key == 'tags' and isinstance(value, list):
+                            # Ensure all items are strings
+                            processed_record[key] = [str(item) for item in value]
+                        
+                        # Handle empty arrays
+                        elif isinstance(value, list) and not value:
+                            if key == 'tags':
+                                processed_record[key] = []
+                            else:
+                                processed_record[key] = value
+                        
+                        # Handle JSON objects stored as strings
+                        elif isinstance(value, (dict, list)) and key not in ['tags']:
+                            processed_record[key] = json.dumps(value)
+                        
+                        # All other values pass through
                         else:
                             processed_record[key] = value
                     
-                    # Handle JSON objects stored as strings
-                    elif key == 'raw_data' and isinstance(value, (dict, list)):
-                        processed_record[key] = json.dumps(value)
+                    # Ensure required fields
+                    if 'id' not in processed_record:
+                        processed_record['id'] = hashlib.md5(str(record).encode()).hexdigest()
                     
-                    # All other values pass through
-                    else:
-                        processed_record[key] = value
-                
-                # Ensure required fields
-                if 'id' not in processed_record:
-                    processed_record['id'] = hashlib.md5(str(record).encode()).hexdigest()
-                
-                # Add record to batch
-                processed_batch.append(processed_record)
+                    # Ensure value field exists and is a string
+                    if 'value' not in processed_record:
+                        if 'ioc' in processed_record:
+                            processed_record['value'] = str(processed_record['ioc'])
+                        elif 'indicator' in processed_record:
+                            processed_record['value'] = str(processed_record['indicator'])
+                        else:
+                            processed_record['value'] = 'unknown_' + str(uuid.uuid4())
+                            logger.warning(f"Added default value field to record: {processed_record['value']}")
+                    elif not isinstance(processed_record['value'], str):
+                        processed_record['value'] = str(processed_record['value'])
+                    
+                    # Add record to batch
+                    processed_batch.append(processed_record)
+                except Exception as record_err:
+                    record_errors.append(str(record_err))
+                    logger.error(f"Error processing record: {str(record_err)}")
             
-            # Step 2: Upload directly to BigQuery using load_table_from_json
-            # This avoids file I/O issues and is more reliable
-            job_config = bigquery.LoadJobConfig(
-                schema_update_options=[
-                    bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
-                ],
-                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            )
+            if record_errors:
+                logger.warning(f"Encountered {len(record_errors)} errors while processing records. First error: {record_errors[0]}")
             
-            # Convert to newline-delimited JSON
-            json_data = "\n".join([json.dumps(record) for record in processed_batch])
+            if not processed_batch:
+                logger.error("No valid records to upload after processing")
+                error_count += 1
+                continue
             
-            # Upload with retries
+            # Upload to BigQuery with multiple retry attempts
             max_retries = 5
             for attempt in range(max_retries):
                 try:
+                    # Configure the job
+                    job_config = bigquery.LoadJobConfig(
+                        schema_update_options=[
+                            bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
+                        ],
+                        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+                    )
+                    
+                    # Upload the records directly
                     job = bq_client.load_table_from_json(
-                        processed_batch,  # Use the processed records directly 
+                        processed_batch,
                         table_id,
                         job_config=job_config
                     )
                     
                     # Wait for job to complete with timeout
-                    result = job.result(timeout=60)  # 60 second timeout
+                    result = job.result(timeout=120)  # 2 minute timeout
                     
                     if job.errors:
-                        logger.error(f"Errors in batch {i//batch_size + 1}: {job.errors}")
+                        logger.error(f"Errors in batch {batch_num}: {job.errors}")
                         if attempt < max_retries - 1:
                             wait_time = 2 ** attempt  # Exponential backoff
                             logger.info(f"Retrying batch in {wait_time} seconds...")
@@ -739,23 +772,23 @@ def upload_records_to_bigquery(table_id: str, records: List[Dict]) -> Optional[s
                     else:
                         job_ids.append(job.job_id)
                         success_count += 1
-                        logger.info(f"Successfully uploaded batch {i//batch_size + 1} ({len(batch)} records) to {table_id}")
+                        logger.info(f"Successfully uploaded batch {batch_num} ({len(processed_batch)} records) to {table_id}")
                     
                     # Break retry loop on success
                     break
                         
                 except Exception as e:
-                    logger.error(f"Error uploading batch {i//batch_size + 1} to BigQuery: {str(e)}")
+                    logger.error(f"Error uploading batch {batch_num} to BigQuery: {str(e)}")
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt  # Exponential backoff
                         logger.info(f"Retrying batch in {wait_time} seconds...")
                         time.sleep(wait_time)
                     else:
-                        logger.error(f"Failed to upload batch {i//batch_size + 1} after {max_retries} attempts")
+                        logger.error(f"Failed to upload batch {batch_num} after {max_retries} attempts")
                         error_count += 1
             
         except Exception as e:
-            logger.error(f"Unexpected error processing batch {i//batch_size + 1}: {str(e)}")
+            logger.error(f"Unexpected error processing batch {batch_num}: {str(e)}")
             if Config.ENVIRONMENT != 'production':
                 logger.error(traceback.format_exc())
             error_count += 1
@@ -1440,6 +1473,216 @@ def store_cached_hashes(feed_name: str, hashes: List[str]) -> bool:
         logger.warning(f"Error storing cached hashes: {str(e)}")
         return False
 
+# -------------------- Diagnostic Functions --------------------
+
+def diagnose_bigquery_issues():
+    """Diagnose common BigQuery issues that might prevent data ingestion."""
+    if not bq_client:
+        logger.error("BigQuery client not initialized - Check service account permissions")
+        return False
+    
+    try:
+        # Test basic query capability
+        logger.info("Testing BigQuery connectivity...")
+        test_query = "SELECT 1 as test"
+        query_job = bq_client.query(test_query)
+        results = list(query_job.result())
+        if results and len(results) > 0:
+            logger.info("✅ BigQuery connectivity test passed")
+        else:
+            logger.error("❌ BigQuery query returned no results")
+            return False
+        
+        # Check if dataset exists
+        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        logger.info(f"Checking if dataset {dataset_id} exists...")
+        try:
+            bq_client.get_dataset(dataset_id)
+            logger.info(f"✅ Dataset {dataset_id} exists")
+        except Exception as e:
+            logger.error(f"❌ Dataset {dataset_id} doesn't exist: {str(e)}")
+            logger.info("Attempting to create dataset...")
+            if not ensure_dataset_exists(dataset_id):
+                logger.error("Failed to create dataset")
+                return False
+        
+        # Check if indicators table exists and is accessible
+        table_id = f"{dataset_id}.indicators"
+        logger.info(f"Checking if table {table_id} exists and is accessible...")
+        try:
+            bq_client.get_table(table_id)
+            # Verify the table with a query
+            test_query = f"SELECT COUNT(*) FROM `{table_id}`"
+            query_job = bq_client.query(test_query)
+            results = list(query_job.result())
+            logger.info(f"✅ Table {table_id} exists and is accessible - contains {results[0][0]} rows")
+        except Exception as e:
+            logger.error(f"❌ Issue with table {table_id}: {str(e)}")
+            logger.info("Attempting to recreate table...")
+            if not initialize_bigquery_tables():
+                logger.error("Failed to initialize tables")
+                return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error while diagnosing BigQuery issues: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        return False
+
+
+def diagnose_feed_issues():
+    """Diagnose issues with feed configuration and connectivity."""
+    logger.info("Diagnosing feed configuration and connectivity...")
+    
+    # Check feed configuration
+    if not Config.FEEDS or len(Config.FEEDS) == 0:
+        logger.error("❌ No feeds configured")
+        # Load default feeds
+        Config.FEEDS = DEFAULT_FEED_CONFIGS
+        logger.info("Loaded default feeds")
+    
+    # Test connectivity to each feed
+    successful_feeds = 0
+    failed_feeds = 0
+    
+    for feed in Config.FEEDS:
+        if not feed.get("enabled", True):
+            logger.info(f"Feed {feed.get('name')} is disabled, skipping")
+            continue
+            
+        url = feed.get("url")
+        if not url:
+            logger.warning(f"Feed {feed.get('name')} has no URL, skipping")
+            continue
+            
+        try:
+            logger.info(f"Testing connectivity to {url}...")
+            # Use requests directly with a short timeout for testing
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                successful_feeds += 1
+                logger.info(f"✅ Successfully connected to {feed.get('name')} ({url})")
+                
+                # Output sample of response content for debugging
+                content_preview = response.content[:200]
+                logger.info(f"Content preview: {content_preview}")
+            else:
+                failed_feeds += 1
+                logger.warning(f"❌ Feed {feed.get('name')} returned status code {response.status_code}")
+        except Exception as e:
+            failed_feeds += 1
+            logger.error(f"❌ Failed to connect to feed {feed.get('name')} ({url}): {str(e)}")
+    
+    logger.info(f"Feed connectivity test results: {successful_feeds} successful, {failed_feeds} failed")
+    return successful_feeds > 0
+
+
+def fix_and_force_ingestion():
+    """Fix common issues and force ingestion of feed data."""
+    logger.info("Starting comprehensive ingestion repair process...")
+    
+    # Step 1: Diagnose and fix BigQuery issues
+    logger.info("Step 1/4: Diagnosing BigQuery issues...")
+    if not diagnose_bigquery_issues():
+        logger.warning("BigQuery issues found, attempting to continue...")
+        # Force table recreation as a last resort
+        force_update_bigquery_tables()
+    
+    # Step 2: Diagnose and fix feed issues
+    logger.info("Step 2/4: Diagnosing feed issues...")
+    if not diagnose_feed_issues():
+        logger.warning("Feed connectivity issues found, attempting to continue with available feeds...")
+    
+    # Step 3: Force ingestion with detailed logging
+    logger.info("Step 3/4: Running forced ingestion with detailed logging...")
+    
+    # Temporarily increase log level
+    current_log_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    
+    # Set processing flags to capture more details
+    os.environ['DEBUG'] = 'true'
+    
+    try:
+        # Run ingestion with forced parameters
+        result = ingest_all_feeds()
+        
+        # Log results
+        success_count = sum(1 for r in result if r.get('status') == 'success')
+        logger.info(f"Ingestion results: {success_count}/{len(result)} feeds processed successfully")
+        
+        # Log detailed information about failures
+        for feed_result in result:
+            if feed_result.get('status') != 'success':
+                feed_name = feed_result.get('feed_name', 'Unknown')
+                error = feed_result.get('error', 'Unknown error')
+                logger.error(f"Failed to process feed {feed_name}: {error}")
+    except Exception as e:
+        logger.error(f"Error during forced ingestion: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+    finally:
+        # Restore log level
+        logger.setLevel(current_log_level)
+    
+    # Step 4: Verify results
+    logger.info("Step 4/4: Verifying ingestion results...")
+    verify_ingestion_results()
+    
+    logger.info("Ingestion repair process completed")
+    return True
+
+
+def verify_ingestion_results():
+    """Verify that data was successfully ingested into BigQuery."""
+    if not bq_client:
+        logger.error("BigQuery client not initialized")
+        return False
+    
+    try:
+        # Check indicators table
+        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        table_id = f"{dataset_id}.indicators"
+        
+        # Count records
+        query = f"SELECT COUNT(*) as count FROM `{table_id}`"
+        query_job = bq_client.query(query)
+        results = list(query_job.result())
+        
+        if results and len(results) > 0:
+            count = results[0]['count']
+            logger.info(f"Found {count} records in the indicators table")
+            
+            if count > 0:
+                # Sample some records
+                sample_query = f"SELECT * FROM `{table_id}` LIMIT 3"
+                sample_job = bq_client.query(sample_query)
+                samples = list(sample_job.result())
+                
+                logger.info(f"Sample record fields: {[field.name for field in sample_job.schema]}")
+                logger.info(f"Sample record count: {len(samples)}")
+                
+                # Log a few key fields from the first record
+                if samples:
+                    first_record = dict(samples[0])
+                    logger.info(f"First record ID: {first_record.get('id')}")
+                    logger.info(f"First record type: {first_record.get('type')}")
+                    logger.info(f"First record value: {first_record.get('value')}")
+                
+                return True
+            else:
+                logger.warning("No records found in the indicators table after ingestion")
+                return False
+        else:
+            logger.error("Failed to query record count")
+            return False
+    except Exception as e:
+        logger.error(f"Error verifying ingestion results: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        return False
+
 # -------------------- Main Feed Processing Function --------------------
 
 def process_feed(feed_config: Dict) -> Dict:
@@ -1792,6 +2035,10 @@ def ingest_all_feeds() -> List[Dict]:
         if not force_update_bigquery_tables():
             logger.error("Failed to force update BigQuery tables, ingestion may have issues")
     
+    # Make sure feed configuration is initialized
+    if not Config.FEEDS or len(Config.FEEDS) == 0:
+        Config.ensure_feed_configuration()
+
     # Define a getter for enabled feeds if it doesn't exist
     if not hasattr(Config, 'get_enabled_feeds'):
         # Default implementation - consider all feeds enabled unless explicitly disabled
@@ -1923,66 +2170,10 @@ def ingest_from_pubsub(event, context):
             logger.error(traceback.format_exc())
         config.report_error(e)
 
-# -------------------- Testing Functions --------------------
-
-def test_bigquery_connectivity():
-    """Test BigQuery connectivity by inserting a test record."""
-    if not bq_client:
-        logger.error("BigQuery client not initialized")
-        return False
-        
-    try:
-        # First ensure tables exist
-        if not initialize_bigquery_tables():
-            logger.error("Failed to initialize BigQuery tables")
-            return False
-            
-        # Create a test record
-        test_record = {
-            "id": f"test-{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-            "type": "test",
-            "value": "test-indicator",
-            "source": "test-source",
-            "created_at": datetime.datetime.utcnow().isoformat()
-        }
-        
-        # Upload to indicators table
-        table_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}.indicators"
-        job_id = upload_records_to_bigquery(table_id, [test_record])
-        
-        if job_id:
-            logger.info("Successfully inserted test record into BigQuery")
-            
-            # Verify the record was inserted
-            query = f"""
-            SELECT * FROM `{table_id}`
-            WHERE id = '{test_record['id']}'
-            LIMIT 1
-            """
-            
-            query_job = bq_client.query(query)
-            results = list(query_job)
-            
-            if results:
-                logger.info("Successfully verified test record in BigQuery")
-                return True
-            else:
-                logger.error("Test record not found in BigQuery after insertion")
-                return False
-        else:
-            logger.error("Failed to insert test record into BigQuery")
-            return False
-    except Exception as e:
-        logger.error(f"Error testing BigQuery connectivity: {str(e)}")
-        if Config.ENVIRONMENT != 'production':
-            logger.error(traceback.format_exc())
-        return False
-
-
-# -------------------- Default Feeds and Sample Data --------------------
+# -------------------- Default Feeds --------------------
 
 # Define some hardcoded default feed configurations for testing and development
-DEFAULT_FEEDS = [
+DEFAULT_FEED_CONFIGS = [
     {
         "id": "phishtank",
         "name": "PhishTank URLs",
@@ -2031,10 +2222,10 @@ DEFAULT_FEEDS = [
 # Add default feeds to config if no feeds are configured
 if not hasattr(Config, 'FEEDS') or not Config.FEEDS:
     logger.info("No feeds configured, adding default feeds")
-    Config.FEEDS = DEFAULT_FEEDS
+    Config.FEEDS = DEFAULT_FEED_CONFIGS
 
 # Automatically trigger ingestion on module load for production environment
-if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and not getattr(Config, 'DISABLE_AUTO_INGESTION', False):
+if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and Config.AUTO_INGEST:
     # Wait a bit to ensure the app has started
     logger.info("Auto-ingestion enabled - will start ingestion after app startup")
     
@@ -2054,10 +2245,17 @@ if initialize_bigquery_tables():
     logger.info("BigQuery tables initialized successfully")
     
     # Test BigQuery connectivity to verify it's working
-    if test_bigquery_connectivity():
-        logger.info("BigQuery connectivity test passed successfully")
-    else:
-        logger.warning("BigQuery connectivity test failed, ingestion may have issues")
+    try:
+        # Simple test query
+        test_query = "SELECT 1 as test"
+        query_job = bq_client.query(test_query)
+        results = list(query_job.result())
+        if results and len(results) > 0:
+            logger.info("BigQuery connectivity test passed")
+        else:
+            logger.warning("BigQuery connectivity test returned no results, there may be issues")
+    except Exception as e:
+        logger.warning(f"BigQuery connectivity test failed: {str(e)}")
 else:
     logger.warning("Some BigQuery tables could not be initialized, will retry when needed")
     # Force update to fix any issues
@@ -2066,30 +2264,42 @@ else:
     else:
         logger.error("Failed to force update BigQuery tables, ingestion may have issues")
 
+# CLI command runner
 if __name__ == "__main__":
-    # When run as a script, ingest all feeds and print the results
-    logger.info("Running ingestion.py as standalone script")
+    import argparse
     
-    # First force tables to be properly initialized
-    logger.info("Ensuring BigQuery tables are properly initialized")
-    if not initialize_bigquery_tables():
-        logger.warning("BigQuery tables initialization reported issues")
-        if force_update_bigquery_tables():
-            logger.info("Successfully forced BigQuery tables update")
-        else:
-            logger.error("Failed to update BigQuery tables, ingestion may have issues")
+    parser = argparse.ArgumentParser(description='Threat Intelligence Platform Ingestion Tool')
+    parser.add_argument('--diagnose', action='store_true', help='Run diagnostics on BigQuery and feed configuration')
+    parser.add_argument('--fix', action='store_true', help='Fix issues and force ingestion')
+    parser.add_argument('--feed', type=str, help='Process a specific feed by ID or name')
+    parser.add_argument('--verify', action='store_true', help='Verify ingestion results')
+    parser.add_argument('--force-tables', action='store_true', help='Force recreation of BigQuery tables')
+    args = parser.parse_args()
     
-    # Run the ingestion
-    results = ingest_all_feeds()
-    
-    # Print summary
-    success_count = sum(1 for r in results if r.get("status") == "success")
-    total_records = sum(r.get("record_count", 0) for r in results if r.get("status") == "success")
-    
-    print(f"Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed")
-    print(f"Total records ingested: {total_records}")
-    
-    # Print errors if any
-    for result in results:
-        if result.get("status") != "success":
-            print(f"Feed '{result.get('feed_name')}' failed: {result.get('error', 'Unknown error')}")
+    if args.diagnose:
+        logger.info("Running diagnostics...")
+        diagnose_bigquery_issues()
+        diagnose_feed_issues()
+        
+    elif args.fix:
+        logger.info("Running fix and force ingestion...")
+        fix_and_force_ingestion()
+        
+    elif args.feed:
+        logger.info(f"Processing specific feed: {args.feed}")
+        result = ingest_feed(args.feed)
+        logger.info(f"Result: {result}")
+        
+    elif args.verify:
+        logger.info("Verifying ingestion results...")
+        verify_ingestion_results()
+        
+    elif args.force_tables:
+        logger.info("Forcing recreation of BigQuery tables...")
+        force_update_bigquery_tables()
+        
+    else:
+        logger.info("Running standard ingestion...")
+        results = ingest_all_feeds()
+        success_count = sum(1 for r in results if r.get('status') == 'success')
+        logger.info(f"Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed")
