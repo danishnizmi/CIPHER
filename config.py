@@ -1,3 +1,9 @@
+"""
+Optimized configuration module for Threat Intelligence Platform.
+Handles configuration management, Google Cloud client initialization, and secret management.
+Cost-optimized to reduce Secret Manager, Cloud Run, and overall resource usage.
+"""
+
 import os
 import sys
 import json
@@ -53,7 +59,7 @@ GCP_SERVICES_AVAILABLE = HAS_GCP
 # Initialize logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
     ]
@@ -246,7 +252,7 @@ def initialize_bigquery():
         
         # Test client by running a simple query
         test_query = "SELECT 1"
-        test_job = client.query(test_query)
+        test_job = client.query(test_query, job_config=bigquery.QueryJobConfig(maximum_bytes_billed=1048576)) # 1MB limit for test
         test_result = list(test_job.result())
         
         if test_result and len(test_result) == 1 and test_result[0][0] == 1:
@@ -313,6 +319,11 @@ def initialize_error_reporting(project_id: str = None):
 @handle_gcp_errors
 def initialize_secret_manager():
     """Initialize and return a Secret Manager client with error handling."""
+    # Only initialize if we're running in a cloud environment
+    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+        logger.info("Using environment variables for secrets, not initializing Secret Manager")
+        return None
+    
     return secretmanager.SecretManagerServiceClient()
 
 # Centralized Error Reporting
@@ -328,17 +339,44 @@ def report_error(exception: Exception):
         except Exception as e:
             logger.error(f"Failed to report error: {str(e)}")
 
-# Secret Management Functions
+# Secret Management Functions with Cost Optimization
 @handle_gcp_errors
 def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
-    """Access secrets from Google Cloud Secret Manager with robust error handling."""
+    """
+    Access secrets from environment variables first, then Google Cloud Secret Manager.
+    
+    This optimized function prioritizes environment variables for non-sensitive configs
+    to reduce Secret Manager costs.
+    """
+    # First check environment variables (most cost-efficient)
+    env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
+    if os.environ.get(env_var_name):
+        logger.info(f"Using environment variable {env_var_name} as fallback for secret {secret_id}")
+        secret_value = os.environ.get(env_var_name)
+        try:
+            # Try to parse as JSON if applicable
+            return json.loads(secret_value)
+        except json.JSONDecodeError:
+            # Return as string if not JSON
+            return secret_value
+    
+    # Check if we should use Secret Manager at all
+    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+        logger.debug(f"Configured to use only environment variables for secrets, not accessing Secret Manager for {secret_id}")
+        return None
+    
+    # Initialize Secret Manager only if needed
     secret_client = initialize_secret_manager()
     if not secret_client:
         logger.debug(f"Secret Manager client not available, checking environment variables for {secret_id}")
-        env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
-        if os.environ.get(env_var_name):
-            logger.info(f"Using environment variable {env_var_name} as fallback for secret {secret_id}")
-            return os.environ.get(env_var_name)
+        for env_name, env_value in os.environ.items():
+            # Check for possible matches in environment
+            if secret_id.lower() in env_name.lower():
+                logger.info(f"Using environment variable {env_name} as potential match for secret {secret_id}")
+                try:
+                    return json.loads(env_value)
+                except json.JSONDecodeError:
+                    return env_value
         return None
     
     project_id = get_project_id()
@@ -372,31 +410,45 @@ def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
 
 # Cached Config Management
 class ConfigCache:
-    """Centralized configuration cache management."""
+    """Centralized configuration cache management with optimized storage."""
     _cache = {}
+    _last_refresh = {}
+    _cache_ttl = 3600  # 1 hour TTL to reduce Secret Manager calls
     
     @classmethod
     def get(cls, key: str, force_refresh: bool = False) -> Optional[Dict]:
-        """Get and cache configuration from Secret Manager."""
+        """Get and cache configuration from Secret Manager or environment variables."""
         cache_key = f"_cached_{key.replace('-', '_')}"
         
-        if cache_key in cls._cache and not force_refresh:
+        # Return from cache if it's still valid
+        if (not force_refresh and 
+            cache_key in cls._cache and 
+            key in cls._last_refresh and 
+            (time.time() - cls._last_refresh[key]) < cls._cache_ttl):
             return cls._cache[cache_key]
         
-        if get_env_bool("USE_ENV_VARS_FOR_SECRETS", False):
-            env_var_name = f"SECRET_{key.replace('-', '_').upper()}"
-            if os.environ.get(env_var_name):
+        # Try environment variables first (cost optimization)
+        env_var_name = f"SECRET_{key.replace('-', '_').upper()}"
+        if os.environ.get(env_var_name):
+            try:
+                config_data = os.environ.get(env_var_name)
                 try:
-                    config_data = json.loads(os.environ.get(env_var_name))
-                    if config_data:
-                        cls._cache[cache_key] = config_data
-                        return config_data
+                    config_data = json.loads(config_data)
                 except json.JSONDecodeError:
                     pass
+                    
+                if config_data:
+                    cls._cache[cache_key] = config_data
+                    cls._last_refresh[key] = time.time()
+                    return config_data
+            except Exception:
+                pass
         
+        # Fall back to Secret Manager if environment variable not available
         config_data = access_secret(key)
         if config_data:
             cls._cache[cache_key] = config_data
+            cls._last_refresh[key] = time.time()
         
         return config_data
     
@@ -407,12 +459,15 @@ class ConfigCache:
             cache_key = f"_cached_{key.replace('-', '_')}"
             if cache_key in cls._cache:
                 del cls._cache[cache_key]
+            if key in cls._last_refresh:
+                del cls._last_refresh[key]
         else:
             cls._cache.clear()
+            cls._last_refresh.clear()
 
 # Simplified config access function
 def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
-    """Get and cache configuration from Secret Manager."""
+    """Get and cache configuration from environment variables or Secret Manager."""
     return ConfigCache.get(secret_id, force_refresh)
 
 # Configuration Class
@@ -448,6 +503,9 @@ class Config:
         'audit_log': 'audit_log'
     }
     BIGQUERY_LOCATION = os.environ.get('BIGQUERY_LOCATION', 'US')
+    
+    # BigQuery cost controls
+    BIGQUERY_MAX_BYTES_BILLED = int(os.environ.get('BIGQUERY_MAX_BYTES_BILLED', 1073741824))  # 1GB default
     
     # Storage configuration
     GCS_BUCKET = os.environ.get('GCS_BUCKET', f"{GCP_PROJECT}-threat-data" if GCP_PROJECT else 'threat-data')
@@ -556,8 +614,13 @@ class Config:
     IGNORE_PERMISSION_ERRORS = get_env_bool('IGNORE_PERMISSION_ERRORS', False)
     
     # Auto ingestion and analysis flags
-    AUTO_INGEST = get_env_bool('AUTO_INGEST', True)  # Changed default to True
-    AUTO_ANALYZE = get_env_bool('AUTO_ANALYZE', True)  # Changed default to True
+    AUTO_INGEST = get_env_bool('AUTO_INGEST', True)
+    AUTO_ANALYZE = get_env_bool('AUTO_ANALYZE', True)
+    
+    # COST OPTIMIZED CONFIG: Secret Management Options
+    USE_ENV_VARS_FOR_SECRETS = get_env_bool('USE_ENV_VARS_FOR_SECRETS', False)
+    SECRETS_CACHE_TTL = int(os.environ.get('SECRETS_CACHE_TTL', 3600))  # 1 hour by default
+    CONSOLIDATED_SECRETS = get_env_bool('CONSOLIDATED_SECRETS', True)  # Use single secrets for multiple values
     
     # Centralized Methods
     @classmethod
@@ -692,9 +755,20 @@ class Config:
     
     @classmethod
     def get_feed_config_from_secret(cls):
-        """Retrieve feed configuration from Secret Manager with improved error handling."""
+        """Retrieve feed configuration from Secret Manager or environment with cost optimization."""
         try:
-            # Try to get config from Secret Manager
+            # Try environment variable first (cost-efficient)
+            env_feed_config = os.environ.get('FEED_CONFIG')
+            if env_feed_config:
+                try:
+                    feed_config = json.loads(env_feed_config)
+                    if isinstance(feed_config, dict) and 'feeds' in feed_config:
+                        logger.info("Successfully loaded feed configuration from environment variable")
+                        return feed_config
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse FEED_CONFIG environment variable")
+            
+            # Then try Secret Manager
             feed_config = access_secret("feed-config")
             
             if feed_config and isinstance(feed_config, dict):
@@ -715,11 +789,11 @@ class Config:
             logger.info(f"Using existing feed configuration with {len(cls.FEEDS)} feeds")
             return True
         
-        # Try to load from Secret Manager
+        # Try to load from environment or Secret Manager
         feed_config = cls.get_feed_config_from_secret()
         if feed_config and 'feeds' in feed_config and feed_config['feeds']:
             cls.FEEDS = feed_config['feeds']
-            logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
+            logger.info(f"Loaded {len(cls.FEEDS)} feeds from configuration source")
             return True
         
         # Fall back to environment variable
@@ -744,23 +818,51 @@ class Config:
             cls.FEEDS = DEFAULT_FEED_CONFIGS
             logger.info(f"Using builtin default feed configuration with {len(cls.FEEDS)} feeds")
         
-        # Try to save this configuration to Secret Manager for future use
+        # Try to save this configuration as environment variable for future use
         try:
             feed_config = {
                 "feeds": cls.FEEDS,
                 "update_interval_hours": cls.FEED_UPDATE_INTERVAL,
                 "default_tags": cls.FEED_DEFAULT_TAGS if hasattr(cls, 'FEED_DEFAULT_TAGS') else []
             }
-            create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
-            logger.info("Saved default feed configuration to Secret Manager")
+            os.environ['FEED_CONFIG'] = json.dumps(feed_config)
+            logger.info("Saved default feed configuration to environment variable")
+            
+            # Only save to Secret Manager if necessary and not using env vars
+            if not cls.USE_ENV_VARS_FOR_SECRETS:
+                create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
+                logger.info("Saved default feed configuration to Secret Manager")
         except Exception as e:
-            logger.warning(f"Failed to save feed configuration to Secret Manager: {str(e)}")
+            logger.warning(f"Failed to save feed configuration: {str(e)}")
         
         return True
     
     @classmethod
     def init_secrets(cls):
-        """Initialize configuration from Secret Manager."""
+        """Initialize configuration from environment variables or Secret Manager."""
+        # First check if we should skip Secret Manager entirely
+        if cls.USE_ENV_VARS_FOR_SECRETS:
+            logger.info("Using environment variables for secrets")
+            try:
+                # Set up API keys from environment
+                cls.API_KEY = os.environ.get('API_KEY', cls.API_KEY)
+                cls.SECRET_KEY = os.environ.get('SECRET_KEY', cls.SECRET_KEY)
+                cls.WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY', cls.SECRET_KEY)
+                
+                # Set up session secret from environment
+                cls.SESSION_SECRET = os.environ.get('SESSION_SECRET', cls.SECRET_KEY)
+                
+                # Ensure feed configuration
+                cls.ensure_feed_configuration()
+                
+                # Load admin password if available
+                cls.ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', cls.ADMIN_PASSWORD)
+                
+                return
+            except Exception as e:
+                logger.warning(f"Error loading from environment variables: {str(e)}")
+        
+        # Fall back to Secret Manager if needed and available
         if not cls.GCP_PROJECT or not HAS_GCP:
             logger.info("Skipping secret initialization - not in GCP environment or missing libraries")
             try:
@@ -866,9 +968,14 @@ class Config:
                 logger.error("Failed to initialize BigQuery client")
                 return False
             
-            # Test simple query
+            # Test simple query with cost controls
             try:
-                query_job = bq_client.query("SELECT 1")
+                query_job = bq_client.query(
+                    "SELECT 1", 
+                    job_config=bigquery.QueryJobConfig(
+                        maximum_bytes_billed=1048576  # 1MB limit for test query
+                    )
+                )
                 query_job.result()
                 logger.info("BigQuery connection test successful")
             except Exception as e:
@@ -914,6 +1021,22 @@ def get_gcp_clients():
 def create_default_feed_config() -> bool:
     """Create a default feed configuration if it doesn't exist."""
     try:
+        # First check if we can use environment variable
+        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+            feed_config = {
+                "feeds": DEFAULT_FEED_CONFIGS,
+                "update_interval_hours": 6,
+                "default_tags": [],
+                "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
+                "request_timeout": 30,
+                "max_retries": 3
+            }
+            os.environ['FEED_CONFIG'] = json.dumps(feed_config)
+            logger.info("Created default feed-config in environment variable")
+            Config.FEEDS = DEFAULT_FEED_CONFIGS
+            return True
+            
+        # Otherwise use Secret Manager if needed
         feed_config = access_secret("feed-config")
         if feed_config:
             logger.info("Feed configuration already exists in Secret Manager")
@@ -946,6 +1069,28 @@ def create_default_feed_config() -> bool:
 def create_default_auth_config() -> bool:
     """Create a default auth configuration if it doesn't exist."""
     try:
+        # First check if we can use environment variable
+        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+            import secrets
+            session_secret = secrets.token_hex(32)
+            auth_config = {
+                "session_secret": session_secret,
+                "enabled": True,
+                "users": {
+                    "admin": {
+                        "password": hashlib.sha256("admin".encode()).hexdigest(),
+                        "role": "admin", 
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                }
+            }
+            os.environ['SECRET_KEY'] = session_secret
+            os.environ['WTF_CSRF_SECRET_KEY'] = session_secret
+            os.environ['SECRET_AUTH_CONFIG'] = json.dumps(auth_config)
+            logger.info("Created default auth-config in environment variables")
+            return True
+        
+        # Otherwise use Secret Manager
         auth_config = access_secret("auth-config")
         if auth_config:
             logger.info("Auth configuration already exists in Secret Manager")
@@ -983,6 +1128,13 @@ def create_default_auth_config() -> bool:
 
 def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
     """Create or update a secret in Secret Manager."""
+    # Skip if we're using environment variables
+    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+        env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
+        os.environ[env_var_name] = secret_value
+        logger.info(f"Set environment variable {env_var_name} instead of Secret Manager")
+        return True
+    
     secret_client = initialize_secret_manager()
     if not secret_client:
         logger.warning(f"Secret Manager client not available, cannot create/update secret {secret_id}")
@@ -1067,16 +1219,27 @@ def ensure_resource_exists(retry_on_failure=True):
         errors.append(error_msg)
         resources_created = False
     
-    # Ensure GCS bucket exists
+    # Ensure GCS bucket exists with lifecycle policy
     try:
         logger.info("Ensuring GCS bucket exists...")
         storage_client = initialize_storage()
         if storage_client:
             bucket = storage_client.bucket(Config.GCS_BUCKET)
             if not bucket.exists():
-                # Create bucket
-                storage_client.create_bucket(bucket, location=Config.GCP_REGION)
+                # Create bucket with lifecycle policy
+                bucket = storage_client.create_bucket(bucket, location=Config.GCP_REGION)
                 logger.info(f"✅ Created GCS bucket: {Config.GCS_BUCKET}")
+                
+                # Set lifecycle policy to reduce storage costs
+                lifecycle_rules = {
+                    'rule': [
+                        {'action': {'type': 'Delete'}, 'condition': {'age': 30, 'isLive': True}},
+                        {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 3, 'isLive': False}}
+                    ]
+                }
+                bucket.lifecycle_rules = lifecycle_rules
+                bucket.patch()
+                logger.info("✅ Applied cost-optimized lifecycle policy to bucket")
                 
                 # Create necessary folder structure
                 for folder in ['raw', 'processed', 'cache', 'exports', 'feeds']:
@@ -1085,6 +1248,17 @@ def ensure_resource_exists(retry_on_failure=True):
                     logger.info(f"✅ Created folder: {folder}/")
             else:
                 logger.info(f"✅ GCS bucket {Config.GCS_BUCKET} already exists")
+                
+                # Update lifecycle policy if needed
+                lifecycle_rules = {
+                    'rule': [
+                        {'action': {'type': 'Delete'}, 'condition': {'age': 30, 'isLive': True}},
+                        {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 3, 'isLive': False}}
+                    ]
+                }
+                bucket.lifecycle_rules = lifecycle_rules
+                bucket.patch()
+                logger.info("✅ Updated cost-optimized lifecycle policy")
         else:
             error_msg = "Could not initialize Storage client to check bucket"
             logger.error(f"❌ {error_msg}")
