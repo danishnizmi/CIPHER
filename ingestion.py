@@ -928,7 +928,11 @@ def parse_feed_data(content: bytes, format_type: str, parser_config: Dict) -> Li
     """Parse raw feed data based on format type and parser configuration."""
     try:
         if format_type == "json":
-            return parse_json_feed(content, parser_config)
+            # Check if it's a nested structure
+            if parser_config.get("nested_structure", False):
+                return parse_nested_json_feed(content, parser_config)
+            else:
+                return parse_json_feed(content, parser_config)
         elif format_type == "csv":
             return parse_csv_feed(content, parser_config)
         elif format_type == "text":
@@ -970,6 +974,76 @@ def parse_feed_data(content: bytes, format_type: str, parser_config: Dict) -> Li
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
         raise
+
+
+def parse_nested_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
+    """Parse JSON with nested structures where IDs are the keys."""
+    try:
+        # Decode and parse JSON
+        content_str = content.decode('utf-8', errors='replace')
+        data = json.loads(content_str)
+        
+        # Handle nested structure where IDs are the keys
+        if parser_config.get("id_key", False):
+            parsed_data = []
+            for key, items in data.items():
+                if isinstance(items, list):
+                    for item in items:
+                        # Add the ID to the item
+                        item_copy = item.copy()
+                        item_copy["id"] = key
+                        
+                        # Apply field mappings
+                        field_mappings = parser_config.get("field_mappings", {})
+                        for src_field, dest_field in field_mappings.items():
+                            if src_field in item_copy and dest_field != src_field:
+                                item_copy[dest_field] = item_copy[src_field]
+                                
+                        # Apply transformations
+                        transformations = parser_config.get("transformations", {})
+                        for field, transform_func in transformations.items():
+                            if field in item_copy and callable(transform_func):
+                                try:
+                                    item_copy[field] = transform_func(item_copy)
+                                except Exception as e:
+                                    logger.warning(f"Error applying transformation to field '{field}': {str(e)}")
+                                    
+                        parsed_data.append(item_copy)
+                elif isinstance(items, dict):
+                    # Single item case
+                    item_copy = items.copy()
+                    item_copy["id"] = key
+                    
+                    # Apply field mappings
+                    field_mappings = parser_config.get("field_mappings", {})
+                    for src_field, dest_field in field_mappings.items():
+                        if src_field in item_copy and dest_field != src_field:
+                            item_copy[dest_field] = item_copy[src_field]
+                            
+                    # Apply transformations
+                    transformations = parser_config.get("transformations", {})
+                    for field, transform_func in transformations.items():
+                        if field in item_copy and callable(transform_func):
+                            try:
+                                item_copy[field] = transform_func(item_copy)
+                            except Exception as e:
+                                logger.warning(f"Error applying transformation to field '{field}': {str(e)}")
+                    
+                    parsed_data.append(item_copy)
+                else:
+                    # Handle primitive types
+                    item = {"value": str(items), "id": key}
+                    parsed_data.append(item)
+            
+            return parsed_data
+        else:
+            # Use standard parsing
+            return parse_json_feed(content, parser_config)
+    except Exception as e:
+        logger.error(f"Error parsing nested JSON data: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
+        raise Exception(f"Failed to parse nested JSON data: {str(e)}")
 
 
 def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
@@ -1084,53 +1158,61 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             if len(lines) > skip_lines:
                 content_str = '\n'.join(lines[skip_lines:])
         
-        # Parse with different CSV dialects if needed
-        csv_data = None
-        dialects = [csv.excel, csv.unix_dialect, csv.excel_tab]
+        # Skip any remaining lines that start with # (comments)
+        content_str = '\n'.join([line for line in content_str.splitlines() if not line.strip().startswith('#')])
         
-        if parser_config.get("has_header", True):
-            # Try with header
-            for dialect in dialects:
-                try:
-                    csv_reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
-                    csv_data = list(csv_reader)
-                    if csv_data:
-                        break
-                except Exception:
-                    continue
+        # Get field names from config if provided
+        field_names = parser_config.get("field_names", [])
+        has_header = parser_config.get("has_header", True)
+        value_field = parser_config.get("value_field", "value")
+        type_field = parser_config.get("type_field", "type")
         
-        # If no data with header, try without header
-        if not csv_data:
-            # For CSV without headers, use field names from config or generate them
-            field_names = parser_config.get("field_names", [])
-            if not field_names:
-                # Generate field names as column1, column2, etc.
-                try:
-                    sniffer = csv.Sniffer()
-                    dialect = sniffer.sniff(content_str[:1024])
-                    first_row = next(csv.reader(io.StringIO(content_str), dialect))
-                    field_names = [f"column{i+1}" for i in range(len(first_row))]
-                except Exception:
-                    # If sniffer fails, make a best guess
-                    first_line = content_str.split('\n')[0]
-                    if ',' in first_line:
-                        field_names = [f"column{i+1}" for i in range(first_line.count(',') + 1)]
-                    elif '\t' in first_line:
-                        field_names = [f"column{i+1}" for i in range(first_line.count('\t') + 1)]
-                    else:
-                        field_names = ["value"]
+        # Determine CSV dialect using sniffer
+        csv_dialects = [csv.excel, csv.unix_dialect, csv.excel_tab]
+        dialect = csv.excel  # Default dialect
+        try:
+            sniffer = csv.Sniffer()
+            if content_str:
+                dialect = sniffer.sniff(content_str[:1024])
+        except Exception:
+            # If sniffer fails, try different dialects
+            logger.debug("CSV dialect sniffer failed, will try standard dialects")
             
-            for dialect in dialects:
-                try:
-                    csv_reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names, dialect=dialect)
-                    csv_data = list(csv_reader)
-                    if csv_data:
-                        break
-                except Exception:
-                    continue
+        # Parse CSV
+        csv_data = []
         
-        # If we still have no data, use a fallback approach
-        if not csv_data:
+        # Try the appropriate parsing approach
+        if has_header and not field_names:
+            try:
+                csv_reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
+                csv_data = list(csv_reader)
+            except Exception as e:
+                logger.warning(f"Error parsing CSV with header: {str(e)}, trying alternative approaches")
+                for alt_dialect in csv_dialects:
+                    try:
+                        csv_reader = csv.DictReader(io.StringIO(content_str), dialect=alt_dialect)
+                        csv_data = list(csv_reader)
+                        if csv_data:
+                            break
+                    except Exception:
+                        continue
+        elif field_names:
+            try:
+                csv_reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names, dialect=dialect)
+                csv_data = list(csv_reader)
+            except Exception as e:
+                logger.warning(f"Error parsing CSV with field names: {str(e)}, trying alternative approaches")
+                for alt_dialect in csv_dialects:
+                    try:
+                        csv_reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names, dialect=alt_dialect)
+                        csv_data = list(csv_reader)
+                        if csv_data:
+                            break
+                    except Exception:
+                        continue
+        
+        # If still no data, try a simpler fallback approach
+        if not csv_data and content_str:
             logger.warning("Standard CSV parsing failed, using fallback row splitting")
             data = []
             lines = content_str.splitlines()
@@ -1147,7 +1229,7 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
                     delimiter = max(counts.keys(), key=lambda k: counts[k])
             
             # Parse with simple delimiter splitting
-            if parser_config.get("has_header", True) and lines:
+            if has_header and lines:
                 header = [h.strip() for h in lines[0].split(delimiter)]
                 
                 for line in lines[1:]:
@@ -1167,8 +1249,26 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
                     data.append(row)
                     
                 csv_data = data
+            elif field_names and lines:
+                for line in lines:
+                    if not line.strip():
+                        continue
+                        
+                    values = line.split(delimiter)
+                    row = {}
+                    
+                    # Map values to provided field names
+                    for i, val in enumerate(values):
+                        if i < len(field_names):
+                            row[field_names[i]] = val.strip()
+                        else:
+                            row[f"column{i+1}"] = val.strip()
+                    
+                    data.append(row)
+                    
+                csv_data = data
             else:
-                # No header, use column names
+                # No header or field names, use column numbers
                 for line in lines:
                     if not line.strip():
                         continue
@@ -1187,20 +1287,32 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         if csv_data:
             csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
         
-        # Add 'value' field if missing for compatibility
+        # Map the value field and determine types
         for row in csv_data:
-            # Try to identify a suitable value field based on common naming patterns
-            if 'value' not in row:
-                for key in ['ioc', 'indicator', 'ip', 'domain', 'url', 'hash', 'md5', 'sha1', 'sha256']:
-                    if key in row and row[key]:
-                        row['value'] = row[key]
-                        break
+            # Copy the value field if specified but different from default
+            if value_field in row and value_field != "value":
+                row["value"] = row[value_field]
+            
+            # Determine type based on type field or content
+            if type_field in row and type_field != "type":
+                # Try to determine the IOC type based on the value
+                if "url" in str(row.get(type_field, "")).lower() or str(row.get("value", "")).startswith(("http://", "https://")):
+                    row["type"] = "url"
+                elif "ip" in str(row.get(type_field, "")).lower():
+                    row["type"] = "ip"
+                elif "domain" in str(row.get(type_field, "")).lower():
+                    row["type"] = "domain"
+                elif "hash" in str(row.get(type_field, "")).lower() or len(str(row.get("value", ""))) == 32:
+                    row["type"] = "md5"
+                elif len(str(row.get("value", ""))) == 40:
+                    row["type"] = "sha1"
+                elif len(str(row.get("value", ""))) == 64:
+                    row["type"] = "sha256"
                 else:
-                    # If no suitable field found, use the first non-empty field
-                    for key, val in row.items():
-                        if val and isinstance(val, str) and val.strip():
-                            row['value'] = val
-                            break
+                    row["type"] = determine_ioc_type(str(row.get("value", "")))
+            else:
+                # Default type detection if no type field
+                row["type"] = determine_ioc_type(str(row.get("value", "")))
         
         return csv_data
     except Exception as e:
@@ -1232,16 +1344,16 @@ def parse_text_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         skip_lines = parser_config.get("skip_lines", 0)
         if skip_lines > 0 and len(lines) > skip_lines:
             lines = lines[skip_lines:]
+        
+        # Skip comment lines if configured
+        if parser_config.get("skip_comments", True):
+            lines = [line for line in lines if not line.startswith('#')]
             
         # Create record for each line
         data = []
         field_name = parser_config.get("value_field_name", "value")
         
         for line in lines:
-            # Skip comments if configured
-            if parser_config.get("skip_comments", False) and line.startswith('#'):
-                continue
-                
             record = {field_name: line}
             
             # Extract data using regex if provided
@@ -1349,6 +1461,10 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
         # Ensure value is a string
         value = str(record['value'])
         
+        # Skip values that are empty or clearly header/comment data
+        if not value or value.startswith('#'):
+            continue
+            
         # Create normalized indicator record
         indicator = {
             "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
@@ -2172,7 +2288,7 @@ def ingest_from_pubsub(event, context):
 
 # -------------------- Default Feeds --------------------
 
-# Define some hardcoded default feed configurations for testing and development
+# Define updated feed configurations for better parsing
 DEFAULT_FEED_CONFIGS = [
     {
         "id": "phishtank",
@@ -2184,7 +2300,10 @@ DEFAULT_FEED_CONFIGS = [
         "update_frequency": "daily",
         "parser_config": {
             "root_element": "data",
-            "transformations": {}
+            "value_field": "url",
+            "transformations": {
+                "type": lambda record: "url"
+            }
         },
         "enabled": True
     },
@@ -2199,6 +2318,9 @@ DEFAULT_FEED_CONFIGS = [
         "parser_config": {
             "skip_lines": 8,
             "has_header": True,
+            "field_names": ["id", "dateadded", "url", "url_status", "threat", "tags", "urlhaus_link", "reporter"],
+            "value_field": "url",
+            "type_field": "threat",
             "transformations": {}
         },
         "enabled": True
@@ -2212,8 +2334,21 @@ DEFAULT_FEED_CONFIGS = [
         "type": "mixed",
         "update_frequency": "daily",
         "parser_config": {
-            "root_element": "data",
-            "transformations": {}
+            "nested_structure": True,
+            "id_key": True,
+            "field_mappings": {
+                "ioc_value": "value",
+                "ioc_type": "type",
+                "threat_type": "description",
+                "malware": "malware_type",
+                "first_seen_utc": "first_seen",
+                "tags": "tags",
+                "confidence_level": "confidence"
+            },
+            "transformations": {
+                "confidence": lambda record: int(record.get("confidence_level", 50))
+            },
+            "array_fields": ["tags"]
         },
         "enabled": True
     }
