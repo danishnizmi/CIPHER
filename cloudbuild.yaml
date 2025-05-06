@@ -121,8 +121,8 @@ steps:
           --set-env-vars CLOUD_LOGGING=true \
           --set-env-vars USE_HTTP_MIDDLEWARE=true \
           --set-env-vars ENABLE_ERROR_REPORTING=true \
-          --set-env-vars AUTO_INGEST=false \
-          --set-env-vars AUTO_ANALYZE=false \
+          --set-env-vars AUTO_INGEST=true \
+          --set-env-vars AUTO_ANALYZE=true \
           --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
 
   # Verify deployment
