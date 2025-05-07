@@ -62,7 +62,7 @@ steps:
   id: 'push-container'
   args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
 
-# Deploy to Cloud Run
+# Deploy to Cloud Run - fixed volume mounting syntax
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
   entrypoint: 'bash'
@@ -87,10 +87,10 @@ steps:
       --set-secrets "API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
       --command "/app/init-app.sh" \
       --args "gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
-      --volume "name=api-keys-volume,secret=api-keys,mount-path=/app/secrets/api-keys" \
-      --volume "name=auth-config-volume,secret=auth-config,mount-path=/app/secrets/auth-config" \
-      --volume "name=feed-config-volume,secret=feed-config,mount-path=/app/secrets/feed-config" \
-      --volume "name=admin-password-volume,secret=admin-initial-password,mount-path=/app/secrets/admin-password"
+      --add-volume "name=api-keys-volume,secret=api-keys,mount-path=/app/secrets/api-keys" \
+      --add-volume "name=auth-config-volume,secret=auth-config,mount-path=/app/secrets/auth-config" \
+      --add-volume "name=feed-config-volume,secret=feed-config,mount-path=/app/secrets/feed-config" \
+      --add-volume "name=admin-password-volume,secret=admin-initial-password,mount-path=/app/secrets/admin-password"
 
 # Setup PubSub topics
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
