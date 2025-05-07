@@ -49,7 +49,7 @@ RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs
 # Create Tailwind CSS file for frontend
 RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
 
-# Create initialization script line by line to avoid heredoc issues
+# Create initialization script
 RUN echo '#!/bin/bash' > /app/init-app.sh && \
     echo 'set -e' >> /app/init-app.sh && \
     echo '' >> /app/init-app.sh && \
@@ -84,7 +84,7 @@ RUN echo '#!/bin/bash' > /app/init-app.sh && \
     echo '' >> /app/init-app.sh && \
     echo '# Start the application with the command passed to the script' >> /app/init-app.sh && \
     echo 'echo "Starting application..."' >> /app/init-app.sh && \
-    echo 'exec $@' >> /app/init-app.sh
+    echo 'exec "$@"' >> /app/init-app.sh
 
 # Make script executable
 RUN chmod +x /app/init-app.sh
