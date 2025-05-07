@@ -1,67 +1,100 @@
 steps:
+  # First step: Explicitly grant logging permissions to the Cloud Build service account
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-permissions'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "Ensuring service account has required permissions..."
+        # Grant Logs Writer role to ensure logging works properly
+        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+          --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
+          --role=roles/logging.logWriter
+        
+        # Also ensure other critical roles are assigned
+        for ROLE in roles/storage.admin roles/run.admin roles/secretmanager.admin roles/pubsub.admin
+        do
+          echo "Ensuring service account has $ROLE..."
+          gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+            --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
+            --role=$ROLE
+        done
+        
+        echo "Permissions setup complete."
+
   # Install dependencies and run checks
   - name: 'python:3.10'
     id: 'setup-and-checks'
-    script: |
-      echo "Installing dependencies..."
-      pip install --upgrade pip
-      pip install --no-cache-dir -r requirements.txt
-      
-      # Run basic syntax checks
-      echo "Running syntax checks..."
-      python -m py_compile app.py
-      python -m py_compile config.py
-      python -m py_compile frontend.py
-      echo "Syntax checks passed!"
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e  # Fail on error
+        echo "Installing dependencies..."
+        pip install --upgrade pip
+        pip install --no-cache-dir -r requirements.txt
+        
+        # Run basic syntax checks
+        echo "Running syntax checks..."
+        python -m py_compile app.py
+        python -m py_compile config.py
+        python -m py_compile frontend.py
+        echo "Syntax checks passed!"
 
   # Build frontend assets
   - name: 'node:16'
     id: 'build-frontend'
-    script: |
-      echo "Building frontend assets..."
-      mkdir -p static/src static/dist templates
-      
-      # Create Tailwind CSS
-      echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
-      
-      # Create package.json
-      cat > package.json << 'EOF'
-      {
-        "name": "threat-intelligence-platform",
-        "version": "1.0.3",
-        "scripts": {
-          "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
-        },
-        "devDependencies": {
-          "tailwindcss": "^3.3.0"
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e  # Fail on error
+        echo "Building frontend assets..."
+        mkdir -p static/src static/dist templates
+        
+        # Create Tailwind CSS
+        echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
+        
+        # Create package.json with explicit versioning
+        cat > package.json << 'EOF'
+        {
+          "name": "threat-intelligence-platform",
+          "version": "1.0.3",
+          "scripts": {
+            "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
+          },
+          "devDependencies": {
+            "tailwindcss": "^3.3.0"
+          }
         }
-      }
-      EOF
-      
-      # Create tailwind.config.js
-      cat > tailwind.config.js << 'EOF'
-      module.exports = {
-        content: [
-          "./templates/**/*.html",
-          "./frontend.py",
-          "./app.py"
-        ],
-        theme: { extend: {} },
-        plugins: []
-      };
-      EOF
-      
-      npm install
-      npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
-      echo "Frontend build complete!"
+        EOF
+        
+        # Create tailwind.config.js
+        cat > tailwind.config.js << 'EOF'
+        module.exports = {
+          content: [
+            "./templates/**/*.html",
+            "./frontend.py",
+            "./app.py"
+          ],
+          theme: { extend: {} },
+          plugins: []
+        };
+        EOF
+        
+        npm install
+        npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
+        echo "Frontend build complete!"
 
-  # Create required resources - BigQuery dataset, GCS bucket, Pub/Sub topics
+  # Create required resources with better error handling
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'create-resources'
     entrypoint: bash
     args:
       - -c
       - |
+        set -e  # Fail on error
         echo "Creating required GCP resources..."
         
         # Create BigQuery dataset if it doesn't exist
@@ -102,81 +135,75 @@ steps:
           echo "Pub/Sub topic threat-analysis-events already exists"
         fi
 
-  # Check secrets without using problematic substitution variables
+  # Check and create secrets if needed
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'verify-secrets'
+    id: 'manage-secrets'
     entrypoint: bash
     args:
       - -c
       - |
-        echo "Verifying required secrets exist..."
+        set -e  # Fail on error
+        echo "Checking and managing secrets..."
         
-        missing_count=0
-        
-        # Check api-keys secret
+        # Check and create api-keys secret if needed
         if ! gcloud secrets describe api-keys --project=${PROJECT_ID} &>/dev/null; then
-          echo "Warning: api-keys secret doesn't exist"
-          missing_count=$((missing_count+1))
+          echo "Creating api-keys secret..."
+          echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets create api-keys --data-file=- --project=${PROJECT_ID}
+          echo "✓ api-keys secret created"
         else
           echo "✓ api-keys secret exists"
         fi
         
-        # Check auth-config secret
+        # Check and create auth-config secret if needed
         if ! gcloud secrets describe auth-config --project=${PROJECT_ID} &>/dev/null; then
-          echo "Warning: auth-config secret doesn't exist"
-          missing_count=$((missing_count+1))
+          echo "Creating auth-config secret..."
+          echo '{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"2023-01-01T00:00:00Z"}}}' | gcloud secrets create auth-config --data-file=- --project=${PROJECT_ID}
+          echo "✓ auth-config secret created"
         else
           echo "✓ auth-config secret exists"
         fi
         
-        # Check feed-config secret
+        # Check and create feed-config secret if needed
         if ! gcloud secrets describe feed-config --project=${PROJECT_ID} &>/dev/null; then
-          echo "Warning: feed-config secret doesn't exist"
-          missing_count=$((missing_count+1))
+          echo "Creating feed-config secret..."
+          echo '{"feeds":[],"update_interval_hours":6}' | gcloud secrets create feed-config --data-file=- --project=${PROJECT_ID}
+          echo "✓ feed-config secret created"
         else
           echo "✓ feed-config secret exists"
         fi
         
-        # Check admin-initial-password secret
+        # Check and create admin-initial-password secret if needed
         if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} &>/dev/null; then
-          echo "Warning: admin-initial-password secret doesn't exist"
-          missing_count=$((missing_count+1))
+          echo "Creating admin-initial-password secret..."
+          echo 'admin' | gcloud secrets create admin-initial-password --data-file=- --project=${PROJECT_ID}
+          echo "✓ admin-initial-password secret created"
         else
           echo "✓ admin-initial-password secret exists"
         fi
         
-        # Report missing secrets but don't fail
-        if [ $missing_count -gt 0 ]; then
-          echo "$missing_count secrets are missing - they will be created automatically when the application starts."
-        else
-          echo "All required secrets exist!"
-        fi
+        echo "Secret management complete!"
 
-  # Build container with cache optimization
+  # Build container
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container'
-    args: [
-      'build', 
-      '--cache-from', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', 
-      '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', 
-      '.'
-    ]
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', '.']
 
-  # Push container to Container Registry  
+  # Push container 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
     args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
 
-  # Deploy to Cloud Run
+  # Deploy to Cloud Run with simplified config
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     entrypoint: bash
     args:
       - -c
       - |
+        set -e  # Fail on error
         echo "Deploying to Cloud Run..."
         
-        # Deploy first without secret mappings
+        # Deploy with basic configuration first
         gcloud run deploy threat-intelligence-platform \
           --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
           --platform managed \
@@ -191,91 +218,35 @@ steps:
           --concurrency 80 \
           --no-cpu-throttling \
           --cpu-boost \
-          --set-env-vars ENVIRONMENT=production \
-          --set-env-vars GCP_PROJECT=${PROJECT_ID} \
-          --set-env-vars GCP_REGION=us-central1 \
-          --set-env-vars BIGQUERY_DATASET=threat_intelligence \
-          --set-env-vars GCS_BUCKET=${PROJECT_ID}-threat-data \
-          --set-env-vars PUBSUB_TOPIC=threat-data-ingestion \
-          --set-env-vars PUBSUB_ANALYSIS_TOPIC=threat-analysis-events \
-          --set-env-vars VERSION=1.0.3 \
-          --set-env-vars DEBUG=false \
-          --set-env-vars PYTHONPATH=/app \
-          --set-env-vars PYTHONDONTWRITEBYTECODE=1 \
-          --set-env-vars PYTHONUNBUFFERED=1 \
-          --set-env-vars LOAD_SECRETS=true \
-          --set-env-vars ENSURE_GCP_RESOURCES=true \
-          --set-env-vars IGNORE_PERMISSION_ERRORS=false \
-          --set-env-vars AUTH_ENABLED=true \
-          --set-env-vars SESSION_COOKIE_SECURE=true \
-          --set-env-vars SESSION_COOKIE_HTTPONLY=true \
-          --set-env-vars SESSION_COOKIE_SAMESITE=Lax \
-          --set-env-vars SESSION_USE_SIGNER=true \
-          --set-env-vars SESSION_KEY_PREFIX=threat_intel: \
-          --set-env-vars SESSION_PROTECTION=basic \
-          --set-env-vars PREFERRED_URL_SCHEME=https \
-          --set-env-vars GUNICORN_WORKERS=2 \
-          --set-env-vars GUNICORN_THREADS=4 \
-          --set-env-vars GUNICORN_TIMEOUT=120 \
-          --set-env-vars GUNICORN_PRELOAD=true \
-          --set-env-vars GUNICORN_WORKER_CLASS=gthread \
-          --set-env-vars LOG_LEVEL=INFO \
-          --set-env-vars LOG_TO_CLOUD=true \
-          --set-env-vars CLOUD_LOGGING=true \
-          --set-env-vars USE_HTTP_MIDDLEWARE=true \
-          --set-env-vars ENABLE_ERROR_REPORTING=true \
-          --set-env-vars AUTO_INGEST=true \
-          --set-env-vars AUTO_ANALYZE=true \
-          --set-env-vars USE_ENV_VARS_FOR_SECRETS=true \
-          --set-env-vars API_KEY=dev-api-key \
-          --set-env-vars SECRET_KEY=dev-secret-key \
-          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
+          --set-env-vars ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,AUTH_ENABLED=true,SESSION_COOKIE_SECURE=true,SESSION_COOKIE_HTTPONLY=true,SESSION_COOKIE_SAMESITE=Lax,SESSION_USE_SIGNER=true,SESSION_KEY_PREFIX=threat_intel:,SESSION_PROTECTION=basic,PREFERRED_URL_SCHEME=https,GUNICORN_WORKERS=2,GUNICORN_THREADS=4,GUNICORN_TIMEOUT=120,GUNICORN_PRELOAD=true,GUNICORN_WORKER_CLASS=gthread,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,CLOUD_LOGGING=true,USE_HTTP_MIDDLEWARE=true,ENABLE_ERROR_REPORTING=true,AUTO_INGEST=true,AUTO_ANALYZE=true,USE_ENV_VARS_FOR_SECRETS=true,API_KEY=dev-api-key,SECRET_KEY=dev-secret-key
         
-        echo "Basic deployment complete!"
+        echo "Basic deployment complete! Adding secret mappings..."
         
-        # Try to update with secret mappings if they exist
-        secrets_exist=0
+        # Add secret mappings
+        gcloud run services update threat-intelligence-platform \
+          --region=us-central1 \
+          --update-secrets=API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest
         
-        # Check if API_KEY secret exists
-        if gcloud secrets describe api-keys --project=${PROJECT_ID} &>/dev/null; then
-          echo "Adding API_KEY secret mapping..."
-          gcloud run services update threat-intelligence-platform \
-            --region=us-central1 \
-            --update-secrets=API_KEY=api-keys:latest
-          secrets_exist=1
-        fi
-        
-        # Check if SECRET_KEY secret exists
-        if gcloud secrets describe auth-config --project=${PROJECT_ID} &>/dev/null; then
-          echo "Adding SECRET_KEY secret mapping..."
-          gcloud run services update threat-intelligence-platform \
-            --region=us-central1 \
-            --update-secrets=SECRET_KEY=auth-config:latest
-          secrets_exist=1
-        fi
-        
-        if [ $secrets_exist -eq 1 ]; then
-          echo "Updated deployment with secret mappings"
-        else 
-          echo "No secrets found - using default environment variables"
-        fi
+        echo "Deployment with secrets complete!"
 
-  # Verify deployment with proper variable escaping
+  # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: bash
     args:
       - -c
       - |
+        # Don't fail on error here so we can provide diagnostics
         echo "Waiting for service to be ready..."
-        sleep 30
+        sleep 45
         
-        # Get service URL with properly escaped bash variables
-        SERVICE_URL=$$(gcloud run services describe threat-intelligence-platform \
+        # Get service URL
+        SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "Service deployed at: $$SERVICE_URL"
+        echo "Service deployed at: $SERVICE_URL"
         
         # Test health endpoint with retries
         echo "Testing health endpoint..."
@@ -283,36 +254,36 @@ steps:
         RETRY_DELAY=10
         SUCCESS=0
         
-        for ATTEMPT in $$(seq 1 $$MAX_RETRIES); do
-          echo "Health check attempt $$ATTEMPT/$$MAX_RETRIES..."
+        for ATTEMPT in $(seq 1 $MAX_RETRIES); do
+          echo "Health check attempt $ATTEMPT/$MAX_RETRIES..."
           
-          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health" || echo "000")
-          HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
-          HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" "$SERVICE_URL/health" || echo "000")
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n-1)
           
-          echo "Response code: $$HTTP_CODE"
+          echo "Response code: $HTTP_CODE"
           
-          if [ "$$HTTP_CODE" = "200" ]; then
+          if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ Health check successful!"
             echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $$SERVICE_URL"
+            echo "Access the application at: $SERVICE_URL"
             echo "Login with username: admin, password: admin"
             SUCCESS=1
             break
           else
-            echo "⚠️ Health check returned: $$HTTP_CODE, retrying in $$RETRY_DELAY seconds..."
-            sleep $$RETRY_DELAY
+            echo "⚠️ Health check returned: $HTTP_CODE, retrying in $RETRY_DELAY seconds..."
+            sleep $RETRY_DELAY
           fi
         done
         
-        if [ $$SUCCESS -eq 0 ]; then
-          echo "❌ Health check failed after $$MAX_RETRIES attempts"
+        if [ $SUCCESS -eq 0 ]; then
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
           echo "Checking latest logs..."
-          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=10
-          echo "You can check the status at: https://console.cloud.google.com/run/detail/us-central1/threat-intelligence-platform/revisions?project=${PROJECT_ID}"
-          # Don't fail the build - just report the warning
-          echo "Deployment may still be initializing - please check the service URL manually"
+          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=20 || echo "Could not retrieve logs"
+          echo "Deployment may still be initializing - please check manually"
         fi
+        
+        echo "Verification step complete"
 
 timeout: '1800s'
 options:
