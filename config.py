@@ -163,12 +163,17 @@ class SecretManager:
                 logger.info("Using existing admin password from secret manager")
                 # Update cache but don't create new version
                 cls._update_cache_only(secret_id, admin_password)
-                return
+                # Make sure it's accessible via environment variable
+                os.environ['ADMIN_PASSWORD'] = admin_password
+                return admin_password
         
         # Only create if it doesn't exist
         admin_password = DEFAULT_ADMIN_PASSWORD
         logger.info("Creating default admin password since none exists")
         cls._create_secret(secret_id, admin_password)
+        # Make environment variable available
+        os.environ['ADMIN_PASSWORD'] = admin_password
+        return admin_password
     
     @classmethod
     def _ensure_api_keys(cls):
@@ -181,30 +186,30 @@ class SecretManager:
                 logger.info("Using existing API keys from secret manager")
                 # Update cache but don't create new version
                 cls._update_cache_only(secret_id, api_keys)
-                return
+                return api_keys
         
         # Only create if it doesn't exist or is invalid
         api_keys = {'platform_api_key': os.environ.get('API_KEY', 'dev-api-key')}
         logger.info("Creating default API keys configuration")
         cls._create_secret(secret_id, api_keys)
+        return api_keys
     
     @classmethod
     def _ensure_auth_config(cls):
         """Initialize authentication configuration with proper admin credentials."""
         secret_id = 'auth-config'
-        # First check if secret exists
+        
+        # CRITICAL: First get admin password - must be done before checking auth_config
+        admin_password = cls._ensure_admin_password()
+        
+        # Now check if auth_config exists
         if cls._secret_exists(secret_id):
             auth_config = cls._get_secret_without_version(secret_id)
             if auth_config and isinstance(auth_config, dict):
                 # Secret exists and is valid - update cache without creating version
                 cls._update_cache_only(secret_id, auth_config)
                 
-                # Get admin password (without creating a new version)
-                admin_password = None
-                if cls._secret_exists('admin-initial-password'):
-                    admin_password = cls._get_secret_without_version('admin-initial-password')
-                
-                # Only update auth config if absolutely necessary (admin user missing)
+                # Always update admin user with correct password hash
                 needs_update = False
                 
                 # Ensure required fields exist
@@ -220,22 +225,29 @@ class SecretManager:
                     auth_config['users'] = {}
                     needs_update = True
                 
-                # Only add admin user if it doesn't exist and we have the admin password
-                if 'admin' not in auth_config['users'] and admin_password:
-                    auth_config['users']['admin'] = {
-                        'password': hash_password(admin_password),
-                        'role': 'admin',
-                        'created_at': datetime.utcnow().isoformat()
-                    }
-                    logger.info("Added admin user to existing auth_config")
-                    needs_update = True
+                # CRITICAL: Always update admin user password to match admin-initial-password
+                if admin_password:
+                    # Compute password hash
+                    password_hash = hash_password(admin_password)
+                    
+                    # Check if admin user exists or password hash is different
+                    if ('admin' not in auth_config['users'] or 
+                        auth_config['users']['admin'].get('password') != password_hash):
+                        
+                        auth_config['users']['admin'] = {
+                            'password': password_hash,
+                            'role': 'admin',
+                            'created_at': datetime.utcnow().isoformat()
+                        }
+                        logger.info("Updated admin user password hash in auth_config")
+                        needs_update = True
                 
                 # Only push update if absolutely necessary
                 if needs_update:
                     logger.info("Updating auth config with necessary changes")
                     cls._update_secret(secret_id, auth_config)
                 
-                return
+                return auth_config
         
         # Create new config if none exists
         logger.info("Creating new auth configuration")
@@ -245,12 +257,7 @@ class SecretManager:
             'users': {}
         }
         
-        # Get admin password (without creating a new version)
-        admin_password = None
-        if cls._secret_exists('admin-initial-password'):
-            admin_password = cls._get_secret_without_version('admin-initial-password')
-        
-        # Add admin user if we have the password
+        # Add admin user with password hash
         if admin_password:
             auth_config['users']['admin'] = {
                 'password': hash_password(admin_password),
@@ -261,6 +268,7 @@ class SecretManager:
         
         # Create the secret
         cls._create_secret(secret_id, auth_config)
+        return auth_config
     
     @classmethod
     def _ensure_feed_config(cls):
@@ -273,7 +281,7 @@ class SecretManager:
                 logger.info("Using existing feed configuration from secret manager")
                 # Update cache but don't create new version
                 cls._update_cache_only(secret_id, feed_config)
-                return
+                return feed_config
         
         # Only create if it doesn't exist or is invalid
         feed_config = {
@@ -282,6 +290,57 @@ class SecretManager:
         }
         logger.info("Creating default feed configuration")
         cls._create_secret(secret_id, feed_config)
+        return feed_config
+    
+    @classmethod
+    def ensure_password_sync(cls):
+        """
+        Explicitly synchronize admin password between admin-initial-password and auth-config.
+        This method ensures passwords are consistent across secrets.
+        """
+        if not cls._initialized:
+            cls.init()
+            
+        logger.info("Ensuring admin password synchronization...")
+        
+        # Get admin password
+        admin_password = cls.get_secret('admin-initial-password')
+        if not admin_password:
+            logger.warning("Admin password not found, creating default")
+            admin_password = DEFAULT_ADMIN_PASSWORD
+            cls._create_secret('admin-initial-password', admin_password)
+        
+        # Get auth config
+        auth_config = cls.get_secret('auth-config')
+        if not auth_config or not isinstance(auth_config, dict):
+            logger.warning("Auth config not found or invalid, creating new")
+            auth_config = {
+                'session_secret': os.environ.get('SECRET_KEY', 'dev-secret-key'),
+                'enabled': True,
+                'users': {}
+            }
+        
+        # Ensure users dictionary exists
+        if 'users' not in auth_config:
+            auth_config['users'] = {}
+        
+        # Update admin user with correct password hash
+        password_hash = hash_password(admin_password)
+        auth_config['users']['admin'] = {
+            'password': password_hash,
+            'role': 'admin',
+            'created_at': datetime.utcnow().isoformat()
+        }
+        
+        # Update auth config
+        result = cls._update_secret('auth-config', auth_config)
+        
+        if result:
+            logger.info("Admin password successfully synchronized")
+        else:
+            logger.error("Failed to synchronize admin password")
+        
+        return result
     
     @classmethod
     def _secret_exists(cls, secret_id: str) -> bool:
@@ -678,6 +737,9 @@ class Config:
         # Initialize Secret Manager
         SecretManager.init()
         
+        # Explicitly synchronize passwords to fix login issues
+        SecretManager.ensure_password_sync()
+        
         # Load API keys
         api_keys = SecretManager.get_secret('api-keys')
         if api_keys and isinstance(api_keys, dict):
@@ -698,11 +760,11 @@ class Config:
                 cls.ADMIN_PASSWORD = admin_password
                 logger.info(f"Admin password loaded from Secret Manager")
                 
-                # Ensure admin user is properly set up
-                if 'users' in auth_config and 'admin' in auth_config['users'] and auth_config['users']['admin'].get('password') != hash_password(admin_password):
-                    logger.info("Updating admin password hash in auth config")
-                    auth_config['users']['admin']['password'] = hash_password(admin_password)
-                    SecretManager.update_secret('auth-config', auth_config)
+                # Verify the admin user in auth_config has the correct password hash
+                if ('users' in auth_config and 'admin' in auth_config['users'] and 
+                    auth_config['users']['admin'].get('password') != hash_password(admin_password)):
+                    logger.warning("Admin password hash mismatch detected, synchronizing...")
+                    SecretManager.ensure_password_sync()
         else:
             cls.SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
         
@@ -776,6 +838,17 @@ class Config:
             
             if cls.API_KEY == 'dev-api-key':
                 warnings.append("Production environment using default development API key!")
+            
+            # Verify admin password is properly synchronized
+            admin_password = SecretManager.get_secret('admin-initial-password')
+            auth_config = SecretManager.get_secret('auth-config')
+            
+            if auth_config and isinstance(auth_config, dict) and 'users' in auth_config and 'admin' in auth_config['users']:
+                admin_hash = auth_config['users']['admin'].get('password')
+                expected_hash = hash_password(admin_password) if admin_password else None
+                
+                if admin_hash != expected_hash:
+                    errors.append("Admin password hash mismatch between secrets! Authentication will fail.")
         
         if not cls.GCP_PROJECT:
             errors.append("GCP_PROJECT not set - multiple GCP services will fail")
@@ -897,7 +970,61 @@ def create_or_update_secret(name: str, value: Any):
     """Helper function to create or update a secret."""
     return SecretManager.update_secret(name, value)
 
+# ===== Testing Utilities =====
+def verify_admin_password_sync():
+    """Verify and fix admin password synchronization."""
+    # Get admin password
+    admin_password = SecretManager.get_secret('admin-initial-password')
+    if not admin_password:
+        logger.error("Admin password not found!")
+        return False
+    
+    # Get auth config
+    auth_config = SecretManager.get_secret('auth-config')
+    if not auth_config or not isinstance(auth_config, dict) or 'users' not in auth_config:
+        logger.error("Auth config not found or invalid!")
+        return False
+    
+    # Check admin user and password hash
+    if 'admin' not in auth_config['users']:
+        logger.error("Admin user not in auth_config!")
+        return False
+    
+    correct_hash = hash_password(admin_password)
+    current_hash = auth_config['users']['admin'].get('password')
+    
+    if current_hash != correct_hash:
+        logger.error(f"Admin password hash mismatch! Authentication will fail.")
+        logger.error(f"Password from admin-initial-password: {admin_password}")
+        logger.error(f"Current hash in auth-config: {current_hash}")
+        logger.error(f"Expected hash: {correct_hash}")
+        
+        # Fix the issue
+        auth_config['users']['admin']['password'] = correct_hash
+        SecretManager.update_secret('auth-config', auth_config)
+        logger.info("Fixed admin password hash in auth_config")
+        return True
+    
+    logger.info("Admin password is properly synchronized")
+    return True
+
 # Initialize configuration if imported
 if __name__ != "__main__":
     # We don't initialize here to avoid circular imports, let the app do it
     pass
+
+# Command-line testing functionality
+if __name__ == "__main__":
+    logger.info("Testing configuration module...")
+    
+    # Initialize Secret Manager
+    SecretManager.init()
+    
+    # Check password synchronization
+    verify_admin_password_sync()
+    
+    # Print configuration
+    logger.info(f"Environment: {Config.ENVIRONMENT}")
+    logger.info(f"GCP Project: {Config.GCP_PROJECT}")
+    logger.info(f"Admin username: {Config.ADMIN_USERNAME}")
+    logger.info("Configuration test complete")
