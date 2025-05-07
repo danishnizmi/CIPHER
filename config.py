@@ -12,6 +12,7 @@ import tempfile
 import hashlib
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 from functools import wraps, lru_cache
@@ -108,21 +109,24 @@ DEFAULT_FEED_CONFIGS = [
 @lru_cache(maxsize=1)
 def get_project_id() -> Optional[str]:
     """Get Google Cloud project ID from environment or GCP metadata with improved error handling."""
+    # First check environment variable (most efficient)
     project_id = os.environ.get('GCP_PROJECT')
     if project_id:
         return project_id
     
+    # Then try google.auth default credentials
     if HAS_GCP:
         try:
             credentials, project_id = google.auth.default()
             if project_id:
-                os.environ['GCP_PROJECT'] = project_id
+                os.environ['GCP_PROJECT'] = project_id  # Cache in env var
                 return project_id
         except (DefaultCredentialsError, TransportError) as e:
             logger.debug(f"Unable to determine GCP project ID from metadata: {str(e)}")
         except Exception as e:
             logger.debug(f"Unexpected error getting project ID: {str(e)}")
     
+    # Last resort - try metadata server directly
     try:
         import requests
         response = requests.get(
@@ -132,11 +136,12 @@ def get_project_id() -> Optional[str]:
         )
         if response.status_code == 200:
             project_id = response.text
-            os.environ['GCP_PROJECT'] = project_id
+            os.environ['GCP_PROJECT'] = project_id  # Cache in env var
             return project_id
     except Exception:
         pass
     
+    # Default to known project ID if all else fails
     fallback_id = "primal-chariot-382610"
     logger.info(f"Using fallback project ID: {fallback_id}")
     return fallback_id
@@ -250,9 +255,12 @@ def initialize_bigquery():
             location=Config.BIGQUERY_LOCATION if hasattr(Config, 'BIGQUERY_LOCATION') else 'US'
         )
         
-        # Test client by running a simple query
+        # Test client with a simple query but limit bytes billed
         test_query = "SELECT 1"
-        test_job = client.query(test_query, job_config=bigquery.QueryJobConfig(maximum_bytes_billed=1048576)) # 1MB limit for test
+        test_job = client.query(
+            test_query, 
+            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=1048576)  # 1MB limit for test
+        )
         test_result = list(test_job.result())
         
         if test_result and len(test_result) == 1 and test_result[0][0] == 1:
@@ -282,21 +290,21 @@ def initialize_storage():
 @handle_gcp_errors
 def initialize_pubsub():
     """Initialize and return PubSub publisher and subscriber clients with error handling."""
-    global _publisher, _subscriber
+    global _clients
     
     if ('_publisher' in _clients and _clients['_publisher'] is not None and 
         '_subscriber' in _clients and _clients['_subscriber'] is not None):
         return _clients['_publisher'], _clients['_subscriber']
     
     try:
-        _publisher = pubsub_v1.PublisherClient()
-        _subscriber = pubsub_v1.SubscriberClient()
+        publisher = pubsub_v1.PublisherClient()
+        subscriber = pubsub_v1.SubscriberClient()
         
-        _clients['_publisher'] = _publisher
-        _clients['_subscriber'] = _subscriber
+        _clients['_publisher'] = publisher
+        _clients['_subscriber'] = subscriber
         
         logger.info("PubSub clients initialized successfully")
-        return _publisher, _subscriber
+        return publisher, subscriber
     except Exception as e:
         logger.error(f"Failed to initialize PubSub clients: {str(e)}")
         import traceback
@@ -1067,58 +1075,58 @@ def create_default_feed_config() -> bool:
         return False
 
 def create_default_auth_config() -> bool:
-    """Create a default auth configuration if it doesn't exist."""
+    """Create a default auth configuration if it doesn't exist with a secure auto-generated password."""
     try:
-        # First check if we can use environment variable
-        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-            import secrets
-            session_secret = secrets.token_hex(32)
-            auth_config = {
-                "session_secret": session_secret,
-                "enabled": True,
-                "users": {
-                    "admin": {
-                        "password": hashlib.sha256("admin".encode()).hexdigest(),
-                        "role": "admin", 
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                }
-            }
-            os.environ['SECRET_KEY'] = session_secret
-            os.environ['WTF_CSRF_SECRET_KEY'] = session_secret
-            os.environ['SECRET_AUTH_CONFIG'] = json.dumps(auth_config)
-            logger.info("Created default auth-config in environment variables")
-            return True
-        
-        # Otherwise use Secret Manager
+        # First check if auth config already exists
         auth_config = access_secret("auth-config")
         if auth_config:
             logger.info("Auth configuration already exists in Secret Manager")
             return True
         
+        # Generate a secure session secret and admin password
         import secrets
         session_secret = secrets.token_hex(32)
+        admin_password = secrets.token_urlsafe(12)  # Generate a secure random password
+        
+        # Create the auth configuration
         auth_config = {
             "session_secret": session_secret,
             "enabled": True,
             "users": {
                 "admin": {
-                    "password": hashlib.sha256("admin".encode()).hexdigest(),
+                    "password": hashlib.sha256(admin_password.encode()).hexdigest(),
                     "role": "admin", 
                     "created_at": datetime.utcnow().isoformat()
                 }
             }
         }
         
+        # Store configuration based on environment
+        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+            # Store in environment variables
+            os.environ['SECRET_KEY'] = session_secret
+            os.environ['WTF_CSRF_SECRET_KEY'] = session_secret
+            os.environ['SECRET_AUTH_CONFIG'] = json.dumps(auth_config)
+            os.environ['ADMIN_PASSWORD'] = admin_password  # Store plaintext for first use
+            logger.info("Created default auth-config in environment variables")
+            return True
+        
+        # Store in Secret Manager
         success = create_or_update_secret("auth-config", json.dumps(auth_config, indent=2))
         if success:
             logger.info("Created default auth-config in Secret Manager")
+            # Store the plaintext password in a separate secret for first use
+            password_success = create_or_update_secret("admin-initial-password", admin_password)
+            if password_success:
+                logger.info("Created initial admin password in Secret Manager")
             return True
         
+        # Fallback for permission errors
         if should_ignore_permission_errors():
             logger.warning("Using in-memory fallback for auth-config")
             Config.SECRET_KEY = session_secret
             Config.WTF_CSRF_SECRET_KEY = session_secret
+            Config.ADMIN_PASSWORD = admin_password
             return True
         
         return False
@@ -1127,7 +1135,7 @@ def create_default_auth_config() -> bool:
         return False
 
 def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
-    """Create or update a secret in Secret Manager."""
+    """Create or update a secret in Secret Manager with improved error handling."""
     # Skip if we're using environment variables
     if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
         env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
@@ -1148,12 +1156,14 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
     try:
         parent = f"projects/{project_id}"
         
+        # Check if secret exists first to avoid unnecessary calls
         secret_exists = True
         try:
             secret_client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
         except Exception:
             secret_exists = False
         
+        # Create secret if it doesn't exist
         if not secret_exists:
             try:
                 secret_client.create_secret(
@@ -1168,14 +1178,15 @@ def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
                 logger.error(f"Error creating secret {secret_id}: {str(e)}")
                 return False
         
+        # Add new version with the updated value
         try:
-            secret_client.add_secret_version(
+            response = secret_client.add_secret_version(
                 request={
                     "parent": f"{parent}/secrets/{secret_id}",
                     "payload": {"data": secret_value.encode("UTF-8")},
                 }
             )
-            logger.info(f"Updated secret: {secret_id}")
+            logger.info(f"Updated secret: {secret_id} (version: {response.name})")
             return True
         except Exception as e:
             logger.error(f"Error adding secret version for {secret_id}: {str(e)}")
@@ -1307,8 +1318,7 @@ def ensure_resource_exists(retry_on_failure=True):
                 message_id = future.result()
                 logger.info(f"✅ Successfully published test message (ID: {message_id}) to {Config.PUBSUB_TOPIC}")
             except Exception as e:
-                error_msg = f"Failed to publish test message: {str(e)}"
-                logger.warning(f"⚠️ {error_msg}")
+                logger.warning(f"⚠️ Failed to publish test message: {str(e)}")
                 # Don't fail on this
         else:
             error_msg = "Could not initialize Pub/Sub clients to check topics"
@@ -1379,3 +1389,51 @@ if __name__ != "__main__" and get_env_bool('ENSURE_GCP_RESOURCES', False):
     init_thread = threading.Thread(target=delayed_resource_init)
     init_thread.daemon = True
     init_thread.start()
+
+# Command line interface for testing
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Threat Intelligence Platform Configuration Tool')
+    parser.add_argument('--create-secrets', action='store_true', help='Create initial secrets')
+    parser.add_argument('--test-resources', action='store_true', help='Test GCP resources')
+    parser.add_argument('--setup-auth', action='store_true', help='Setup authentication')
+    parser.add_argument('--list-feeds', action='store_true', help='List configured feeds')
+    args = parser.parse_args()
+
+    # Initialize Config
+    Config.init_app()
+    
+    if args.create_secrets:
+        # Create initial secrets
+        print("Creating initial secrets...")
+        create_default_auth_config()
+        create_default_feed_config()
+        
+    if args.test_resources:
+        # Test GCP resources
+        print("Testing GCP resources...")
+        ensure_resource_exists()
+        
+    if args.setup_auth:
+        # Setup authentication
+        print("Setting up authentication...")
+        auth_config = create_default_auth_config()
+        admin_password = access_secret('admin-initial-password')
+        print(f"Default admin password: {admin_password}")
+        
+    if args.list_feeds:
+        # List configured feeds
+        print("Configured feeds:")
+        for feed in Config.FEEDS:
+            print(f" - {feed.get('name')} ({feed.get('id')}): {feed.get('description')}")
+    
+    # If no arguments provided, show general info
+    if not any(vars(args).values()):
+        print(f"Environment: {Config.ENVIRONMENT}")
+        print(f"Version: {Config.VERSION}")
+        print(f"Project ID: {Config.GCP_PROJECT}")
+        print(f"BigQuery Dataset: {Config.BIGQUERY_DATASET}")
+        print(f"GCS Bucket: {Config.GCS_BUCKET}")
+        print(f"Feed count: {len(Config.FEEDS)}")
+        print("\nUse --help to see available commands")
