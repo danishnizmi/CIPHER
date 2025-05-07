@@ -8,200 +8,103 @@ metadata:
   labels:
     app: threat-intelligence-platform
     environment: production
+    managed-by: cloudbuild
 spec:
   template:
     metadata:
       annotations:
-        # Set minimum instances to 1 for better availability
         autoscaling.knative.dev/minScale: "1"
         autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/startup-cpu-boost: "true"
-        run.googleapis.com/cpu-throttling: "true"
+        run.googleapis.com/cpu-throttling: "false"
       labels:
         app: threat-intelligence-platform
         environment: production
+        managed-by: cloudbuild
     spec:
-      containerConcurrency: 50
-      timeoutSeconds: 300
+      containerConcurrency: 80
+      timeoutSeconds: 900
+      serviceAccountName: cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
       containers:
-      - image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
+      - name: threat-intelligence-platform-1
+        image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
+        command: ["/app/init-app.sh"]
+        args: ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "app:app"]
         ports:
         - name: http1
           containerPort: 8080
-        resources:
-          limits:
-            cpu: "2"
-            memory: "2Gi"
-          requests:
-            cpu: "1"
-            memory: "512Mi"
         env:
         - name: ENVIRONMENT
-          value: "production"
+          value: production
         - name: GCP_PROJECT
-          value: "${PROJECT_ID}"
+          value: ${PROJECT_ID}
         - name: GCP_REGION
-          value: "us-central1"
+          value: us-central1
         - name: BIGQUERY_DATASET
-          value: "threat_intelligence"
+          value: threat_intelligence
         - name: GCS_BUCKET
-          value: "${PROJECT_ID}-threat-data"
+          value: ${PROJECT_ID}-threat-data
         - name: PUBSUB_TOPIC
-          value: "threat-data-ingestion"
+          value: threat-data-ingestion
         - name: PUBSUB_ANALYSIS_TOPIC
-          value: "threat-analysis-events"
+          value: threat-analysis-events
         - name: VERSION
-          value: "1.0.3"
+          value: 1.0.3
         - name: DEBUG
-          value: "false"
+          value: 'false'
         - name: PYTHONPATH
-          value: "/app"
+          value: /app
         - name: PYTHONDONTWRITEBYTECODE
-          value: "1"
+          value: '1'
         - name: PYTHONUNBUFFERED
-          value: "1"
-        - name: BIGQUERY_MAX_BYTES_BILLED
-          value: "104857600"  # 100MB
+          value: '1'
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_TO_CLOUD
+          value: 'true'
+        - name: ENABLE_ERROR_REPORTING
+          value: 'true'
         - name: AUTO_ANALYZE
-          value: "false"
-        - name: AUTH_ENABLED
-          value: "true"
-        - name: SESSION_COOKIE_SECURE
-          value: "true"
-        - name: SESSION_COOKIE_HTTPONLY
-          value: "true"
-        - name: SESSION_COOKIE_SAMESITE
-          value: "Lax"
-        - name: SESSION_USE_SIGNER
-          value: "true"
-        - name: SESSION_KEY_PREFIX
-          value: "threat_intel:"
-        - name: SESSION_PROTECTION
-          value: "basic"
-        - name: PREFERRED_URL_SCHEME
-          value: "https"
-        # CRITICAL: Use secret references consistently for sensitive variables
+          value: 'false'
         - name: API_KEY
           valueFrom:
             secretKeyRef:
-              name: api-keys
               key: latest
+              name: api-keys
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
-              name: auth-config
               key: latest
-        # Gunicorn settings
-        - name: GUNICORN_WORKERS
-          value: "2" 
-        - name: GUNICORN_THREADS
-          value: "4"
-        - name: GUNICORN_TIMEOUT
-          value: "120"
-        - name: GUNICORN_WORKER_CLASS
-          value: "gthread"
-        # Logging settings
-        - name: LOG_LEVEL
-          value: "INFO"
-        - name: LOG_TO_CLOUD
-          value: "true"
-        - name: ENABLE_ERROR_REPORTING
-          value: "true"
-        # Add startup command to sync admin password between secrets
-        command: ["/bin/bash", "-c"]
-        args:
-          - |
-            # Run password synchronization script first
-            python -c '
-            import hashlib, json, os
-            from google.cloud import secretmanager
-            
-            # Get project ID
-            project_id = os.environ.get("GCP_PROJECT")
-            print(f"Running password sync for project: {project_id}")
-            
-            # Initialize Secret Manager client
-            client = secretmanager.SecretManagerServiceClient()
-            
-            # Function to get secret
-            def get_secret(secret_id):
-                try:
-                    name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-                    response = client.access_secret_version(request={"name": name})
-                    data = response.payload.data.decode("UTF-8")
-                    try:
-                        return json.loads(data)
-                    except:
-                        return data
-                except Exception as e:
-                    print(f"Error getting secret {secret_id}: {e}")
-                    return None
-            
-            # Function to update secret
-            def update_secret(secret_id, data):
-                try:
-                    if isinstance(data, dict):
-                        data_str = json.dumps(data)
-                    else:
-                        data_str = str(data)
-                        
-                    parent = f"projects/{project_id}/secrets/{secret_id}"
-                    client.add_secret_version(
-                        request={
-                            "parent": parent,
-                            "payload": {"data": data_str.encode("UTF-8")}
-                        }
-                    )
-                    print(f"Updated secret {secret_id}")
-                    return True
-                except Exception as e:
-                    print(f"Error updating secret {secret_id}: {e}")
-                    return False
-            
-            # Get admin password
-            admin_password = get_secret("admin-initial-password")
-            if admin_password:
-                print(f"Admin password retrieved successfully")
-                
-                # Get auth config
-                auth_config = get_secret("auth-config")
-                if auth_config and isinstance(auth_config, dict):
-                    # Ensure users dictionary exists
-                    if "users" not in auth_config:
-                        auth_config["users"] = {}
-                    
-                    # Compute password hash
-                    password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
-                    
-                    # Update admin user with correct password hash
-                    from datetime import datetime
-                    auth_config["users"]["admin"] = {
-                        "password": password_hash,
-                        "role": "admin", 
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                    
-                    # Update auth config
-                    if update_secret("auth-config", auth_config):
-                        print("Admin password synchronized successfully")
-                    else:
-                        print("Failed to update auth config")
-                else:
-                    print("Auth config not found or invalid")
-            else:
-                print("Admin password not found")
-            '
-            
-            # Then start the application
-            exec /app/init-app.sh gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --timeout 120 --worker-class gthread --preload --log-level info app:app
+              name: auth-config
+        resources:
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: app-data
+          mountPath: /app/data
+        - name: api-keys-volume
+          mountPath: /app/secrets/api-keys
+          readOnly: true
+        - name: auth-config-volume
+          mountPath: /app/secrets/auth-config
+          readOnly: true
+        - name: feed-config-volume
+          mountPath: /app/secrets/feed-config
+          readOnly: true
+        - name: admin-password-volume
+          mountPath: /app/secrets/admin-password
+          readOnly: true
         startupProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 15
-          periodSeconds: 5
-          timeoutSeconds: 5
-          failureThreshold: 3
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 6
         livenessProbe:
           httpGet:
             path: /health
@@ -209,24 +112,6 @@ spec:
           periodSeconds: 30
           timeoutSeconds: 5
           failureThreshold: 3
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        - name: app-data
-          mountPath: /app/data
-        # Mount secrets as volumes
-        - name: api-keys-volume
-          readOnly: true
-          mountPath: /app/secrets/api-keys
-        - name: auth-config-volume
-          readOnly: true
-          mountPath: /app/secrets/auth-config
-        - name: feed-config-volume
-          readOnly: true
-          mountPath: /app/secrets/feed-config
-        - name: admin-password-volume
-          readOnly: true
-          mountPath: /app/secrets/admin-password
       volumes:
       - name: tmp
         emptyDir:
@@ -237,27 +122,15 @@ spec:
       - name: api-keys-volume
         secret:
           secretName: api-keys
-          items:
-          - key: latest
-            path: api-keys.json
       - name: auth-config-volume
         secret:
           secretName: auth-config
-          items:
-          - key: latest
-            path: auth-config.json
       - name: feed-config-volume
         secret:
           secretName: feed-config
-          items:
-          - key: latest
-            path: feed-config.json
       - name: admin-password-volume
         secret:
           secretName: admin-initial-password
-          items:
-          - key: latest
-            path: admin-password.txt
   traffic:
   - percent: 100
     latestRevision: true
