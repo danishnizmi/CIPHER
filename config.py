@@ -142,84 +142,99 @@ class SecretManager:
             if cls._initialized:
                 return
                 
-            # Initialize the secrets
-            cls._init_admin_password()
-            cls._init_api_keys()
-            cls._init_auth_config()
-            cls._init_feed_config()
+            # Initialize the secrets - only create defaults if they don't exist
+            cls._ensure_admin_password()
+            cls._ensure_api_keys()
+            cls._ensure_auth_config()
+            cls._ensure_feed_config()
             
             cls._initialized = True
             logger.info("Secret Manager initialized successfully")
     
     @classmethod
-    def _init_admin_password(cls):
-        """Initialize admin password secret."""
+    def _ensure_admin_password(cls):
+        """Initialize admin password secret ONLY if it doesn't exist."""
         secret_id = 'admin-initial-password'
         admin_password = cls._get_secret(secret_id)
         
+        # Only create if it doesn't exist - preserve existing value
         if not admin_password:
             admin_password = DEFAULT_ADMIN_PASSWORD
-            logger.info("Creating default admin password")
-            cls._update_secret(secret_id, admin_password)
+            logger.info("Creating default admin password since none exists")
+            cls._create_secret(secret_id, admin_password)
+        else:
+            logger.info("Using existing admin password from secret manager")
     
     @classmethod
-    def _init_api_keys(cls):
-        """Initialize API keys secret."""
+    def _ensure_api_keys(cls):
+        """Initialize API keys secret ONLY if it doesn't exist."""
         secret_id = 'api-keys'
         api_keys = cls._get_secret(secret_id)
         
+        # Only create if it doesn't exist or is invalid
         if not api_keys or not isinstance(api_keys, dict) or 'platform_api_key' not in api_keys:
             api_keys = {'platform_api_key': os.environ.get('API_KEY', 'dev-api-key')}
             logger.info("Creating default API keys configuration")
-            cls._update_secret(secret_id, api_keys)
+            cls._create_secret(secret_id, api_keys)
+        else:
+            logger.info("Using existing API keys from secret manager")
     
     @classmethod
-    def _init_auth_config(cls):
+    def _ensure_auth_config(cls):
         """Initialize authentication configuration with proper admin credentials."""
         secret_id = 'auth-config'
         auth_config = cls._get_secret(secret_id)
         
         if not auth_config or not isinstance(auth_config, dict):
-            auth_config = {}
+            # Create new config if none exists
+            auth_config = {
+                'session_secret': os.environ.get('SECRET_KEY', 'dev-secret-key'),
+                'enabled': True,
+                'users': {}
+            }
+            logger.info("Created new auth configuration")
         
-        # Ensure session secret exists
+        # Ensure required fields exist
         if 'session_secret' not in auth_config:
             auth_config['session_secret'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
         
-        # Ensure enabled flag exists
-        auth_config['enabled'] = auth_config.get('enabled', True)
+        if 'enabled' not in auth_config:
+            auth_config['enabled'] = True
         
-        # Ensure users dict exists
         if 'users' not in auth_config:
             auth_config['users'] = {}
         
-        # Ensure admin user exists with proper hash format
+        # Ensure admin user exists but don't overwrite password if already set
         admin_password = cls._get_secret('admin-initial-password') or DEFAULT_ADMIN_PASSWORD
-        admin_password_hash = hash_password(admin_password)
         
-        # Update or create admin user
-        auth_config['users']['admin'] = {
-            'password': admin_password_hash,
-            'role': 'admin',
-            'created_at': datetime.utcnow().isoformat()
-        }
+        # Only add admin user if it doesn't exist
+        if 'admin' not in auth_config['users']:
+            auth_config['users']['admin'] = {
+                'password': hash_password(admin_password),
+                'role': 'admin',
+                'created_at': datetime.utcnow().isoformat()
+            }
+            logger.info(f"Added admin user with default password")
         
-        logger.info(f"Setting up admin user with credentials admin/{admin_password}")
+        # Update the config
         cls._update_secret(secret_id, auth_config)
     
     @classmethod
-    def _init_feed_config(cls):
-        """Initialize feed configuration."""
+    def _ensure_feed_config(cls):
+        """Initialize feed configuration ONLY if it doesn't exist."""
         secret_id = 'feed-config'
         feed_config = cls._get_secret(secret_id)
         
+        # Only create if it doesn't exist or is invalid
         if not feed_config or not isinstance(feed_config, dict) or 'feeds' not in feed_config:
             feed_config = {
                 'feeds': DEFAULT_FEED_CONFIGS,
                 'update_interval_hours': 6
             }
             logger.info("Creating default feed configuration")
-            cls._update_secret(secret_id, feed_config)
+            cls._create_secret(secret_id, feed_config)
+        else:
+            logger.info("Using existing feed configuration from secret manager")
     
     @classmethod
     def get_secret(cls, secret_id: str, force_refresh: bool = False) -> Any:
@@ -291,6 +306,27 @@ class SecretManager:
         return cls._update_secret(secret_id, value)
     
     @classmethod
+    def _create_secret(cls, secret_id: str, value: Any) -> bool:
+        """Create a new secret only if it doesn't exist."""
+        # Serialize value if needed
+        if not isinstance(value, str):
+            value = json.dumps(value)
+            
+        # Update cache
+        cls._cache[secret_id] = value
+        cls._cache_timestamp[secret_id] = datetime.now()
+        
+        # Update environment variable
+        env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
+        os.environ[env_var_name] = value
+        
+        # Push to cloud if not using env vars
+        if not get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+            return cls._create_cloud_secret(secret_id, value)
+            
+        return True
+    
+    @classmethod
     def _update_secret(cls, secret_id: str, value: Any) -> bool:
         """Internal method to update a secret."""
         # Serialize value if needed
@@ -310,6 +346,48 @@ class SecretManager:
             return cls._push_to_cloud(secret_id, value)
             
         return True
+    
+    @classmethod
+    def _create_cloud_secret(cls, secret_id: str, value: str) -> bool:
+        """Create a secret in Google Cloud Secret Manager only if it doesn't exist."""
+        client = cls._get_secret_client()
+        if not client:
+            return False
+            
+        project_id = get_project_id()
+        if not project_id:
+            return False
+            
+        try:
+            # Check if secret exists
+            try:
+                client.get_secret(request={"name": f"projects/{project_id}/secrets/{secret_id}"})
+                # Secret exists, don't create it
+                logger.info(f"Secret {secret_id} already exists, not creating")
+                return True
+            except Exception:
+                # Secret doesn't exist, create it
+                client.create_secret(
+                    request={
+                        "parent": f"projects/{project_id}",
+                        "secret_id": secret_id,
+                        "secret": {"replication": {"automatic": {}}}
+                    }
+                )
+                logger.info(f"Created new secret: {secret_id}")
+                
+                # Add initial version
+                client.add_secret_version(
+                    request={
+                        "parent": f"projects/{project_id}/secrets/{secret_id}",
+                        "payload": {"data": value.encode("UTF-8")}
+                    }
+                )
+                logger.info(f"Added initial version to secret: {secret_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error creating secret in cloud: {e}")
+            return False
     
     @classmethod
     def _push_to_cloud(cls, secret_id: str, value: str) -> bool:
@@ -338,13 +416,16 @@ class SecretManager:
                         "secret": {"replication": {"automatic": {}}}
                     }
                 )
+                logger.info(f"Created new secret: {secret_id}")
                 
+            # Add new version
             client.add_secret_version(
                 request={
                     "parent": f"projects/{project_id}/secrets/{secret_id}",
                     "payload": {"data": value.encode("UTF-8")}
                 }
             )
+            logger.info(f"Updated secret: {secret_id}")
             return True
         except Exception as e:
             logger.error(f"Error pushing secret to cloud: {e}")
@@ -429,6 +510,11 @@ class Config:
     ANALYSIS_ENABLED = get_env_bool('ANALYSIS_ENABLED', True)
     ANALYSIS_AUTO_ENRICH = get_env_bool('ANALYSIS_AUTO_ENRICH', True)
     
+    # ===== NLP Configuration =====
+    NLP_ENABLED = get_env_bool('NLP_ENABLED', True)
+    VERTEXAI_LOCATION = os.environ.get('VERTEXAI_LOCATION', 'us-central1')
+    VERTEXAI_MODEL = os.environ.get('VERTEXAI_MODEL', 'text-bison@latest')
+    
     # ===== Error and Logging =====
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
     LOG_TO_CLOUD = get_env_bool('LOG_TO_CLOUD', False)
@@ -463,19 +549,12 @@ class Config:
             admin_password = SecretManager.get_secret('admin-initial-password')
             if admin_password:
                 cls.ADMIN_PASSWORD = admin_password
-                logger.info(f"Admin password loaded: {cls.ADMIN_PASSWORD}")
+                logger.info(f"Admin password loaded from Secret Manager")
                 
                 # Ensure admin user is properly set up
-                if auth_config.get('users', {}).get('admin', {}).get('password') != hash_password(admin_password):
-                    logger.warning("Admin password hash doesn't match stored value, updating auth config")
-                    if 'users' not in auth_config:
-                        auth_config['users'] = {}
-                    
-                    auth_config['users']['admin'] = {
-                        'password': hash_password(admin_password),
-                        'role': 'admin',
-                        'created_at': datetime.utcnow().isoformat()
-                    }
+                if 'users' in auth_config and 'admin' in auth_config['users'] and auth_config['users']['admin'].get('password') != hash_password(admin_password):
+                    logger.info("Updating admin password hash in auth config")
+                    auth_config['users']['admin']['password'] = hash_password(admin_password)
                     SecretManager.update_secret('auth-config', auth_config)
         else:
             cls.SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
@@ -586,6 +665,20 @@ class Config:
             return None
         
         return f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}.{table_name}"
+    
+    @classmethod
+    def ensure_feed_configuration(cls):
+        """Ensure that the feed configuration exists and is valid."""
+        feed_config = SecretManager.get_secret('feed-config')
+        if not feed_config or not isinstance(feed_config, dict) or 'feeds' not in feed_config:
+            logger.info("Creating default feed configuration")
+            feed_config = {
+                'feeds': DEFAULT_FEED_CONFIGS,
+                'update_interval_hours': cls.FEED_UPDATE_INTERVAL
+            }
+            SecretManager.update_secret('feed-config', feed_config)
+            cls.FEEDS = feed_config['feeds']
+        return cls.FEEDS
 
 # ===== Error Reporting =====
 def report_error(exception: Exception):
@@ -648,6 +741,14 @@ def initialize_pubsub():
     except Exception as e:
         logger.error(f"Failed to initialize PubSub clients: {e}")
         return None, None
+
+def get_cached_config(name: str, force_refresh: bool = False):
+    """Helper function to get cached config for other modules."""
+    return SecretManager.get_secret(name, force_refresh)
+
+def create_or_update_secret(name: str, value: Any):
+    """Helper function to create or update a secret."""
+    return SecretManager.update_secret(name, value)
 
 # Initialize configuration if imported
 if __name__ != "__main__":
