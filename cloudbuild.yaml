@@ -1,278 +1,95 @@
-steps:
-  # Fix logging permissions
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'ensure-permissions'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Ensuring service account has logging permissions..."
-        # Grant Logs Writer role directly (no variable substitution)
-        gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-          --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
-          --role=roles/logging.logWriter
-        
-        echo "Permissions setup complete."
+# Use Python 3.10 slim image for reduced image size
+FROM python:3.10-slim
 
-  # Install dependencies and run checks
-  - name: 'python:3.10'
-    id: 'setup-and-checks'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -e  # Fail on error
-        echo "Installing dependencies..."
-        pip install --upgrade pip
-        pip install --no-cache-dir -r requirements.txt
-        
-        # Run basic syntax checks
-        echo "Running syntax checks..."
-        python -m py_compile app.py
-        python -m py_compile config.py
-        python -m py_compile frontend.py
-        echo "Syntax checks passed!"
+# Set working directory
+WORKDIR /app
 
-  # Build frontend assets
-  - name: 'node:16'
-    id: 'build-frontend'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -e  # Fail on error
-        echo "Building frontend assets..."
-        mkdir -p static/src static/dist templates
-        
-        # Create Tailwind CSS
-        echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
-        
-        # Create package.json
-        cat > package.json << 'EOF'
-        {
-          "name": "threat-intelligence-platform",
-          "version": "1.0.3",
-          "scripts": {
-            "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
-          },
-          "devDependencies": {
-            "tailwindcss": "^3.3.0"
-          }
-        }
-        EOF
-        
-        # Create tailwind.config.js
-        cat > tailwind.config.js << 'EOF'
-        module.exports = {
-          content: [
-            "./templates/**/*.html",
-            "./frontend.py",
-            "./app.py"
-          ],
-          theme: { extend: {} },
-          plugins: []
-        };
-        EOF
-        
-        npm install
-        npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
-        echo "Frontend build complete!"
+# Set environment variables for optimization
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    FLASK_APP=app.py \
+    FLASK_ENV=production \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Container configuration
+    PORT=8080
 
-  # Create required resources
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'create-resources'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Creating required GCP resources..."
-        
-        # Create BigQuery dataset if it doesn't exist
-        if ! bq ls --dataset ${PROJECT_ID}:threat_intelligence &>/dev/null; then
-          echo "Creating BigQuery dataset threat_intelligence..."
-          bq --location=US mk \
-            --dataset \
-            --description="Threat Intelligence Platform Dataset" \
-            ${PROJECT_ID}:threat_intelligence
-          echo "BigQuery dataset created successfully!"
-        else
-          echo "BigQuery dataset threat_intelligence already exists"
-        fi
-        
-        # Create GCS bucket if it doesn't exist
-        if ! gsutil ls -b gs://${PROJECT_ID}-threat-data &>/dev/null; then
-          echo "Creating GCS bucket ${PROJECT_ID}-threat-data..."
-          gsutil mb -l us-central1 gs://${PROJECT_ID}-threat-data
-          echo "Bucket created successfully!"
-        else
-          echo "Bucket ${PROJECT_ID}-threat-data already exists"
-        fi
-        
-        # Create Pub/Sub topics if they don't exist
-        if ! gcloud pubsub topics describe threat-data-ingestion &>/dev/null; then
-          echo "Creating Pub/Sub topic threat-data-ingestion..."
-          gcloud pubsub topics create threat-data-ingestion
-          echo "Pub/Sub topic created successfully!"
-        else
-          echo "Pub/Sub topic threat-data-ingestion already exists"
-        fi
-        
-        if ! gcloud pubsub topics describe threat-analysis-events &>/dev/null; then
-          echo "Creating Pub/Sub topic threat-analysis-events..."
-          gcloud pubsub topics create threat-analysis-events
-          echo "Pub/Sub topic created successfully!"
-        else
-          echo "Pub/Sub topic threat-analysis-events already exists"
-        fi
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    gcc \
+    python3-dev \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-  # Check and create secrets if needed
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'manage-secrets'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Checking and managing secrets..."
-        
-        # Check and create api-keys secret if needed
-        if ! gcloud secrets describe api-keys --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating api-keys secret..."
-          echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets create api-keys --data-file=- --project=${PROJECT_ID}
-          echo "✓ api-keys secret created"
-        else
-          echo "✓ api-keys secret exists"
-        fi
-        
-        # Check and create auth-config secret if needed
-        if ! gcloud secrets describe auth-config --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating auth-config secret..."
-          echo '{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"2023-01-01T00:00:00Z"}}}' | gcloud secrets create auth-config --data-file=- --project=${PROJECT_ID}
-          echo "✓ auth-config secret created"
-        else
-          echo "✓ auth-config secret exists"
-        fi
-        
-        # Check and create feed-config secret if needed
-        if ! gcloud secrets describe feed-config --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating feed-config secret..."
-          echo '{"feeds":[],"update_interval_hours":6}' | gcloud secrets create feed-config --data-file=- --project=${PROJECT_ID}
-          echo "✓ feed-config secret created"
-        else
-          echo "✓ feed-config secret exists"
-        fi
-        
-        # Check and create admin-initial-password secret if needed
-        if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} &>/dev/null; then
-          echo "Creating admin-initial-password secret..."
-          echo 'admin' | gcloud secrets create admin-initial-password --data-file=- --project=${PROJECT_ID}
-          echo "✓ admin-initial-password secret created"
-        else
-          echo "✓ admin-initial-password secret exists"
-        fi
-        
-        echo "Secret management complete!"
+# Copy requirements file first (for better caching)
+COPY requirements.txt .
 
-  # Build container
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-container'
-    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest', '.']
+# Install Python dependencies in layers for better caching
+RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
+    pip install --no-cache-dir --upgrade wheel setuptools && \
+    # Install numpy first to avoid compatibility issues
+    pip install --no-cache-dir numpy==1.24.3 && \
+    # Install pandas next (depends on numpy)
+    pip install --no-cache-dir pandas==1.5.3 && \
+    # Then install all remaining requirements
+    pip install --no-cache-dir -r requirements.txt
 
-  # Push container 
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-container'
-    args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/secrets && \
+    chmod -R 755 /app
 
-  # Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'deploy-cloudrun'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Deploying to Cloud Run..."
-        
-        # Deploy with all environment variables
-        gcloud run deploy threat-intelligence-platform \
-          --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
-          --platform managed \
-          --region us-central1 \
-          --allow-unauthenticated \
-          --memory 4Gi \
-          --cpu 4 \
-          --timeout 900 \
-          --max-instances 20 \
-          --min-instances 1 \
-          --execution-environment gen2 \
-          --concurrency 80 \
-          --no-cpu-throttling \
-          --cpu-boost \
-          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
-          --set-env-vars ENVIRONMENT=production,GCP_PROJECT=${PROJECT_ID},GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=${PROJECT_ID}-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,LOAD_SECRETS=true,ENSURE_GCP_RESOURCES=true,AUTH_ENABLED=true,SESSION_COOKIE_SECURE=true,SESSION_COOKIE_HTTPONLY=true,SESSION_COOKIE_SAMESITE=Lax,SESSION_USE_SIGNER=true,SESSION_KEY_PREFIX=threat_intel:,SESSION_PROTECTION=basic,PREFERRED_URL_SCHEME=https,GUNICORN_WORKERS=2,GUNICORN_THREADS=4,GUNICORN_TIMEOUT=120,GUNICORN_PRELOAD=true,GUNICORN_WORKER_CLASS=gthread,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,CLOUD_LOGGING=true,USE_HTTP_MIDDLEWARE=true,ENABLE_ERROR_REPORTING=true,AUTO_INGEST=true,AUTO_ANALYZE=true,USE_ENV_VARS_FOR_SECRETS=true,API_KEY=dev-api-key,SECRET_KEY=dev-secret-key
-        
-        echo "Basic deployment complete! Adding secret mappings..."
-        
-        # Add secret mappings
-        gcloud run services update threat-intelligence-platform \
-          --region=us-central1 \
-          --update-secrets=API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest
-        
-        echo "Deployment with secrets complete!"
+# Create Tailwind CSS file for frontend
+RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
 
-  # Verify deployment with proper escaping
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'verify-deployment'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Waiting for service to be ready..."
-        sleep 30
-        
-        # Get service URL using proper bash escaping
-        SERVICE_URL=$$(gcloud run services describe threat-intelligence-platform \
-          --region=us-central1 \
-          --format='value(status.url)')
-        
-        echo "Service deployed at: $$SERVICE_URL"
-        
-        # Test health endpoint with retries
-        echo "Testing health endpoint..."
-        MAX_RETRIES=15
-        RETRY_DELAY=10
-        SUCCESS=0
-        
-        for ATTEMPT in $$(seq 1 $$MAX_RETRIES); do
-          echo "Health check attempt $$ATTEMPT/$$MAX_RETRIES..."
-          
-          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health" || echo "000")
-          HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
-          HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
-          
-          echo "Response code: $$HTTP_CODE"
-          
-          if [ "$$HTTP_CODE" = "200" ]; then
-            echo "✅ Health check successful!"
-            echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $$SERVICE_URL"
-            echo "Login with username: admin, password: admin"
-            SUCCESS=1
-            break
-          else
-            echo "⚠️ Health check returned: $$HTTP_CODE, retrying in $$RETRY_DELAY seconds..."
-            sleep $$RETRY_DELAY
-          fi
-        done
-        
-        if [ $$SUCCESS -eq 0 ]; then
-          echo "❌ Health check failed after $$MAX_RETRIES attempts"
-          echo "Checking latest logs..."
-          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=10
-          echo "Deployment may still be initializing - please check manually"
-          echo "You can check the status at: https://console.cloud.google.com/run/detail/us-central1/threat-intelligence-platform/revisions?project=${PROJECT_ID}"
-        fi
+# Copy configuration module and essential files first
+COPY config.py ./
+COPY app.py ./
 
-timeout: '1800s'
-options:
-  logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'
-  disk_size_gb: 10
+# Create initialization script that leverages our config module
+RUN bash -c 'cat > /app/init-app.sh << EOF
+#!/bin/bash
+set -e
+
+echo "Starting Threat Intelligence Platform initialization..."
+
+# Run Python setup script that uses our config module to initialize secrets
+python -c "
+import config
+from config import Config, SecretManager
+
+print(\"Initializing application configuration...\")
+# Initialize secrets using our modules
+SecretManager.init()
+Config.init_app()
+print(\"Configuration initialized successfully\")
+"
+
+# Start the application with the command passed to the script
+exec "\$@"
+EOF'
+
+RUN chmod +x /app/init-app.sh
+
+# Copy all application code
+COPY . .
+
+# Create non-root user for security
+RUN useradd -m -u 1000 -s /bin/bash appuser && \
+    chown -R appuser:appuser /app
+
+# Expose port 8080
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+
+# Switch to non-root user
+USER appuser
+
+# Start with the initialization script that uses our config module
+ENTRYPOINT ["/app/init-app.sh"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "app:app"]
