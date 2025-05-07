@@ -20,7 +20,7 @@ from werkzeug.exceptions import BadRequest
 
 # Import config module for centralized configuration
 import config
-from config import Config
+from config import Config, SecretManager
 
 # Environment settings with defaults
 VERSION = os.environ.get("VERSION", "1.0.3")
@@ -239,17 +239,23 @@ def admin_required(func):
 def load_users() -> Dict[str, Dict]:
     """Load user data with optimized config access."""
     try:
+        # Try to ensure admin password sync first (critical fix)
+        if hasattr(SecretManager, 'ensure_password_sync'):
+            SecretManager.ensure_password_sync()
+        
         # Try config module first
         auth_config = None
         if hasattr(config, 'get_cached_config'):
-            auth_config = config.get_cached_config('auth-config')
+            auth_config = config.get_cached_config('auth-config', force_refresh=True)
         
         if auth_config and 'users' in auth_config and auth_config['users']:
+            logger.info(f"Loaded {len(auth_config['users'])} users from auth config")
             return auth_config.get('users', {})
         
         # Check environment variables
         admin_password = os.environ.get('ADMIN_PASSWORD')
         if admin_password:
+            logger.info("Loaded admin password from environment variables")
             return {
                 'admin': {
                     'password': hash_password(admin_password),
@@ -271,6 +277,7 @@ def load_users() -> Dict[str, Dict]:
         
         # Config module fallback
         if hasattr(Config, 'ADMIN_PASSWORD') and Config.ADMIN_PASSWORD:
+            logger.info("Using admin password from Config class")
             return {
                 'admin': {
                     'password': hash_password(Config.ADMIN_PASSWORD),
@@ -306,6 +313,11 @@ def verify_password(stored_password: str, provided_password: str) -> bool:
     provided_hash = hash_password(provided_password)
     if stored_password == provided_hash:
         return True
+    
+    # Direct string comparison in dev mode (dangerous in production)
+    if ENVIRONMENT != 'production' and stored_password == provided_password:
+        logger.warning("Dev-mode direct password comparison used")
+        return True
         
     # Werkzeug compatibility for legacy hashes
     if stored_password.startswith('pbkdf2:sha256:'):
@@ -315,10 +327,15 @@ def verify_password(stored_password: str, provided_password: str) -> bool:
         except ImportError:
             pass
     
+    # Always log failures to help debug authentication issues
+    logger.warning(f"Password verification failed. Stored hash: {stored_password[:10]}... Provided hash: {provided_hash[:10]}...")
+    
     return False
 
 def hash_password(password: str) -> str:
     """Hash password using secure method."""
+    if not password:
+        return ""
     return hashlib.sha256(password.encode()).hexdigest()
 
 # ====== Route Handlers ======
@@ -344,11 +361,16 @@ def login():
             error = "Username and password are required"
             return render_template('auth.html', page_type='login', error=error, now=datetime.now())
         
+        # Load users from config - force refresh to ensure we have the latest data
         users = load_users()
         
         if username in users:
             user = users[username]
             
+            # Additional logging for transparency
+            logger.info(f"Login attempt for {username}")
+            
+            # Verify password - improved with better error handling
             if verify_password(user.get('password', ''), password):
                 # Set up session
                 session.clear()
@@ -363,9 +385,9 @@ def login():
                     auth_config = config.get_cached_config('auth-config', force_refresh=True)
                     if auth_config and 'users' in auth_config and username in auth_config['users']:
                         auth_config['users'][username]['last_login'] = datetime.utcnow().isoformat()
-                        config.create_or_update_secret('auth-config', json.dumps(auth_config))
-                except Exception:
-                    pass
+                        config.create_or_update_secret('auth-config', auth_config)
+                except Exception as e:
+                    logger.warning(f"Failed to update last login time: {str(e)}")
                 
                 logger.info(f"Successful login: {username}")
                 flash(f'Welcome, {username}!', 'success')
@@ -379,6 +401,12 @@ def login():
             else:
                 error = "Invalid password"
                 logger.warning(f"Failed login: Invalid password for {username}")
+                
+                # Debug logging to help diagnose authentication issues
+                if DEBUG_MODE:
+                    stored_hash = user.get('password', '')
+                    provided_hash = hash_password(password)
+                    logger.debug(f"Auth debug - Stored hash: {stored_hash[:10]}... Provided hash: {provided_hash[:10]}...")
         else:
             error = "Invalid username"
             logger.warning(f"Failed login: Invalid username {username}")
@@ -430,8 +458,14 @@ def change_password():
             auth_config = config.get_cached_config('auth-config')
             if auth_config and 'users' in auth_config:
                 auth_config['users'][session.get('username')]['password'] = password_hash
-                config.create_or_update_secret('auth-config', json.dumps(auth_config))
+                config.create_or_update_secret('auth-config', auth_config)
                 flash('Password changed successfully', 'success')
+                
+                # Special handling for admin user
+                if session.get('username') == 'admin':
+                    # Also update admin-initial-password if it exists
+                    config.create_or_update_secret('admin-initial-password', new_password)
+                    logger.info("Updated admin-initial-password after password change")
             else:
                 flash('Could not update password in configuration', 'warning')
         except Exception as e:
@@ -665,7 +699,7 @@ def add_user_route():
             }
             
             # Save to Secret Manager
-            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+            if config.create_or_update_secret('auth-config', auth_config):
                 flash(f'User {username} created successfully', 'success')
             else:
                 flash(f'User created but not saved to configuration', 'warning')
@@ -703,12 +737,24 @@ def edit_user(username):
             # Update user
             if password:
                 auth_config["users"][username]['password'] = hash_password(password)
+                
+                # Special handling for admin user
+                if username == 'admin':
+                    # Also update admin-initial-password
+                    config.create_or_update_secret('admin-initial-password', password)
+                    logger.info("Updated admin-initial-password during user edit")
+                    
             if role:
                 auth_config["users"][username]['role'] = role
             
             # Save to configuration
-            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+            if config.create_or_update_secret('auth-config', auth_config):
                 flash(f'User {username} updated successfully', 'success')
+                
+                # Re-sync passwords if admin
+                if username == 'admin' and hasattr(SecretManager, 'ensure_password_sync'):
+                    SecretManager.ensure_password_sync()
+                    logger.info("Re-synchronized admin password after edit")
             else:
                 flash(f'Changes not saved to configuration', 'warning')
                 
@@ -727,6 +773,11 @@ def edit_user(username):
 def delete_user(username):
     """Delete user."""
     try:
+        # Prevent deleting admin user
+        if username == 'admin':
+            flash('Cannot delete admin user', 'danger')
+            return redirect(url_for('frontend.users'))
+            
         # Get auth config
         auth_config = config.get_cached_config('auth-config')
         if not auth_config or "users" not in auth_config:
@@ -738,7 +789,7 @@ def delete_user(username):
             del auth_config["users"][username]
             
             # Save changes
-            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+            if config.create_or_update_secret('auth-config', auth_config):
                 flash(f'User {username} deleted successfully', 'success')
             else:
                 flash(f'User deleted but changes not saved to configuration', 'warning')
