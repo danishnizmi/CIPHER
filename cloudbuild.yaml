@@ -62,42 +62,38 @@ steps:
     args:
       - -c
       - |
-        echo "Creating required secrets..."
+        echo "Creating required secrets if they don't exist..."
         
-        # Create api-keys secret
+        # Create api-keys secret if it doesn't exist
         if ! gcloud secrets describe api-keys 2>/dev/null; then
           echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets create api-keys --data-file=-
           echo "Created api-keys secret"
         else
-          echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets versions add api-keys --data-file=-
-          echo "Updated api-keys secret"
+          echo "Using existing api-keys secret"
         fi
         
-        # Create auth-config secret
+        # Create auth-config secret if it doesn't exist
         if ! gcloud secrets describe auth-config 2>/dev/null; then
           echo '{"session_secret":"dev-secret-key","enabled":true}' | gcloud secrets create auth-config --data-file=-
           echo "Created auth-config secret"
         else
-          echo '{"session_secret":"dev-secret-key","enabled":true}' | gcloud secrets versions add auth-config --data-file=-
-          echo "Updated auth-config secret"
+          echo "Using existing auth-config secret"
         fi
         
-        # Create feed-config secret
+        # Create feed-config secret if it doesn't exist
         if ! gcloud secrets describe feed-config 2>/dev/null; then
           echo '{"feeds":[]}' | gcloud secrets create feed-config --data-file=-
           echo "Created feed-config secret"
         else
-          echo '{"feeds":[]}' | gcloud secrets versions add feed-config --data-file=-
-          echo "Updated feed-config secret"
+          echo "Using existing feed-config secret"
         fi
         
-        # Create admin-initial-password secret
+        # Create admin-initial-password secret if it doesn't exist
         if ! gcloud secrets describe admin-initial-password 2>/dev/null; then
           echo 'admin' | gcloud secrets create admin-initial-password --data-file=-
           echo "Created admin-initial-password secret"
         else
-          echo 'admin' | gcloud secrets versions add admin-initial-password --data-file=-
-          echo "Updated admin-initial-password secret"
+          echo "Using existing admin-initial-password secret"
         fi
 
   # Build container with cache optimization
