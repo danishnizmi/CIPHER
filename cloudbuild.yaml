@@ -55,45 +55,58 @@ steps:
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
       echo "Frontend build complete!"
 
-  # Create required secrets if they don't exist
+  # Check if secrets exist without creating new versions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'create-secrets'
+    id: 'verify-secrets'
     entrypoint: bash
     args:
       - -c
       - |
-        echo "Creating required secrets if they don't exist..."
+        echo "Verifying required secrets exist..."
         
-        # Create api-keys secret if it doesn't exist
-        if ! gcloud secrets describe api-keys 2>/dev/null; then
-          echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets create api-keys --data-file=-
-          echo "Created api-keys secret"
+        # Only check if secrets exist, don't create or update them
+        SECRET_CHECK="true"
+        MISSING_SECRETS=""
+        
+        # Check api-keys secret
+        if ! gcloud secrets describe api-keys --project=${PROJECT_ID} 2>/dev/null; then
+          echo "Warning: api-keys secret doesn't exist"
+          MISSING_SECRETS="${MISSING_SECRETS} api-keys"
         else
-          echo "Using existing api-keys secret"
+          echo "✓ api-keys secret exists"
         fi
         
-        # Create auth-config secret if it doesn't exist
-        if ! gcloud secrets describe auth-config 2>/dev/null; then
-          echo '{"session_secret":"dev-secret-key","enabled":true}' | gcloud secrets create auth-config --data-file=-
-          echo "Created auth-config secret"
+        # Check auth-config secret
+        if ! gcloud secrets describe auth-config --project=${PROJECT_ID} 2>/dev/null; then
+          echo "Warning: auth-config secret doesn't exist"
+          MISSING_SECRETS="${MISSING_SECRETS} auth-config"
         else
-          echo "Using existing auth-config secret"
+          echo "✓ auth-config secret exists"
         fi
         
-        # Create feed-config secret if it doesn't exist
-        if ! gcloud secrets describe feed-config 2>/dev/null; then
-          echo '{"feeds":[]}' | gcloud secrets create feed-config --data-file=-
-          echo "Created feed-config secret"
+        # Check feed-config secret
+        if ! gcloud secrets describe feed-config --project=${PROJECT_ID} 2>/dev/null; then
+          echo "Warning: feed-config secret doesn't exist"
+          MISSING_SECRETS="${MISSING_SECRETS} feed-config"
         else
-          echo "Using existing feed-config secret"
+          echo "✓ feed-config secret exists"
         fi
         
-        # Create admin-initial-password secret if it doesn't exist
-        if ! gcloud secrets describe admin-initial-password 2>/dev/null; then
-          echo 'admin' | gcloud secrets create admin-initial-password --data-file=-
-          echo "Created admin-initial-password secret"
+        # Check admin-initial-password secret
+        if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} 2>/dev/null; then
+          echo "Warning: admin-initial-password secret doesn't exist"
+          MISSING_SECRETS="${MISSING_SECRETS} admin-initial-password"
         else
-          echo "Using existing admin-initial-password secret"
+          echo "✓ admin-initial-password secret exists"
+        fi
+        
+        # Only create missing secrets if absolutely necessary
+        if [ ! -z "$MISSING_SECRETS" ]; then
+          echo "Missing secrets detected: $MISSING_SECRETS"
+          echo "These will be created by the application on first run."
+          echo "If you need to create them now, run the create-secrets.sh script manually."
+        else
+          echo "All required secrets exist! No secrets will be modified during this build."
         fi
 
   # Build container with cache optimization
