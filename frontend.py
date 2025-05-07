@@ -1,5 +1,5 @@
 """
-Threat Intelligence Platform - Frontend Module
+Optimized frontend module for Threat Intelligence Platform.
 Handles web interface, user authentication, and dashboard views.
 """
 
@@ -8,30 +8,28 @@ import json
 import logging
 import hashlib
 import time
-import traceback
 import secrets
 import threading
 from datetime import datetime, timedelta
 from functools import wraps, lru_cache
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, session, abort, g, Response, current_app
-from werkzeug.middleware.proxy_fix import ProxyFix
+from flask import flash, session, abort, g, current_app
 from werkzeug.exceptions import BadRequest
 
 # Import config module for centralized configuration
 import config
 from config import Config
 
-# Environment settings
+# Environment settings with defaults
 VERSION = os.environ.get("VERSION", "1.0.3")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
 # Cache settings
-CACHE_TIMEOUT = 300  # Cache for 5 minutes
-LONG_CACHE_TIMEOUT = 1800  # Cache for 30 minutes
+CACHE_TIMEOUT = 300  # 5 minutes
+LONG_CACHE_TIMEOUT = 1800  # 30 minutes
 API_CACHE = {}
 API_CACHE_TIMESTAMP = {}
 
@@ -44,263 +42,189 @@ logging.basicConfig(level=LOG_LEVEL,
 # Create Blueprint for the frontend module
 frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
 
-# ====== Session and Security Configuration ======
+# ====== Session and Security Functions ======
 
 @frontend_app.before_request
 def before_request():
-    """Ensure session is properly established with cloud-based session."""
-    try:
-        # Force session creation if needed
-        if '_id' not in session:
-            session.permanent = True
-            session['_id'] = secrets.token_hex(16)
-            logger.debug(f"New session created: {session.get('_id')}")
-        
-        # Add session debug info in development
+    """Ensure session is properly established."""
+    if '_id' not in session:
+        session.permanent = True
+        session['_id'] = secrets.token_hex(16)
         if DEBUG_MODE:
-            logger.debug(f"Session data: {dict(session)}")
-            logger.debug(f"Request path: {request.path}")
-            logger.debug(f"Request method: {request.method}")
-    
-    except Exception as e:
-        logger.error(f"Error in before_request: {str(e)}")
-        logger.error(traceback.format_exc())
+            logger.debug(f"New session created: {session.get('_id')}")
 
 # ====== Helper Functions ======
+
 def safe_report_exception(e=None):
-    """Safely report exception using config module"""
+    """Safely report exception using config module."""
     try:
-        if e:
-            config.report_error(e)
-        else:
-            config.report_error(Exception("Frontend error"))
+        config.report_error(e or Exception("Frontend error"))
     except Exception as err:
         logger.warning(f"Failed to report exception: {err}")
 
-def get_cache_key(func_name: str, **params) -> str:
-    """Generate a cache key for a function call"""
-    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()) if k not in ['api_key', 'token', 'password'])
+def cache_key(func_name: str, **params) -> str:
+    """Generate cache key excluding sensitive parameters."""
+    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()) 
+                        if k not in ['api_key', 'token', 'password'])
     return f"{func_name}:{param_str}"
 
-def is_cache_valid(cache_key: str, timeout: int = CACHE_TIMEOUT) -> bool:
-    """Check if a cached value is still valid"""
-    if cache_key not in API_CACHE or cache_key not in API_CACHE_TIMESTAMP:
-        return False
-    
-    timestamp = API_CACHE_TIMESTAMP[cache_key]
-    return (time.time() - timestamp) < timeout
+def cache_valid(key: str, timeout: int = CACHE_TIMEOUT) -> bool:
+    """Check if cached value is still valid."""
+    return (key in API_CACHE and key in API_CACHE_TIMESTAMP and 
+            (time.time() - API_CACHE_TIMESTAMP[key]) < timeout)
 
 def api_cache(timeout: int = CACHE_TIMEOUT):
-    """Decorator for caching API results"""
+    """Cache decorator for API results."""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # Skip cache for authenticated users for real-time data
+            # Skip cache for authenticated users
             if session.get('logged_in'):
                 return func(*args, **kwargs)
             
-            # Generate cache key
-            cache_key = get_cache_key(func.__name__, **kwargs)
+            key = cache_key(func.__name__, **kwargs)
+            if cache_valid(key, timeout):
+                return API_CACHE[key]
             
-            # Check cache
-            if is_cache_valid(cache_key, timeout):
-                logger.debug(f"Cache hit for {func.__name__}")
-                return API_CACHE[cache_key]
-            
-            # Call function if not cached or expired
-            logger.debug(f"Cache miss for {func.__name__}")
             result = func(*args, **kwargs)
-            
-            # Update cache
-            API_CACHE[cache_key] = result
-            API_CACHE_TIMESTAMP[cache_key] = time.time()
-            
+            API_CACHE[key] = result
+            API_CACHE_TIMESTAMP[key] = time.time()
             return result
         return wrapper
     return decorator
 
 def clear_api_cache(prefix: str = None):
-    """Clear API cache entries, optionally filtering by prefix"""
+    """Clear API cache entries with optional prefix filter."""
     global API_CACHE, API_CACHE_TIMESTAMP
     
     if prefix:
-        # Clear only entries with matching prefix
-        keys_to_delete = [k for k in API_CACHE if k.startswith(prefix)]
-        for k in keys_to_delete:
-            if k in API_CACHE:
-                del API_CACHE[k]
-            if k in API_CACHE_TIMESTAMP:
-                del API_CACHE_TIMESTAMP[k]
-        logger.debug(f"Cleared {len(keys_to_delete)} cache entries with prefix '{prefix}'")
+        keys = [k for k in API_CACHE if k.startswith(prefix)]
+        for k in keys:
+            API_CACHE.pop(k, None)
+            API_CACHE_TIMESTAMP.pop(k, None)
+        logger.debug(f"Cleared {len(keys)} cache entries with prefix '{prefix}'")
     else:
-        # Clear all cache
         API_CACHE = {}
         API_CACHE_TIMESTAMP = {}
         logger.debug("Cleared all API cache entries")
 
 # ====== API Interaction Functions ======
+
+@lru_cache(maxsize=1)
 def get_api_key() -> str:
-    """Get API key for internal requests using config module"""
-    # Try to get API key from config module
+    """Get API key from config with optimized caching."""
+    # Try config module attributes
     api_key = getattr(Config, 'API_KEY', None)
     
-    # If not available directly, try to get from cached config
+    # Try cached config
     if not api_key:
-        api_keys_config = config.get_cached_config('api-keys')
+        api_keys_config = config.get_cached_config('api-keys') if hasattr(config, 'get_cached_config') else None
         if api_keys_config and 'platform_api_key' in api_keys_config:
             api_key = api_keys_config['platform_api_key']
     
-    # Try environment variable as last resort
-    if not api_key:
-        api_key = os.environ.get('API_KEY', '')
-    
-    return api_key or ''
+    # Fall back to environment variable
+    return api_key or os.environ.get('API_KEY', '')
 
 @api_cache(timeout=CACHE_TIMEOUT)
-def _api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
-    """Make an internal API request with caching and enhanced error handling"""
+def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
+    """Make internal API request with caching and optimized error handling."""
     try:
-        # Import requests here to avoid global dependency
         import requests
         
-        # Construct base URL
+        # Construct URL
         base_url = request.url_root.rstrip('/')
-        api_url = f"{base_url}/api/{endpoint.lstrip('/')}"
+        url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # Always include API key for internal requests
+        # Add API key and CSRF token
         headers = {"Content-Type": "application/json"}
         api_key = get_api_key()
         if api_key:
             headers["X-API-Key"] = api_key
-        else:
-            logger.warning("No API key available for internal request")
         
-        # Add CSRF token if available
         csrf_token = session.get('csrf_token')
         if csrf_token:
             headers["X-CSRF-Token"] = csrf_token
         
-        # Make the request
-        logger.debug(f"API request: {method} {api_url}")
+        # Make request with optimized retries
+        max_retries = 3
         start_time = time.time()
         
-        # Add retry logic for resilience
-        max_retries = 3
-        retry_count = 0
-        response = None
-        
-        while retry_count < max_retries:
+        for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = requests.get(api_url, headers=headers, params=params, timeout=10)
-                else:  # POST
-                    response = requests.post(api_url, headers=headers, json=data, timeout=10)
+                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                else:
+                    response = requests.post(url, headers=headers, json=data, timeout=10)
                 
-                # Break if successful
+                # Break on success or specific failure
                 if response.status_code < 500:
                     break
-                    
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                logger.warning(f"Attempt {retry_count+1}/{max_retries} failed: {str(e)}")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                pass
                 
             # Exponential backoff
-            wait_time = 0.5 * (2 ** retry_count)
-            time.sleep(wait_time)
-            retry_count += 1
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (2 ** attempt))
         
-        if response is None:
-            # All retries failed
-            return {
-                "error": "Failed to connect to API after multiple retries",
-                # Add default structure to prevent template errors
-                "feeds": {"total_sources": 0},
-                "iocs": {"total": 0, "types": []},
-                "campaigns": {"total_campaigns": 0},
-                "analyses": {"total_analyses": 0}
-            }
-        
-        # Log response time
+        # Report slow requests
         request_time = time.time() - start_time
         if request_time > 1.0:
-            logger.info(f"Slow API request ({request_time:.2f}s): {method} {api_url}")
+            logger.info(f"Slow API request ({request_time:.2f}s): {method} {url}")
         
-        # Check for errors
-        if response.status_code != 200:
-            logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
+        # Handle response
+        if not response or response.status_code != 200:
+            logger.warning(f"API request failed: {getattr(response, 'status_code', 'No response')} - {getattr(response, 'text', '')[:100]}")
             return {
-                "error": f"API request failed with status {response.status_code}",
-                "status_code": response.status_code,
-                # Add default structure to prevent template errors
+                "error": f"API request failed with status {getattr(response, 'status_code', 'unknown')}",
+                "status_code": getattr(response, 'status_code', 500),
+                # Default structure for templates
                 "feeds": {"total_sources": 0},
                 "iocs": {"total": 0, "types": []},
                 "campaigns": {"total_campaigns": 0},
                 "analyses": {"total_analyses": 0}
             }
         
-        # Parse and return JSON
-        if response.text:
-            try:
-                return response.json()
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON response: {response.text[:100]}")
-                return {
-                    "error": "Invalid JSON response", 
-                    "raw_response": response.text[:500],
-                    # Add default structure to prevent template errors
-                    "feeds": {"total_sources": 0},
-                    "iocs": {"total": 0, "types": []},
-                    "campaigns": {"total_campaigns": 0},
-                    "analyses": {"total_analyses": 0}
-                }
-        
-        return {}
+        # Parse JSON response
+        try:
+            return response.json() if response.text else {}
+        except json.JSONDecodeError:
+            return {
+                "error": "Invalid JSON response",
+                # Default structure for templates
+                "feeds": {"total_sources": 0},
+                "iocs": {"total": 0, "types": []},
+                "campaigns": {"total_campaigns": 0},
+                "analyses": {"total_analyses": 0}
+            }
     
     except Exception as e:
-        if 'requests' in locals() and isinstance(e, requests.RequestException):
-            logger.error(f"API request error ({endpoint}): {str(e)}")
-            status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
-            
-            error_msg = f"API error: {str(e)}"
-            if status_code:
-                error_msg += f" (status code: {status_code})"
-            
-            return {
-                "error": error_msg, 
-                "status_code": status_code,
-                # Add default structure to prevent template errors
-                "feeds": {"total_sources": 0},
-                "iocs": {"total": 0, "types": []},
-                "campaigns": {"total_campaigns": 0},
-                "analyses": {"total_analyses": 0}
-            }
-        else:
-            logger.error(f"Unexpected API error ({endpoint}): {str(e)}")
-            safe_report_exception(e)
-            return {
-                "error": f"Unexpected error: {str(e)}",
-                # Add default structure to prevent template errors
-                "feeds": {"total_sources": 0},
-                "iocs": {"total": 0, "types": []},
-                "campaigns": {"total_campaigns": 0},
-                "analyses": {"total_analyses": 0}
-            }
+        logger.error(f"API request error ({endpoint}): {str(e)}")
+        safe_report_exception(e)
+        return {
+            "error": f"API error: {str(e)}",
+            # Default structure for templates
+            "feeds": {"total_sources": 0},
+            "iocs": {"total": 0, "types": []},
+            "campaigns": {"total_campaigns": 0},
+            "analyses": {"total_analyses": 0}
+        }
 
 # ====== Authentication Functions ======
-def login_required(f):
-    """Decorator to require login for views"""
-    @wraps(f)
+
+def login_required(func):
+    """Decorator requiring login for views."""
+    @wraps(func)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            # Save the requested URL
             session['next_url'] = request.url
             flash('Please log in to continue', 'info')
             return redirect(url_for('frontend.login'))
-        return f(*args, **kwargs)
+        return func(*args, **kwargs)
     return decorated_function
 
-def admin_required(f):
-    """Decorator to require admin role"""
-    @wraps(f)
+def admin_required(func):
+    """Decorator requiring admin role."""
+    @wraps(func)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
             session['next_url'] = request.url
@@ -309,32 +233,34 @@ def admin_required(f):
         if session.get('role') != 'admin':
             flash('Admin privileges required', 'danger')
             return render_template('auth.html', page_type='not_authorized')
-        return f(*args, **kwargs)
+        return func(*args, **kwargs)
     return decorated_function
 
 def load_users() -> Dict[str, Dict]:
-    """Load user data from auth config using config module"""
+    """Load user data with optimized config access."""
     try:
-        # Get auth config from config module
-        auth_config = config.get_cached_config('auth-config')
+        # Try config module first
+        auth_config = None
+        if hasattr(config, 'get_cached_config'):
+            auth_config = config.get_cached_config('auth-config')
+        
         if auth_config and 'users' in auth_config and auth_config['users']:
             return auth_config.get('users', {})
         
-        # If no users found in config, check for default admin user in environment
+        # Check environment variables
         admin_password = os.environ.get('ADMIN_PASSWORD')
         if admin_password:
-            default_admin = {
+            return {
                 'admin': {
                     'password': hash_password(admin_password),
                     'role': 'admin',
                     'created_at': datetime.utcnow().isoformat()
                 }
             }
-            return default_admin
             
-        # As a last resort, try hardcoded admin (for development only)
+        # Development fallback
         if ENVIRONMENT != 'production':
-            logger.warning("No users found in auth config, using default admin")
+            logger.warning("Using default admin account for development")
             return {
                 'admin': {
                     'password': hash_password('admin'),
@@ -343,9 +269,8 @@ def load_users() -> Dict[str, Dict]:
                 }
             }
         
-        # For production, look for admin password in config
+        # Config module fallback
         if hasattr(Config, 'ADMIN_PASSWORD') and Config.ADMIN_PASSWORD:
-            logger.info("Using admin password from Config")
             return {
                 'admin': {
                     'password': hash_password(Config.ADMIN_PASSWORD),
@@ -354,14 +279,14 @@ def load_users() -> Dict[str, Dict]:
                 }
             }
             
-        logger.error("No user accounts found or configured")
+        logger.error("No user accounts found")
         return {}
+        
     except Exception as e:
-        logger.error(f"Failed to load users: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error loading users: {str(e)}")
         safe_report_exception(e)
         
-        # In development, provide a fallback admin account
+        # Development fallback
         if ENVIRONMENT != 'production':
             return {
                 'admin': {
@@ -373,119 +298,97 @@ def load_users() -> Dict[str, Dict]:
         return {}
 
 def verify_password(stored_password: str, provided_password: str) -> bool:
-    """Verify password with support for multiple hash formats"""
+    """Verify password with support for multiple hash formats."""
     if not stored_password or not provided_password:
         return False
     
-    # Simple SHA-256 hash comparison
-    provided_hash = hashlib.sha256(provided_password.encode()).hexdigest()
+    # Simple hash comparison
+    provided_hash = hash_password(provided_password)
     if stored_password == provided_hash:
         return True
         
-    # For backward compatibility with Werkzeug hash format
+    # Werkzeug compatibility for legacy hashes
     if stored_password.startswith('pbkdf2:sha256:'):
         try:
             from werkzeug.security import check_password_hash
             return check_password_hash(stored_password, provided_password)
         except ImportError:
-            logger.warning("Werkzeug security not available for password check")
-            return False
+            pass
     
     return False
 
 def hash_password(password: str) -> str:
-    """Hash password using secure method"""
-    # Use simple SHA-256 for consistent hashing
+    """Hash password using secure method."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 # ====== Route Handlers ======
+
 @frontend_app.route('/')
 def index():
-    """Root redirects to dashboard if logged in, otherwise to login"""
-    logger.debug("Accessed root route")
+    """Root redirects to dashboard or login."""
     if session.get('logged_in'):
         return redirect(url_for('frontend.dashboard'))
     return redirect(url_for('frontend.login'))
 
 @frontend_app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Login page handler with Flask-WTF CSRF protection"""
+    """Login page handler."""
     error = None
-    logger.debug("Accessed login route")
     
-    try:
-        if request.method == 'POST':
-            # Flask-WTF automatically handles CSRF validation
-            username = request.form.get('username')
-            password = request.form.get('password')
-            remember = request.form.get('remember') == 'on'
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        remember = request.form.get('remember') == 'on'
+        
+        if not username or not password:
+            error = "Username and password are required"
+            return render_template('auth.html', page_type='login', error=error, now=datetime.now())
+        
+        users = load_users()
+        
+        if username in users:
+            user = users[username]
             
-            # Debug output for login attempt
-            logger.info(f"Login attempt for user: {username}")
-            
-            # Validate inputs
-            if not username or not password:
-                error = "Username and password are required"
-                return render_template('auth.html', page_type='login', error=error, now=datetime.now())
-            
-            # Load users
-            users = load_users()
-            
-            if username in users:
-                user = users[username]
-                stored_password = user.get('password', '')
+            if verify_password(user.get('password', ''), password):
+                # Set up session
+                session.clear()
+                session.permanent = remember
+                session['logged_in'] = True
+                session['username'] = username
+                session['role'] = user.get('role', 'readonly')
+                session['_id'] = secrets.token_hex(16)
                 
-                # Verify password
-                if verify_password(stored_password, password):
-                    # Login successful
-                    session.clear()  # Clear previous session data
-                    session.permanent = remember
-                    session['logged_in'] = True
-                    session['username'] = username
-                    session['role'] = user.get('role', 'readonly')
-                    session['_id'] = secrets.token_hex(16)  # Generate new session ID
-                    
-                    # Update last login time
-                    try:
-                        auth_config = config.get_cached_config('auth-config', force_refresh=True)
-                        if auth_config and 'users' in auth_config and username in auth_config['users']:
-                            auth_config['users'][username]['last_login'] = datetime.utcnow().isoformat()
-                            config.create_or_update_secret('auth-config', json.dumps(auth_config))
-                    except Exception as e:
-                        logger.warning(f"Could not update last login time: {str(e)}")
-                    
-                    # Log the successful login
-                    logger.info(f"Successful login: {username}")
-                    
-                    flash(f'Welcome, {username}!', 'success')
-                    
-                    # Clear cache for this user
-                    clear_api_cache()
-                    
-                    # Redirect to requested page or dashboard
-                    next_page = session.pop('next_url', None) or request.args.get('next')
-                    if next_page and next_page.startswith('/'):
-                        return redirect(next_page)
-                    return redirect(url_for('frontend.dashboard'))
-                else:
-                    error = "Invalid password"
-                    logger.warning(f"Failed login attempt: Invalid password for {username}")
+                # Update last login time
+                try:
+                    auth_config = config.get_cached_config('auth-config', force_refresh=True)
+                    if auth_config and 'users' in auth_config and username in auth_config['users']:
+                        auth_config['users'][username]['last_login'] = datetime.utcnow().isoformat()
+                        config.create_or_update_secret('auth-config', json.dumps(auth_config))
+                except Exception:
+                    pass
+                
+                logger.info(f"Successful login: {username}")
+                flash(f'Welcome, {username}!', 'success')
+                
+                # Clear cache and redirect
+                clear_api_cache()
+                next_page = session.pop('next_url', None) or request.args.get('next')
+                if next_page and next_page.startswith('/'):
+                    return redirect(next_page)
+                return redirect(url_for('frontend.dashboard'))
             else:
-                error = "Invalid username"
-                logger.warning(f"Failed login attempt: Invalid username {username}")
-    except Exception as e:
-        logger.error(f"Unexpected error in login: {str(e)}")
-        logger.error(traceback.format_exc())
-        safe_report_exception(e)
-        error = f"An unexpected error occurred: {str(e)}"
+                error = "Invalid password"
+                logger.warning(f"Failed login: Invalid password for {username}")
+        else:
+            error = "Invalid username"
+            logger.warning(f"Failed login: Invalid username {username}")
     
-    # For GET requests or failed logins
     return render_template('auth.html', page_type='login', error=error, now=datetime.now())
 
 @frontend_app.route('/profile')
 @login_required
 def profile():
-    """User profile page handler"""
+    """User profile page."""
     try:
         users = load_users()
         user = users.get(session.get('username'))
@@ -500,15 +403,14 @@ def profile():
                              user=user)
     except Exception as e:
         logger.error(f"Error loading profile: {str(e)}")
-        logger.error(traceback.format_exc())
-        flash('Error loading profile page', 'error')
+        flash('Error loading profile', 'error')
         safe_report_exception(e)
         return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/change_password', methods=['POST'])
 @login_required
 def change_password():
-    """Handle password change requests"""
+    """Handle password change requests."""
     try:
         current_password = request.form.get('current_password')
         new_password = request.form.get('new_password')
@@ -516,30 +418,26 @@ def change_password():
         users = load_users()
         user = users.get(session.get('username'))
         
-        if not user:
-            flash('User not found', 'error')
-            return redirect(url_for('frontend.profile'))
-        
-        # Verify current password
-        if not verify_password(user.get('password', ''), current_password):
+        if not user or not verify_password(user.get('password', ''), current_password):
             flash('Current password is incorrect', 'danger')
             return redirect(url_for('frontend.profile'))
         
-        # Update password
-        user['password'] = hash_password(new_password)
+        # Create updated password hash
+        password_hash = hash_password(new_password)
         
         # Update in Secret Manager if possible
         try:
             auth_config = config.get_cached_config('auth-config')
             if auth_config and 'users' in auth_config:
-                auth_config['users'][session.get('username')]['password'] = hash_password(new_password)
-                # Save back to Secret Manager
+                auth_config['users'][session.get('username')]['password'] = password_hash
                 config.create_or_update_secret('auth-config', json.dumps(auth_config))
+                flash('Password changed successfully', 'success')
+            else:
+                flash('Could not update password in configuration', 'warning')
         except Exception as e:
-            logger.warning(f"Failed to update password in Secret Manager: {str(e)}")
-            # Continue anyway as we've updated the in-memory version
+            logger.warning(f"Error updating password: {str(e)}")
+            flash('Password updated in memory only', 'warning')
         
-        flash('Password changed successfully', 'success')
         return redirect(url_for('frontend.profile'))
     except Exception as e:
         logger.error(f"Error changing password: {str(e)}")
@@ -549,9 +447,8 @@ def change_password():
 
 @frontend_app.route('/logout')
 def logout():
-    """Logout route handler"""
+    """Logout handler."""
     username = session.get('username')
-    
     if username:
         logger.info(f"User logged out: {username}")
     
@@ -563,10 +460,9 @@ def logout():
 @frontend_app.route('/dashboard/<view>')
 @login_required
 def dashboard(view=None):
-    """Dashboard view with dynamic content loading based on view type"""
+    """Dashboard view with dynamic content loading."""
     try:
-        logger.debug(f"Accessing dashboard with view: {view}")
-        # Get and validate the view and timeframe
+        # Get view parameters
         current_view = view or request.args.get('view', 'dashboard')
         days = int(request.args.get('days', '30'))
         
@@ -576,38 +472,42 @@ def dashboard(view=None):
             'days': days,
         }
         
-        # Set page metadata based on view
-        if current_view == 'feeds':
-            context.update({
-                'page_title': 'Threat Feeds',
-                'page_subtitle': 'Intelligence sources and data collection',
-                'page_icon': 'rss'
-            })
-        elif current_view == 'iocs':
-            context.update({
-                'page_title': 'Indicators of Compromise',
-                'page_subtitle': 'Observed indicators and threat artifacts',
-                'page_icon': 'fingerprint'
-            })
-        elif current_view == 'campaigns':
-            context.update({
-                'page_title': 'Threat Campaigns',
-                'page_subtitle': 'Detected threat actor campaigns and activities',
-                'page_icon': 'project-diagram'
-            })
-        else:
-            context.update({
-                'page_title': 'Threat Intelligence Dashboard',
-                'page_subtitle': 'Platform overview and threat summary',
-                'page_icon': 'tachometer-alt'
-            })
+        # Set page metadata
+        page_metadata = {
+            'feeds': {
+                'title': 'Threat Feeds',
+                'subtitle': 'Intelligence sources and data collection',
+                'icon': 'rss'
+            },
+            'iocs': {
+                'title': 'Indicators of Compromise',
+                'subtitle': 'Observed indicators and threat artifacts',
+                'icon': 'fingerprint'
+            },
+            'campaigns': {
+                'title': 'Threat Campaigns',
+                'subtitle': 'Detected threat actor campaigns and activities',
+                'icon': 'project-diagram'
+            },
+            'dashboard': {
+                'title': 'Threat Intelligence Dashboard',
+                'subtitle': 'Platform overview and threat summary',
+                'icon': 'tachometer-alt'
+            }
+        }
         
-        # Load statistics for all views
+        metadata = page_metadata.get(current_view, page_metadata['dashboard'])
+        context.update({
+            'page_title': metadata['title'],
+            'page_subtitle': metadata['subtitle'],
+            'page_icon': metadata['icon']
+        })
+        
+        # Load statistics
         try:
-            # Get statistics using the helper function
-            stats_response = _api_request('stats', params={"days": days}) or {}
+            stats_response = api_request('stats', params={"days": days}) or {}
             
-            # Ensure stats has the expected structure even if API fails
+            # Ensure stats structure
             context['stats'] = {
                 'feeds': stats_response.get('feeds', {'total_sources': 0}),
                 'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
@@ -616,20 +516,20 @@ def dashboard(view=None):
                 'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
             }
             
-            # Extract trends from statistics - use real data
+            # Extract trends
             if isinstance(stats_response, dict) and 'feeds' in stats_response:
                 context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
                 context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
                 context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
                 context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
                 
-                # Extract IOC type data for charts
+                # IOC type data
                 context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
                 context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
             
             # Load view-specific data
             if current_view == 'feeds':
-                feeds_response = _api_request('feeds') or {}
+                feeds_response = api_request('feeds') or {}
                 context['feed_items'] = feeds_response.get('feed_details', [])
                 context['feed_type_descriptions'] = {
                     feed.get('name', ''): feed.get('description', 'Threat Intelligence Feed') 
@@ -637,21 +537,20 @@ def dashboard(view=None):
                 }
                 
             elif current_view == 'iocs':
-                iocs_response = _api_request('iocs', params={"days": days}) or {}
+                iocs_response = api_request('iocs', params={"days": days}) or {}
                 context['ioc_items'] = iocs_response.get('records', [])
                 
             elif current_view == 'campaigns':
-                campaigns_response = _api_request('campaigns', params={"days": days}) or {}
+                campaigns_response = api_request('campaigns', params={"days": days}) or {}
                 context['campaigns'] = campaigns_response.get('campaigns', [])
                 
             else:
-                # Dashboard view - load additional data
-                # Get date range for activity chart
+                # Dashboard view extras
                 today = datetime.now().date()
                 date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
                 context['activity_dates'] = date_range
                 
-                # Get activity counts from stats if available
+                # Activity data
                 if (isinstance(stats_response, dict) and 
                     'visualization_data' in stats_response and 
                     'daily_counts' in stats_response['visualization_data']):
@@ -665,48 +564,35 @@ def dashboard(view=None):
                     
                     context['activity_counts'] = counts
                 else:
-                    # Generate a basic trend if no visualization data
                     context['activity_counts'] = [20 + i * 2 for i in range(days)]
                 
-                # Load campaigns for dashboard
-                campaigns_response = _api_request('campaigns', params={"days": days}) or {}
-                campaigns_list = campaigns_response.get('campaigns', [])
+                # Load additional dashboard data
+                campaigns_response = api_request('campaigns', params={"days": days}) or {}
+                context['campaigns'] = campaigns_response.get('campaigns', [])[:3]
                 
-                if campaigns_list:
-                    context['campaigns'] = campaigns_list[:3]
-                else:
-                    context['campaigns'] = []
+                iocs_response = api_request('iocs', params={"days": days}) or {}
+                context['top_iocs'] = iocs_response.get('records', [])[:4]
                 
-                # Load IOCs for dashboard
-                iocs_response = _api_request('iocs', params={"days": days}) or {}
-                iocs_list = iocs_response.get('records', [])
-                
-                if iocs_list:
-                    context['top_iocs'] = iocs_list[:4]
-                else:
-                    context['top_iocs'] = []
-                
-                # Load threat summary for dashboard
-                threat_summary = _api_request(f"threat_summary", params={"days": days}) or {}
+                threat_summary = api_request(f"threat_summary", params={"days": days}) or {}
                 context['threat_summary'] = threat_summary
                 
-                # Load geo data for map
-                geo_stats = _api_request(f"iocs/geo", params={"days": days}) or {}
+                geo_stats = api_request(f"iocs/geo", params={"days": days}) or {}
                 context['geo_stats'] = geo_stats.get('countries', [])
                 
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
-            logger.error(traceback.format_exc())
             safe_report_exception(e)
             
-            # Initialize empty data structures on error
-            context['stats'] = {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}}
-            context['feed_trend'] = 0
-            context['ioc_trend'] = 0
-            context['campaign_trend'] = 0
-            context['analysis_trend'] = 0
-            context['ioc_type_labels'] = []
-            context['ioc_type_values'] = []
+            # Initialize empty data structures
+            context.update({
+                'stats': {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}},
+                'feed_trend': 0,
+                'ioc_trend': 0,
+                'campaign_trend': 0,
+                'analysis_trend': 0,
+                'ioc_type_labels': [],
+                'ioc_type_values': []
+            })
             
             if current_view == 'feeds':
                 context['feed_items'] = []
@@ -728,10 +614,9 @@ def dashboard(view=None):
         
         return render_template('dashboard.html', **context, now=datetime.now())
     except Exception as e:
-        logger.error(f"Unexpected error in dashboard: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Unexpected dashboard error: {str(e)}")
         safe_report_exception(e)
-        flash('An unexpected error occurred. Please try again later.', 'danger')
+        flash('An unexpected error occurred', 'danger')
         return redirect(url_for('frontend.login'))
 
 # User Management Routes
@@ -739,7 +624,7 @@ def dashboard(view=None):
 @login_required
 @admin_required
 def users():
-    """User management page"""
+    """User management page."""
     try:
         users = load_users()
         return render_template('content.html', page_type='users', users=users)
@@ -753,37 +638,38 @@ def users():
 @login_required
 @admin_required
 def add_user_route():
-    """Add new user"""
+    """Add new user."""
     if request.method == 'POST':
         try:
             username = request.form.get('username')
             password = request.form.get('password')
             role = request.form.get('role', 'readonly')
             
-            users = load_users()
-            if username in users:
+            # Load existing users
+            auth_config = config.get_cached_config('auth-config')
+            if not auth_config:
+                auth_config = {"users": {}}
+            elif "users" not in auth_config:
+                auth_config["users"] = {}
+                
+            # Check if user exists
+            if username in auth_config["users"]:
                 flash('Username already exists', 'danger')
                 return redirect(url_for('frontend.add_user_route'))
             
             # Create new user
-            users[username] = {
+            auth_config["users"][username] = {
                 'password': hash_password(password),
                 'role': role,
                 'created_at': datetime.utcnow().isoformat()
             }
             
-            # Save to Secret Manager if possible
-            try:
-                auth_config = config.get_cached_config('auth-config')
-                if auth_config and 'users' in auth_config:
-                    auth_config['users'][username] = users[username]
-                    # Save back to Secret Manager
-                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
-            except Exception as e:
-                logger.warning(f"Failed to save new user to Secret Manager: {str(e)}")
-                # Continue anyway as we've updated the in-memory version
-            
-            flash(f'User {username} created successfully', 'success')
+            # Save to Secret Manager
+            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+                flash(f'User {username} created successfully', 'success')
+            else:
+                flash(f'User created but not saved to configuration', 'warning')
+                
             return redirect(url_for('frontend.users'))
             
         except Exception as e:
@@ -797,7 +683,7 @@ def add_user_route():
 @login_required
 @admin_required
 def edit_user(username):
-    """Edit user"""
+    """Edit user."""
     users = load_users()
     if username not in users:
         flash('User not found', 'danger')
@@ -808,26 +694,24 @@ def edit_user(username):
             password = request.form.get('password')
             role = request.form.get('role')
             
+            # Get auth config
+            auth_config = config.get_cached_config('auth-config')
+            if not auth_config or "users" not in auth_config or username not in auth_config["users"]:
+                flash('User configuration not found', 'danger')
+                return redirect(url_for('frontend.users'))
+            
+            # Update user
             if password:
-                users[username]['password'] = hash_password(password)
+                auth_config["users"][username]['password'] = hash_password(password)
             if role:
-                users[username]['role'] = role
+                auth_config["users"][username]['role'] = role
             
-            # Save to Secret Manager if possible
-            try:
-                auth_config = config.get_cached_config('auth-config')
-                if auth_config and 'users' in auth_config:
-                    if password:
-                        auth_config['users'][username]['password'] = hash_password(password)
-                    if role:
-                        auth_config['users'][username]['role'] = role
-                    # Save back to Secret Manager
-                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
-            except Exception as e:
-                logger.warning(f"Failed to update user in Secret Manager: {str(e)}")
-                # Continue anyway as we've updated the in-memory version
-            
-            flash(f'User {username} updated successfully', 'success')
+            # Save to configuration
+            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+                flash(f'User {username} updated successfully', 'success')
+            else:
+                flash(f'Changes not saved to configuration', 'warning')
+                
             return redirect(url_for('frontend.users'))
             
         except Exception as e:
@@ -841,24 +725,23 @@ def edit_user(username):
 @login_required
 @admin_required
 def delete_user(username):
-    """Delete user"""
+    """Delete user."""
     try:
-        users = load_users()
-        if username in users:
-            del users[username]
+        # Get auth config
+        auth_config = config.get_cached_config('auth-config')
+        if not auth_config or "users" not in auth_config:
+            flash('User configuration not found', 'danger')
+            return redirect(url_for('frontend.users'))
+        
+        # Delete user
+        if username in auth_config["users"]:
+            del auth_config["users"][username]
             
-            # Delete from Secret Manager if possible
-            try:
-                auth_config = config.get_cached_config('auth-config')
-                if auth_config and 'users' in auth_config and username in auth_config['users']:
-                    del auth_config['users'][username]
-                    # Save back to Secret Manager
-                    config.create_or_update_secret('auth-config', json.dumps(auth_config))
-            except Exception as e:
-                logger.warning(f"Failed to delete user from Secret Manager: {str(e)}")
-                # Continue anyway as we've updated the in-memory version
-            
-            flash(f'User {username} deleted successfully', 'success')
+            # Save changes
+            if config.create_or_update_secret('auth-config', json.dumps(auth_config)):
+                flash(f'User {username} deleted successfully', 'success')
+            else:
+                flash(f'User deleted but changes not saved to configuration', 'warning')
         else:
             flash('User not found', 'warning')
     except Exception as e:
@@ -873,11 +756,11 @@ def delete_user(username):
 @login_required
 @admin_required
 def ingest_threat_data():
-    """Trigger threat data ingestion"""
+    """Trigger threat data ingestion."""
     try:
         if request.method == 'POST':
-            # Trigger ingestion through API
-            result = _api_request('admin/ingest', method='POST', data={'process_all': True})
+            # Trigger ingestion
+            result = api_request('admin/ingest', method='POST', data={'process_all': True})
             
             if result.get('error'):
                 flash(f'Error triggering ingestion: {result["error"]}', 'danger')
@@ -886,7 +769,7 @@ def ingest_threat_data():
             
             return redirect(url_for('frontend.dashboard'))
         
-        # For GET requests, trigger POST to the same endpoint using autosubmit form
+        # For GET, render autosubmit form
         return render_template('base.html', 
                               title="Triggering Data Ingestion", 
                               content="""
@@ -907,51 +790,48 @@ def ingest_threat_data():
     except Exception as e:
         logger.error(f"Error in ingest_threat_data: {str(e)}")
         safe_report_exception(e)
-        flash('An error occurred while triggering ingestion', 'danger')
+        flash('Error triggering ingestion', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
-# Additional Routes for Dashboard Links
+# Shortcut routes
 @frontend_app.route('/feeds')
 @login_required
 def feeds():
-    """Redirect to dashboard feeds view"""
+    """Redirect to dashboard feeds view."""
     return redirect(url_for('frontend.dashboard', view='feeds'))
 
 @frontend_app.route('/iocs')
 @login_required
 def iocs():
-    """Redirect to dashboard IOCs view"""
+    """Redirect to dashboard IOCs view."""
     return redirect(url_for('frontend.dashboard', view='iocs'))
 
 @frontend_app.route('/campaigns')
 @login_required
 def campaigns():
-    """Redirect to dashboard campaigns view"""
+    """Redirect to dashboard campaigns view."""
     return redirect(url_for('frontend.dashboard', view='campaigns'))
 
 @frontend_app.route('/detail/<content_type>/<path:identifier>')
 @login_required
 def dynamic_content_detail(content_type, identifier):
-    """Generic detail page for different content types"""
+    """Generic detail page for different content types."""
     try:
-        # This is a placeholder for detailed views
-        context = {
-            'content_type': content_type,
-            'identifier': identifier,
-            'title': f"{content_type.title()} Detail"
-        }
-        return render_template('detail.html', **context)
+        return render_template('detail.html', 
+                              content_type=content_type,
+                              identifier=identifier,
+                              title=f"{content_type.title()} Detail")
     except Exception as e:
         logger.error(f"Error loading detail page: {str(e)}")
         safe_report_exception(e)
         flash(f'Error loading {content_type} detail', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
-# ====== Template Filters ======
+# ====== Template Filters and Context ======
 
-# Define datetime formatter function that can be registered in app.py
+# Define datetime formatter function
 def format_datetime(value):
-    """Format a datetime string for display"""
+    """Format a datetime string for display."""
     if not value:
         return 'N/A'
     try:
@@ -960,107 +840,60 @@ def format_datetime(value):
         else:
             dt = value
         return dt.strftime('%Y-%m-%d %H:%M:%S')
-    except (ValueError, TypeError):
+    except:
         return str(value)
 
 # ====== Error Handlers ======
 
 @frontend_app.errorhandler(404)
 def page_not_found(e):
-    """Handle 404 errors"""
+    """Handle 404 errors."""
     logger.info(f"Page not found: {request.path}")
     try:
         return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
-    except Exception as render_error:
-        logger.error(f"Error rendering 404 page: {str(render_error)}")
+    except Exception:
         return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Page Not Found</title>
-            <style>
-                body { font-family: sans-serif; text-align: center; padding: 50px; }
-                h1 { color: #d63031; }
-            </style>
-        </head>
-        <body>
-            <h1>404 - Page Not Found</h1>
-            <p>The requested page does not exist.</p>
-            <p><a href="/">Return to Home</a></p>
-        </body>
-        </html>
+        <html><body><h1>404 - Page Not Found</h1><p>The requested page does not exist.</p>
+        <p><a href="/">Return to Home</a></p></body></html>
         """, 404
 
 @frontend_app.errorhandler(500)
 def server_error(e):
-    """Handle 500 errors"""
+    """Handle 500 errors."""
     logger.error(f"Server error: {str(e)}")
-    logger.error(traceback.format_exc())
     safe_report_exception(e)
     try:
         return render_template('500.html'), 500
-    except Exception as render_error:
-        logger.error(f"Error rendering 500 page: {str(render_error)}")
+    except Exception:
         return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Server Error</title>
-            <style>
-                body { font-family: sans-serif; text-align: center; padding: 50px; }
-                h1 { color: #d63031; }
-            </style>
-        </head>
-        <body>
-            <h1>500 - Server Error</h1>
-            <p>An unexpected error occurred.</p>
-            <p><a href="/">Return to Home</a></p>
-        </body>
-        </html>
+        <html><body><h1>500 - Server Error</h1><p>An unexpected error occurred.</p>
+        <p><a href="/">Return to Home</a></p></body></html>
         """, 500
 
 @frontend_app.errorhandler(400)
 def handle_bad_request(e):
-    """Handle 400 errors including CSRF errors"""
+    """Handle 400 errors including CSRF errors."""
     logger.error(f"400 error: {str(e)}")
     
-    # Check if this is a CSRF error
+    # Handle CSRF errors
     if isinstance(e, BadRequest) and 'CSRF' in str(e):
-        logger.error("CSRF validation failed")
         flash('Your session has expired or there was a security issue. Please try again.', 'danger')
         return redirect(url_for('frontend.login'))
     
-    # For other 400 errors
+    # Handle other 400 errors
     try:
-        return render_template('500.html', 
-                            error_code=400,
-                            error_message=f"Bad Request: {str(e)}"), 400
-    except Exception as render_error:
-        logger.error(f"Error rendering 400 page: {str(render_error)}")
+        return render_template('500.html', error_code=400, error_message=f"Bad Request: {str(e)}"), 400
+    except Exception:
         return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Bad Request</title>
-            <style>
-                body {{ font-family: sans-serif; text-align: center; padding: 50px; }}
-                h1 {{ color: #d63031; }}
-            </style>
-        </head>
-        <body>
-            <h1>400 - Bad Request</h1>
-            <p>{str(e)}</p>
-            <p><a href="/">Return to Home</a></p>
-        </body>
-        </html>
+        <html><body><h1>400 - Bad Request</h1><p>{str(e)}</p>
+        <p><a href="/">Return to Home</a></p></body></html>
         """, 400
 
 # ====== Context Processors ======
 
 @frontend_app.context_processor
 def inject_global_data():
-    """Inject global data into templates"""
-    # Flask-WTF handles CSRF token automatically
+    """Inject global data into templates."""
     return {
         'now': datetime.now(),
         'environment': ENVIRONMENT,
@@ -1069,19 +902,18 @@ def inject_global_data():
         'debug_mode': DEBUG_MODE,
     }
 
-# ====== Template Function ======
 @frontend_app.context_processor
 def utility_processor():
-    """Add utility functions to template context"""
+    """Add utility functions to template context."""
     def format_number(value):
-        """Format numbers with commas"""
+        """Format numbers with commas."""
         try:
             return "{:,}".format(int(value)) if value else "0"
         except:
             return str(value)
     
     def get_severity_class(severity):
-        """Get CSS class for severity levels"""
+        """Get CSS class for severity levels."""
         severity_map = {
             'critical': 'bg-red-600 text-white',
             'high': 'bg-orange-500 text-white',
@@ -1091,19 +923,17 @@ def utility_processor():
         return severity_map.get(str(severity).lower(), 'bg-gray-300 text-gray-800')
     
     def get_confidence_width(value):
-        """Get width percentage for confidence bar"""
+        """Get width percentage for confidence bar."""
         try:
-            if isinstance(value, (int, float)):
-                return min(100, max(0, int(value)))
-            return 40  # Default
+            return min(100, max(0, int(value))) if isinstance(value, (int, float)) else 40
         except:
             return 40
     
-    return dict(
-        format_number=format_number,
-        get_severity_class=get_severity_class,
-        get_confidence_width=get_confidence_width,
-    )
+    return {
+        'format_number': format_number,
+        'get_severity_class': get_severity_class,
+        'get_confidence_width': get_confidence_width,
+    }
 
 # Initialize module
 logger.info("Frontend module initialized successfully")
