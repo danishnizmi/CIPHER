@@ -8,7 +8,7 @@ steps:
   - |
     echo "Ensuring service account has logging permissions..."
     gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member=serviceAccount:$PROJECT_ID@appspot.gserviceaccount.com \
+      --member=serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
       --role=roles/logging.logWriter \
       --condition=None || echo "Permissions setup complete."
 
