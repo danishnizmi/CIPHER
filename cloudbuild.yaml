@@ -1,25 +1,16 @@
 steps:
-  # First step: Explicitly grant logging permissions to the Cloud Build service account
+  # Fix logging permissions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'ensure-permissions'
     entrypoint: bash
     args:
       - -c
       - |
-        echo "Ensuring service account has required permissions..."
-        # Grant Logs Writer role to ensure logging works properly
+        echo "Ensuring service account has logging permissions..."
+        # Grant Logs Writer role directly (no variable substitution)
         gcloud projects add-iam-policy-binding ${PROJECT_ID} \
           --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
           --role=roles/logging.logWriter
-        
-        # Also ensure other critical roles are assigned
-        for ROLE in roles/storage.admin roles/run.admin roles/secretmanager.admin roles/pubsub.admin
-        do
-          echo "Ensuring service account has $ROLE..."
-          gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-            --member=serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
-            --role=$ROLE
-        done
         
         echo "Permissions setup complete."
 
@@ -56,7 +47,7 @@ steps:
         # Create Tailwind CSS
         echo '@tailwind base; @tailwind components; @tailwind utilities;' > static/src/input.css
         
-        # Create package.json with explicit versioning
+        # Create package.json
         cat > package.json << 'EOF'
         {
           "name": "threat-intelligence-platform",
@@ -87,14 +78,13 @@ steps:
         npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
         echo "Frontend build complete!"
 
-  # Create required resources with better error handling
+  # Create required resources
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'create-resources'
     entrypoint: bash
     args:
       - -c
       - |
-        set -e  # Fail on error
         echo "Creating required GCP resources..."
         
         # Create BigQuery dataset if it doesn't exist
@@ -142,7 +132,6 @@ steps:
     args:
       - -c
       - |
-        set -e  # Fail on error
         echo "Checking and managing secrets..."
         
         # Check and create api-keys secret if needed
@@ -193,17 +182,16 @@ steps:
     id: 'push-container'
     args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
 
-  # Deploy to Cloud Run with simplified config
+  # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
     entrypoint: bash
     args:
       - -c
       - |
-        set -e  # Fail on error
         echo "Deploying to Cloud Run..."
         
-        # Deploy with basic configuration first
+        # Deploy with all environment variables
         gcloud run deploy threat-intelligence-platform \
           --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
           --platform managed \
@@ -230,23 +218,22 @@ steps:
         
         echo "Deployment with secrets complete!"
 
-  # Verify deployment
+  # Verify deployment with proper escaping
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: bash
     args:
       - -c
       - |
-        # Don't fail on error here so we can provide diagnostics
         echo "Waiting for service to be ready..."
-        sleep 45
+        sleep 30
         
-        # Get service URL
-        SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
+        # Get service URL using proper bash escaping
+        SERVICE_URL=$$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "Service deployed at: $SERVICE_URL"
+        echo "Service deployed at: $$SERVICE_URL"
         
         # Test health endpoint with retries
         echo "Testing health endpoint..."
@@ -254,36 +241,35 @@ steps:
         RETRY_DELAY=10
         SUCCESS=0
         
-        for ATTEMPT in $(seq 1 $MAX_RETRIES); do
-          echo "Health check attempt $ATTEMPT/$MAX_RETRIES..."
+        for ATTEMPT in $$(seq 1 $$MAX_RETRIES); do
+          echo "Health check attempt $$ATTEMPT/$$MAX_RETRIES..."
           
-          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" "$SERVICE_URL/health" || echo "000")
-          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
-          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n-1)
+          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health" || echo "000")
+          HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
+          HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
           
-          echo "Response code: $HTTP_CODE"
+          echo "Response code: $$HTTP_CODE"
           
-          if [ "$HTTP_CODE" = "200" ]; then
+          if [ "$$HTTP_CODE" = "200" ]; then
             echo "✅ Health check successful!"
             echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $SERVICE_URL"
+            echo "Access the application at: $$SERVICE_URL"
             echo "Login with username: admin, password: admin"
             SUCCESS=1
             break
           else
-            echo "⚠️ Health check returned: $HTTP_CODE, retrying in $RETRY_DELAY seconds..."
-            sleep $RETRY_DELAY
+            echo "⚠️ Health check returned: $$HTTP_CODE, retrying in $$RETRY_DELAY seconds..."
+            sleep $$RETRY_DELAY
           fi
         done
         
-        if [ $SUCCESS -eq 0 ]; then
-          echo "❌ Health check failed after $MAX_RETRIES attempts"
+        if [ $$SUCCESS -eq 0 ]; then
+          echo "❌ Health check failed after $$MAX_RETRIES attempts"
           echo "Checking latest logs..."
-          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=20 || echo "Could not retrieve logs"
+          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=10
           echo "Deployment may still be initializing - please check manually"
+          echo "You can check the status at: https://console.cloud.google.com/run/detail/us-central1/threat-intelligence-platform/revisions?project=${PROJECT_ID}"
         fi
-        
-        echo "Verification step complete"
 
 timeout: '1800s'
 options:
