@@ -28,7 +28,7 @@ steps:
       cat > package.json << 'EOF'
       {
         "name": "threat-intelligence-platform",
-        "version": "1.0.0",
+        "version": "1.0.3",
         "scripts": {
           "build": "tailwindcss -i static/src/input.css -o static/dist/output.css --minify"
         },
@@ -55,7 +55,7 @@ steps:
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
       echo "Frontend build complete!"
 
-  # Check if secrets exist without creating new versions
+  # Check if secrets exist - improved error handling
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-secrets'
     entrypoint: bash
@@ -100,7 +100,7 @@ steps:
           echo "✓ admin-initial-password secret exists"
         fi
         
-        # Only create missing secrets if absolutely necessary
+        # Only log missing secrets, don't try to use them as substitution
         if [ ! -z "$MISSING_SECRETS" ]; then
           echo "Missing secrets detected: $MISSING_SECRETS"
           echo "These will be created by the application on first run."
@@ -123,6 +123,22 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-container'
     args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
+
+  # Create GCS bucket if it doesn't exist
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-gcs-bucket'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "Ensuring GCS bucket exists..."
+        if ! gsutil ls -b gs://${PROJECT_ID}-threat-data 2>/dev/null; then
+          echo "Creating GCS bucket ${PROJECT_ID}-threat-data"
+          gsutil mb -l us-central1 gs://${PROJECT_ID}-threat-data
+          echo "Bucket created successfully!"
+        else
+          echo "Bucket ${PROJECT_ID}-threat-data already exists"
+        fi
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -183,9 +199,28 @@ steps:
           --set-env-vars AUTO_INGEST=true \
           --set-env-vars AUTO_ANALYZE=true \
           --set-env-vars USE_ENV_VARS_FOR_SECRETS=true \
-          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com \
-          --update-secrets=API_KEY=api-keys:latest \
-          --update-secrets=SECRET_KEY=auth-config:latest
+          --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+
+        # Handle secrets safely - don't fail if they don't exist yet
+        if gcloud secrets describe api-keys --project=${PROJECT_ID} >/dev/null 2>&1; then
+          gcloud run services update threat-intelligence-platform \
+            --region=us-central1 \
+            --update-secrets=API_KEY=api-keys:latest \
+            --quiet
+          echo "Updated API_KEY secret mapping"
+        else 
+          echo "Skipping API_KEY secret - will be created on first run"
+        fi
+
+        if gcloud secrets describe auth-config --project=${PROJECT_ID} >/dev/null 2>&1; then
+          gcloud run services update threat-intelligence-platform \
+            --region=us-central1 \
+            --update-secrets=SECRET_KEY=auth-config:latest \
+            --quiet
+          echo "Updated SECRET_KEY secret mapping"
+        else
+          echo "Skipping SECRET_KEY secret - will be created on first run"
+        fi
 
   # Verify deployment - with proper variable escaping
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -206,42 +241,41 @@ steps:
         
         # Test health endpoint with more retries
         echo "Testing health endpoint..."
-        for ATTEMPT in $$(seq 1 10); do
-          echo "Health check attempt $$ATTEMPT/10..."
+        MAX_RETRIES=15
+        RETRY_DELAY=10
+        
+        for ATTEMPT in $$(seq 1 $$MAX_RETRIES); do
+          echo "Health check attempt $$ATTEMPT/$$MAX_RETRIES..."
           
-          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health")
+          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health" || echo "000")
           HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
           HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
           
           echo "Response code: $$HTTP_CODE"
-          echo "Response body: $$HTTP_BODY"
           
-          if [ "$$HTTP_CODE" -eq 200 ]; then
+          if [ "$$HTTP_CODE" = "200" ]; then
             echo "✅ Health check successful!"
-            
-            # Also test the root endpoint
-            echo "Testing root endpoint..."
-            ROOT_CODE=$$(curl -s -o /dev/null -w "%{http_code}" -L "$$SERVICE_URL/")
-            echo "Root endpoint status: $$ROOT_CODE"
-            
             echo "✅ Deployment verified successfully!"
             echo "Access the application at: $$SERVICE_URL"
             exit 0
+          elif [ "$$HTTP_CODE" = "000" ]; then
+            echo "⚠️ Connection failed, retrying in $$RETRY_DELAY seconds..."
           else
-            echo "⚠️ Health check returned: $$HTTP_CODE"
-            if [ $$ATTEMPT -lt 10 ]; then
-              echo "Waiting 10 seconds before next attempt..."
-              sleep 10
-            fi
+            echo "⚠️ Health check returned: $$HTTP_CODE, retrying in $$RETRY_DELAY seconds..."
+          fi
+          
+          if [ $$ATTEMPT -lt $$MAX_RETRIES ]; then
+            sleep $$RETRY_DELAY
           fi
         done
         
-        echo "❌ Health check failed after 10 attempts"
+        echo "❌ Health check failed after $$MAX_RETRIES attempts"
         echo "Checking latest logs..."
-        echo "Logs URL: https://console.cloud.google.com/logs/viewer?project=${PROJECT_ID}"
+        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=20 --format=json | jq '.[].textPayload'
+        echo "You can access more logs at: https://console.cloud.google.com/logs/viewer?project=${PROJECT_ID}"
         exit 1
 
-timeout: '900s'
+timeout: '1200s'
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
