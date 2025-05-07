@@ -49,49 +49,48 @@ RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs
 # Create Tailwind CSS file for frontend
 RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
 
+# Create initialization script line by line to avoid heredoc issues
+RUN echo '#!/bin/bash' > /app/init-app.sh && \
+    echo 'set -e' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo 'echo "Starting Threat Intelligence Platform initialization..."' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Set up environment for secret management' >> /app/init-app.sh && \
+    echo 'export USE_ENV_VARS_FOR_SECRETS=${USE_ENV_VARS_FOR_SECRETS:-true}' >> /app/init-app.sh && \
+    echo 'export LOAD_SECRETS=${LOAD_SECRETS:-true}' >> /app/init-app.sh && \
+    echo 'export ENSURE_GCP_RESOURCES=${ENSURE_GCP_RESOURCES:-true}' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Initialize application configuration with a Python helper that uses our modules' >> /app/init-app.sh && \
+    echo 'if [ "$LOAD_SECRETS" = "true" ]; then' >> /app/init-app.sh && \
+    echo '    echo "Initializing secrets and configuration..."' >> /app/init-app.sh && \
+    echo '    python -c "' >> /app/init-app.sh && \
+    echo 'import os' >> /app/init-app.sh && \
+    echo 'import sys' >> /app/init-app.sh && \
+    echo 'try:' >> /app/init-app.sh && \
+    echo '    import config' >> /app/init-app.sh && \
+    echo '    from config import Config, SecretManager' >> /app/init-app.sh && \
+    echo '    print(\"Initializing application configuration...\")' >> /app/init-app.sh && \
+    echo '    # Initialize secret manager first' >> /app/init-app.sh && \
+    echo '    SecretManager.init()' >> /app/init-app.sh && \
+    echo '    # Then initialize app config' >> /app/init-app.sh && \
+    echo '    Config.init_app()' >> /app/init-app.sh && \
+    echo '    print(\"Configuration initialized successfully\")' >> /app/init-app.sh && \
+    echo 'except Exception as e:' >> /app/init-app.sh && \
+    echo '    print(f\"Error initializing configuration: {str(e)}\", file=sys.stderr)' >> /app/init-app.sh && \
+    echo '    # Do not exit - we can still try to start with environment variables' >> /app/init-app.sh && \
+    echo '    pass' >> /app/init-app.sh && \
+    echo '"' >> /app/init-app.sh && \
+    echo 'fi' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Start the application with the command passed to the script' >> /app/init-app.sh && \
+    echo 'echo "Starting application..."' >> /app/init-app.sh && \
+    echo 'exec $@' >> /app/init-app.sh
+
+# Make script executable
+RUN chmod +x /app/init-app.sh
+
 # Copy all application code
 COPY . .
-
-# Create initialization script that leverages config module functionality
-RUN bash -c 'cat > /app/init-app.sh << "EOF"
-#!/bin/bash
-set -e
-
-echo "Starting Threat Intelligence Platform initialization..."
-
-# Set up environment for secret management
-export USE_ENV_VARS_FOR_SECRETS=${USE_ENV_VARS_FOR_SECRETS:-true}
-export LOAD_SECRETS=${LOAD_SECRETS:-true}
-export ENSURE_GCP_RESOURCES=${ENSURE_GCP_RESOURCES:-true}
-
-# Initialize application configuration with a Python helper that uses our modules
-if [ "$LOAD_SECRETS" = "true" ]; then
-    echo "Initializing secrets and configuration..."
-    python -c "
-import os
-import sys
-try:
-    import config
-    from config import Config, SecretManager
-    print(\"Initializing application configuration...\")
-    # Initialize secret manager first
-    SecretManager.init()
-    # Then initialize app config
-    Config.init_app()
-    print(\"Configuration initialized successfully\")
-except Exception as e:
-    print(f\"Error initializing configuration: {str(e)}\", file=sys.stderr)
-    # Do not exit - we can still try to start with environment variables
-    pass
-"
-fi
-
-# Start the application with the command passed to the script
-echo "Starting application..."
-exec \$@
-EOF'
-
-RUN chmod +x /app/init-app.sh
 
 # Create non-root user for security
 RUN useradd -m -u 1000 -s /bin/bash appuser && \
