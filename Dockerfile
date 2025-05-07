@@ -52,7 +52,7 @@ RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs
 # Initialize script to ensure consistent secret setup at container start
 RUN cat > /app/init-secrets.sh << 'EOF'
 #!/bin/bash
-# Delete existing Secret Manager secrets to avoid duplicates
+# Check environment variable for cleaning secrets
 if [ "$CLEAN_SECRETS" = "true" ]; then
   echo "Cleaning up existing secrets..."
   for SECRET_ID in "api-keys" "auth-config" "feed-config" "admin-initial-password"; do
