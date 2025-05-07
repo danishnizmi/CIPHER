@@ -50,33 +50,36 @@ RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs
     chmod -R 755 /app
 
 # Initialize script to ensure consistent secret setup at container start
-RUN echo '#!/bin/bash\n\
-# Delete existing Secret Manager secrets to avoid duplicates\n\
-if [ "$CLEAN_SECRETS" = "true" ]; then\n\
-  echo "Cleaning up existing secrets..."\n\
-  for SECRET_ID in "api-keys" "auth-config" "feed-config" "admin-initial-password"; do\n\
-    gcloud secrets delete "$SECRET_ID" --quiet || echo "Secret $SECRET_ID not found or already deleted"\n\
-  done\n\
-  echo "Secrets cleaned up"\n\
-fi\n\
-\n\
-# Initialize admin password environment variable\n\
-echo "Setting up admin password environment variable"\n\
-export SECRET_ADMIN_INITIAL_PASSWORD="admin"\n\
-\n\
-# Initialize auth config with proper admin credentials\n\
-AUTH_CONFIG=\'{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"'"}}}\'\n\
-export SECRET_AUTH_CONFIG="$AUTH_CONFIG"\n\
-\n\
-# Initialize API keys\n\
-export SECRET_API_KEYS=\'{"platform_api_key":"dev-api-key"}\'\n\
-\n\
-# Initialize feed config\n\
-export SECRET_FEED_CONFIG=\'{"feeds":[],"update_interval_hours":6}\'\n\
-\n\
-# Start the application\n\
-exec "$@"\n\
-' > /app/init-secrets.sh && chmod +x /app/init-secrets.sh
+RUN cat > /app/init-secrets.sh << 'EOF'
+#!/bin/bash
+# Delete existing Secret Manager secrets to avoid duplicates
+if [ "$CLEAN_SECRETS" = "true" ]; then
+  echo "Cleaning up existing secrets..."
+  for SECRET_ID in "api-keys" "auth-config" "feed-config" "admin-initial-password"; do
+    gcloud secrets delete "$SECRET_ID" --quiet || echo "Secret $SECRET_ID not found or already deleted"
+  done
+  echo "Secrets cleaned up"
+fi
+
+# Initialize admin password environment variable
+echo "Setting up admin password environment variable"
+export SECRET_ADMIN_INITIAL_PASSWORD="admin"
+
+# Initialize auth config with proper admin credentials
+CURRENT_TIME=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+AUTH_CONFIG='{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"'$CURRENT_TIME'"}}}'
+export SECRET_AUTH_CONFIG="$AUTH_CONFIG"
+
+# Initialize API keys
+export SECRET_API_KEYS='{"platform_api_key":"dev-api-key"}'
+
+# Initialize feed config
+export SECRET_FEED_CONFIG='{"feeds":[],"update_interval_hours":6}'
+
+# Start the application
+exec "$@"
+EOF
+RUN chmod +x /app/init-secrets.sh
 
 # Create Tailwind CSS file for frontend
 RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
