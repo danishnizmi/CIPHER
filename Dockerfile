@@ -53,19 +53,19 @@ RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/sta
 COPY . .
 
 # Create initialization script that leverages config module functionality
-RUN bash -c 'cat > /app/init-app.sh << EOF
+RUN bash -c 'cat > /app/init-app.sh << "EOF"
 #!/bin/bash
 set -e
 
 echo "Starting Threat Intelligence Platform initialization..."
 
 # Set up environment for secret management
-export USE_ENV_VARS_FOR_SECRETS=\${USE_ENV_VARS_FOR_SECRETS:-true}
-export LOAD_SECRETS=\${LOAD_SECRETS:-true}
-export ENSURE_GCP_RESOURCES=\${ENSURE_GCP_RESOURCES:-true}
+export USE_ENV_VARS_FOR_SECRETS=${USE_ENV_VARS_FOR_SECRETS:-true}
+export LOAD_SECRETS=${LOAD_SECRETS:-true}
+export ENSURE_GCP_RESOURCES=${ENSURE_GCP_RESOURCES:-true}
 
 # Initialize application configuration with a Python helper that uses our modules
-if [ "\$LOAD_SECRETS" = "true" ]; then
+if [ "$LOAD_SECRETS" = "true" ]; then
     echo "Initializing secrets and configuration..."
     python -c "
 import os
@@ -73,15 +73,15 @@ import sys
 try:
     import config
     from config import Config, SecretManager
-    print('Initializing application configuration...')
+    print(\"Initializing application configuration...\")
     # Initialize secret manager first
     SecretManager.init()
     # Then initialize app config
     Config.init_app()
-    print('Configuration initialized successfully')
+    print(\"Configuration initialized successfully\")
 except Exception as e:
-    print(f'Error initializing configuration: {str(e)}', file=sys.stderr)
-    # Don't exit - we can still try to start with environment variables
+    print(f\"Error initializing configuration: {str(e)}\", file=sys.stderr)
+    # Do not exit - we can still try to start with environment variables
     pass
 "
 fi
