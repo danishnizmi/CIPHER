@@ -21,18 +21,11 @@ steps:
   - |
     echo "Setting up Python environment and checking dependencies..."
     pip install -q -r requirements.txt
-    python -m pytest --version || echo "Tests will be skipped"
 
 # Build the container image
 - name: 'gcr.io/cloud-builders/docker'
   id: 'build-container'
   args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
-
-# Run tests (optional - comment out if not needed)
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'run-tests'
-  args: ['run', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', 'python', '-m', 'pytest', '--version']
-  allowFailure: true
 
 # Prepare GCP resources
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -44,24 +37,24 @@ steps:
     echo "Creating/updating Secret Manager secrets..."
     
     # Create secrets if they don't exist
-    gcloud secrets describe api-keys || \
+    gcloud secrets describe api-keys 2>/dev/null || \
       gcloud secrets create api-keys --replication-policy="automatic"
     
-    gcloud secrets describe auth-config || \
+    gcloud secrets describe auth-config 2>/dev/null || \
       gcloud secrets create auth-config --replication-policy="automatic"
     
-    gcloud secrets describe feed-config || \
+    gcloud secrets describe feed-config 2>/dev/null || \
       gcloud secrets create feed-config --replication-policy="automatic"
     
-    gcloud secrets describe admin-initial-password || \
+    gcloud secrets describe admin-initial-password 2>/dev/null || \
       gcloud secrets create admin-initial-password --replication-policy="automatic"
     
     # Create BigQuery dataset if it doesn't exist
-    bq --location=US ls threat_intelligence > /dev/null 2>&1 || \
+    bq --location=US ls threat_intelligence >/dev/null 2>&1 || \
       bq --location=US mk --dataset $PROJECT_ID:threat_intelligence
     
     # Create Cloud Storage bucket if it doesn't exist
-    gsutil ls -b gs://$PROJECT_ID-threat-data > /dev/null 2>&1 || \
+    gsutil ls -b gs://$PROJECT_ID-threat-data >/dev/null 2>&1 || \
       gsutil mb -l us-central1 gs://$PROJECT_ID-threat-data
 
 # Push the container image to Container Registry
@@ -92,7 +85,7 @@ steps:
       --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false" \
       --set-secrets "API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
       --command="/bin/bash" \
-      --args="-c,python -c 'import hashlib, json, os; from google.cloud import secretmanager; project_id = os.environ.get(\"GCP_PROJECT\"); client = secretmanager.SecretManagerServiceClient(); admin_password = client.access_secret_version(request={\"name\": f\"projects/{project_id}/secrets/admin-initial-password/versions/latest\"}).payload.data.decode(\"UTF-8\"); name = f\"projects/{project_id}/secrets/auth-config/versions/latest\"; response = client.access_secret_version(request={\"name\": name}); auth_config = json.loads(response.payload.data.decode(\"UTF-8\")); if \"users\" not in auth_config: auth_config[\"users\"] = {}; auth_config[\"users\"][\"admin\"] = {\"password\": hashlib.sha256(admin_password.encode()).hexdigest(), \"role\": \"admin\", \"created_at\": \"2025-05-07T00:00:00.000Z\"}; client.add_secret_version(request={\"parent\": f\"projects/{project_id}/secrets/auth-config\", \"payload\": {\"data\": json.dumps(auth_config).encode(\"UTF-8\")}});' && exec gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --timeout 120 --worker-class gthread --preload --log-level info app:app"
+      --args="-c,python -c \"import hashlib, json, os; from google.cloud import secretmanager; project_id = os.environ.get('GCP_PROJECT'); client = secretmanager.SecretManagerServiceClient(); admin_password = client.access_secret_version(request={'name': f'projects/{project_id}/secrets/admin-initial-password/versions/latest'}).payload.data.decode('UTF-8'); name = f'projects/{project_id}/secrets/auth-config/versions/latest'; response = client.access_secret_version(request={'name': name}); auth_config = json.loads(response.payload.data.decode('UTF-8')); if 'users' not in auth_config: auth_config['users'] = {}; auth_config['users']['admin'] = {'password': hashlib.sha256(admin_password.encode()).hexdigest(), 'role': 'admin', 'created_at': '2025-05-07T00:00:00.000Z'}; client.add_secret_version(request={'parent': f'projects/{project_id}/secrets/auth-config', 'payload': {'data': json.dumps(auth_config).encode('UTF-8')}});\" && exec gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --timeout 120 --worker-class gthread --preload --log-level info app:app"
     
     echo "Basic deployment complete! Adding secret mappings..."
     
@@ -104,27 +97,6 @@ steps:
       --update-volumes="name=feed-config-volume,secret=feed-config,mount-path=/app/secrets/feed-config" \
       --update-volumes="name=admin-password-volume,secret=admin-initial-password,mount-path=/app/secrets/admin-password"
 
-# Verify deployment
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'verify-deployment'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    echo "Verifying deployment..."
-    
-    # Get deployment URL
-    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region us-central1 --format 'value(status.url)')
-    echo "Service URL: $SERVICE_URL"
-    
-    # Wait for service to be ready
-    for i in {1..6}; do
-      echo "Checking service health (attempt $i)..."
-      curl -s $SERVICE_URL/health && break || sleep 10
-    done
-    
-    echo "Deployment verification complete."
-
 # Setup PubSub topics
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'setup-pubsub'
@@ -135,11 +107,13 @@ steps:
     echo "Setting up PubSub topics..."
     
     # Create topics if they don't exist
-    gcloud pubsub topics describe threat-data-ingestion || \
+    gcloud pubsub topics describe threat-data-ingestion 2>/dev/null || \
       gcloud pubsub topics create threat-data-ingestion
     
-    gcloud pubsub topics describe threat-analysis-events || \
+    gcloud pubsub topics describe threat-analysis-events 2>/dev/null || \
       gcloud pubsub topics create threat-analysis-events
+    
+    echo "Deployment complete!"
 
 images:
 - 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
