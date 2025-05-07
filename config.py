@@ -1,77 +1,40 @@
 """
 Optimized configuration module for Threat Intelligence Platform.
-Handles configuration management, Google Cloud client initialization, and secret management.
-Cost-optimized to reduce Secret Manager, Cloud Run, and overall resource usage.
+Handles configuration management with cost-effective secret handling.
+Uses environment variables with periodic cloud validation.
 """
 
 import os
 import sys
 import json
 import logging
-import tempfile
 import hashlib
 import threading
 import time
-import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Dict, List, Any, Optional, Union
 from functools import wraps, lru_cache
 
-# Global client variables
+# Global client variables with lazy initialization
 _clients = {}
-_logging_client = None
-_error_client = None
 _secret_client = None
-_redis_client = None
-_vertex_client = None
 
-# Google Cloud imports with safe fallbacks
-HAS_GCP = True
-HAS_VERTEX = False
-try:
-    from google.cloud import secretmanager, storage, bigquery, pubsub_v1, error_reporting
-    from google.cloud.logging_v2 import Client as LoggingClient
-    from google.cloud.exceptions import NotFound, Forbidden, BadRequest, Conflict
-    from google.api_core.exceptions import GoogleAPIError, PermissionDenied, ResourceExhausted, NotFound as ApiNotFound
-    from google.auth.exceptions import DefaultCredentialsError, TransportError
-    import google.auth
-    try:
-        import vertexai
-        from vertexai.language_models import TextGenerationModel
-        from vertexai.preview.generative_models import GenerativeModel
-        HAS_VERTEX = True
-    except ImportError:
-        HAS_VERTEX = False
-except ImportError as e:
-    HAS_GCP = False
-    print(f"Warning: Google Cloud libraries not installed: {e}")
-
-# Redis (for production caching)
-HAS_REDIS = False
-try:
-    import redis
-    HAS_REDIS = True
-except ImportError:
-    HAS_REDIS = False
-
-# Add the missing GCP_SERVICES_AVAILABLE attribute
-GCP_SERVICES_AVAILABLE = HAS_GCP
-
-# Initialize logging
+# Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=getattr(logging, os.environ.get('LOG_LEVEL', 'INFO')),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# Constants
+# ===== Constants and Default Configuration =====
 DEFAULT_API_RATE_LIMIT = "200 per day, 50 per hour"
 DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_SECRET_TTL = 86400  # 24 hours (previously 3600/1 hour)
 FEED_TYPES = ["indicators", "vulnerabilities", "threat_actors", "campaigns", "malware"]
 SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
+
+# Default feed configurations
 DEFAULT_FEED_CONFIGS = [
     {
         "id": "phishtank",
@@ -105,28 +68,29 @@ DEFAULT_FEED_CONFIGS = [
     }
 ]
 
-# Utility Functions
+# ===== Utility Functions =====
 @lru_cache(maxsize=1)
 def get_project_id() -> Optional[str]:
-    """Get Google Cloud project ID from environment or GCP metadata with improved error handling."""
-    # First check environment variable (most efficient)
+    """Get Google Cloud project ID with cache."""
+    # Check environment variable first (most efficient)
     project_id = os.environ.get('GCP_PROJECT')
     if project_id:
         return project_id
     
-    # Then try google.auth default credentials
-    if HAS_GCP:
+    # Try google.auth default credentials if available
+    try:
+        import google.auth
         try:
             credentials, project_id = google.auth.default()
             if project_id:
                 os.environ['GCP_PROJECT'] = project_id  # Cache in env var
                 return project_id
-        except (DefaultCredentialsError, TransportError) as e:
-            logger.debug(f"Unable to determine GCP project ID from metadata: {str(e)}")
-        except Exception as e:
-            logger.debug(f"Unexpected error getting project ID: {str(e)}")
+        except Exception:
+            pass
+    except ImportError:
+        pass
     
-    # Last resort - try metadata server directly
+    # Last resort - metadata server
     try:
         import requests
         response = requests.get(
@@ -141,8 +105,8 @@ def get_project_id() -> Optional[str]:
     except Exception:
         pass
     
-    # Default to known project ID if all else fails
-    fallback_id = "primal-chariot-382610"
+    # Default to a fallback ID if nothing else works
+    fallback_id = os.environ.get('FALLBACK_PROJECT_ID', "primal-chariot-382610")
     logger.info(f"Using fallback project ID: {fallback_id}")
     return fallback_id
 
@@ -173,334 +137,295 @@ def get_env_dict(var_name: str, default: Optional[Dict] = None) -> Dict:
         logger.warning(f"Invalid JSON in {var_name} environment variable")
         return default
 
-def should_ignore_permission_errors() -> bool:
-    """Check if permission errors should be ignored."""
-    return get_env_bool('IGNORE_PERMISSION_ERRORS', False)
-
-# Decorators
-def handle_gcp_errors(func):
-    """Decorator to handle GCP errors consistently."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except PermissionDenied as e:
-            if should_ignore_permission_errors():
-                logger.warning(f"Permission denied in {func.__name__}, but continuing: {str(e)}")
-                return None
-            else:
-                logger.error(f"Permission denied in {func.__name__}. Check service account roles: {str(e)}")
-                raise
-        except Exception as e:
-            logger.error(f"Error in {func.__name__}: {str(e)}")
-            if os.environ.get('ENVIRONMENT') != 'production':
-                import traceback
-                logger.error(traceback.format_exc())
-            report_error(e)
-            return None
-    return wrapper
-
-def cache_client(client_name: str):
-    """Decorator to cache GCP clients."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            global _clients
-            if client_name in _clients and _clients[client_name] is not None:
-                return _clients[client_name]
+# ===== Secret Management with Cost Optimization =====
+class SecretManager:
+    """Manages secrets with cost-efficient cloud and environment variable strategy."""
+    
+    _cache = {}  # In-memory cache
+    _cache_timestamp = {}  # Last refresh timestamps
+    _offline_backups = {}  # Offline backups for secrets
+    _last_cloud_check = None  # Last time we checked the cloud for updates
+    _lock = threading.RLock()  # Lock for thread safety
+    
+    @classmethod
+    def init(cls):
+        """Initialize the secret manager."""
+        # Load any secrets saved to disk from previous runs
+        cls._load_offline_backups()
+        # Initialize last cloud check timestamp
+        cls._last_cloud_check = datetime.now() - timedelta(hours=25)  # Force initial check
+        
+    @classmethod
+    def get_secret(cls, secret_id: str, force_refresh: bool = False) -> Any:
+        """
+        Get a secret with optimized fetching strategy.
+        
+        1. Try environment variables first (fastest)
+        2. Check in-memory cache if environment variable not available
+        3. Load from offline backup if cache miss and cloud check not needed
+        4. Check cloud if cache expired or forced refresh
+        """
+        with cls._lock:
+            # Step 1: Check environment variables (fastest, no cost)
+            env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
+            if env_var_name in os.environ:
+                # Try to parse JSON if it's a JSON string
+                try:
+                    return json.loads(os.environ[env_var_name])
+                except json.JSONDecodeError:
+                    return os.environ[env_var_name]
             
-            client = func(*args, **kwargs)
-            if client is not None:
-                _clients[client_name] = client
-            return client
-        return wrapper
-    return decorator
-
-# Base Client Manager
-class ClientManager:
-    """Base class for managing GCP clients."""
+            # Step 2: Check in-memory cache
+            cached = cls._get_from_cache(secret_id)
+            if cached is not None and not force_refresh:
+                return cached
+                
+            # Step 3: Check if we need to refresh from cloud
+            now = datetime.now()
+            cloud_check_needed = (
+                force_refresh or 
+                (now - cls._last_cloud_check).total_seconds() > DEFAULT_SECRET_TTL
+            )
+            
+            # Step 4: Get from cloud if needed, otherwise use offline backup
+            if cloud_check_needed:
+                # Update last cloud check time
+                cls._last_cloud_check = now
+                
+                # Bundle cloud requests for efficiency
+                all_secrets = cls._fetch_all_from_cloud()
+                
+                # If we got the secret we need from cloud, return it
+                if secret_id in all_secrets:
+                    cls._update_cache(secret_id, all_secrets[secret_id])
+                    cls._update_offline_backup(secret_id, all_secrets[secret_id])
+                    return all_secrets[secret_id]
+            
+            # Step 5: Fall back to offline backup
+            backup = cls._get_from_offline_backup(secret_id)
+            if backup is not None:
+                cls._update_cache(secret_id, backup)
+                return backup
+                
+            # Step 6: Last resort, use default values
+            return cls._get_default_value(secret_id)
     
-    @staticmethod
-    def get_client(client_type: str, constructor_func, *args, **kwargs):
-        """Generic client getter with caching and error handling."""
-        client_key = f"_{client_type}_client"
-        
-        if not HAS_GCP:
-            logger.warning(f"Google Cloud libraries not installed, cannot initialize {client_type}")
+    @classmethod
+    def _get_from_cache(cls, secret_id: str) -> Optional[Any]:
+        """Get secret from in-memory cache if not expired."""
+        if secret_id not in cls._cache:
             return None
+            
+        # Check if cache is expired
+        if secret_id in cls._cache_timestamp:
+            now = datetime.now()
+            timestamp = cls._cache_timestamp[secret_id]
+            if (now - timestamp).total_seconds() < DEFAULT_SECRET_TTL:
+                return cls._cache[secret_id]
         
+        return None
+    
+    @classmethod
+    def _update_cache(cls, secret_id: str, value: Any):
+        """Update in-memory cache."""
+        cls._cache[secret_id] = value
+        cls._cache_timestamp[secret_id] = datetime.now()
+    
+    @classmethod
+    def _get_from_offline_backup(cls, secret_id: str) -> Optional[Any]:
+        """Get secret from offline backup."""
+        return cls._offline_backups.get(secret_id)
+    
+    @classmethod
+    def _update_offline_backup(cls, secret_id: str, value: Any):
+        """Update offline backup and persist to disk."""
+        cls._offline_backups[secret_id] = value
+        cls._save_offline_backups()
+    
+    @classmethod
+    def _load_offline_backups(cls):
+        """Load offline backups from disk."""
+        backup_path = os.environ.get('SECRET_BACKUP_PATH', '/app/data/secret_backups.json')
         try:
-            client = constructor_func(*args, **kwargs)
-            if client:
-                logger.info(f"{client_type} client initialized successfully")
-            return client
+            if os.path.exists(backup_path):
+                with open(backup_path, 'r') as f:
+                    cls._offline_backups = json.load(f)
         except Exception as e:
-            logger.error(f"Failed to initialize {client_type} client: {str(e)}")
-            return None
-
-# GCP Service Initialization Functions
-@cache_client('bigquery')
-@handle_gcp_errors
-def initialize_bigquery():
-    """Initialize and return a BigQuery client with improved error handling."""
-    project_id = get_project_id()
-    if not project_id:
-        logger.error("Project ID not available, cannot initialize BigQuery client")
-        return None
+            logger.warning(f"Could not load offline secret backups: {e}")
+            cls._offline_backups = {}
     
-    try:
-        # Create the client with explicit location
-        client = bigquery.Client(
-            project=project_id, 
-            location=Config.BIGQUERY_LOCATION if hasattr(Config, 'BIGQUERY_LOCATION') else 'US'
-        )
-        
-        # Test client with a simple query but limit bytes billed
-        test_query = "SELECT 1"
-        test_job = client.query(
-            test_query, 
-            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=1048576)  # 1MB limit for test
-        )
-        test_result = list(test_job.result())
-        
-        if test_result and len(test_result) == 1 and test_result[0][0] == 1:
-            logger.info("BigQuery client initialized and tested successfully")
-            return client
-        else:
-            logger.error("BigQuery client test query failed")
-            return None
-    except Exception as e:
-        logger.error(f"Failed to initialize BigQuery client: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
-
-@cache_client('storage')
-@handle_gcp_errors
-def initialize_storage():
-    """Initialize and return a Cloud Storage client with error handling."""
-    project_id = get_project_id()
-    if not project_id:
-        logger.error("Project ID not available, cannot initialize Storage client")
-        return None
+    @classmethod
+    def _save_offline_backups(cls):
+        """Save offline backups to disk."""
+        backup_path = os.environ.get('SECRET_BACKUP_PATH', '/app/data/secret_backups.json')
+        try:
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            with open(backup_path, 'w') as f:
+                json.dump(cls._offline_backups, f)
+        except Exception as e:
+            logger.warning(f"Could not save offline secret backups: {e}")
     
-    return storage.Client(project=project_id)
-
-@cache_client('pubsub')
-@handle_gcp_errors
-def initialize_pubsub():
-    """Initialize and return PubSub publisher and subscriber clients with error handling."""
-    global _clients
-    
-    if ('_publisher' in _clients and _clients['_publisher'] is not None and 
-        '_subscriber' in _clients and _clients['_subscriber'] is not None):
-        return _clients['_publisher'], _clients['_subscriber']
-    
-    try:
-        publisher = pubsub_v1.PublisherClient()
-        subscriber = pubsub_v1.SubscriberClient()
+    @classmethod
+    def _fetch_all_from_cloud(cls) -> Dict[str, Any]:
+        """Fetch all secrets from cloud in one batch to reduce API calls."""
+        results = {}
         
-        _clients['_publisher'] = publisher
-        _clients['_subscriber'] = subscriber
+        # If we're configured to not use Secret Manager, skip cloud fetch
+        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
+            return results
         
-        logger.info("PubSub clients initialized successfully")
-        return publisher, subscriber
-    except Exception as e:
-        logger.error(f"Failed to initialize PubSub clients: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None, None
-
-@cache_client('error_reporting')
-@handle_gcp_errors
-def initialize_error_reporting(project_id: str = None):
-    """Initialize Google Cloud Error Reporting."""
-    if project_id is None:
+        # List of essential secrets to fetch
+        secret_ids = ['api-keys', 'auth-config', 'feed-config', 'admin-initial-password']
+        
+        # Initialize Secret Manager client if needed
+        client = cls._get_secret_client()
+        if not client:
+            return results
+            
+        # Get project ID
         project_id = get_project_id()
         if not project_id:
-            logger.error("Project ID not available, cannot initialize Error Reporting")
+            return results
+        
+        # Fetch all secrets
+        for secret_id in secret_ids:
+            try:
+                name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+                response = client.access_secret_version(request={"name": name})
+                secret_data = response.payload.data.decode("UTF-8")
+                
+                # Try to parse JSON
+                try:
+                    results[secret_id] = json.loads(secret_data)
+                except json.JSONDecodeError:
+                    results[secret_id] = secret_data
+            except Exception as e:
+                logger.debug(f"Could not fetch secret {secret_id}: {e}")
+        
+        return results
+    
+    @classmethod
+    def _get_secret_client(cls):
+        """Get or create Secret Manager client."""
+        global _secret_client
+        
+        if _secret_client:
+            return _secret_client
+            
+        try:
+            from google.cloud import secretmanager
+            _secret_client = secretmanager.SecretManagerServiceClient()
+            return _secret_client
+        except (ImportError, Exception) as e:
+            logger.warning(f"Could not initialize Secret Manager client: {e}")
             return None
     
-    return error_reporting.Client(project=project_id)
-
-@cache_client('secretmanager')
-@handle_gcp_errors
-def initialize_secret_manager():
-    """Initialize and return a Secret Manager client with error handling."""
-    # Only initialize if we're running in a cloud environment
-    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-        logger.info("Using environment variables for secrets, not initializing Secret Manager")
-        return None
-    
-    return secretmanager.SecretManagerServiceClient()
-
-# Centralized Error Reporting
-def report_error(exception: Exception):
-    """Report an error to Cloud Error Reporting."""
-    if not os.environ.get('ENABLE_ERROR_REPORTING', 'false').lower() == 'true':
-        return
-    
-    client = initialize_error_reporting()
-    if client:
-        try:
-            client.report_exception()
-        except Exception as e:
-            logger.error(f"Failed to report error: {str(e)}")
-
-# Secret Management Functions with Cost Optimization
-@handle_gcp_errors
-def access_secret(secret_id: str, version_id: str = "latest") -> Optional[Any]:
-    """
-    Access secrets from environment variables first, then Google Cloud Secret Manager.
-    
-    This optimized function prioritizes environment variables for non-sensitive configs
-    to reduce Secret Manager costs.
-    """
-    # First check environment variables (most cost-efficient)
-    env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
-    if os.environ.get(env_var_name):
-        logger.info(f"Using environment variable {env_var_name} as fallback for secret {secret_id}")
-        secret_value = os.environ.get(env_var_name)
-        try:
-            # Try to parse as JSON if applicable
-            return json.loads(secret_value)
-        except json.JSONDecodeError:
-            # Return as string if not JSON
-            return secret_value
-    
-    # Check if we should use Secret Manager at all
-    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-        logger.debug(f"Configured to use only environment variables for secrets, not accessing Secret Manager for {secret_id}")
-        return None
-    
-    # Initialize Secret Manager only if needed
-    secret_client = initialize_secret_manager()
-    if not secret_client:
-        logger.debug(f"Secret Manager client not available, checking environment variables for {secret_id}")
-        for env_name, env_value in os.environ.items():
-            # Check for possible matches in environment
-            if secret_id.lower() in env_name.lower():
-                logger.info(f"Using environment variable {env_name} as potential match for secret {secret_id}")
-                try:
-                    return json.loads(env_value)
-                except json.JSONDecodeError:
-                    return env_value
-        return None
-    
-    project_id = get_project_id()
-    if not project_id:
-        logger.warning(f"Unable to access secret {secret_id}: No project ID available")
-        return None
-    
-    try:
-        name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
-        response = secret_client.access_secret_version(request={"name": name})
-        secret_data = response.payload.data.decode("UTF-8")
-        
-        try:
-            return json.loads(secret_data)
-        except json.JSONDecodeError:
-            return secret_data
-    except NotFound as e:
-        logger.debug(f"Secret {secret_id} not found in project {project_id}")
-        # Try to create default config if it's a standard config secret
-        if secret_id == 'feed-config':
-            if create_default_feed_config():
-                return access_secret(secret_id, version_id)
+    @classmethod
+    def _get_default_value(cls, secret_id: str) -> Any:
+        """Get default value for a secret if all else fails."""
+        if secret_id == 'api-keys':
+            return {'platform_api_key': os.environ.get('API_KEY', 'dev-api-key')}
         elif secret_id == 'auth-config':
-            if create_default_auth_config():
-                return access_secret(secret_id, version_id)
-        logger.debug(f"Secret {secret_id} not found and could not be created")
+            return {
+                'session_secret': os.environ.get('SECRET_KEY', 'dev-secret-key'),
+                'enabled': True
+            }
+        elif secret_id == 'feed-config':
+            return {'feeds': DEFAULT_FEED_CONFIGS}
+        elif secret_id == 'admin-initial-password':
+            return os.environ.get('ADMIN_PASSWORD', 'admin')
         return None
-    except Exception as e:
-        logger.error(f"Error accessing secret {secret_id}: {str(e)}")
-        return None
-
-# Cached Config Management
-class ConfigCache:
-    """Centralized configuration cache management with optimized storage."""
-    _cache = {}
-    _last_refresh = {}
-    _cache_ttl = 3600  # 1 hour TTL to reduce Secret Manager calls
     
     @classmethod
-    def get(cls, key: str, force_refresh: bool = False) -> Optional[Dict]:
-        """Get and cache configuration from Secret Manager or environment variables."""
-        cache_key = f"_cached_{key.replace('-', '_')}"
+    def update_secret(cls, secret_id: str, value: Any) -> bool:
+        """
+        Update a secret in the cloud and local caches.
+        For cost efficiency, we update environment vars and caches immediately,
+        but only push to cloud if forced or on a schedule.
+        """
+        # Serialize value to string if needed
+        if not isinstance(value, str):
+            value = json.dumps(value)
+            
+        # Update environment variable
+        env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
+        os.environ[env_var_name] = value
         
-        # Return from cache if it's still valid
-        if (not force_refresh and 
-            cache_key in cls._cache and 
-            key in cls._last_refresh and 
-            (time.time() - cls._last_refresh[key]) < cls._cache_ttl):
-            return cls._cache[cache_key]
+        # Update caches
+        cls._update_cache(secret_id, value)
+        cls._update_offline_backup(secret_id, value)
         
-        # Try environment variables first (cost optimization)
-        env_var_name = f"SECRET_{key.replace('-', '_').upper()}"
-        if os.environ.get(env_var_name):
+        # Only push to cloud if we're not configured to use env vars
+        if not get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
             try:
-                config_data = os.environ.get(env_var_name)
-                try:
-                    config_data = json.loads(config_data)
-                except json.JSONDecodeError:
-                    pass
-                    
-                if config_data:
-                    cls._cache[cache_key] = config_data
-                    cls._last_refresh[key] = time.time()
-                    return config_data
-            except Exception:
-                pass
+                return cls._push_to_cloud(secret_id, value)
+            except Exception as e:
+                logger.warning(f"Could not push secret {secret_id} to cloud: {e}")
         
-        # Fall back to Secret Manager if environment variable not available
-        config_data = access_secret(key)
-        if config_data:
-            cls._cache[cache_key] = config_data
-            cls._last_refresh[key] = time.time()
-        
-        return config_data
+        return True
     
     @classmethod
-    def clear(cls, key: Optional[str] = None):
-        """Clear cached configuration."""
-        if key:
-            cache_key = f"_cached_{key.replace('-', '_')}"
-            if cache_key in cls._cache:
-                del cls._cache[cache_key]
-            if key in cls._last_refresh:
-                del cls._last_refresh[key]
-        else:
-            cls._cache.clear()
-            cls._last_refresh.clear()
+    def _push_to_cloud(cls, secret_id: str, value: str) -> bool:
+        """Push a secret to the cloud."""
+        client = cls._get_secret_client()
+        if not client:
+            return False
+            
+        project_id = get_project_id()
+        if not project_id:
+            return False
+            
+        try:
+            # Check if secret exists
+            try:
+                client.get_secret(request={"name": f"projects/{project_id}/secrets/{secret_id}"})
+                secret_exists = True
+            except Exception:
+                secret_exists = False
+                
+            # Create secret if it doesn't exist
+            if not secret_exists:
+                client.create_secret(
+                    request={
+                        "parent": f"projects/{project_id}",
+                        "secret_id": secret_id,
+                        "secret": {"replication": {"automatic": {}}}
+                    }
+                )
+                
+            # Add new version
+            client.add_secret_version(
+                request={
+                    "parent": f"projects/{project_id}/secrets/{secret_id}",
+                    "payload": {"data": value.encode("UTF-8")}
+                }
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error pushing secret to cloud: {e}")
+            return False
 
-# Simplified config access function
-def get_cached_config(secret_id: str, force_refresh: bool = False) -> Optional[Dict]:
-    """Get and cache configuration from environment variables or Secret Manager."""
-    return ConfigCache.get(secret_id, force_refresh)
+# Initialize the secret manager
+SecretManager.init()
 
-# Configuration Class
+# ===== Main Configuration Class =====
 class Config:
-    """Base configuration class with common settings."""
+    """Base configuration class with secure, cost-effective secret handling."""
     
-    # Basic Flask configuration
-    DEBUG = False
-    TESTING = False
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
-    
-    # Environment and version
+    # ===== Basic Application Configuration =====
+    DEBUG = get_env_bool('DEBUG', False)
+    TESTING = get_env_bool('TESTING', False)
     ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
-    VERSION = os.environ.get('VERSION', '1.0.0')
+    VERSION = os.environ.get('VERSION', '1.0.3')
     
-    # Host and port configuration
-    HOST = os.environ.get('HOST', '0.0.0.0')
-    PORT = int(os.environ.get('PORT', 8080))
-    
-    # Google Cloud configuration
+    # ===== Google Cloud Configuration =====
     GCP_PROJECT = get_project_id()
     GCP_REGION = os.environ.get('GCP_REGION', 'us-central1')
     
-    # BigQuery configuration
+    # ===== BigQuery Configuration =====
     BIGQUERY_DATASET = os.environ.get('BIGQUERY_DATASET', 'threat_intelligence')
+    BIGQUERY_LOCATION = os.environ.get('BIGQUERY_LOCATION', 'US')
+    BIGQUERY_MAX_BYTES_BILLED = int(os.environ.get('BIGQUERY_MAX_BYTES_BILLED', 1073741824))  # 1GB
     BIGQUERY_TABLES = {
         'indicators': 'indicators',
         'vulnerabilities': 'vulnerabilities',
@@ -510,169 +435,112 @@ class Config:
         'users': 'users',
         'audit_log': 'audit_log'
     }
-    BIGQUERY_LOCATION = os.environ.get('BIGQUERY_LOCATION', 'US')
     
-    # BigQuery cost controls
-    BIGQUERY_MAX_BYTES_BILLED = int(os.environ.get('BIGQUERY_MAX_BYTES_BILLED', 1073741824))  # 1GB default
-    
-    # Storage configuration
+    # ===== Storage Configuration =====
     GCS_BUCKET = os.environ.get('GCS_BUCKET', f"{GCP_PROJECT}-threat-data" if GCP_PROJECT else 'threat-data')
-    GCS_RAW_DATA_PREFIX = 'raw'
-    GCS_PROCESSED_DATA_PREFIX = 'processed'
-    GCS_EXPORT_PREFIX = 'exports'
-    GCS_TEMP_PREFIX = 'temp'
     
-    # PubSub configuration
+    # ===== PubSub Configuration =====
     PUBSUB_TOPIC = os.environ.get('PUBSUB_TOPIC', 'threat-data-ingestion')
-    PUBSUB_SUBSCRIPTION = os.environ.get('PUBSUB_SUBSCRIPTION', 'threat-data-ingestion-sub')
     PUBSUB_ANALYSIS_TOPIC = os.environ.get('PUBSUB_ANALYSIS_TOPIC', 'threat-analysis-events')
-    PUBSUB_ANALYSIS_SUBSCRIPTION = os.environ.get(
-        'PUBSUB_ANALYSIS_SUBSCRIPTION', 'threat-analysis-events-sub'
-    )
     
-    # API configuration
-    API_KEY = os.environ.get('API_KEY', 'dev-api-key')
+    # ===== Secret Management =====
+    USE_ENV_VARS_FOR_SECRETS = get_env_bool('USE_ENV_VARS_FOR_SECRETS', True)  # Default to true for cost savings
+    SECRET_TTL = int(os.environ.get('SECRET_TTL', DEFAULT_SECRET_TTL))  # Default 24 hours
+    
+    # ===== Server Configuration =====
+    HOST = os.environ.get('HOST', '0.0.0.0')
+    PORT = int(os.environ.get('PORT', 8080))
+    
+    # ===== API Configuration =====
+    API_KEY = None  # Will be initialized in init_app
     API_VERSION = 'v1'
-    API_PREFIX = f'/api/{API_VERSION}'
     API_RATE_LIMIT = os.environ.get('API_RATE_LIMIT', DEFAULT_API_RATE_LIMIT)
-    API_RATE_LIMIT_EXEMPT_IPS = get_env_list('API_RATE_LIMIT_EXEMPT_IPS', ['127.0.0.1'])
-    API_CORS_ORIGINS = get_env_list('API_CORS_ORIGINS', ['*'])
-    API_MAX_PAGE_SIZE = int(os.environ.get('API_MAX_PAGE_SIZE', 1000))
-    API_DEFAULT_PAGE_SIZE = int(os.environ.get('API_DEFAULT_PAGE_SIZE', 100))
     
-    # Authentication configuration
+    # ===== Auth Configuration =====
+    SECRET_KEY = None  # Will be initialized in init_app
     AUTH_ENABLED = get_env_bool('AUTH_ENABLED', True)
-    AUTH_SESSION_TIMEOUT = int(os.environ.get('AUTH_SESSION_TIMEOUT', 12 * 60 * 60))  # 12 hours in seconds
-    AUTH_REQUIRED_ROUTES = ['/dashboard', '/admin', '/api/admin']
-    AUTH_PUBLIC_ROUTES = ['/', '/login', '/logout', '/health', '/api/health', '/static']
-    AUTH_USERNAME_FIELD = 'username'
-    AUTH_PASSWORD_FIELD = 'password'
+    AUTH_SESSION_TIMEOUT = int(os.environ.get('AUTH_SESSION_TIMEOUT', 12 * 60 * 60))  # 12 hours
     
-    # Admin configuration
-    ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', DEFAULT_ADMIN_USERNAME)
-    ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
-    ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', None)
-    
-    # Session configuration - Cloud-based
-    PERMANENT_SESSION_LIFETIME = timedelta(seconds=AUTH_SESSION_TIMEOUT)
-    SESSION_COOKIE_NAME = 'threat_intelligence_session'
-    SESSION_COOKIE_SECURE = get_env_bool('SESSION_COOKIE_SECURE', True)
-    SESSION_COOKIE_HTTPONLY = True
-    SESSION_COOKIE_SAMESITE = 'Lax'
-    SESSION_USE_SIGNER = True
-    SESSION_KEY_PREFIX = 'threat_intel:'
-    SESSION_COOKIE_DOMAIN = None
-    SESSION_COOKIE_PATH = '/'
-    SESSION_REFRESH_EACH_REQUEST = False
-    REMEMBER_COOKIE_DURATION = timedelta(seconds=AUTH_SESSION_TIMEOUT)
-    REMEMBER_COOKIE_SECURE = True
-    REMEMBER_COOKIE_HTTPONLY = True
-    REMEMBER_COOKIE_REFRESH_EACH_REQUEST = False
-    SESSION_PROTECTION = 'basic'
-    
-    # Security configuration
-    WTF_CSRF_ENABLED = True
-    WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY', SECRET_KEY)
-    WTF_CSRF_TIME_LIMIT = int(os.environ.get('WTF_CSRF_TIME_LIMIT', 3600))
-    
-    # Logging configuration
-    LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
-    LOG_TO_CLOUD = get_env_bool('LOG_TO_CLOUD', False)
-    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
-    # Error reporting configuration
-    ENABLE_ERROR_REPORTING = get_env_bool('ENABLE_ERROR_REPORTING', False)
-    
-    # Threat intelligence feed configuration
-    FEEDS = []
+    # ===== Feed Configuration =====
+    FEEDS = []  # Will be initialized in init_app
     FEED_UPDATE_INTERVAL = int(os.environ.get('FEED_UPDATE_INTERVAL', 3))  # hours
-    DEFAULT_FEED_CONFIDENCE = 70  # Default confidence level (0-100)
     
-    # Analysis configuration
+    # ===== Analysis Configuration =====
     ANALYSIS_ENABLED = get_env_bool('ANALYSIS_ENABLED', True)
     ANALYSIS_AUTO_ENRICH = get_env_bool('ANALYSIS_AUTO_ENRICH', True)
-    ANALYSIS_CONFIDENCE_THRESHOLD = int(os.environ.get('ANALYSIS_CONFIDENCE_THRESHOLD', 60))
-    ANALYSIS_MAX_INDICATORS_PER_BATCH = int(os.environ.get('ANALYSIS_MAX_INDICATORS_PER_BATCH', 1000))
     
-    # Natural Language Processing configuration
-    NLP_ENABLED = get_env_bool('NLP_ENABLED', True)
-    NLP_MIN_CONFIDENCE = float(os.environ.get('NLP_MIN_CONFIDENCE', 0.7))
+    # ===== Error and Logging =====
+    LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+    LOG_TO_CLOUD = get_env_bool('LOG_TO_CLOUD', False)
+    ENABLE_ERROR_REPORTING = get_env_bool('ENABLE_ERROR_REPORTING', False)
     
-    # Vertex AI configuration
-    VERTEXAI_LOCATION = os.environ.get('VERTEXAI_LOCATION', 'us-central1')
-    VERTEXAI_MODEL = os.environ.get('VERTEXAI_MODEL', 'text-bison')
+    # ===== Initialization Methods =====
+    @classmethod
+    def init_app(cls):
+        """Initialize the application configuration."""
+        # Configure logging
+        cls.configure_logging()
+        logger.info(f"Initializing {cls.ENVIRONMENT} configuration")
+        
+        # Initialize essential secrets with cost-effective strategy
+        api_keys = SecretManager.get_secret('api-keys')
+        if api_keys and isinstance(api_keys, dict):
+            cls.API_KEY = api_keys.get('platform_api_key', os.environ.get('API_KEY', 'dev-api-key'))
+            cls.EXTERNAL_API_KEYS = {k: v for k, v in api_keys.items() if k != 'platform_api_key'}
+        else:
+            cls.API_KEY = os.environ.get('API_KEY', 'dev-api-key')
+        
+        # Load authentication configuration
+        auth_config = SecretManager.get_secret('auth-config')
+        if auth_config and isinstance(auth_config, dict):
+            cls.SECRET_KEY = auth_config.get('session_secret', os.environ.get('SECRET_KEY', 'dev-secret-key'))
+            cls.AUTH_ENABLED = auth_config.get('enabled', cls.AUTH_ENABLED)
+        else:
+            cls.SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key')
+        
+        # Initialize feed configuration
+        cls.ensure_feed_configuration()
+        
+        # Validate configuration
+        valid = cls.validate_configuration()
+        if not valid:
+            logger.warning("Configuration validation found issues but continuing")
     
-    # Frontend configuration
-    TEMPLATES_AUTO_RELOAD = get_env_bool('TEMPLATES_AUTO_RELOAD', False)
-    FRONTEND_THEME = os.environ.get('FRONTEND_THEME', 'default')
-    
-    # Cache configuration
-    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'SimpleCache')
-    CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', 300))
-    REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
-    REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
-    REDIS_DB = int(os.environ.get('REDIS_DB', 0))
-    REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', None)
-    
-    # Export configuration
-    EXPORT_FORMATS = ['csv', 'json', 'stix']
-    MAX_EXPORT_SIZE = int(os.environ.get('MAX_EXPORT_SIZE', 100000))
-    
-    # Ignore permission errors
-    IGNORE_PERMISSION_ERRORS = get_env_bool('IGNORE_PERMISSION_ERRORS', False)
-    
-    # Auto ingestion and analysis flags
-    AUTO_INGEST = get_env_bool('AUTO_INGEST', True)
-    AUTO_ANALYZE = get_env_bool('AUTO_ANALYZE', True)
-    
-    # COST OPTIMIZED CONFIG: Secret Management Options
-    USE_ENV_VARS_FOR_SECRETS = get_env_bool('USE_ENV_VARS_FOR_SECRETS', False)
-    SECRETS_CACHE_TTL = int(os.environ.get('SECRETS_CACHE_TTL', 3600))  # 1 hour by default
-    CONSOLIDATED_SECRETS = get_env_bool('CONSOLIDATED_SECRETS', True)  # Use single secrets for multiple values
-    
-    # Centralized Methods
     @classmethod
     def configure_logging(cls):
         """Configure logging based on settings."""
-        try:
-            log_level = getattr(logging, cls.LOG_LEVEL.upper(), logging.INFO)
-            root_logger = logging.getLogger()
-            root_logger.setLevel(log_level)
-            
-            for handler in root_logger.handlers[:]:
-                root_logger.removeHandler(handler)
-            
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(log_level)
-            formatter = logging.Formatter(cls.LOG_FORMAT)
-            console_handler.setFormatter(formatter)
-            root_logger.addHandler(console_handler)
-            
-            if cls.LOG_TO_CLOUD and cls.GCP_PROJECT and HAS_GCP:
-                try:
-                    global _logging_client
-                    if _logging_client is None:
-                        _logging_client = LoggingClient(project=cls.GCP_PROJECT)
-                    cloud_handler = _logging_client.get_default_handler()
-                    cloud_handler.setLevel(log_level)
-                    root_logger.addHandler(cloud_handler)
-                    logger.info("Cloud Logging enabled")
-                except Exception as e:
-                    logger.error(f"Failed to set up Cloud Logging: {str(e)}")
-        except Exception as e:
-            print(f"Error configuring logging: {str(e)}")
-    
-    @classmethod
-    def initialize_error_reporting(cls):
-        """Initialize Google Cloud Error Reporting."""
-        if not cls.ENABLE_ERROR_REPORTING or not cls.GCP_PROJECT or not HAS_GCP:
-            return None
+        log_level = getattr(logging, cls.LOG_LEVEL.upper(), logging.INFO)
         
-        return initialize_error_reporting(cls.GCP_PROJECT)
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        
+        # Clear existing handlers
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        
+        # Add console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(log_level)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+        
+        # Add cloud logging if enabled
+        if cls.LOG_TO_CLOUD and cls.GCP_PROJECT:
+            try:
+                from google.cloud.logging_v2 import Client as LoggingClient
+                logging_client = LoggingClient(project=cls.GCP_PROJECT)
+                cloud_handler = logging_client.get_default_handler()
+                cloud_handler.setLevel(log_level)
+                root_logger.addHandler(cloud_handler)
+                logger.info("Cloud Logging enabled")
+            except Exception as e:
+                logger.warning(f"Failed to set up Cloud Logging: {e}")
     
     @classmethod
     def validate_configuration(cls):
-        """Validate configuration values and check GCP permissions."""
+        """Validate configuration values and return whether configuration is valid."""
         warnings = []
         errors = []
         
@@ -682,18 +550,9 @@ class Config:
             
             if cls.API_KEY == 'dev-api-key':
                 warnings.append("Production environment using default development API key!")
-            
-            if not cls.SESSION_COOKIE_SECURE:
-                warnings.append("Session cookies not set to secure in production!")
         
         if not cls.GCP_PROJECT:
             errors.append("GCP_PROJECT not set - multiple GCP services will fail")
-        
-        # Test BigQuery connection if configuration is critical
-        if cls.GCP_PROJECT and HAS_GCP:
-            bq_client = initialize_bigquery()
-            if not bq_client:
-                warnings.append("Could not initialize BigQuery client")
         
         for warning in warnings:
             logger.warning(warning)
@@ -702,6 +561,34 @@ class Config:
             logger.error(error)
         
         return len(errors) == 0
+    
+    @classmethod
+    def ensure_feed_configuration(cls):
+        """Ensure feed configuration is properly loaded."""
+        # Skip if already loaded
+        if cls.FEEDS and len(cls.FEEDS) > 0:
+            logger.info(f"Using existing feed configuration with {len(cls.FEEDS)} feeds")
+            return True
+        
+        # Try to load from secret manager
+        feed_config = SecretManager.get_secret('feed-config')
+        if feed_config and isinstance(feed_config, dict) and 'feeds' in feed_config and feed_config['feeds']:
+            cls.FEEDS = feed_config['feeds']
+            logger.info(f"Loaded {len(cls.FEEDS)} feeds from configuration")
+            return True
+        
+        # Fall back to default feeds
+        cls.FEEDS = DEFAULT_FEED_CONFIGS
+        logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
+        
+        # Try to save this configuration
+        feed_config = {
+            "feeds": cls.FEEDS,
+            "update_interval_hours": cls.FEED_UPDATE_INTERVAL
+        }
+        
+        SecretManager.update_secret('feed-config', feed_config)
+        return True
     
     @classmethod
     def get_feed_by_id(cls, feed_id):
@@ -717,11 +604,6 @@ class Config:
         return [feed for feed in cls.FEEDS if feed.get('enabled', True)]
     
     @classmethod
-    def get_feeds_by_schedule(cls, schedule):
-        """Get feeds configured for a specific schedule."""
-        return [feed for feed in cls.FEEDS if feed.get('schedule') == schedule and feed.get('enabled', True)]
-    
-    @classmethod
     def get_table_name(cls, table_key):
         """Get the full BigQuery table name including project and dataset."""
         if not cls.GCP_PROJECT or not cls.BIGQUERY_DATASET:
@@ -732,708 +614,112 @@ class Config:
             return None
         
         return f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}.{table_name}"
+
+# ===== Error Reporting =====
+def report_error(exception: Exception):
+    """Report an error to Cloud Error Reporting if enabled."""
+    if not Config.ENABLE_ERROR_REPORTING:
+        return
     
-    @classmethod
-    def get_gcs_path(cls, prefix, filename=None):
-        """Construct a GCS path with the given prefix and optional filename."""
-        if not cls.GCS_BUCKET:
-            return None
-        
-        path = f"gs://{cls.GCS_BUCKET}/{prefix}"
-        if filename:
-            path = f"{path}/{filename}"
-        
-        return path
+    try:
+        from google.cloud import error_reporting
+        client = error_reporting.Client(project=Config.GCP_PROJECT)
+        client.report_exception()
+    except Exception as e:
+        logger.error(f"Failed to report error: {e}")
+
+# ===== GCP Client Initialization =====
+def initialize_bigquery():
+    """Initialize and return a BigQuery client."""
+    if 'bigquery' in _clients:
+        return _clients['bigquery']
     
-    @classmethod
-    def get_pubsub_topic_path(cls, topic_name):
-        """Get full path for a Pub/Sub topic."""
-        if not cls.GCP_PROJECT:
-            return None
-        
-        return f"projects/{cls.GCP_PROJECT}/topics/{topic_name}"
+    try:
+        from google.cloud import bigquery
+        client = bigquery.Client(project=Config.GCP_PROJECT, location=Config.BIGQUERY_LOCATION)
+        _clients['bigquery'] = client
+        return client
+    except Exception as e:
+        logger.error(f"Failed to initialize BigQuery client: {e}")
+        return None
+
+def initialize_storage():
+    """Initialize and return a Cloud Storage client."""
+    if 'storage' in _clients:
+        return _clients['storage']
     
-    @classmethod
-    def get_pubsub_subscription_path(cls, subscription_name):
-        """Get full path for a Pub/Sub subscription."""
-        if not cls.GCP_PROJECT:
-            return None
-        
-        return f"projects/{cls.GCP_PROJECT}/subscriptions/{subscription_name}"
+    try:
+        from google.cloud import storage
+        client = storage.Client(project=Config.GCP_PROJECT)
+        _clients['storage'] = client
+        return client
+    except Exception as e:
+        logger.error(f"Failed to initialize Storage client: {e}")
+        return None
+
+def initialize_pubsub():
+    """Initialize and return PubSub publisher and subscriber clients."""
+    if 'publisher' in _clients and 'subscriber' in _clients:
+        return _clients['publisher'], _clients['subscriber']
     
-    @classmethod
-    def get_feed_config_from_secret(cls):
-        """Retrieve feed configuration from Secret Manager or environment with cost optimization."""
-        try:
-            # Try environment variable first (cost-efficient)
-            env_feed_config = os.environ.get('FEED_CONFIG')
-            if env_feed_config:
-                try:
-                    feed_config = json.loads(env_feed_config)
-                    if isinstance(feed_config, dict) and 'feeds' in feed_config:
-                        logger.info("Successfully loaded feed configuration from environment variable")
-                        return feed_config
-                except json.JSONDecodeError:
-                    logger.warning("Failed to parse FEED_CONFIG environment variable")
-            
-            # Then try Secret Manager
-            feed_config = access_secret("feed-config")
-            
-            if feed_config and isinstance(feed_config, dict):
-                logger.info("Successfully loaded feed configuration from Secret Manager")
-                return feed_config
-            else:
-                logger.warning("Failed to load valid feed configuration from Secret Manager")
-                return None
-        except Exception as e:
-            logger.error(f"Error retrieving feed configuration: {str(e)}")
-            return None
+    try:
+        from google.cloud import pubsub_v1
+        publisher = pubsub_v1.PublisherClient()
+        subscriber = pubsub_v1.SubscriberClient()
+        
+        _clients['publisher'] = publisher
+        _clients['subscriber'] = subscriber
+        
+        return publisher, subscriber
+    except Exception as e:
+        logger.error(f"Failed to initialize PubSub clients: {e}")
+        return None, None
+
+# ===== Resource Management =====
+def ensure_resource_exists(retry_on_failure=True):
+    """Ensure GCP resources exist for the application."""
+    import threading
     
-    @classmethod
-    def ensure_feed_configuration(cls):
-        """Ensure feed configuration is properly loaded."""
-        # First check if FEEDS is already populated
-        if cls.FEEDS and len(cls.FEEDS) > 0:
-            logger.info(f"Using existing feed configuration with {len(cls.FEEDS)} feeds")
-            return True
+    def delayed_resource_check():
+        time.sleep(5)  # Wait for app startup
         
-        # Try to load from environment or Secret Manager
-        feed_config = cls.get_feed_config_from_secret()
-        if feed_config and 'feeds' in feed_config and feed_config['feeds']:
-            cls.FEEDS = feed_config['feeds']
-            logger.info(f"Loaded {len(cls.FEEDS)} feeds from configuration source")
-            return True
-        
-        # Fall back to environment variable
-        if os.environ.get('FEED_CONFIG'):
-            try:
-                feed_config = json.loads(os.environ.get('FEED_CONFIG'))
-                if 'feeds' in feed_config and feed_config['feeds']:
-                    cls.FEEDS = feed_config['feeds']
-                    logger.info(f"Loaded {len(cls.FEEDS)} feeds from environment variable")
-                    return True
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse feed configuration from environment variable")
-        
-        # Last resort: use default feeds
+        # Check BigQuery dataset
         try:
-            # Import here to avoid circular import
-            from ingestion import DEFAULT_FEEDS
-            cls.FEEDS = DEFAULT_FEEDS
-            logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
-        except ImportError:
-            # If import fails, use the constants defined at the top of this file
-            cls.FEEDS = DEFAULT_FEED_CONFIGS
-            logger.info(f"Using builtin default feed configuration with {len(cls.FEEDS)} feeds")
-        
-        # Try to save this configuration as environment variable for future use
-        try:
-            feed_config = {
-                "feeds": cls.FEEDS,
-                "update_interval_hours": cls.FEED_UPDATE_INTERVAL,
-                "default_tags": cls.FEED_DEFAULT_TAGS if hasattr(cls, 'FEED_DEFAULT_TAGS') else []
-            }
-            os.environ['FEED_CONFIG'] = json.dumps(feed_config)
-            logger.info("Saved default feed configuration to environment variable")
-            
-            # Only save to Secret Manager if necessary and not using env vars
-            if not cls.USE_ENV_VARS_FOR_SECRETS:
-                create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
-                logger.info("Saved default feed configuration to Secret Manager")
-        except Exception as e:
-            logger.warning(f"Failed to save feed configuration: {str(e)}")
-        
-        return True
-    
-    @classmethod
-    def init_secrets(cls):
-        """Initialize configuration from environment variables or Secret Manager."""
-        # First check if we should skip Secret Manager entirely
-        if cls.USE_ENV_VARS_FOR_SECRETS:
-            logger.info("Using environment variables for secrets")
-            try:
-                # Set up API keys from environment
-                cls.API_KEY = os.environ.get('API_KEY', cls.API_KEY)
-                cls.SECRET_KEY = os.environ.get('SECRET_KEY', cls.SECRET_KEY)
-                cls.WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY', cls.SECRET_KEY)
-                
-                # Set up session secret from environment
-                cls.SESSION_SECRET = os.environ.get('SESSION_SECRET', cls.SECRET_KEY)
-                
-                # Ensure feed configuration
-                cls.ensure_feed_configuration()
-                
-                # Load admin password if available
-                cls.ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', cls.ADMIN_PASSWORD)
-                
-                return
-            except Exception as e:
-                logger.warning(f"Error loading from environment variables: {str(e)}")
-        
-        # Fall back to Secret Manager if needed and available
-        if not cls.GCP_PROJECT or not HAS_GCP:
-            logger.info("Skipping secret initialization - not in GCP environment or missing libraries")
-            try:
-                create_default_feed_config()
-                create_default_auth_config()
-            except Exception as e:
-                logger.warning(f"Failed to create default configurations: {str(e)}")
-            return
-        
-        try:
-            # Load API keys
-            api_keys = access_secret('api-keys')
-            if api_keys and isinstance(api_keys, dict):
-                platform_api_key = api_keys.get('platform_api_key')
-                if platform_api_key:
-                    cls.API_KEY = platform_api_key
-                
-                cls.EXTERNAL_API_KEYS = {
-                    k: v for k, v in api_keys.items() if k != 'platform_api_key'
-                }
-                logger.info("Loaded API keys from Secret Manager")
-            
-            # Load authentication configuration
-            auth_config = access_secret('auth-config')
-            if auth_config and isinstance(auth_config, dict):
-                cls.AUTH_ENABLED = auth_config.get('enabled', cls.AUTH_ENABLED)
-                cls.SESSION_SECRET = auth_config.get('session_secret')
-                
-                if cls.SESSION_SECRET:
-                    cls.SECRET_KEY = cls.SESSION_SECRET
-                    cls.WTF_CSRF_SECRET_KEY = cls.SESSION_SECRET
-                    logger.info("Loaded session secret from Secret Manager")
-                else:
-                    # Generate a secure session secret if not provided
-                    import secrets
-                    cls.SESSION_SECRET = secrets.token_hex(32)
-                    cls.SECRET_KEY = cls.SESSION_SECRET
-                    cls.WTF_CSRF_SECRET_KEY = cls.SESSION_SECRET
-                    logger.warning("Generated new session secret - this should be stored in Secret Manager")
-                
-                if 'providers' in auth_config:
-                    cls.AUTH_PROVIDERS = auth_config['providers']
-                
-                logger.info("Loaded authentication configuration from Secret Manager")
-            
-            # Ensure feed configuration is loaded
-            cls.ensure_feed_configuration()
-            
-            # Load admin password if available
-            admin_password = access_secret('admin-initial-password')
-            if admin_password:
-                cls.ADMIN_PASSWORD = admin_password
-                logger.info("Loaded admin password from Secret Manager")
-                
-        except Exception as e:
-            logger.error(f"Error initializing secrets: {str(e)}")
-            if cls.IGNORE_PERMISSION_ERRORS:
-                create_default_feed_config()
-                create_default_auth_config()
-    
-    @classmethod
-    def init_app(cls):
-        """Initialize application configuration with fault tolerance."""
-        try:
-            cls.configure_logging()
-            logger.info("Logging configured")
-        except Exception as e:
-            print(f"Error configuring logging: {str(e)}")
-        
-        try:
-            if get_env_bool('LOAD_SECRETS', True):
-                cls.init_secrets()
-                logger.info("Secrets initialized")
-        except Exception as e:
-            logger.warning(f"Error initializing secrets: {str(e)}")
-            # Continue without secrets if needed
-        
-        try:
-            cls.initialize_error_reporting()
-            logger.info("Error reporting initialized")
-        except Exception as e:
-            logger.warning(f"Error reporting initialization failed: {str(e)}")
-        
-        try:
-            valid = cls.validate_configuration()
-            if not valid:
-                logger.warning("Configuration validation failed but continuing")
-        except Exception as e:
-            logger.warning(f"Configuration validation failed: {str(e)}")
-        
-        logger.info(f"Initialized {cls.ENVIRONMENT} configuration")
-    
-    @classmethod
-    def test_bigquery_connection(cls):
-        """Test BigQuery connection and create dataset if it doesn't exist."""
-        if not cls.GCP_PROJECT:
-            logger.warning("Cannot test BigQuery connection: No project ID available")
-            return False
-        
-        try:
+            from google.cloud import bigquery
             bq_client = initialize_bigquery()
-            if not bq_client:
-                logger.error("Failed to initialize BigQuery client")
-                return False
-            
-            # Test simple query with cost controls
-            try:
-                query_job = bq_client.query(
-                    "SELECT 1", 
-                    job_config=bigquery.QueryJobConfig(
-                        maximum_bytes_billed=1048576  # 1MB limit for test query
-                    )
-                )
-                query_job.result()
-                logger.info("BigQuery connection test successful")
-            except Exception as e:
-                logger.error(f"BigQuery query test failed: {str(e)}")
-                return False
-            
-            # Try to create dataset if it doesn't exist
-            try:
-                dataset_id = f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}"
+            if bq_client:
+                dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
                 try:
                     bq_client.get_dataset(dataset_id)
-                    logger.info(f"BigQuery dataset {cls.BIGQUERY_DATASET} already exists")
-                except NotFound:
+                    logger.info(f"BigQuery dataset {dataset_id} exists")
+                except Exception:
                     # Create dataset
                     dataset = bigquery.Dataset(dataset_id)
-                    dataset.location = cls.BIGQUERY_LOCATION
+                    dataset.location = Config.BIGQUERY_LOCATION
                     bq_client.create_dataset(dataset)
-                    logger.info(f"Created BigQuery dataset {cls.BIGQUERY_DATASET}")
-            except Exception as e:
-                logger.warning(f"Failed to ensure BigQuery dataset exists: {str(e)}")
-                if not cls.IGNORE_PERMISSION_ERRORS:
-                    return False
-            
-            return True
+                    logger.info(f"Created BigQuery dataset {dataset_id}")
         except Exception as e:
-            logger.error(f"Error testing BigQuery connection: {str(e)}")
-            return False
-
-# Helper Functions
-def get_config():
-    """Return the current configuration."""
-    return Config
-
-def get_gcp_clients():
-    """Get a dictionary of initialized GCP clients."""
-    return {
-        "bigquery": initialize_bigquery(),
-        "storage": initialize_storage(),
-        "pubsub": initialize_pubsub(),
-        "error_reporting": initialize_error_reporting()
-    }
-
-def create_default_feed_config() -> bool:
-    """Create a default feed configuration if it doesn't exist."""
-    try:
-        # First check if we can use environment variable
-        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-            feed_config = {
-                "feeds": DEFAULT_FEED_CONFIGS,
-                "update_interval_hours": 6,
-                "default_tags": [],
-                "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
-                "request_timeout": 30,
-                "max_retries": 3
-            }
-            os.environ['FEED_CONFIG'] = json.dumps(feed_config)
-            logger.info("Created default feed-config in environment variable")
-            Config.FEEDS = DEFAULT_FEED_CONFIGS
-            return True
-            
-        # Otherwise use Secret Manager if needed
-        feed_config = access_secret("feed-config")
-        if feed_config:
-            logger.info("Feed configuration already exists in Secret Manager")
-            return True
+            logger.error(f"Error checking BigQuery resources: {e}")
         
-        feed_config = {
-            "feeds": DEFAULT_FEED_CONFIGS,
-            "update_interval_hours": 6,
-            "default_tags": [],
-            "user_agent": f"ThreatIntelligencePlatform/{os.environ.get('VERSION', '1.0.0')}",
-            "request_timeout": 30,
-            "max_retries": 3
-        }
-        
-        success = create_or_update_secret("feed-config", json.dumps(feed_config, indent=2))
-        if success:
-            logger.info("Created default feed-config in Secret Manager")
-            return True
-        
-        if should_ignore_permission_errors():
-            logger.warning("Using in-memory fallback for feed-config")
-            Config.FEEDS = DEFAULT_FEED_CONFIGS
-            return True
-        
-        return False
-    except Exception as e:
-        logger.error(f"Error creating default feed config: {str(e)}")
-        return False
-
-def create_default_auth_config() -> bool:
-    """Create a default auth configuration if it doesn't exist with a secure auto-generated password."""
-    try:
-        # First check if auth config already exists
-        auth_config = access_secret("auth-config")
-        if auth_config:
-            logger.info("Auth configuration already exists in Secret Manager")
-            return True
-        
-        # Generate a secure session secret and admin password
-        import secrets
-        session_secret = secrets.token_hex(32)
-        admin_password = secrets.token_urlsafe(12)  # Generate a secure random password
-        
-        # Create the auth configuration
-        auth_config = {
-            "session_secret": session_secret,
-            "enabled": True,
-            "users": {
-                "admin": {
-                    "password": hashlib.sha256(admin_password.encode()).hexdigest(),
-                    "role": "admin", 
-                    "created_at": datetime.utcnow().isoformat()
-                }
-            }
-        }
-        
-        # Store configuration based on environment
-        if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-            # Store in environment variables
-            os.environ['SECRET_KEY'] = session_secret
-            os.environ['WTF_CSRF_SECRET_KEY'] = session_secret
-            os.environ['SECRET_AUTH_CONFIG'] = json.dumps(auth_config)
-            os.environ['ADMIN_PASSWORD'] = admin_password  # Store plaintext for first use
-            logger.info("Created default auth-config in environment variables")
-            return True
-        
-        # Store in Secret Manager
-        success = create_or_update_secret("auth-config", json.dumps(auth_config, indent=2))
-        if success:
-            logger.info("Created default auth-config in Secret Manager")
-            # Store the plaintext password in a separate secret for first use
-            password_success = create_or_update_secret("admin-initial-password", admin_password)
-            if password_success:
-                logger.info("Created initial admin password in Secret Manager")
-            return True
-        
-        # Fallback for permission errors
-        if should_ignore_permission_errors():
-            logger.warning("Using in-memory fallback for auth-config")
-            Config.SECRET_KEY = session_secret
-            Config.WTF_CSRF_SECRET_KEY = session_secret
-            Config.ADMIN_PASSWORD = admin_password
-            return True
-        
-        return False
-    except Exception as e:
-        logger.error(f"Error creating default auth config: {str(e)}")
-        return False
-
-def create_or_update_secret(secret_id: str, secret_value: str) -> bool:
-    """Create or update a secret in Secret Manager with improved error handling."""
-    # Skip if we're using environment variables
-    if get_env_bool('USE_ENV_VARS_FOR_SECRETS', False):
-        env_var_name = f"SECRET_{secret_id.replace('-', '_').upper()}"
-        os.environ[env_var_name] = secret_value
-        logger.info(f"Set environment variable {env_var_name} instead of Secret Manager")
-        return True
-    
-    secret_client = initialize_secret_manager()
-    if not secret_client:
-        logger.warning(f"Secret Manager client not available, cannot create/update secret {secret_id}")
-        return False
-    
-    project_id = get_project_id()
-    if not project_id:
-        logger.warning(f"Unable to create/update secret {secret_id}: No project ID available")
-        return False
-    
-    try:
-        parent = f"projects/{project_id}"
-        
-        # Check if secret exists first to avoid unnecessary calls
-        secret_exists = True
+        # Check GCS bucket
         try:
-            secret_client.get_secret(request={"name": f"{parent}/secrets/{secret_id}"})
-        except Exception:
-            secret_exists = False
-        
-        # Create secret if it doesn't exist
-        if not secret_exists:
-            try:
-                secret_client.create_secret(
-                    request={
-                        "parent": parent,
-                        "secret_id": secret_id,
-                        "secret": {"replication": {"automatic": {}}},
-                    }
-                )
-                logger.info(f"Created new secret: {secret_id}")
-            except Exception as e:
-                logger.error(f"Error creating secret {secret_id}: {str(e)}")
-                return False
-        
-        # Add new version with the updated value
-        try:
-            response = secret_client.add_secret_version(
-                request={
-                    "parent": f"{parent}/secrets/{secret_id}",
-                    "payload": {"data": secret_value.encode("UTF-8")},
-                }
-            )
-            logger.info(f"Updated secret: {secret_id} (version: {response.name})")
-            return True
-        except Exception as e:
-            logger.error(f"Error adding secret version for {secret_id}: {str(e)}")
-            return False
-    except Exception as e:
-        logger.error(f"Error creating/updating secret {secret_id}: {str(e)}")
-        return False
-
-def ensure_resource_exists(retry_on_failure=True):
-    """Ensure GCP resources exist for the application with improved error reporting."""
-    if not HAS_GCP or not Config.GCP_PROJECT:
-        logger.warning("Cannot ensure GCP resources: GCP libraries not available or project ID not set")
-        return False
-    
-    resources_created = True
-    errors = []
-    
-    # Test BigQuery connection and create dataset
-    try:
-        logger.info("Ensuring BigQuery resources...")
-        if Config.test_bigquery_connection():
-            logger.info("✅ BigQuery resources verified")
-        else:
-            error_msg = "Failed to verify BigQuery resources"
-            logger.error(f"❌ {error_msg}")
-            errors.append(error_msg)
-            resources_created = False
-            
-            # Try force updating tables on failure
-            if retry_on_failure:
-                logger.info("Attempting to force update BigQuery tables...")
-                from ingestion import force_update_bigquery_tables
-                if force_update_bigquery_tables():
-                    logger.info("✅ Successfully forced BigQuery tables update")
-                    resources_created = True
+            storage_client = initialize_storage()
+            if storage_client:
+                bucket = storage_client.bucket(Config.GCS_BUCKET)
+                if not bucket.exists():
+                    storage_client.create_bucket(bucket, location=Config.GCP_REGION)
+                    logger.info(f"Created GCS bucket {Config.GCS_BUCKET}")
                 else:
-                    logger.error("❌ Failed to force update BigQuery tables")
-    except Exception as e:
-        error_msg = f"Error ensuring BigQuery resources: {str(e)}"
-        logger.error(f"❌ {error_msg}")
-        errors.append(error_msg)
-        resources_created = False
+                    logger.info(f"GCS bucket {Config.GCS_BUCKET} exists")
+        except Exception as e:
+            logger.error(f"Error checking GCS resources: {e}")
     
-    # Ensure GCS bucket exists with lifecycle policy
-    try:
-        logger.info("Ensuring GCS bucket exists...")
-        storage_client = initialize_storage()
-        if storage_client:
-            bucket = storage_client.bucket(Config.GCS_BUCKET)
-            if not bucket.exists():
-                # Create bucket with lifecycle policy
-                bucket = storage_client.create_bucket(bucket, location=Config.GCP_REGION)
-                logger.info(f"✅ Created GCS bucket: {Config.GCS_BUCKET}")
-                
-                # Set lifecycle policy to reduce storage costs
-                lifecycle_rules = {
-                    'rule': [
-                        {'action': {'type': 'Delete'}, 'condition': {'age': 30, 'isLive': True}},
-                        {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 3, 'isLive': False}}
-                    ]
-                }
-                bucket.lifecycle_rules = lifecycle_rules
-                bucket.patch()
-                logger.info("✅ Applied cost-optimized lifecycle policy to bucket")
-                
-                # Create necessary folder structure
-                for folder in ['raw', 'processed', 'cache', 'exports', 'feeds']:
-                    blob = bucket.blob(f"{folder}/")
-                    blob.upload_from_string('')
-                    logger.info(f"✅ Created folder: {folder}/")
-            else:
-                logger.info(f"✅ GCS bucket {Config.GCS_BUCKET} already exists")
-                
-                # Update lifecycle policy if needed
-                lifecycle_rules = {
-                    'rule': [
-                        {'action': {'type': 'Delete'}, 'condition': {'age': 30, 'isLive': True}},
-                        {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 3, 'isLive': False}}
-                    ]
-                }
-                bucket.lifecycle_rules = lifecycle_rules
-                bucket.patch()
-                logger.info("✅ Updated cost-optimized lifecycle policy")
-        else:
-            error_msg = "Could not initialize Storage client to check bucket"
-            logger.error(f"❌ {error_msg}")
-            errors.append(error_msg)
-            resources_created = False
-    except Exception as e:
-        error_msg = f"Failed to ensure GCS bucket exists: {str(e)}"
-        logger.error(f"❌ {error_msg}")
-        errors.append(error_msg)
-        resources_created = False
-    
-    # Ensure Pub/Sub topics exist
-    try:
-        logger.info("Ensuring Pub/Sub topics exist...")
-        publisher, _ = initialize_pubsub()
-        if publisher:
-            # Check and create main ingestion topic
-            topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
-            try:
-                publisher.get_topic(request={"topic": topic_path})
-                logger.info(f"✅ Pub/Sub topic {Config.PUBSUB_TOPIC} already exists")
-            except NotFound:
-                publisher.create_topic(request={"name": topic_path})
-                logger.info(f"✅ Created Pub/Sub topic: {Config.PUBSUB_TOPIC}")
-            
-            # Check and create analysis topic
-            analysis_topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_ANALYSIS_TOPIC)
-            try:
-                publisher.get_topic(request={"topic": analysis_topic_path})
-                logger.info(f"✅ Pub/Sub topic {Config.PUBSUB_ANALYSIS_TOPIC} already exists")
-            except NotFound:
-                publisher.create_topic(request={"name": analysis_topic_path})
-                logger.info(f"✅ Created Pub/Sub topic: {Config.PUBSUB_ANALYSIS_TOPIC}")
-                
-            # Publish a test message to verify permissions
-            try:
-                test_message = {
-                    "operation": "resource_test",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                future = publisher.publish(
-                    topic_path,
-                    json.dumps(test_message).encode('utf-8'),
-                    operation="test"
-                )
-                message_id = future.result()
-                logger.info(f"✅ Successfully published test message (ID: {message_id}) to {Config.PUBSUB_TOPIC}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to publish test message: {str(e)}")
-                # Don't fail on this
-        else:
-            error_msg = "Could not initialize Pub/Sub clients to check topics"
-            logger.error(f"❌ {error_msg}")
-            errors.append(error_msg)
-            resources_created = False
-    except Exception as e:
-        error_msg = f"Failed to ensure Pub/Sub topics exist: {str(e)}"
-        logger.error(f"❌ {error_msg}")
-        errors.append(error_msg)
-        resources_created = False
-    
-    # Ensure feed configuration
-    try:
-        logger.info("Ensuring feed configuration...")
-        if Config.ensure_feed_configuration():
-            logger.info(f"✅ Feed configuration verified with {len(Config.FEEDS)} feeds")
-        else:
-            error_msg = "Failed to ensure feed configuration"
-            logger.error(f"❌ {error_msg}")
-            errors.append(error_msg)
-            resources_created = False
-    except Exception as e:
-        error_msg = f"Error ensuring feed configuration: {str(e)}"
-        logger.error(f"❌ {error_msg}")
-        errors.append(error_msg)
-        resources_created = False
-    
-    # Summary
-    if resources_created:
-        logger.info("✅ All resources verified successfully")
-    else:
-        logger.error(f"❌ Resource verification failed with {len(errors)} errors")
-        for i, error in enumerate(errors):
-            logger.error(f"  Error {i+1}: {error}")
-    
-    return resources_created
+    thread = threading.Thread(target=delayed_resource_check)
+    thread.daemon = True
+    thread.start()
 
-# Module exports
-__all__ = [
-    'Config', 
-    'get_config', 
-    'initialize_bigquery', 
-    'initialize_storage', 
-    'initialize_pubsub',
-    'initialize_error_reporting',
-    'initialize_secret_manager',
-    'report_error',
-    'access_secret',
-    'create_or_update_secret',
-    'get_cached_config',
-    'create_default_feed_config',
-    'create_default_auth_config',
-    'get_gcp_clients',
-    'ensure_resource_exists',
-    'GCP_SERVICES_AVAILABLE',
-    'HAS_GCP'
-]
-
-# Initialize resources if requested
-if __name__ != "__main__" and get_env_bool('ENSURE_GCP_RESOURCES', False):
-    # Wait until imported to avoid startup issues
-    logger.info("Auto-initializing GCP resources")
-    def delayed_resource_init():
-        time.sleep(2)  # Small delay to allow other initialization
+# ===== Module Initialization =====
+if __name__ != "__main__":
+    # Auto-initialize configuration when imported
+    if get_env_bool('ENSURE_GCP_RESOURCES', False):
         ensure_resource_exists()
-    
-    init_thread = threading.Thread(target=delayed_resource_init)
-    init_thread.daemon = True
-    init_thread.start()
-
-# Command line interface for testing
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Threat Intelligence Platform Configuration Tool')
-    parser.add_argument('--create-secrets', action='store_true', help='Create initial secrets')
-    parser.add_argument('--test-resources', action='store_true', help='Test GCP resources')
-    parser.add_argument('--setup-auth', action='store_true', help='Setup authentication')
-    parser.add_argument('--list-feeds', action='store_true', help='List configured feeds')
-    args = parser.parse_args()
-
-    # Initialize Config
-    Config.init_app()
-    
-    if args.create_secrets:
-        # Create initial secrets
-        print("Creating initial secrets...")
-        create_default_auth_config()
-        create_default_feed_config()
-        
-    if args.test_resources:
-        # Test GCP resources
-        print("Testing GCP resources...")
-        ensure_resource_exists()
-        
-    if args.setup_auth:
-        # Setup authentication
-        print("Setting up authentication...")
-        auth_config = create_default_auth_config()
-        admin_password = access_secret('admin-initial-password')
-        print(f"Default admin password: {admin_password}")
-        
-    if args.list_feeds:
-        # List configured feeds
-        print("Configured feeds:")
-        for feed in Config.FEEDS:
-            print(f" - {feed.get('name')} ({feed.get('id')}): {feed.get('description')}")
-    
-    # If no arguments provided, show general info
-    if not any(vars(args).values()):
-        print(f"Environment: {Config.ENVIRONMENT}")
-        print(f"Version: {Config.VERSION}")
-        print(f"Project ID: {Config.GCP_PROJECT}")
-        print(f"BigQuery Dataset: {Config.BIGQUERY_DATASET}")
-        print(f"GCS Bucket: {Config.GCS_BUCKET}")
-        print(f"Feed count: {len(Config.FEEDS)}")
-        print("\nUse --help to see available commands")
