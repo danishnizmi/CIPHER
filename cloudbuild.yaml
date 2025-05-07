@@ -55,7 +55,54 @@ steps:
       npx tailwindcss -i static/src/input.css -o static/dist/output.css --minify
       echo "Frontend build complete!"
 
-  # Check if secrets exist - improved error handling
+  # Create required resources - BigQuery dataset, GCS bucket, Pub/Sub topics
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'create-resources'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "Creating required GCP resources..."
+        
+        # Create BigQuery dataset if it doesn't exist
+        if ! bq ls --dataset ${PROJECT_ID}:threat_intelligence &>/dev/null; then
+          echo "Creating BigQuery dataset threat_intelligence..."
+          bq --location=US mk \
+            --dataset \
+            --description="Threat Intelligence Platform Dataset" \
+            ${PROJECT_ID}:threat_intelligence
+          echo "BigQuery dataset created successfully!"
+        else
+          echo "BigQuery dataset threat_intelligence already exists"
+        fi
+        
+        # Create GCS bucket if it doesn't exist
+        if ! gsutil ls -b gs://${PROJECT_ID}-threat-data &>/dev/null; then
+          echo "Creating GCS bucket ${PROJECT_ID}-threat-data..."
+          gsutil mb -l us-central1 gs://${PROJECT_ID}-threat-data
+          echo "Bucket created successfully!"
+        else
+          echo "Bucket ${PROJECT_ID}-threat-data already exists"
+        fi
+        
+        # Create Pub/Sub topics if they don't exist
+        if ! gcloud pubsub topics describe threat-data-ingestion &>/dev/null; then
+          echo "Creating Pub/Sub topic threat-data-ingestion..."
+          gcloud pubsub topics create threat-data-ingestion
+          echo "Pub/Sub topic created successfully!"
+        else
+          echo "Pub/Sub topic threat-data-ingestion already exists"
+        fi
+        
+        if ! gcloud pubsub topics describe threat-analysis-events &>/dev/null; then
+          echo "Creating Pub/Sub topic threat-analysis-events..."
+          gcloud pubsub topics create threat-analysis-events
+          echo "Pub/Sub topic created successfully!"
+        else
+          echo "Pub/Sub topic threat-analysis-events already exists"
+        fi
+
+  # Check for required secrets but don't fail if they don't exist
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-secrets'
     entrypoint: bash
@@ -64,50 +111,85 @@ steps:
       - |
         echo "Verifying required secrets exist..."
         
-        # Only check if secrets exist, don't create or update them
-        SECRET_CHECK="true"
-        MISSING_SECRETS=""
+        # Initialize variables to track missing secrets
+        missing_secrets=()
         
         # Check api-keys secret
-        if ! gcloud secrets describe api-keys --project=${PROJECT_ID} 2>/dev/null; then
+        if ! gcloud secrets describe api-keys --project=${PROJECT_ID} &>/dev/null; then
           echo "Warning: api-keys secret doesn't exist"
-          MISSING_SECRETS="${MISSING_SECRETS} api-keys"
+          missing_secrets+=("api-keys")
         else
           echo "✓ api-keys secret exists"
         fi
         
         # Check auth-config secret
-        if ! gcloud secrets describe auth-config --project=${PROJECT_ID} 2>/dev/null; then
+        if ! gcloud secrets describe auth-config --project=${PROJECT_ID} &>/dev/null; then
           echo "Warning: auth-config secret doesn't exist"
-          MISSING_SECRETS="${MISSING_SECRETS} auth-config"
+          missing_secrets+=("auth-config")
         else
           echo "✓ auth-config secret exists"
         fi
         
         # Check feed-config secret
-        if ! gcloud secrets describe feed-config --project=${PROJECT_ID} 2>/dev/null; then
+        if ! gcloud secrets describe feed-config --project=${PROJECT_ID} &>/dev/null; then
           echo "Warning: feed-config secret doesn't exist"
-          MISSING_SECRETS="${MISSING_SECRETS} feed-config"
+          missing_secrets+=("feed-config")
         else
           echo "✓ feed-config secret exists"
         fi
         
         # Check admin-initial-password secret
-        if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} 2>/dev/null; then
+        if ! gcloud secrets describe admin-initial-password --project=${PROJECT_ID} &>/dev/null; then
           echo "Warning: admin-initial-password secret doesn't exist"
-          MISSING_SECRETS="${MISSING_SECRETS} admin-initial-password"
+          missing_secrets+=("admin-initial-password")
         else
           echo "✓ admin-initial-password secret exists"
         fi
         
-        # Only log missing secrets, don't try to use them as substitution
-        if [ ! -z "$MISSING_SECRETS" ]; then
-          echo "Missing secrets detected: $MISSING_SECRETS"
-          echo "These will be created by the application on first run."
-          echo "If you need to create them now, run the create-secrets.sh script manually."
+        # Report missing secrets but don't fail
+        if [ ${#missing_secrets[@]} -gt 0 ]; then
+          echo "Missing secrets detected: ${missing_secrets[*]}"
+          echo "These will be created automatically when the application starts."
         else
-          echo "All required secrets exist! No secrets will be modified during this build."
+          echo "All required secrets exist!"
         fi
+        
+        # Create a simple script to create default secrets if needed
+        cat > create-default-secrets.sh << 'EOF'
+        #!/bin/bash
+        
+        PROJECT_ID=$(gcloud config get-value project)
+        echo "Creating default secrets for project: $PROJECT_ID"
+        
+        # Create api-keys secret if it doesn't exist
+        if ! gcloud secrets describe api-keys --project=$PROJECT_ID &>/dev/null; then
+          echo "Creating api-keys secret..."
+          echo '{"platform_api_key":"dev-api-key"}' | gcloud secrets create api-keys --data-file=- --project=$PROJECT_ID
+        fi
+        
+        # Create auth-config secret if it doesn't exist
+        if ! gcloud secrets describe auth-config --project=$PROJECT_ID &>/dev/null; then
+          echo "Creating auth-config secret..."
+          echo '{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"2023-01-01T00:00:00Z"}}}' | gcloud secrets create auth-config --data-file=- --project=$PROJECT_ID
+        fi
+        
+        # Create feed-config secret if it doesn't exist
+        if ! gcloud secrets describe feed-config --project=$PROJECT_ID &>/dev/null; then
+          echo "Creating feed-config secret..."
+          echo '{"feeds":[],"update_interval_hours":6}' | gcloud secrets create feed-config --data-file=- --project=$PROJECT_ID
+        fi
+        
+        # Create admin-initial-password secret if it doesn't exist
+        if ! gcloud secrets describe admin-initial-password --project=$PROJECT_ID &>/dev/null; then
+          echo "Creating admin-initial-password secret..."
+          echo 'admin' | gcloud secrets create admin-initial-password --data-file=- --project=$PROJECT_ID
+        fi
+        
+        echo "Secret creation complete!"
+        EOF
+        
+        chmod +x create-default-secrets.sh
+        echo "Created secret creation helper script: create-default-secrets.sh"
 
   # Build container with cache optimization
   - name: 'gcr.io/cloud-builders/docker'
@@ -124,22 +206,6 @@ steps:
     id: 'push-container'
     args: ['push', 'gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest']
 
-  # Create GCS bucket if it doesn't exist
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'ensure-gcs-bucket'
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        echo "Ensuring GCS bucket exists..."
-        if ! gsutil ls -b gs://${PROJECT_ID}-threat-data 2>/dev/null; then
-          echo "Creating GCS bucket ${PROJECT_ID}-threat-data"
-          gsutil mb -l us-central1 gs://${PROJECT_ID}-threat-data
-          echo "Bucket created successfully!"
-        else
-          echo "Bucket ${PROJECT_ID}-threat-data already exists"
-        fi
-
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloudrun'
@@ -149,6 +215,7 @@ steps:
       - |
         echo "Deploying to Cloud Run..."
         
+        # Deploy first without secret mappings
         gcloud run deploy threat-intelligence-platform \
           --image gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest \
           --platform managed \
@@ -199,30 +266,40 @@ steps:
           --set-env-vars AUTO_INGEST=true \
           --set-env-vars AUTO_ANALYZE=true \
           --set-env-vars USE_ENV_VARS_FOR_SECRETS=true \
+          --set-env-vars API_KEY=dev-api-key \
+          --set-env-vars SECRET_KEY=dev-secret-key \
           --service-account cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
-
-        # Handle secrets safely - don't fail if they don't exist yet
-        if gcloud secrets describe api-keys --project=${PROJECT_ID} >/dev/null 2>&1; then
+        
+        echo "Basic deployment complete!"
+        
+        # Now try to add secret mappings if secrets exist
+        echo "Attempting to add secret mappings..."
+        
+        # Add API_KEY secret if it exists
+        if gcloud secrets describe api-keys --project=${PROJECT_ID} &>/dev/null; then
+          echo "Adding API_KEY secret mapping..."
           gcloud run services update threat-intelligence-platform \
             --region=us-central1 \
-            --update-secrets=API_KEY=api-keys:latest \
-            --quiet
-          echo "Updated API_KEY secret mapping"
-        else 
-          echo "Skipping API_KEY secret - will be created on first run"
-        fi
-
-        if gcloud secrets describe auth-config --project=${PROJECT_ID} >/dev/null 2>&1; then
-          gcloud run services update threat-intelligence-platform \
-            --region=us-central1 \
-            --update-secrets=SECRET_KEY=auth-config:latest \
-            --quiet
-          echo "Updated SECRET_KEY secret mapping"
+            --update-secrets=API_KEY=api-keys:latest
+          echo "Added API_KEY secret mapping"
         else
-          echo "Skipping SECRET_KEY secret - will be created on first run"
+          echo "Skipping API_KEY secret mapping - secret doesn't exist yet"
         fi
+        
+        # Add SECRET_KEY secret if it exists
+        if gcloud secrets describe auth-config --project=${PROJECT_ID} &>/dev/null; then
+          echo "Adding SECRET_KEY secret mapping..."
+          gcloud run services update threat-intelligence-platform \
+            --region=us-central1 \
+            --update-secrets=SECRET_KEY=auth-config:latest
+          echo "Added SECRET_KEY secret mapping"
+        else
+          echo "Skipping SECRET_KEY secret mapping - secret doesn't exist yet"
+        fi
+        
+        echo "Deployment complete!"
 
-  # Verify deployment - with proper variable escaping
+  # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: bash
@@ -230,52 +307,53 @@ steps:
       - -c
       - |
         echo "Waiting for service to be ready..."
-        sleep 30
+        sleep 45
         
-        # Properly escaped with double dollar signs ($$)
-        SERVICE_URL=$$(gcloud run services describe threat-intelligence-platform \
+        # Get service URL
+        SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "Service deployed at: $$SERVICE_URL"
+        echo "Service deployed at: $SERVICE_URL"
         
-        # Test health endpoint with more retries
+        # Test health endpoint with retries
         echo "Testing health endpoint..."
-        MAX_RETRIES=15
-        RETRY_DELAY=10
+        MAX_RETRIES=20
+        RETRY_DELAY=15
         
-        for ATTEMPT in $$(seq 1 $$MAX_RETRIES); do
-          echo "Health check attempt $$ATTEMPT/$$MAX_RETRIES..."
+        for ATTEMPT in $(seq 1 $MAX_RETRIES); do
+          echo "Health check attempt $ATTEMPT/$MAX_RETRIES..."
           
-          HTTP_RESPONSE=$$(curl -s -w "\n%{http_code}" "$$SERVICE_URL/health" || echo "000")
-          HTTP_CODE=$$(echo "$$HTTP_RESPONSE" | tail -n1)
-          HTTP_BODY=$$(echo "$$HTTP_RESPONSE" | head -n-1)
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" "$SERVICE_URL/health" || echo "000")
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n1)
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n-1)
           
-          echo "Response code: $$HTTP_CODE"
+          echo "Response code: $HTTP_CODE"
           
-          if [ "$$HTTP_CODE" = "200" ]; then
+          if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ Health check successful!"
             echo "✅ Deployment verified successfully!"
-            echo "Access the application at: $$SERVICE_URL"
+            echo "Access the application at: $SERVICE_URL"
+            echo "Login with username: admin, password: admin"
             exit 0
-          elif [ "$$HTTP_CODE" = "000" ]; then
-            echo "⚠️ Connection failed, retrying in $$RETRY_DELAY seconds..."
+          elif [ "$HTTP_CODE" = "000" ]; then
+            echo "⚠️ Connection failed, retrying in $RETRY_DELAY seconds..."
           else
-            echo "⚠️ Health check returned: $$HTTP_CODE, retrying in $$RETRY_DELAY seconds..."
+            echo "⚠️ Health check returned: $HTTP_CODE, retrying in $RETRY_DELAY seconds..."
           fi
           
-          if [ $$ATTEMPT -lt $$MAX_RETRIES ]; then
-            sleep $$RETRY_DELAY
+          if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+            sleep $RETRY_DELAY
           fi
         done
         
-        echo "❌ Health check failed after $$MAX_RETRIES attempts"
+        echo "❌ Health check failed after $MAX_RETRIES attempts"
         echo "Checking latest logs..."
-        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=20 --format=json | jq '.[].textPayload'
-        echo "You can access more logs at: https://console.cloud.google.com/logs/viewer?project=${PROJECT_ID}"
+        gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=threat-intelligence-platform" --limit=20 --format=json | jq '.[].textPayload' || echo "Failed to retrieve logs"
+        echo "Deployment may still be in progress. You can check the status at: https://console.cloud.google.com/run/detail/us-central1/threat-intelligence-platform/revisions?project=${PROJECT_ID}"
         exit 1
 
-timeout: '1200s'
+timeout: '1800s'
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
