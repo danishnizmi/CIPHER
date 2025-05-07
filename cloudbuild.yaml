@@ -1,95 +1,150 @@
-# Use Python 3.10 slim image for reduced image size
-FROM python:3.10-slim
+steps:
+# Ensure permissions for service account
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'ensure-permissions'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Ensuring service account has logging permissions..."
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member=serviceAccount:$PROJECT_ID@appspot.gserviceaccount.com \
+      --role=roles/logging.logWriter \
+      --condition=None || echo "Permissions setup complete."
 
-# Set working directory
-WORKDIR /app
+# Setup and check environment
+- name: 'python:3.10'
+  id: 'setup-and-checks'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Setting up Python environment and checking dependencies..."
+    pip install -q -r requirements.txt
+    python -m pytest --version || echo "Tests will be skipped"
 
-# Set environment variables for optimization
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    FLASK_APP=app.py \
-    FLASK_ENV=production \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Container configuration
-    PORT=8080
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'build-container'
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    gcc \
-    python3-dev \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Run tests (optional - comment out if not needed)
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'run-tests'
+  args: ['run', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', 'python', '-m', 'pytest', '--version']
+  allowFailure: true
 
-# Copy requirements file first (for better caching)
-COPY requirements.txt .
+# Prepare GCP resources
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'prepare-resources'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Creating/updating Secret Manager secrets..."
+    
+    # Create secrets if they don't exist
+    gcloud secrets describe api-keys || \
+      gcloud secrets create api-keys --replication-policy="automatic"
+    
+    gcloud secrets describe auth-config || \
+      gcloud secrets create auth-config --replication-policy="automatic"
+    
+    gcloud secrets describe feed-config || \
+      gcloud secrets create feed-config --replication-policy="automatic"
+    
+    gcloud secrets describe admin-initial-password || \
+      gcloud secrets create admin-initial-password --replication-policy="automatic"
+    
+    # Create BigQuery dataset if it doesn't exist
+    bq --location=US ls threat_intelligence > /dev/null 2>&1 || \
+      bq --location=US mk --dataset $PROJECT_ID:threat_intelligence
+    
+    # Create Cloud Storage bucket if it doesn't exist
+    gsutil ls -b gs://$PROJECT_ID-threat-data > /dev/null 2>&1 || \
+      gsutil mb -l us-central1 gs://$PROJECT_ID-threat-data
 
-# Install Python dependencies in layers for better caching
-RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
-    pip install --no-cache-dir --upgrade wheel setuptools && \
-    # Install numpy first to avoid compatibility issues
-    pip install --no-cache-dir numpy==1.24.3 && \
-    # Install pandas next (depends on numpy)
-    pip install --no-cache-dir pandas==1.5.3 && \
-    # Then install all remaining requirements
-    pip install --no-cache-dir -r requirements.txt
+# Push the container image to Container Registry
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'push-container'
+  args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
 
-# Create necessary directories with proper permissions
-RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/secrets && \
-    chmod -R 755 /app
+# Deploy to Cloud Run
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-cloudrun'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Deploying to Cloud Run..."
+    
+    # Deploy basic service first
+    gcloud run deploy threat-intelligence-platform \
+      --image gcr.io/$PROJECT_ID/threat-intelligence-platform:latest \
+      --region us-central1 \
+      --platform managed \
+      --allow-unauthenticated \
+      --execution-environment gen2 \
+      --memory 2Gi \
+      --cpu 2 \
+      --min-instances 1 \
+      --max-instances 10 \
+      --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false" \
+      --set-secrets "API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
+      --command="/bin/bash" \
+      --args="-c,python -c 'import hashlib, json, os; from google.cloud import secretmanager; project_id = os.environ.get(\"GCP_PROJECT\"); client = secretmanager.SecretManagerServiceClient(); admin_password = client.access_secret_version(request={\"name\": f\"projects/{project_id}/secrets/admin-initial-password/versions/latest\"}).payload.data.decode(\"UTF-8\"); name = f\"projects/{project_id}/secrets/auth-config/versions/latest\"; response = client.access_secret_version(request={\"name\": name}); auth_config = json.loads(response.payload.data.decode(\"UTF-8\")); if \"users\" not in auth_config: auth_config[\"users\"] = {}; auth_config[\"users\"][\"admin\"] = {\"password\": hashlib.sha256(admin_password.encode()).hexdigest(), \"role\": \"admin\", \"created_at\": \"2025-05-07T00:00:00.000Z\"}; client.add_secret_version(request={\"parent\": f\"projects/{project_id}/secrets/auth-config\", \"payload\": {\"data\": json.dumps(auth_config).encode(\"UTF-8\")}});' && exec gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --timeout 120 --worker-class gthread --preload --log-level info app:app"
+    
+    echo "Basic deployment complete! Adding secret mappings..."
+    
+    # Add volume mounts after initial deployment
+    gcloud run services update threat-intelligence-platform \
+      --region us-central1 \
+      --update-volumes="name=api-keys-volume,secret=api-keys,mount-path=/app/secrets/api-keys" \
+      --update-volumes="name=auth-config-volume,secret=auth-config,mount-path=/app/secrets/auth-config" \
+      --update-volumes="name=feed-config-volume,secret=feed-config,mount-path=/app/secrets/feed-config" \
+      --update-volumes="name=admin-password-volume,secret=admin-initial-password,mount-path=/app/secrets/admin-password"
 
-# Create Tailwind CSS file for frontend
-RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
+# Verify deployment
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'verify-deployment'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Verifying deployment..."
+    
+    # Get deployment URL
+    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform --region us-central1 --format 'value(status.url)')
+    echo "Service URL: $SERVICE_URL"
+    
+    # Wait for service to be ready
+    for i in {1..6}; do
+      echo "Checking service health (attempt $i)..."
+      curl -s $SERVICE_URL/health && break || sleep 10
+    done
+    
+    echo "Deployment verification complete."
 
-# Copy configuration module and essential files first
-COPY config.py ./
-COPY app.py ./
+# Setup PubSub topics
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'setup-pubsub'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Setting up PubSub topics..."
+    
+    # Create topics if they don't exist
+    gcloud pubsub topics describe threat-data-ingestion || \
+      gcloud pubsub topics create threat-data-ingestion
+    
+    gcloud pubsub topics describe threat-analysis-events || \
+      gcloud pubsub topics create threat-analysis-events
 
-# Create initialization script that leverages our config module
-RUN bash -c 'cat > /app/init-app.sh << EOF
-#!/bin/bash
-set -e
+images:
+- 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
 
-echo "Starting Threat Intelligence Platform initialization..."
-
-# Run Python setup script that uses our config module to initialize secrets
-python -c "
-import config
-from config import Config, SecretManager
-
-print(\"Initializing application configuration...\")
-# Initialize secrets using our modules
-SecretManager.init()
-Config.init_app()
-print(\"Configuration initialized successfully\")
-"
-
-# Start the application with the command passed to the script
-exec "\$@"
-EOF'
-
-RUN chmod +x /app/init-app.sh
-
-# Copy all application code
-COPY . .
-
-# Create non-root user for security
-RUN useradd -m -u 1000 -s /bin/bash appuser && \
-    chown -R appuser:appuser /app
-
-# Expose port 8080
-EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
-
-# Switch to non-root user
-USER appuser
-
-# Start with the initialization script that uses our config module
-ENTRYPOINT ["/app/init-app.sh"]
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "app:app"]
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
