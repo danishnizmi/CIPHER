@@ -15,6 +15,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # Secret management optimization
     USE_ENV_VARS_FOR_SECRETS=true \
     SECRET_TTL=86400 \
+    # Default credentials
+    ADMIN_USERNAME=admin \
+    ADMIN_PASSWORD=admin \
     # BigQuery cost controls
     BIGQUERY_MAX_BYTES_BILLED=104857600 \
     # Container configuration
@@ -44,12 +47,39 @@ RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
 
 # Create necessary directories with proper permissions
 RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/secrets && \
-    # Create directory for offline secret backups
-    mkdir -p /app/data/secrets && \
     chmod -R 755 /app
 
-# Set Secret Manager backup path for offline fallbacks
-ENV SECRET_BACKUP_PATH=/app/data/secrets/secret_backups.json
+# Initialize script to ensure consistent secret setup at container start
+RUN echo '#!/bin/bash\n\
+# Delete existing Secret Manager secrets to avoid duplicates\n\
+if [ "$CLEAN_SECRETS" = "true" ]; then\n\
+  echo "Cleaning up existing secrets..."\n\
+  for SECRET_ID in "api-keys" "auth-config" "feed-config" "admin-initial-password"; do\n\
+    gcloud secrets delete "$SECRET_ID" --quiet || echo "Secret $SECRET_ID not found or already deleted"\n\
+  done\n\
+  echo "Secrets cleaned up"\n\
+fi\n\
+\n\
+# Initialize admin password environment variable\n\
+echo "Setting up admin password environment variable"\n\
+export SECRET_ADMIN_INITIAL_PASSWORD="admin"\n\
+\n\
+# Initialize auth config with proper admin credentials\n\
+AUTH_CONFIG=\'{"session_secret":"dev-secret-key","enabled":true,"users":{"admin":{"password":"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918","role":"admin","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"'"}}}\'\n\
+export SECRET_AUTH_CONFIG="$AUTH_CONFIG"\n\
+\n\
+# Initialize API keys\n\
+export SECRET_API_KEYS=\'{"platform_api_key":"dev-api-key"}\'\n\
+\n\
+# Initialize feed config\n\
+export SECRET_FEED_CONFIG=\'{"feeds":[],"update_interval_hours":6}\'\n\
+\n\
+# Start the application\n\
+exec "$@"\n\
+' > /app/init-secrets.sh && chmod +x /app/init-secrets.sh
+
+# Create Tailwind CSS file for frontend
+RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
 
 # Copy application code
 COPY . .
@@ -58,9 +88,6 @@ COPY . .
 RUN useradd -m -u 1000 -s /bin/bash appuser && \
     chown -R appuser:appuser /app
 
-# Create Tailwind CSS file for frontend
-RUN echo '@tailwind base; @tailwind components; @tailwind utilities;' > /app/static/src/input.css
-
 # Expose port 8080
 EXPOSE 8080
 
@@ -68,29 +95,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
-# Initialize application at startup
-RUN echo '#!/bin/bash \n\
-# Initialize environment \n\
-python -c "import config; config.Config.init_app()" \n\
-\n\
-# Start the application \n\
-exec gunicorn \
-    --bind "0.0.0.0:${PORT:-8080}" \
-    --workers ${GUNICORN_WORKERS:-2} \
-    --threads ${GUNICORN_THREADS:-4} \
-    --timeout ${GUNICORN_TIMEOUT:-120} \
-    --worker-class ${GUNICORN_WORKER_CLASS:-gthread} \
-    --preload \
-    --access-logfile - \
-    --error-logfile - \
-    --log-level ${LOG_LEVEL:-info} \
-    --worker-tmp-dir /dev/shm \
-    --max-requests 1000 \
-    --max-requests-jitter 50 \
-    "app:app"' > /app/startup.sh && chmod +x /app/startup.sh
-
 # Switch to non-root user
 USER appuser
 
-# Start the application with initialization
-CMD ["/app/startup.sh"]
+# Start with the entrypoint script to initialize secrets, then start the application
+ENTRYPOINT ["/app/init-secrets.sh"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "app:app"]
