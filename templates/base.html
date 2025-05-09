@@ -109,7 +109,7 @@
     <!-- Navigation Bar -->
     <nav class="bg-gray-900 text-white shadow-md sticky top-0 z-50 w-full">
         <div class="container mx-auto px-4 py-3 flex justify-between items-center">
-            <a href="{{ url_for('frontend.dashboard') if request.endpoint else '/' }}" class="flex items-center group">
+            <a href="{% if request.endpoint and 'frontend.dashboard' in request.endpoint|app.view_functions %}{{ url_for('frontend.dashboard') }}{% else %}/{% endif %}" class="flex items-center group">
                 <div class="bg-accent rounded-lg p-2 mr-2 group-hover:bg-accent-dark transition-colors">
                     <i class="fas fa-shield-alt text-xl"></i>
                 </div>
@@ -120,10 +120,12 @@
                     <i class="fas fa-globe mr-2"></i>
                     Global Intelligence Feed
                 </span>
-                <a href="{{ url_for('frontend.dashboard', view='ai-analysis') if request.endpoint else '/dashboard?view=ai-analysis' }}" class="btn btn-primary btn-sm">
+                {% if 'frontend.dashboard' in request.endpoint|app.view_functions %}
+                <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="btn btn-primary btn-sm">
                     <i class="fas fa-brain mr-2"></i>
                     AI Analysis
                 </a>
+                {% endif %}
             </div>
         </div>
     </nav>
@@ -133,7 +135,7 @@
         <div class="w-64 flex-shrink-0 hidden md:block" id="sidebar">
             <div class="bg-white rounded-lg shadow-lg p-4 border border-gray-100 sticky top-20">
                 <!-- Search Box -->
-                <form action="{{ url_for('frontend.dashboard') if request.endpoint else '/' }}" method="get" class="mb-6">
+                <form action="{% if 'frontend.dashboard' in request.endpoint|app.view_functions %}{{ url_for('frontend.dashboard') }}{% else %}/{% endif %}" method="get" class="mb-6">
                     <div class="search-input">
                         <i class="fas fa-search"></i>
                         <input type="text" name="q" placeholder="Search..." class="form-control" value="{{ request.args.get('q', '') }}">
@@ -142,30 +144,49 @@
                 
                 <!-- Navigation Menu -->
                 <div class="space-y-1">
-                    <a href="{{ url_for('frontend.dashboard') if request.endpoint else '/' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view', 'dashboard') == 'dashboard' %}active{% endif %}">
+                    {% if 'frontend.dashboard' in request.endpoint|app.view_functions %}
+                    <a href="{{ url_for('frontend.dashboard') }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view', 'dashboard') == 'dashboard' %}active{% endif %}">
                         <i class="fas fa-tachometer-alt"></i> Dashboard
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='feeds') if request.endpoint else '/dashboard?view=feeds' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'feeds' %}active{% endif %}">
+                    <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'feeds' %}active{% endif %}">
                         <i class="fas fa-rss"></i> Threat Feeds
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='iocs') if request.endpoint else '/dashboard?view=iocs' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'iocs' %}active{% endif %}">
+                    <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'iocs' %}active{% endif %}">
                         <i class="fas fa-fingerprint"></i> IOCs
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') if request.endpoint else '/dashboard?view=ai-analysis' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'ai-analysis' %}active{% endif %}">
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'ai-analysis' %}active{% endif %}">
                         <i class="fas fa-brain"></i> AI Analysis
                     </a>
+                    {% else %}
+                    <a href="/" class="sidebar-item">
+                        <i class="fas fa-tachometer-alt"></i> Dashboard
+                    </a>
+                    <a href="/" class="sidebar-item">
+                        <i class="fas fa-rss"></i> Threat Feeds
+                    </a>
+                    <a href="/" class="sidebar-item">
+                        <i class="fas fa-fingerprint"></i> IOCs
+                    </a>
+                    <a href="/" class="sidebar-item">
+                        <i class="fas fa-brain"></i> AI Analysis
+                    </a>
+                    {% endif %}
                 </div>
                 
                 <!-- Quick Actions Section -->
                 <div class="border-t border-gray-200 my-4 pt-4">
                     <h6 class="font-semibold text-sm mb-2 text-gray-500 uppercase tracking-wider px-4">Quick Actions</h6>
                     <div class="space-y-1">
-                        <a href="{{ url_for('frontend.ingest_threat_data') if request.endpoint else '/ingest_threat_data' }}" class="sidebar-item">
+                        {% if 'frontend.ingest_threat_data' in request.endpoint|app.view_functions %}
+                        <a href="{{ url_for('frontend.ingest_threat_data') }}" class="sidebar-item">
                             <i class="fas fa-sync"></i> Refresh Threat Data
                         </a>
-                        <a href="{{ url_for('frontend.run_ai_analysis') if request.endpoint else '/run_ai_analysis' }}" class="sidebar-item">
+                        {% endif %}
+                        {% if 'frontend.run_ai_analysis' in request.endpoint|app.view_functions %}
+                        <a href="{{ url_for('frontend.run_ai_analysis') }}" class="sidebar-item">
                             <i class="fas fa-brain"></i> Run AI Analysis
                         </a>
+                        {% endif %}
                     </div>
                 </div>
                 
