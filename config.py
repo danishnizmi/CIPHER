@@ -1,6 +1,6 @@
 """
 Optimized configuration module for Threat Intelligence Platform.
-Handles configuration management for production deployment.
+Handles configuration management for production deployment with centralized service management.
 """
 
 import os
@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Union
 from functools import wraps, lru_cache
+from enum import Enum
 
 # Global client variables with lazy initialization
 _clients = {}
@@ -25,6 +26,87 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+# ===== Service Status Management =====
+class ServiceStatus(Enum):
+    INITIALIZING = "initializing"
+    READY = "ready"
+    DEGRADED = "degraded"
+    ERROR = "error"
+
+class ServiceManager:
+    """Centralized service management and monitoring."""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self._services = {
+            'config': ServiceStatus.INITIALIZING,
+            'bigquery': ServiceStatus.INITIALIZING,
+            'storage': ServiceStatus.INITIALIZING,
+            'pubsub': ServiceStatus.INITIALIZING,
+            'ai_models': ServiceStatus.INITIALIZING,
+            'ingestion': ServiceStatus.INITIALIZING,
+            'analysis': ServiceStatus.INITIALIZING,
+            'frontend': ServiceStatus.INITIALIZING,
+            'api': ServiceStatus.INITIALIZING
+        }
+        self._clients = {}
+        self._errors = {}
+        self._lock = threading.Lock()
+    
+    def update_status(self, service: str, status: ServiceStatus, error: str = None):
+        """Update service status."""
+        with self._lock:
+            self._services[service] = status
+            if error:
+                self._errors[service] = error
+            elif service in self._errors:
+                del self._errors[service]
+            logger.info(f"Service {service} status updated to {status.value}")
+    
+    def get_status(self) -> Dict:
+        """Get overall system status."""
+        with self._lock:
+            return {
+                'services': {k: v.value for k, v in self._services.items()},
+                'errors': dict(self._errors),
+                'overall': self._calculate_overall_status().value,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    def _calculate_overall_status(self) -> ServiceStatus:
+        """Calculate overall system status."""
+        statuses = list(self._services.values())
+        if all(s == ServiceStatus.READY for s in statuses):
+            return ServiceStatus.READY
+        elif any(s == ServiceStatus.ERROR for s in statuses):
+            return ServiceStatus.ERROR
+        elif any(s == ServiceStatus.DEGRADED for s in statuses):
+            return ServiceStatus.DEGRADED
+        else:
+            return ServiceStatus.INITIALIZING
+    
+    def get_client(self, client_type: str):
+        """Get a client instance."""
+        return self._clients.get(client_type)
+    
+    def set_client(self, client_type: str, client):
+        """Set a client instance."""
+        with self._lock:
+            self._clients[client_type] = client
 
 # ===== Constants and Default Configuration =====
 DEFAULT_API_RATE_LIMIT = "1000 per day, 100 per hour"
@@ -256,37 +338,48 @@ class Config:
     @classmethod
     def init_app(cls):
         """Initialize the application configuration."""
-        # Configure logging
-        cls.configure_logging()
-        logger.info(f"Initializing {cls.ENVIRONMENT} configuration")
+        service_manager = cls.get_service_manager()
         
-        # Initialize configuration store
-        ConfigStore.init()
-        
-        # Load API keys
-        api_keys = ConfigStore.get_config('api-keys')
-        if api_keys and isinstance(api_keys, dict):
-            cls.API_KEY = api_keys.get('platform_api_key', os.environ.get('API_KEY', 'default-api-key'))
-            cls.EXTERNAL_API_KEYS = {k: v for k, v in api_keys.items() if k != 'platform_api_key'}
-        else:
-            cls.API_KEY = os.environ.get('API_KEY', 'default-api-key')
-        
-        # Load feed configuration
-        feed_config = ConfigStore.get_config('feed-config')
-        if feed_config and isinstance(feed_config, dict) and 'feeds' in feed_config:
-            cls.FEEDS = feed_config['feeds']
-            logger.info(f"Loaded {len(cls.FEEDS)} feeds from configuration")
-        else:
-            # Initialize with default feeds
-            cls.FEEDS = DEFAULT_FEED_CONFIGS
-            logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
-        
-        # Log configuration status
-        logger.info(f"Configuration initialized - Environment: {cls.ENVIRONMENT}")
-        logger.info(f"API Key: {cls.API_KEY[:4]}...{cls.API_KEY[-4:] if len(cls.API_KEY) > 8 else ''}")
-        
-        # Validate configuration
-        cls.validate_configuration()
+        try:
+            # Configure logging
+            cls.configure_logging()
+            logger.info(f"Initializing {cls.ENVIRONMENT} configuration")
+            
+            # Initialize configuration store
+            ConfigStore.init()
+            
+            # Load API keys
+            api_keys = ConfigStore.get_config('api-keys')
+            if api_keys and isinstance(api_keys, dict):
+                cls.API_KEY = api_keys.get('platform_api_key', os.environ.get('API_KEY', 'default-api-key'))
+                cls.EXTERNAL_API_KEYS = {k: v for k, v in api_keys.items() if k != 'platform_api_key'}
+            else:
+                cls.API_KEY = os.environ.get('API_KEY', 'default-api-key')
+            
+            # Load feed configuration
+            feed_config = ConfigStore.get_config('feed-config')
+            if feed_config and isinstance(feed_config, dict) and 'feeds' in feed_config:
+                cls.FEEDS = feed_config['feeds']
+                logger.info(f"Loaded {len(cls.FEEDS)} feeds from configuration")
+            else:
+                # Initialize with default feeds
+                cls.FEEDS = DEFAULT_FEED_CONFIGS
+                logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
+            
+            # Log configuration status
+            logger.info(f"Configuration initialized - Environment: {cls.ENVIRONMENT}")
+            logger.info(f"API Key: {cls.API_KEY[:4]}...{cls.API_KEY[-4:] if len(cls.API_KEY) > 8 else ''}")
+            
+            # Validate configuration
+            if cls.validate_configuration():
+                service_manager.update_status('config', ServiceStatus.READY)
+            else:
+                service_manager.update_status('config', ServiceStatus.DEGRADED, "Configuration validation warnings")
+                
+        except Exception as e:
+            logger.error(f"Error initializing configuration: {e}")
+            service_manager.update_status('config', ServiceStatus.ERROR, str(e))
+            raise
     
     @classmethod
     def configure_logging(cls):
@@ -344,6 +437,11 @@ class Config:
         return len(errors) == 0
     
     @classmethod
+    def get_service_manager(cls) -> ServiceManager:
+        """Get the service manager instance."""
+        return ServiceManager()
+    
+    @classmethod
     def get_feed_by_id(cls, feed_id):
         """Get feed configuration by ID."""
         for feed in cls.FEEDS:
@@ -388,6 +486,8 @@ def report_error(exception: Exception):
     if not Config.ENABLE_ERROR_REPORTING:
         return
     
+    service_manager = Config.get_service_manager()
+    
     try:
         from google.cloud import error_reporting
         global _error_client
@@ -396,52 +496,73 @@ def report_error(exception: Exception):
         _error_client.report_exception()
     except Exception as e:
         logger.error(f"Failed to report error: {e}")
+        service_manager.update_status('error_reporting', ServiceStatus.ERROR, str(e))
 
 # ===== GCP Client Initialization =====
 def initialize_bigquery():
     """Initialize and return a BigQuery client."""
-    if 'bigquery' in _clients:
-        return _clients['bigquery']
+    service_manager = Config.get_service_manager()
+    
+    # Check if already initialized
+    existing_client = service_manager.get_client('bigquery')
+    if existing_client:
+        return existing_client
     
     try:
         from google.cloud import bigquery
         client = bigquery.Client(project=Config.GCP_PROJECT, location=Config.BIGQUERY_LOCATION)
-        _clients['bigquery'] = client
+        service_manager.set_client('bigquery', client)
+        service_manager.update_status('bigquery', ServiceStatus.READY)
         return client
     except Exception as e:
         logger.error(f"Failed to initialize BigQuery client: {e}")
+        service_manager.update_status('bigquery', ServiceStatus.ERROR, str(e))
         return None
 
 def initialize_storage():
     """Initialize and return a Cloud Storage client."""
-    if 'storage' in _clients:
-        return _clients['storage']
+    service_manager = Config.get_service_manager()
+    
+    # Check if already initialized
+    existing_client = service_manager.get_client('storage')
+    if existing_client:
+        return existing_client
     
     try:
         from google.cloud import storage
         client = storage.Client(project=Config.GCP_PROJECT)
-        _clients['storage'] = client
+        service_manager.set_client('storage', client)
+        service_manager.update_status('storage', ServiceStatus.READY)
         return client
     except Exception as e:
         logger.error(f"Failed to initialize Storage client: {e}")
+        service_manager.update_status('storage', ServiceStatus.ERROR, str(e))
         return None
 
 def initialize_pubsub():
     """Initialize and return PubSub publisher and subscriber clients."""
-    if 'publisher' in _clients and 'subscriber' in _clients:
-        return _clients['publisher'], _clients['subscriber']
+    service_manager = Config.get_service_manager()
+    
+    # Check if already initialized
+    existing_publisher = service_manager.get_client('publisher')
+    existing_subscriber = service_manager.get_client('subscriber')
+    
+    if existing_publisher and existing_subscriber:
+        return existing_publisher, existing_subscriber
     
     try:
         from google.cloud import pubsub_v1
         publisher = pubsub_v1.PublisherClient()
         subscriber = pubsub_v1.SubscriberClient()
         
-        _clients['publisher'] = publisher
-        _clients['subscriber'] = subscriber
+        service_manager.set_client('publisher', publisher)
+        service_manager.set_client('subscriber', subscriber)
+        service_manager.update_status('pubsub', ServiceStatus.READY)
         
         return publisher, subscriber
     except Exception as e:
         logger.error(f"Failed to initialize PubSub clients: {e}")
+        service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
         return None, None
 
 def get_cached_config(name: str, force_refresh: bool = False):
@@ -470,4 +591,10 @@ if __name__ == "__main__":
     logger.info(f"GCP Project: {Config.GCP_PROJECT}")
     logger.info(f"API Key: {Config.API_KEY[:4]}...{Config.API_KEY[-4:] if len(Config.API_KEY) > 8 else ''}")
     logger.info(f"Feeds configured: {len(Config.FEEDS)}")
+    
+    # Test service manager
+    service_manager = Config.get_service_manager()
+    status = service_manager.get_status()
+    logger.info(f"Service Status: {json.dumps(status, indent=2)}")
+    
     logger.info("Configuration test complete")
