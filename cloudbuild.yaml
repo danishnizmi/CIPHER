@@ -1,331 +1,137 @@
-steps:
-# Step 1: Enable necessary APIs and ensure permissions
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'enable-apis'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    echo "Enabling required APIs..."
-    gcloud services enable \
-      cloudbuild.googleapis.com \
-      run.googleapis.com \
-      storage.googleapis.com \
-      bigquery.googleapis.com \
-      secretmanager.googleapis.com \
-      cloudscheduler.googleapis.com \
-      pubsub.googleapis.com \
-      logging.googleapis.com \
-      clouderrorreporting.googleapis.com \
-      aiplatform.googleapis.com
-    
-    echo "Setting up service account permissions..."
-    PROJECT_ID=$PROJECT_ID
-    SERVICE_ACCOUNT="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
-    
-    # Grant necessary roles
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/logging.logWriter" \
-      --condition=None
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/bigquery.admin" \
-      --condition=None
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/storage.admin" \
-      --condition=None
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/pubsub.editor" \
-      --condition=None
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/secretmanager.secretAccessor" \
-      --condition=None
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member="serviceAccount:$SERVICE_ACCOUNT" \
-      --role="roles/aiplatform.user" \
-      --condition=None
-    
-    echo "APIs enabled and permissions configured."
-
-# Step 2: Setup Python environment and dependencies
-- name: 'python:3.10'
-  id: 'test-dependencies'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    echo "Testing Python dependencies..."
-    pip install -q -r requirements.txt
-    python -c "import flask, google.cloud.bigquery, google.cloud.storage; print('Dependencies OK')"
-
-# Step 3: Build the container image
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'build-container'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA', '.']
-  timeout: '1200s'
-
-# Step 4: Push the container image
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'push-container'
-  args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA']
-
-# Step 5: Setup GCP resources (secrets, dataset, bucket, topics)
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'setup-gcp-resources'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    set -e
-    echo "Setting up GCP resources..."
-    
-    # Create secrets if they don't exist
-    echo "Creating/updating secrets..."
-    
-    # API Keys secret
-    if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
-      echo "Creating api-keys secret..."
-      gcloud secrets create api-keys \
-        --replication-policy="automatic" \
-        --project=$PROJECT_ID
-      
-      # Create default API key JSON
-      echo '{"platform_api_key": "$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)"}' | \
-        gcloud secrets versions add api-keys --data-file=- --project=$PROJECT_ID
-    fi
-    
-    # Feed config secret
-    if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
-      echo "Creating feed-config secret..."
-      gcloud secrets create feed-config \
-        --replication-policy="automatic" \
-        --project=$PROJECT_ID
-    fi
-    
-    # Create BigQuery dataset
-    echo "Setting up BigQuery dataset..."
-    if ! bq --location=US ls -d threat_intelligence >/dev/null 2>&1; then
-      echo "Creating BigQuery dataset..."
-      bq --location=US mk -d \
-        --description="Threat Intelligence Data" \
-        $PROJECT_ID:threat_intelligence
-    fi
-    
-    # Create Cloud Storage bucket
-    echo "Setting up Cloud Storage bucket..."
-    BUCKET_NAME="$PROJECT_ID-threat-data"
-    if ! gsutil ls -b gs://$BUCKET_NAME >/dev/null 2>&1; then
-      echo "Creating storage bucket..."
-      gsutil mb -l us-central1 -c standard gs://$BUCKET_NAME
-      
-      # Set lifecycle rules
-      cat > lifecycle.json << EOF
-    {
-      "lifecycle": {
-        "rule": [
-          {
-            "action": {"type": "Delete"},
-            "condition": {"age": 30}
-          }
-        ]
-      }
-    }
-    EOF
-      gsutil lifecycle set lifecycle.json gs://$BUCKET_NAME
-      rm lifecycle.json
-    fi
-    
-    # Create Pub/Sub topics
-    echo "Setting up Pub/Sub topics..."
-    
-    if ! gcloud pubsub topics describe threat-data-ingestion --project=$PROJECT_ID >/dev/null 2>&1; then
-      echo "Creating threat-data-ingestion topic..."
-      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID
-    fi
-    
-    if ! gcloud pubsub topics describe threat-analysis-events --project=$PROJECT_ID >/dev/null 2>&1; then
-      echo "Creating threat-analysis-events topic..."
-      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID
-    fi
-    
-    echo "GCP resources setup complete."
-
-# Step 6: Deploy to Cloud Run
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'deploy-cloudrun'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    set -e
-    echo "Deploying to Cloud Run..."
-    
-    # Get the API key from Secret Manager
-    API_KEY_EXISTS=true
-    if ! gcloud secrets versions list api-keys --project=$PROJECT_ID --limit=1 >/dev/null 2>&1; then
-      echo "Warning: api-keys secret has no versions"
-      API_KEY_EXISTS=false
-    fi
-    
-    # Deploy Cloud Run service
-    if [ "$API_KEY_EXISTS" = true ]; then
-      gcloud run deploy threat-intelligence-platform \
-        --image=gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
-        --region=us-central1 \
-        --platform=managed \
-        --allow-unauthenticated \
-        --execution-environment=gen2 \
-        --memory=2Gi \
-        --cpu=2 \
-        --min-instances=1 \
-        --max-instances=10 \
-        --timeout=900s \
-        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=true,API_KEY=default-api-key" \
-        --set-secrets="API_KEY=api-keys:latest" \
-        --command="/app/init-app.sh" \
-        --args="gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
-        --project=$PROJECT_ID
-    else
-      echo "Deploying without secrets (will use default API key)..."
-      gcloud run deploy threat-intelligence-platform \
-        --image=gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
-        --region=us-central1 \
-        --platform=managed \
-        --allow-unauthenticated \
-        --execution-environment=gen2 \
-        --memory=2Gi \
-        --cpu=2 \
-        --min-instances=1 \
-        --max-instances=10 \
-        --timeout=900s \
-        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=true,API_KEY=default-api-key" \
-        --command="/app/init-app.sh" \
-        --args="gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
-        --project=$PROJECT_ID
-    fi
-    
-    echo "Cloud Run deployment complete."
-
-# Step 7: Setup Cloud Scheduler
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'setup-scheduler'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    echo "Setting up Cloud Scheduler jobs..."
-    
-    # Enable Cloud Scheduler API if not enabled
-    gcloud services enable cloudscheduler.googleapis.com --project=$PROJECT_ID
-    
-    # Get the Cloud Run service URL
-    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
-      --region=us-central1 \
-      --platform=managed \
-      --format='value(status.url)' \
-      --project=$PROJECT_ID)
-    
-    echo "Service URL: $SERVICE_URL"
-    
-    # Extract API key safely
-    API_KEY="default-api-key"
-    if gcloud secrets versions access latest --secret=api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
-      # Try to extract the API key using jq if available, otherwise use grep
-      API_KEY_JSON=$(gcloud secrets versions access latest --secret=api-keys --project=$PROJECT_ID)
-      if command -v jq >/dev/null 2>&1; then
-        API_KEY=$(echo "$API_KEY_JSON" | jq -r '.platform_api_key // "default-api-key"')
-      else
-        # Fallback to grep/sed
-        API_KEY=$(echo "$API_KEY_JSON" | grep -o '"platform_api_key":"[^"]*"' | sed 's/"platform_api_key":"\([^"]*\)"/\1/')
-        if [ -z "$API_KEY" ]; then
-          API_KEY="default-api-key"
-        fi
-      fi
-    fi
-    
-    echo "Using API key: ${API_KEY:0:8}..."
-    
-    # Delete existing jobs if they exist
-    gcloud scheduler jobs delete threat-data-ingestion \
-      --location=us-central1 \
-      --quiet \
-      --project=$PROJECT_ID 2>/dev/null || true
-    
-    gcloud scheduler jobs delete threat-analysis \
-      --location=us-central1 \
-      --quiet \
-      --project=$PROJECT_ID 2>/dev/null || true
-    
-    # Create ingestion job (every 6 hours)
-    echo "Creating threat-data-ingestion job..."
-    gcloud scheduler jobs create http threat-data-ingestion \
-      --location=us-central1 \
-      --schedule="0 */6 * * *" \
-      --uri="${SERVICE_URL}/api/admin/ingest" \
-      --http-method=POST \
-      --headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
-      --message-body='{"process_all": true}' \
-      --time-zone="UTC" \
-      --project=$PROJECT_ID
-    
-    # Create analysis job (daily at 2 AM UTC)
-    echo "Creating threat-analysis job..."
-    gcloud scheduler jobs create http threat-analysis \
-      --location=us-central1 \
-      --schedule="0 2 * * *" \
-      --uri="${SERVICE_URL}/api/admin/analyze" \
-      --http-method=POST \
-      --headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
-      --message-body='{"analyze_all": true}' \
-      --time-zone="UTC" \
-      --project=$PROJECT_ID
-    
-    echo "Cloud Scheduler setup complete."
-
-# Step 8: Verify deployment
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'verify-deployment'
-  entrypoint: 'bash'
-  args:
-  - '-c'
-  - |
-    echo "Verifying deployment..."
-    
-    # Get service URL
-    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
-      --region=us-central1 \
-      --platform=managed \
-      --format='value(status.url)' \
-      --project=$PROJECT_ID)
-    
-    echo "Service deployed at: $SERVICE_URL"
-    
-    # Wait for service to be ready
-    echo "Waiting for service to be ready..."
-    sleep 30
-    
-    # Test the health endpoint
-    echo "Testing health endpoint..."
-    curl -f "${SERVICE_URL}/health" || echo "Health check failed (service may still be starting)"
-    
-    echo "Deployment verification complete."
-
-images:
-- 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
-
-timeout: '2400s'
-options:
-  logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'
-  substitution_option: 'ALLOW_LOOSE'
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: threat-intelligence-platform
+  namespace: '561511062593'
+  selfLink: /apis/serving.knative.dev/v1/namespaces/561511062593/services/threat-intelligence-platform
+  uid: d1fad59d-ce82-4c58-bffd-2235896eb2d6
+  resourceVersion: AAY0tAG9lMc
+  generation: 4
+  creationTimestamp: '2025-05-09T11:59:58.646008Z'
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    serving.knative.dev/creator: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+    serving.knative.dev/lastModifier: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+    run.googleapis.com/client-name: gcloud
+    run.googleapis.com/client-version: 521.0.0
+    run.googleapis.com/operation-id: 65b7808d-278b-40f9-a09f-725a2aa5f1a6
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/urls: '["https://threat-intelligence-platform-561511062593.us-central1.run.app","https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app"]'
+spec:
+  template:
+    metadata:
+      labels:
+        client.knative.dev/nonce: yjmjzsyhdo
+        run.googleapis.com/startupProbeType: Default
+      annotations:
+        autoscaling.knative.dev/maxScale: '10'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/client-name: gcloud
+        run.googleapis.com/client-version: 521.0.0
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: 'true'
+    spec:
+      containerConcurrency: 160
+      timeoutSeconds: 300
+      serviceAccountName: 561511062593-compute@developer.gserviceaccount.com
+      containers:
+      - image: gcr.io/primal-chariot-382610/threat-intelligence-platform:latest
+        command:
+        - /app/init-app.sh
+        args:
+        - gunicorn
+        - --bind
+        - 0.0.0.0:8080
+        - --workers
+        - '2'
+        - --threads
+        - '4'
+        - --timeout
+        - '120'
+        - --worker-class
+        - gthread
+        - --preload
+        - --log-level
+        - info
+        - app:app
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: ENVIRONMENT
+          value: production
+        - name: GCP_PROJECT
+          value: primal-chariot-382610
+        - name: GCP_REGION
+          value: us-central1
+        - name: BIGQUERY_DATASET
+          value: threat_intelligence
+        - name: GCS_BUCKET
+          value: primal-chariot-382610-threat-data
+        - name: PUBSUB_TOPIC
+          value: threat-data-ingestion
+        - name: PUBSUB_ANALYSIS_TOPIC
+          value: threat-analysis-events
+        - name: VERSION
+          value: 1.0.3
+        - name: DEBUG
+          value: 'false'
+        - name: PYTHONPATH
+          value: /app
+        - name: PYTHONDONTWRITEBYTECODE
+          value: '1'
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        - name: LOG_LEVEL
+          value: INFO
+        - name: LOG_TO_CLOUD
+          value: 'true'
+        - name: ENABLE_ERROR_REPORTING
+          value: 'true'
+        - name: AUTO_ANALYZE
+          value: 'false'
+        - name: NLP_ENABLED
+          value: 'true'
+        - name: ANALYSIS_ENABLED
+          value: 'true'
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: api-keys
+        resources:
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        startupProbe:
+          timeoutSeconds: 240
+          periodSeconds: 240
+          failureThreshold: 1
+          tcpSocket:
+            port: 8080
+  traffic:
+  - percent: 100
+    latestRevision: true
+status:
+  observedGeneration: 4
+  conditions:
+  - type: Ready
+    status: 'True'
+    lastTransitionTime: '2025-05-09T13:33:08.223175Z'
+  - type: ConfigurationsReady
+    status: 'True'
+    lastTransitionTime: '2025-05-09T13:33:05.862610Z'
+  - type: RoutesReady
+    status: 'True'
+    lastTransitionTime: '2025-05-09T13:33:08.190530Z'
+  latestReadyRevisionName: threat-intelligence-platform-00004-m5l
+  latestCreatedRevisionName: threat-intelligence-platform-00004-m5l
+  traffic:
+  - revisionName: threat-intelligence-platform-00004-m5l
+    percent: 100
+    latestRevision: true
+  url: https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app
+  address:
+    url: https://threat-intelligence-platform-4aihb26uiq-uc.a.run.app
