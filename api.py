@@ -28,35 +28,11 @@ bq_client = initialize_bigquery()
 storage_client = initialize_storage()
 publisher, subscriber = initialize_pubsub()
 
-# Initialize rate limiter
+# Initialize rate limiter for cost efficiency
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["1000 per day", "100 per hour"]
 )
-
-# -------------------- Authentication & Authorization --------------------
-
-def require_api_key(f):
-    """Decorator to require API key for routes with improved session handling for Cloud Run."""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Get API key from request
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        # Check if user is logged in (for internal requests from frontend)
-        # This works better for Cloud Run than IP-based checking
-        from flask import session
-        if session.get('logged_in'):
-            return f(*args, **kwargs)
-        
-        # Check if API key is valid
-        if not api_key or api_key != Config.API_KEY:
-            logger.warning(f"Invalid API key attempt from IP: {get_remote_address()}")
-            return jsonify({"error": "Invalid or missing API key"}), 401
-        
-        return f(*args, **kwargs)
-    
-    return decorated_function
 
 # -------------------- Helper Functions --------------------
 
@@ -239,7 +215,7 @@ def api_health_check():
 # -------------------- Stats Endpoint --------------------
 
 @api_blueprint.route('/stats', methods=['GET'])
-@require_api_key
+@limiter.limit("30 per minute")
 def get_stats():
     """Get platform statistics."""
     try:
@@ -258,7 +234,6 @@ def get_stats():
         stats = {
             'feeds': {'total_sources': 0, 'growth_rate': 0},
             'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
-            'campaigns': {'total_campaigns': 0, 'growth_rate': 0},
             'analyses': {'total_analyses': 0, 'growth_rate': 0},
             'timestamp': datetime.utcnow().isoformat(),
             'visualization_data': {
@@ -296,6 +271,18 @@ def get_stats():
                 for row in ioc_results
             ]
         
+        # Query for AI analyses count
+        analyses_query = """
+        SELECT COUNT(*) as total_analyses
+        FROM `{table_id}`
+        WHERE last_analyzed IS NOT NULL
+        AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        analyses_results = execute_bq_query(analyses_query)
+        if analyses_results:
+            stats['analyses']['total_analyses'] = analyses_results[0].get('total_analyses', 0)
+        
         # Query for daily activity
         daily_query = """
         SELECT 
@@ -314,6 +301,35 @@ def get_stats():
                 for row in daily_results
             ]
         
+        # Calculate growth rates
+        if days > 7:
+            growth_query = """
+            WITH recent AS (
+                SELECT COUNT(*) as recent_count
+                FROM `{table_id}`
+                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            ),
+            previous AS (
+                SELECT COUNT(*) as previous_count
+                FROM `{table_id}`
+                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
+                AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+            )
+            SELECT 
+                recent.recent_count,
+                previous.previous_count,
+                CASE 
+                    WHEN previous.previous_count > 0 THEN 
+                        ROUND((recent.recent_count - previous.previous_count) * 100.0 / previous.previous_count, 1)
+                    ELSE 0
+                END as growth_rate
+            FROM recent, previous
+            """.format(table_id=Config.get_table_name('indicators'))
+            
+            growth_results = execute_bq_query(growth_query)
+            if growth_results:
+                stats['iocs']['growth_rate'] = growth_results[0].get('growth_rate', 0)
+        
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
@@ -323,7 +339,7 @@ def get_stats():
 # -------------------- Feeds Endpoint --------------------
 
 @api_blueprint.route('/feeds', methods=['GET'])
-@require_api_key
+@limiter.limit("30 per minute")
 def get_feeds():
     """Get feed information."""
     try:
@@ -336,7 +352,9 @@ def get_feeds():
                 'description': feed.get('description'),
                 'record_count': 0,
                 'last_updated': None,
-                'enabled': feed.get('enabled', True)
+                'enabled': feed.get('enabled', True),
+                'format': feed.get('format', 'json'),
+                'update_frequency': feed.get('update_frequency', 'daily')
             }
             
             # Query for feed record count
@@ -367,42 +385,54 @@ def get_feeds():
         report_error(e)
         return jsonify({"error": str(e)}), 500
 
-# -------------------- IOCs Endpoint --------------------
+# -------------------- IOCs Endpoints --------------------
 
 @api_blueprint.route('/iocs', methods=['GET'])
-@require_api_key
+@limiter.limit("30 per minute")
 def get_iocs():
     """Get IOC data."""
     try:
         days = int(request.args.get('days', 30))
         limit = int(request.args.get('limit', 100))
         offset = int(request.args.get('offset', 0))
+        ioc_type = request.args.get('type', '')
+        
+        # Build where clause
+        where_conditions = ["created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {} DAY)".format(days)]
+        params = []
+        
+        if ioc_type:
+            where_conditions.append("type = @ioc_type")
+            params.append(bigquery.ScalarQueryParameter("ioc_type", "STRING", ioc_type))
         
         # Query for IOCs
         ioc_query = """
         SELECT *
         FROM `{table_id}`
-        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        WHERE {where_clause}
         ORDER BY created_at DESC
         LIMIT {limit}
         OFFSET {offset}
         """.format(
             table_id=Config.get_table_name('indicators'),
-            days=days,
+            where_clause=" AND ".join(where_conditions),
             limit=limit,
             offset=offset
         )
         
-        iocs = execute_bq_query(ioc_query)
+        iocs = execute_bq_query(ioc_query, params)
         
         # Query for total count
         count_query = """
         SELECT COUNT(*) as total
         FROM `{table_id}`
-        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        WHERE {where_clause}
+        """.format(
+            table_id=Config.get_table_name('indicators'),
+            where_clause=" AND ".join(where_conditions)
+        )
         
-        count_results = execute_bq_query(count_query)
+        count_results = execute_bq_query(count_query, params)
         total_count = count_results[0].get('total', 0) if count_results else 0
         
         return jsonify({
@@ -415,80 +445,389 @@ def get_iocs():
         report_error(e)
         return jsonify({"error": str(e)}), 500
 
-# -------------------- Campaigns Endpoint --------------------
-
-@api_blueprint.route('/campaigns', methods=['GET'])
-@require_api_key
-def get_campaigns():
-    """Get campaign data."""
+@api_blueprint.route('/iocs/<ioc_id>', methods=['GET'])
+def get_ioc_detail(ioc_id):
+    """Get detailed information about a specific IOC."""
     try:
-        days = int(request.args.get('days', 30))
-        limit = int(request.args.get('limit', 100))
-        
-        # Query for campaigns
-        campaign_query = """
-        SELECT 
-            campaign_id,
-            campaign_name,
-            threat_actor,
-            COUNT(*) as source_count,
-            MAX(confidence) as max_confidence,
-            MIN(created_at) as first_seen,
-            MAX(created_at) as last_seen
+        query = """
+        SELECT *
         FROM `{table_id}`
-        WHERE campaign_id IS NOT NULL
-        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        GROUP BY campaign_id, campaign_name, threat_actor
-        ORDER BY source_count DESC
-        LIMIT {limit}
-        """.format(table_id=Config.get_table_name('indicators'), days=days, limit=limit)
+        WHERE id = @ioc_id
+        LIMIT 1
+        """.format(table_id=Config.get_table_name('indicators'))
         
-        campaign_results = execute_bq_query(campaign_query)
+        params = [bigquery.ScalarQueryParameter("ioc_id", "STRING", ioc_id)]
+        results = execute_bq_query(query, params)
         
-        # Add severity based on confidence and source count
-        campaigns = []
-        for campaign in campaign_results:
-            campaign_data = dict(campaign)
-            confidence = campaign_data.get('max_confidence', 0)
-            source_count = campaign_data.get('source_count', 0)
-            
-            # Determine severity
-            if confidence >= 90 or source_count >= 10:
-                campaign_data['severity'] = 'critical'
-            elif confidence >= 70 or source_count >= 5:
-                campaign_data['severity'] = 'high'
-            elif confidence >= 50 or source_count >= 3:
-                campaign_data['severity'] = 'medium'
-            else:
-                campaign_data['severity'] = 'low'
-            
-            campaigns.append(campaign_data)
+        if not results:
+            return jsonify({"error": "IOC not found"}), 404
         
-        # Query for total campaigns count
-        count_query = """
-        SELECT COUNT(DISTINCT campaign_id) as total
-        FROM `{table_id}`
-        WHERE campaign_id IS NOT NULL
-        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        ioc = results[0]
         
-        count_results = execute_bq_query(count_query)
-        total_campaigns = count_results[0].get('total', 0) if count_results else 0
+        # Get AI analysis if available
+        if ioc.get('last_analyzed'):
+            ioc['ai_analysis'] = {
+                'timestamp': ioc.get('last_analyzed'),
+                'risk_score': ioc.get('risk_score'),
+                'summary': ioc.get('analysis_summary'),
+                'confidence': ioc.get('confidence')
+            }
         
-        return jsonify({
-            'campaigns': campaigns,
-            'count': len(campaigns),
-            'total_campaigns': total_campaigns
-        })
+        return jsonify(ioc)
     except Exception as e:
-        logger.error(f"Error getting campaigns: {str(e)}")
+        logger.error(f"Error getting IOC detail: {str(e)}")
         report_error(e)
         return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/iocs/<ioc_id>/related', methods=['GET'])
+def get_related_iocs(ioc_id):
+    """Get IOCs related to a specific IOC."""
+    try:
+        # First get the IOC details
+        ioc_query = """
+        SELECT *
+        FROM `{table_id}`
+        WHERE id = @ioc_id
+        LIMIT 1
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        params = [bigquery.ScalarQueryParameter("ioc_id", "STRING", ioc_id)]
+        ioc_results = execute_bq_query(ioc_query, params)
+        
+        if not ioc_results:
+            return jsonify({"error": "IOC not found"}), 404
+        
+        ioc = ioc_results[0]
+        
+        # Find related IOCs based on shared attributes
+        related_query = """
+        WITH original AS (
+            SELECT * FROM `{table_id}` WHERE id = @ioc_id
+        )
+        SELECT DISTINCT i.*
+        FROM `{table_id}` i
+        JOIN original o ON (
+            (i.source = o.source AND i.id != o.id) OR
+            (i.campaign_id = o.campaign_id AND o.campaign_id IS NOT NULL) OR
+            (i.threat_actor = o.threat_actor AND o.threat_actor IS NOT NULL) OR
+            (ARRAY_LENGTH(
+                ARRAY(SELECT x FROM UNNEST(i.tags) x 
+                      WHERE x IN (SELECT y FROM UNNEST(o.tags) y))
+            ) > 0)
+        )
+        WHERE i.id != @ioc_id
+        ORDER BY i.confidence DESC
+        LIMIT 10
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        related_results = execute_bq_query(related_query, params)
+        
+        return jsonify({
+            'ioc': ioc,
+            'items': related_results,
+            'count': len(related_results)
+        })
+    except Exception as e:
+        logger.error(f"Error getting related IOCs: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/iocs/export', methods=['GET'])
+@limiter.limit("10 per minute")
+def export_iocs():
+    """Export IOCs in bulk."""
+    try:
+        days = int(request.args.get('days', 30))
+        ioc_type = request.args.get('type', '')
+        limit = int(request.args.get('limit', 10000))
+        
+        # Build query
+        where_conditions = ["created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {} DAY)".format(days)]
+        params = []
+        
+        if ioc_type:
+            where_conditions.append("type = @ioc_type")
+            params.append(bigquery.ScalarQueryParameter("ioc_type", "STRING", ioc_type))
+        
+        query = """
+        SELECT *
+        FROM `{table_id}`
+        WHERE {where_clause}
+        ORDER BY created_at DESC
+        LIMIT {limit}
+        """.format(
+            table_id=Config.get_table_name('indicators'),
+            where_clause=" AND ".join(where_conditions),
+            limit=limit
+        )
+        
+        results = execute_bq_query(query, params)
+        
+        return jsonify({
+            'records': results,
+            'count': len(results)
+        })
+    except Exception as e:
+        logger.error(f"Error exporting IOCs: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+# -------------------- AI Analysis Endpoints --------------------
+
+@api_blueprint.route('/ai/analyses', methods=['GET'])
+@limiter.limit("20 per minute")
+def get_ai_analyses():
+    """Get AI analysis results."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        # Query for recent analyses
+        query = """
+        SELECT 
+            id,
+            type,
+            value,
+            last_analyzed as timestamp,
+            risk_score,
+            confidence,
+            analysis_summary as result,
+            CASE 
+                WHEN risk_score >= 80 THEN 'critical'
+                WHEN risk_score >= 60 THEN 'high'
+                WHEN risk_score >= 40 THEN 'medium'
+                ELSE 'low'
+            END as result_severity
+        FROM `{table_id}`
+        WHERE last_analyzed IS NOT NULL
+        AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        ORDER BY last_analyzed DESC
+        LIMIT 100
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        results = execute_bq_query(query)
+        
+        # Calculate summary statistics
+        summary = {
+            'overall_threat_level': 'Medium',
+            'total_indicators': len(results),
+            'critical_indicators': sum(1 for r in results if r.get('result_severity') == 'critical'),
+            'emerging_threats_count': 0,  # Would need more complex analysis
+            'threat_patterns': [],  # Would need pattern analysis
+            'recommendations': [
+                {
+                    'text': 'Review critical severity indicators immediately',
+                    'priority': 'High'
+                },
+                {
+                    'text': 'Update security controls based on latest threat patterns',
+                    'priority': 'Medium'
+                }
+            ],
+            'recent_analyses': results[:20]
+        }
+        
+        # Determine overall threat level
+        critical_ratio = summary['critical_indicators'] / max(1, summary['total_indicators'])
+        if critical_ratio > 0.3:
+            summary['overall_threat_level'] = 'Critical'
+        elif critical_ratio > 0.1:
+            summary['overall_threat_level'] = 'High'
+        elif critical_ratio > 0.05:
+            summary['overall_threat_level'] = 'Medium'
+        else:
+            summary['overall_threat_level'] = 'Low'
+        
+        # Get last run time
+        last_run_query = """
+        SELECT MAX(last_analyzed) as last_run
+        FROM `{table_id}`
+        WHERE last_analyzed IS NOT NULL
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        last_run_results = execute_bq_query(last_run_query)
+        if last_run_results:
+            summary['last_run_time'] = last_run_results[0].get('last_run')
+        
+        return jsonify(summary)
+    except Exception as e:
+        logger.error(f"Error getting AI analyses: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/ai/analyses/<analysis_id>', methods=['GET'])
+def get_ai_analysis_detail(analysis_id):
+    """Get detailed AI analysis result."""
+    try:
+        # For this implementation, analysis_id is the IOC id
+        query = """
+        SELECT *
+        FROM `{table_id}`
+        WHERE id = @analysis_id
+        AND last_analyzed IS NOT NULL
+        LIMIT 1
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        params = [bigquery.ScalarQueryParameter("analysis_id", "STRING", analysis_id)]
+        results = execute_bq_query(query, params)
+        
+        if not results:
+            return jsonify({"error": "Analysis not found"}), 404
+        
+        analysis = results[0]
+        
+        # Format as analysis result
+        formatted_analysis = {
+            'id': analysis['id'],
+            'type': 'IOC Analysis',
+            'target': f"{analysis['type']}:{analysis['value']}",
+            'timestamp': analysis['last_analyzed'],
+            'model': 'Vertex AI',
+            'result': analysis.get('analysis_summary', 'No summary available'),
+            'result_severity': 'critical' if analysis.get('risk_score', 0) > 80 else 'high' if analysis.get('risk_score', 0) > 60 else 'medium' if analysis.get('risk_score', 0) > 40 else 'low',
+            'confidence': analysis.get('confidence', 0),
+            'findings': {
+                'risk_score': analysis.get('risk_score', 0),
+                'indicators': [],  # Would be populated from enrichment data
+                'mitre_mapping': []  # Would need to parse from tags
+            }
+        }
+        
+        return jsonify(formatted_analysis)
+    except Exception as e:
+        logger.error(f"Error getting AI analysis detail: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/ai/summary', methods=['GET'])
+def get_ai_summary():
+    """Get AI analysis summary for dashboard."""
+    try:
+        # Get recent high-risk indicators
+        summary_query = """
+        SELECT 
+            CASE 
+                WHEN AVG(risk_score) >= 80 THEN 'Critical'
+                WHEN AVG(risk_score) >= 60 THEN 'High'
+                WHEN AVG(risk_score) >= 40 THEN 'Medium'
+                ELSE 'Low'
+            END as risk_level,
+            COUNT(CASE WHEN risk_score >= 80 THEN 1 END) as critical_indicators,
+            STRING_AGG(DISTINCT type ORDER BY type LIMIT 3) as trending_threats
+        FROM `{table_id}`
+        WHERE last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        AND risk_score IS NOT NULL
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        results = execute_bq_query(summary_query)
+        
+        if results:
+            return jsonify(results[0])
+        else:
+            return jsonify({
+                'risk_level': 'Unknown',
+                'critical_indicators': 0,
+                'trending_threats': 'None detected'
+            })
+    except Exception as e:
+        logger.error(f"Error getting AI summary: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/ai/generate_report', methods=['POST'])
+@limiter.limit("5 per minute")
+def generate_ai_report():
+    """Generate AI analysis report."""
+    try:
+        req_data = request.get_json() or {}
+        report_type = req_data.get('report_type', 'summary')
+        period = req_data.get('period', 'monthly')
+        
+        # Determine time range
+        if period == 'daily':
+            days = 1
+        elif period == 'weekly':
+            days = 7
+        elif period == 'monthly':
+            days = 30
+        else:
+            days = int(req_data.get('days', 30))
+        
+        # Generate report data
+        report = {
+            'title': f"Threat Intelligence Report - {report_type.title()}",
+            'generated_at': datetime.utcnow().isoformat(),
+            'period': period,
+            'sections': []
+        }
+        
+        # Executive Summary
+        exec_summary_query = """
+        SELECT 
+            COUNT(*) as total_indicators,
+            COUNT(DISTINCT source) as total_sources,
+            AVG(risk_score) as avg_risk_score,
+            COUNT(CASE WHEN risk_score >= 80 THEN 1 END) as critical_count,
+            COUNT(CASE WHEN risk_score >= 60 THEN 1 END) as high_count
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        summary_results = execute_bq_query(exec_summary_query)
+        if summary_results:
+            report['sections'].append({
+                'title': 'Executive Summary',
+                'content': summary_results[0]
+            })
+        
+        # Top Threats
+        threats_query = """
+        SELECT 
+            type,
+            COUNT(*) as count,
+            AVG(risk_score) as avg_risk_score,
+            MAX(risk_score) as max_risk_score
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY type
+        ORDER BY count DESC
+        LIMIT 10
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        threats_results = execute_bq_query(threats_query)
+        if threats_results:
+            report['sections'].append({
+                'title': 'Top Threat Types',
+                'content': threats_results
+            })
+        
+        # AI Analysis Summary
+        ai_query = """
+        SELECT 
+            COUNT(*) as analyzed_count,
+            AVG(confidence) as avg_confidence,
+            STRING_AGG(DISTINCT analysis_summary ORDER BY analysis_summary LIMIT 5) as key_findings
+        FROM `{table_id}`
+        WHERE last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND analysis_summary IS NOT NULL
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        ai_results = execute_bq_query(ai_query)
+        if ai_results:
+            report['sections'].append({
+                'title': 'AI Analysis Summary',
+                'content': ai_results[0]
+            })
+        
+        return jsonify({'report': report})
+    except Exception as e:
+        logger.error(f"Error generating AI report: {str(e)}")
+        report_error(e)
+        return jsonify({'error': str(e)}), 500
 
 # -------------------- Threat Summary Endpoint --------------------
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
-@require_api_key
+@limiter.limit("30 per minute")
 def get_threat_summary():
     """Get threat summary data."""
     try:
@@ -505,17 +844,6 @@ def get_threat_summary():
         risk_results = execute_bq_query(risk_query)
         high_risk_indicators = risk_results[0].get('count', 0) if risk_results else 0
         
-        # Query for active campaigns
-        campaign_query = """
-        SELECT COUNT(DISTINCT campaign_id) as count
-        FROM `{table_id}`
-        WHERE campaign_id IS NOT NULL
-        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        """.format(table_id=Config.get_table_name('indicators'), days=days)
-        
-        campaign_results = execute_bq_query(campaign_query)
-        active_campaigns = campaign_results[0].get('count', 0) if campaign_results else 0
-        
         # Query for recent detections
         recent_query = """
         SELECT COUNT(*) as count
@@ -526,10 +854,31 @@ def get_threat_summary():
         recent_results = execute_bq_query(recent_query)
         recent_detections = recent_results[0].get('count', 0) if recent_results else 0
         
+        # Calculate overall threat score
+        score_query = """
+        SELECT 
+            AVG(risk_score) as avg_risk,
+            MAX(risk_score) as max_risk,
+            COUNT(CASE WHEN risk_score >= 80 THEN 1 END) as critical_count
+        FROM `{table_id}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND risk_score IS NOT NULL
+        """.format(table_id=Config.get_table_name('indicators'), days=days)
+        
+        score_results = execute_bq_query(score_query)
+        overall_score = 50  # Default score
+        
+        if score_results and score_results[0].get('avg_risk'):
+            avg_risk = score_results[0]['avg_risk']
+            critical_count = score_results[0]['critical_count']
+            
+            # Calculate weighted score
+            overall_score = min(100, int(avg_risk + (critical_count * 2)))
+        
         summary = {
             'high_risk_indicators': high_risk_indicators,
-            'active_campaigns': active_campaigns,
             'recent_detections': recent_detections,
+            'overall_score': overall_score,
             'timestamp': datetime.utcnow().isoformat()
         }
         
@@ -542,7 +891,7 @@ def get_threat_summary():
 # -------------------- Geo Stats Endpoint --------------------
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
-@require_api_key
+@limiter.limit("30 per minute")
 def get_geo_stats():
     """Get geographical IOC distribution."""
     try:
@@ -551,22 +900,37 @@ def get_geo_stats():
         # Query for geographical distribution
         geo_query = """
         SELECT 
-            enrichment_country as country,
+            enrichment_geo as country,
             COUNT(*) as count
         FROM `{table_id}`
-        WHERE enrichment_country IS NOT NULL
+        WHERE enrichment_geo IS NOT NULL
         AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        GROUP BY enrichment_country
+        GROUP BY enrichment_geo
         ORDER BY count DESC
         LIMIT 10
         """.format(table_id=Config.get_table_name('indicators'), days=days)
         
         geo_results = execute_bq_query(geo_query)
         
-        countries = [
-            {'country': row['country'], 'count': row['count']}
-            for row in geo_results
-        ]
+        countries = []
+        for row in geo_results:
+            # Parse geo data if it's JSON
+            try:
+                if isinstance(row['country'], str) and row['country'].startswith('{'):
+                    geo_data = json.loads(row['country'])
+                    country = geo_data.get('country', 'Unknown')
+                else:
+                    country = row['country']
+                
+                countries.append({
+                    'country': country,
+                    'count': row['count']
+                })
+            except:
+                countries.append({
+                    'country': row['country'],
+                    'count': row['count']
+                })
         
         return jsonify({'countries': countries})
     except Exception as e:
@@ -574,10 +938,61 @@ def get_geo_stats():
         report_error(e)
         return jsonify({"error": str(e)}), 500
 
+# -------------------- Search Endpoint --------------------
+
+@api_blueprint.route('/search', methods=['GET'])
+@limiter.limit("20 per minute")
+def search():
+    """Search across all threat intelligence data."""
+    try:
+        query_string = request.args.get('query', '')
+        if not query_string:
+            return jsonify({"error": "Query parameter required"}), 400
+        
+        # Search across indicators
+        search_query = """
+        SELECT 
+            id,
+            type,
+            value,
+            source,
+            description,
+            created_at,
+            risk_score,
+            CASE 
+                WHEN risk_score >= 80 THEN 'critical'
+                WHEN risk_score >= 60 THEN 'high'
+                WHEN risk_score >= 40 THEN 'medium'
+                ELSE 'low'
+            END as severity
+        FROM `{table_id}`
+        WHERE (
+            LOWER(value) LIKE LOWER(@query) OR
+            LOWER(description) LIKE LOWER(@query) OR
+            LOWER(source) LIKE LOWER(@query) OR
+            LOWER(type) LIKE LOWER(@query)
+        )
+        ORDER BY created_at DESC
+        LIMIT 50
+        """.format(table_id=Config.get_table_name('indicators'))
+        
+        params = [bigquery.ScalarQueryParameter("query", "STRING", f"%{query_string}%")]
+        results = execute_bq_query(search_query, params)
+        
+        return jsonify({
+            'query': query_string,
+            'results': results,
+            'count': len(results)
+        })
+    except Exception as e:
+        logger.error(f"Error in search: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
 # -------------------- Admin Endpoints --------------------
 
 @api_blueprint.route('/admin/ingest', methods=['POST'])
-@require_api_key
+@limiter.limit("5 per minute")
 def trigger_ingest():
     """Trigger data ingestion."""
     try:
@@ -607,7 +1022,7 @@ def trigger_ingest():
         return jsonify({'error': str(e)}), 500
 
 @api_blueprint.route('/admin/analyze', methods=['POST'])
-@require_api_key
+@limiter.limit("5 per minute")
 def trigger_analysis():
     """Trigger data analysis."""
     try:
@@ -639,7 +1054,7 @@ def trigger_analysis():
         return jsonify({'error': str(e)}), 500
 
 @api_blueprint.route('/admin/initialize_tables', methods=['POST'])
-@require_api_key
+@limiter.limit("1 per minute")
 def initialize_tables():
     """Manually trigger BigQuery table initialization."""
     try:
@@ -710,9 +1125,16 @@ def get_api_info():
             {'path': '/api/stats', 'method': 'GET', 'description': 'Get platform statistics'},
             {'path': '/api/feeds', 'method': 'GET', 'description': 'Get threat feeds information'},
             {'path': '/api/iocs', 'method': 'GET', 'description': 'Get indicators of compromise'},
-            {'path': '/api/campaigns', 'method': 'GET', 'description': 'Get campaign information'},
+            {'path': '/api/iocs/<id>', 'method': 'GET', 'description': 'Get IOC details'},
+            {'path': '/api/iocs/<id>/related', 'method': 'GET', 'description': 'Get related IOCs'},
+            {'path': '/api/iocs/export', 'method': 'GET', 'description': 'Export IOCs'},
             {'path': '/api/threat_summary', 'method': 'GET', 'description': 'Get threat summary'},
             {'path': '/api/iocs/geo', 'method': 'GET', 'description': 'Get geographical distribution'},
+            {'path': '/api/ai/analyses', 'method': 'GET', 'description': 'Get AI analysis results'},
+            {'path': '/api/ai/analyses/<id>', 'method': 'GET', 'description': 'Get AI analysis details'},
+            {'path': '/api/ai/summary', 'method': 'GET', 'description': 'Get AI summary'},
+            {'path': '/api/ai/generate_report', 'method': 'POST', 'description': 'Generate AI report'},
+            {'path': '/api/search', 'method': 'GET', 'description': 'Search threat intelligence'},
             {'path': '/api/admin/ingest', 'method': 'POST', 'description': 'Trigger data ingestion'},
             {'path': '/api/admin/analyze', 'method': 'POST', 'description': 'Trigger data analysis'},
             {'path': '/api/admin/initialize_tables', 'method': 'POST', 'description': 'Initialize BigQuery tables'}
@@ -725,16 +1147,6 @@ def get_api_info():
 def bad_request(e):
     """Handle 400 errors."""
     return jsonify({"error": "Bad request", "message": str(e)}), 400
-
-@api_blueprint.errorhandler(401)
-def unauthorized(e):
-    """Handle 401 errors."""
-    return jsonify({"error": "Unauthorized", "message": "Authentication required"}), 401
-
-@api_blueprint.errorhandler(403)
-def forbidden(e):
-    """Handle 403 errors."""
-    return jsonify({"error": "Forbidden", "message": "Insufficient permissions"}), 403
 
 @api_blueprint.errorhandler(404)
 def not_found(e):
