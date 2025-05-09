@@ -13,7 +13,7 @@ from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, abort, g, current_app, send_file, Response, session
+from flask import flash, abort, g, current_app, send_file, Response
 
 # Import config module for centralized configuration
 from config import Config, ServiceManager, ServiceStatus
@@ -173,9 +173,9 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = requests.get(url, headers=headers, params=params, timeout=30)
+                    response = requests.get(url, headers=headers, params=params, timeout=10)
                 else:
-                    response = requests.post(url, headers=headers, json=data, timeout=30)
+                    response = requests.post(url, headers=headers, json=data, timeout=10)
                 
                 # Break on success or non-retriable failure
                 if response.status_code < 500 or response.status_code == 401:
@@ -223,6 +223,16 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
 def index():
     """Root redirects to dashboard."""
     return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/feeds')
+def feeds():
+    """Redirect to dashboard feeds view."""
+    return redirect(url_for('frontend.dashboard', view='feeds'))
+
+@frontend_app.route('/iocs')
+def iocs():
+    """Redirect to dashboard IOCs view."""
+    return redirect(url_for('frontend.dashboard', view='iocs'))
 
 @frontend_app.route('/dashboard')
 @frontend_app.route('/dashboard/<view>')
@@ -316,6 +326,28 @@ def dashboard(view=None):
             ioc_types = stats_response.get('iocs', {}).get('types', [])
             context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
             context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
+            
+            # Process visualization data
+            if 'visualization_data' in stats_response:
+                viz_data = stats_response['visualization_data']
+                if 'daily_counts' in viz_data:
+                    # Create date range
+                    today = datetime.now().date()
+                    date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
+                    context['activity_dates'] = date_range
+                    
+                    # Map counts to dates
+                    daily_counts = viz_data['daily_counts']
+                    counts = [0] * len(date_range)
+                    date_to_index = {date: idx for idx, date in enumerate(date_range)}
+                    
+                    for entry in daily_counts:
+                        if isinstance(entry, dict) and 'date' in entry and 'count' in entry:
+                            date_str = entry['date']
+                            if date_str in date_to_index:
+                                counts[date_to_index[date_str]] = entry['count']
+                    
+                    context['activity_counts'] = counts
         
         # Load view-specific data
         if current_view == 'feeds':
@@ -325,7 +357,7 @@ def dashboard(view=None):
                 if feeds_response and 'error' in feeds_response:
                     flash(f"Error loading feeds: {feeds_response['error']}", 'warning')
             else:
-                context['feed_items'] = feeds_response.get('feed_details', [])
+                context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
             
         elif current_view == 'iocs':
             iocs_response = api_request('iocs', params={"days": days, "limit": 100})
@@ -341,49 +373,34 @@ def dashboard(view=None):
             if not ai_response or 'error' in ai_response:
                 context['ai_analyses'] = {}
                 context['last_ai_analysis'] = None
-                if ai_response and 'error' in ai_response:
-                    flash(f"Error loading AI analysis: {ai_response['error']}", 'warning')
             else:
                 context['ai_analyses'] = ai_response
                 context['last_ai_analysis'] = ai_response.get('last_run_time')
             
         else:
-            # Dashboard view
+            # Dashboard view - load additional data
             # Date range for activity chart
             today = datetime.now().date()
             date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
             context['activity_dates'] = date_range
             
-            # Activity data
-            if stats_response and 'visualization_data' in stats_response:
-                daily_counts = stats_response['visualization_data'].get('daily_counts', [])
-                counts = [0] * len(date_range)
-                date_to_index = {date: idx for idx, date in enumerate(date_range)}
-                
-                for entry in daily_counts:
-                    if isinstance(entry, dict) and 'date' in entry:
-                        date_str = entry.get('date')
-                        if date_str in date_to_index:
-                            counts[date_to_index[date_str]] = entry.get('count', 0)
-                
-                context['activity_counts'] = counts
-            else:
-                context['activity_counts'] = [20 + i * 2 for i in range(days)]
-            
-            # Load additional dashboard data
+            # Get recent IOCs
             iocs_response = api_request('iocs', params={"days": days, "limit": 10})
             if iocs_response and 'error' not in iocs_response:
                 context['top_iocs'] = iocs_response.get('records', [])
             
+            # Get threat summary
             threat_summary = api_request('threat_summary', params={"days": days})
             if threat_summary and 'error' not in threat_summary:
                 context['threat_summary'] = threat_summary
                 context['threat_score'] = threat_summary.get('overall_score', 50)
             
+            # Get AI summary
             ai_summary = api_request('ai/summary')
             if ai_summary and 'error' not in ai_summary:
                 context['ai_summary'] = ai_summary
             
+            # Get geo stats
             geo_stats = api_request('iocs/geo', params={"days": days})
             if geo_stats and 'error' not in geo_stats:
                 context['geo_stats'] = geo_stats.get('countries', [])
@@ -395,172 +412,6 @@ def dashboard(view=None):
         safe_report_exception(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
-
-# Additional routes that were missing
-
-@frontend_app.route('/feeds')
-def feeds():
-    """Redirect to dashboard feeds view."""
-    return redirect(url_for('frontend.dashboard', view='feeds'))
-
-@frontend_app.route('/iocs')
-def iocs():
-    """Redirect to dashboard IOCs view."""
-    return redirect(url_for('frontend.dashboard', view='iocs'))
-
-@frontend_app.route('/ioc/<ioc_id>/analyze', methods=['GET', 'POST'])
-def analyze_ioc(ioc_id):
-    """Trigger AI analysis for a specific IOC."""
-    try:
-        if request.method == 'POST':
-            result = api_request('admin/analyze', method='POST', data={
-                'indicator_ids': [ioc_id],
-                'force_reanalysis': True
-            })
-            
-            if result.get('error'):
-                flash(f'Error triggering IOC analysis: {result["error"]}', 'danger')
-            else:
-                flash('AI analysis triggered successfully for IOC', 'success')
-                clear_api_cache('ai')
-            
-            return redirect(url_for('frontend.dashboard', view='iocs'))
-        
-        # For GET, trigger analysis and redirect
-        result = api_request('admin/analyze', method='POST', data={
-            'indicator_ids': [ioc_id],
-            'force_reanalysis': True
-        })
-        
-        if result.get('error'):
-            flash(f'Error triggering IOC analysis: {result["error"]}', 'danger')
-        else:
-            flash('AI analysis triggered successfully for IOC', 'success')
-        
-        return redirect(url_for('frontend.dashboard', view='iocs'))
-        
-    except Exception as e:
-        logger.error(f"Error in analyze_ioc: {str(e)}")
-        safe_report_exception(e)
-        flash('Error triggering IOC analysis', 'danger')
-        return redirect(url_for('frontend.dashboard', view='iocs'))
-
-@frontend_app.route('/export/iocs')
-def export_iocs():
-    """Export IOCs in various formats."""
-    try:
-        format_type = request.args.get('format', 'json')
-        days = int(request.args.get('days', 30))
-        ioc_type = request.args.get('type', '')
-        
-        # Get IOCs from API
-        params = {"days": days, "limit": 10000}
-        if ioc_type:
-            params['type'] = ioc_type
-            
-        iocs_response = api_request('iocs/export', params=params)
-        
-        if not iocs_response or 'error' in iocs_response:
-            flash('Error exporting IOCs', 'danger')
-            return redirect(url_for('frontend.dashboard', view='iocs'))
-        
-        iocs = iocs_response.get('records', [])
-        
-        # Format based on requested type
-        if format_type == 'json':
-            return Response(
-                json.dumps(iocs, indent=2),
-                mimetype='application/json',
-                headers={'Content-Disposition': 'attachment; filename=iocs.json'}
-            )
-        elif format_type == 'csv':
-            import csv
-            import io
-            
-            output = io.StringIO()
-            if iocs:
-                writer = csv.DictWriter(output, fieldnames=iocs[0].keys())
-                writer.writeheader()
-                writer.writerows(iocs)
-            
-            return Response(
-                output.getvalue(),
-                mimetype='text/csv',
-                headers={'Content-Disposition': 'attachment; filename=iocs.csv'}
-            )
-        elif format_type == 'txt':
-            lines = []
-            for ioc in iocs:
-                lines.append(f"{ioc.get('type', 'unknown')}: {ioc.get('value', '')}")
-            
-            return Response(
-                '\n'.join(lines),
-                mimetype='text/plain',
-                headers={'Content-Disposition': 'attachment; filename=iocs.txt'}
-            )
-        else:
-            flash('Unsupported export format', 'warning')
-            return redirect(url_for('frontend.dashboard', view='iocs'))
-            
-    except Exception as e:
-        logger.error(f"Error exporting IOCs: {str(e)}")
-        safe_report_exception(e)
-        flash('Error exporting IOCs', 'danger')
-        return redirect(url_for('frontend.dashboard', view='iocs'))
-
-@frontend_app.route('/<content_type>/<path:identifier>')
-def dynamic_content_detail(content_type, identifier):
-    """Dynamic content detail view."""
-    try:
-        # Map content type to view
-        content_map = {
-            'ioc': 'ioc_detail',
-            'feed': 'feed_detail',
-            'analysis': 'analysis_detail',
-            'campaign': 'campaign_detail',
-            'threat_actor': 'threat_actor_detail'
-        }
-        
-        if content_type not in content_map:
-            abort(404)
-        
-        # Get data from API
-        endpoint = f"{content_type}s/{identifier}"
-        data = api_request(endpoint)
-        
-        if not data or 'error' in data:
-            flash(f'Error loading {content_type} details', 'danger')
-            return redirect(url_for('frontend.dashboard'))
-        
-        # Get related items if applicable
-        related_items = []
-        if content_type == 'ioc':
-            related_response = api_request(f"{endpoint}/related")
-            if related_response and 'error' not in related_response:
-                related_items = related_response.get('items', [])
-        
-        context = {
-            'content_type': content_type,
-            'identifier': identifier,
-            'data': data,
-            'related_items': related_items,
-            'view_type': content_type + 's',
-            'icon': {
-                'ioc': 'fingerprint',
-                'feed': 'rss',
-                'analysis': 'brain',
-                'campaign': 'bullhorn',
-                'threat_actor': 'user-secret'
-            }.get(content_type, 'info-circle')
-        }
-        
-        return render_template('detail.html', **context)
-    
-    except Exception as e:
-        logger.error(f"Error in dynamic_content_detail: {str(e)}")
-        safe_report_exception(e)
-        flash(f'Error loading {content_type} details', 'danger')
-        return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/ingest_threat_data', methods=['GET', 'POST'])
 def ingest_threat_data():
@@ -640,6 +491,173 @@ def run_ai_analysis():
         safe_report_exception(e)
         flash('Error triggering AI analysis', 'danger')
         return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/export/iocs')
+def export_iocs():
+    """Export IOCs in various formats."""
+    try:
+        format_type = request.args.get('format', 'json')
+        days = int(request.args.get('days', 30))
+        ioc_type = request.args.get('type', '')
+        
+        # Get IOC data
+        params = {"days": days, "limit": 10000}
+        if ioc_type:
+            params['type'] = ioc_type
+            
+        iocs_response = api_request('iocs', params=params)
+        
+        if iocs_response.get('error'):
+            flash(f'Error exporting IOCs: {iocs_response["error"]}', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        iocs = iocs_response.get('records', [])
+        
+        # Format data based on requested format
+        if format_type == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['Type', 'Value', 'Risk Score', 'Confidence', 'Source', 'First Seen', 'Last Seen'])
+            
+            for ioc in iocs:
+                writer.writerow([
+                    ioc.get('type', ''),
+                    ioc.get('value', ''),
+                    ioc.get('risk_score', ''),
+                    ioc.get('confidence', ''),
+                    ioc.get('source', ''),
+                    ioc.get('first_seen', ioc.get('created_at', '')),
+                    ioc.get('last_seen', '')
+                ])
+            
+            output.seek(0)
+            return Response(
+                output.getvalue(),
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.csv'}
+            )
+            
+        elif format_type == 'txt':
+            lines = []
+            for ioc in iocs:
+                lines.append(ioc.get('value', ''))
+            
+            return Response(
+                '\n'.join(lines),
+                mimetype='text/plain',
+                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.txt'}
+            )
+            
+        else:  # JSON format (default)
+            return Response(
+                json.dumps(iocs, indent=2),
+                mimetype='application/json',
+                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.json'}
+            )
+            
+    except Exception as e:
+        logger.error(f"Error exporting IOCs: {str(e)}")
+        flash('Error exporting IOCs', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/<content_type>/<path:identifier>')
+def dynamic_content_detail(content_type, identifier):
+    """Display detailed view for any content type."""
+    try:
+        # Sanitize inputs
+        allowed_types = ['ioc', 'feed', 'analysis', 'threat_actor', 'campaign']
+        if content_type not in allowed_types:
+            abort(404)
+        
+        # Initialize context
+        context = {
+            'content_type': content_type,
+            'identifier': identifier,
+            'data': {},
+            'related_items': [],
+            'icon': 'info-circle',
+            'view_type': content_type + 's'
+        }
+        
+        # Set icon based on content type
+        icons = {
+            'ioc': 'fingerprint',
+            'feed': 'rss',
+            'analysis': 'brain',
+            'threat_actor': 'user-secret',
+            'campaign': 'bullhorn'
+        }
+        context['icon'] = icons.get(content_type, 'info-circle')
+        
+        # Handle different content types
+        if content_type == 'ioc':
+            # Parse IOC identifier (format: type/value)
+            parts = identifier.split('/', 1)
+            if len(parts) == 2:
+                ioc_type, ioc_value = parts
+                # Get IOC data by type and value
+                iocs_response = api_request('iocs', params={'type': ioc_type, 'value': ioc_value, 'limit': 1})
+                if iocs_response and 'records' in iocs_response and len(iocs_response['records']) > 0:
+                    context['data'] = iocs_response['records'][0]
+                else:
+                    flash('IOC not found', 'warning')
+                    return redirect(url_for('frontend.dashboard', view='iocs'))
+            else:
+                flash('Invalid IOC identifier', 'warning')
+                return redirect(url_for('frontend.dashboard', view='iocs'))
+                
+        elif content_type == 'feed':
+            # Get feed data by ID
+            feeds_response = api_request('feeds')
+            if feeds_response and 'feed_details' in feeds_response:
+                for feed in feeds_response['feed_details']:
+                    if feed.get('id') == identifier:
+                        context['data'] = feed
+                        break
+                else:
+                    flash('Feed not found', 'warning')
+                    return redirect(url_for('frontend.dashboard', view='feeds'))
+                    
+        elif content_type == 'analysis':
+            # Get analysis data by ID
+            analysis_response = api_request(f'analysis/{identifier}')
+            if analysis_response and 'error' not in analysis_response:
+                context['data'] = analysis_response
+            else:
+                flash('Analysis not found', 'warning')
+                return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+        
+        return render_template('detail.html', **context)
+        
+    except Exception as e:
+        logger.error(f"Error in dynamic_content_detail: {str(e)}")
+        flash('Error loading content details', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/ioc/<ioc_id>/analyze')
+def analyze_ioc(ioc_id):
+    """Trigger AI analysis for a specific IOC."""
+    try:
+        result = api_request('admin/analyze', method='POST', data={
+            'indicator_ids': [ioc_id],
+            'force_reanalysis': True
+        })
+        
+        if result.get('error'):
+            flash(f'Error analyzing IOC: {result["error"]}', 'danger')
+        else:
+            flash('IOC analysis started successfully', 'success')
+            clear_api_cache(f'iocs_{ioc_id}')
+        
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+    except Exception as e:
+        logger.error(f"Error analyzing IOC: {str(e)}")
+        flash('Error triggering IOC analysis', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
 
 # Template filters and context processors
 def format_datetime(value):
