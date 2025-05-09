@@ -62,7 +62,7 @@ steps:
   id: 'push-container'
   args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
 
-# Deploy to Cloud Run - fixed volume mounting syntax
+# Deploy to Cloud Run - simplified approach without secret volumes
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
   entrypoint: 'bash'
@@ -84,13 +84,9 @@ steps:
       --max-instances 10 \
       --timeout 300s \
       --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false" \
-      --set-secrets "API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest" \
+      --set-secrets "API_KEY=api-keys:latest,SECRET_KEY=auth-config:latest,ADMIN_PASSWORD=admin-initial-password:latest" \
       --command "/app/init-app.sh" \
-      --args "gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
-      --add-volume "type=secret,name=api-keys-volume,secret=api-keys,mount-path=/app/secrets/api-keys" \
-      --add-volume "type=secret,name=auth-config-volume,secret=auth-config,mount-path=/app/secrets/auth-config" \
-      --add-volume "type=secret,name=feed-config-volume,secret=feed-config,mount-path=/app/secrets/feed-config" \
-      --add-volume "type=secret,name=admin-password-volume,secret=admin-initial-password,mount-path=/app/secrets/admin-password"
+      --args "gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app"
 
 # Setup PubSub topics
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
