@@ -34,12 +34,6 @@
                         'card-hover': '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
                     }
                 }
-            },
-            variants: {
-                extend: {
-                    opacity: ['disabled'],
-                    cursor: ['disabled'],
-                }
             }
         }
     </script>
@@ -73,10 +67,8 @@
             .btn-danger { @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-600; }
             .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-gray-400; }
             .btn-sm { @apply px-3 py-1 text-sm; }
-            .btn-disabled { @apply opacity-50 cursor-not-allowed; }
             
             .form-control { @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent text-gray-700; }
-            .form-control:disabled { @apply bg-gray-100 opacity-75 cursor-not-allowed; }
             
             .sidebar-item { @apply block px-4 py-2 rounded transition-colors duration-200 flex items-center; }
             .sidebar-item.active { @apply bg-blue-50 text-accent border-l-4 border-accent font-medium; }
@@ -90,35 +82,6 @@
             .table-body tr { @apply hover:bg-gray-50 transition-colors duration-100; }
             .table-body td { @apply px-6 py-4 whitespace-nowrap; }
             
-            /* User dropdown */
-            .user-dropdown {
-                @apply absolute right-0 mt-2 w-48 bg-white text-gray-800 rounded-lg shadow-lg z-50 border border-gray-100 py-1;
-                display: none;
-            }
-            .user-dropdown.active {
-                display: block;
-                animation: fadeIn 0.2s ease-out;
-            }
-            .user-dropdown a {
-                @apply block px-4 py-2 hover:bg-gray-50 transition-colors duration-100;
-            }
-            
-            /* Nav active indicator */
-            .nav-indicator {
-                @apply absolute bottom-0 left-0 right-0 h-1 bg-accent rounded-t;
-                transform: scaleX(0);
-                transition: transform 0.2s ease-in-out;
-                transform-origin: center;
-            }
-            .nav-link.active .nav-indicator {
-                transform: scaleX(1);
-            }
-            
-            @keyframes fadeIn {
-                from { opacity: 0; transform: translateY(-10px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-            
             .search-input {
                 @apply relative;
             }
@@ -128,7 +91,15 @@
             .search-input i {
                 @apply absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400;
             }
-            .auth-card { @apply bg-white p-8 rounded-lg shadow-lg w-full max-w-md border border-gray-100; }
+            
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(-10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            
+            .fade-in {
+                animation: fadeIn 0.3s ease-out;
+            }
         }
     </style>
     
@@ -145,35 +116,14 @@
                 <span class="font-bold text-lg">Threat Intelligence Platform</span>
             </a>
             <div class="flex items-center space-x-4">
-                {% if session.get('logged_in') %}
-                <div class="relative" id="userDropdownContainer">
-                    <button id="userDropdownButton" class="flex items-center space-x-2 focus:outline-none bg-gray-800 bg-opacity-50 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors">
-                        <i class="fas fa-user-circle text-lg"></i>
-                        <span>{{ session.get('username', 'User') }}</span>
-                        <span class="bg-accent text-xs px-2 py-1 rounded">{{ session.get('role', 'user') }}</span>
-                        <i class="fas fa-chevron-down text-xs"></i>
-                    </button>
-                    <div id="userDropdown" class="user-dropdown">
-                        <a href="{{ url_for('frontend.profile') if request.endpoint else '/profile' }}" class="flex items-center">
-                            <i class="fas fa-user-cog w-5 mr-2"></i> Profile
-                        </a>
-                        {% if session.get('role') == 'admin' %}
-                        <a href="{{ url_for('frontend.users') if request.endpoint else '/users' }}" class="flex items-center">
-                            <i class="fas fa-users w-5 mr-2"></i> User Management
-                        </a>
-                        {% endif %}
-                        <div class="border-t border-gray-200 my-1"></div>
-                        <a href="{{ url_for('frontend.logout') if request.endpoint else '/logout' }}" class="flex items-center text-red-600">
-                            <i class="fas fa-sign-out-alt w-5 mr-2"></i> Logout
-                        </a>
-                    </div>
-                </div>
-                {% else %}
-                <a href="{{ url_for('frontend.login') if request.endpoint else '/login' }}" class="flex items-center bg-accent rounded-lg px-3 py-2 hover:bg-accent-dark transition-colors">
-                    <i class="fas fa-sign-in-alt mr-2"></i>
-                    <span>Login</span>
+                <span class="text-sm bg-gray-800 px-3 py-1 rounded flex items-center">
+                    <i class="fas fa-globe mr-2"></i>
+                    Global Intelligence Feed
+                </span>
+                <a href="{{ url_for('frontend.dashboard', view='ai-analysis') if request.endpoint else '/dashboard?view=ai-analysis' }}" class="btn btn-primary btn-sm">
+                    <i class="fas fa-brain mr-2"></i>
+                    AI Analysis
                 </a>
-                {% endif %}
             </div>
         </div>
     </nav>
@@ -201,22 +151,10 @@
                     <a href="{{ url_for('frontend.dashboard', view='iocs') if request.endpoint else '/dashboard?view=iocs' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'iocs' %}active{% endif %}">
                         <i class="fas fa-fingerprint"></i> IOCs
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='campaigns') if request.endpoint else '/dashboard?view=campaigns' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'campaigns' %}active{% endif %}">
-                        <i class="fas fa-project-diagram"></i> Campaigns
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') if request.endpoint else '/dashboard?view=ai-analysis' }}" class="sidebar-item {% if request.endpoint == 'frontend.dashboard' and request.args.get('view') == 'ai-analysis' %}active{% endif %}">
+                        <i class="fas fa-brain"></i> AI Analysis
                     </a>
                 </div>
-                
-                <!-- Admin Section -->
-                {% if session.get('role') == 'admin' %}
-                <div class="border-t border-gray-200 my-4 pt-4">
-                    <h6 class="font-semibold text-sm mb-2 text-gray-500 uppercase tracking-wider px-4">Administration</h6>
-                    <div class="space-y-1">
-                        <a href="{{ url_for('frontend.users') if request.endpoint else '/users' }}" class="sidebar-item {% if request.endpoint == 'frontend.users' %}active{% endif %}">
-                            <i class="fas fa-users"></i> User Management
-                        </a>
-                    </div>
-                </div>
-                {% endif %}
                 
                 <!-- Quick Actions Section -->
                 <div class="border-t border-gray-200 my-4 pt-4">
@@ -224,6 +162,9 @@
                     <div class="space-y-1">
                         <a href="{{ url_for('frontend.ingest_threat_data') if request.endpoint else '/ingest_threat_data' }}" class="sidebar-item">
                             <i class="fas fa-sync"></i> Refresh Threat Data
+                        </a>
+                        <a href="{{ url_for('frontend.run_ai_analysis') if request.endpoint else '/run_ai_analysis' }}" class="sidebar-item">
+                            <i class="fas fa-brain"></i> Run AI Analysis
                         </a>
                     </div>
                 </div>
@@ -244,7 +185,7 @@
                         <div class="flex justify-between items-center text-sm">
                             <div class="flex items-center">
                                 <div class="w-2 h-2 rounded-full bg-green-500 mr-2"></div>
-                                <span>Feed Collection</span>
+                                <span>AI Analysis</span>
                             </div>
                             <span class="text-green-600">Operational</span>
                         </div>
@@ -276,11 +217,6 @@
                 {% endif %}
             {% endwith %}
             
-            <!-- CSRF Token for forms -->
-            {% if csrf_token() %}
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            {% endif %}
-            
             <!-- Page Content -->
             {% block content %}{% endblock %}
         </div>
@@ -297,26 +233,6 @@
     <!-- Common Scripts -->
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // User dropdown toggle
-            const userDropdownButton = document.getElementById('userDropdownButton');
-            const userDropdown = document.getElementById('userDropdown');
-            
-            if (userDropdownButton && userDropdown) {
-                userDropdownButton.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    userDropdown.classList.toggle('active');
-                });
-                
-                // Close dropdown when clicking elsewhere
-                document.addEventListener('click', function(e) {
-                    if (userDropdown.classList.contains('active') && 
-                        !userDropdownButton.contains(e.target) && 
-                        !userDropdown.contains(e.target)) {
-                        userDropdown.classList.remove('active');
-                    }
-                });
-            }
-            
             // Mobile navigation toggle
             const mobileNavToggle = document.getElementById('mobileNavToggle');
             const sidebar = document.getElementById('sidebar');
@@ -360,19 +276,6 @@
                     return dateString;
                 }
             };
-            
-            // Add smooth scrolling for anchors
-            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-                anchor.addEventListener('click', function (e) {
-                    const href = this.getAttribute('href');
-                    if (href !== '#' && href.startsWith('#')) {
-                        e.preventDefault();
-                        document.querySelector(this.getAttribute('href')).scrollIntoView({
-                            behavior: 'smooth'
-                        });
-                    }
-                });
-            });
         });
     </script>
     
