@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Any
 from flask import Blueprint, jsonify, request, current_app, abort, Response, g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import csrf_exempt
 from functools import wraps
 from google.cloud import bigquery, storage, pubsub_v1
 from google.cloud.exceptions import NotFound
@@ -186,6 +187,7 @@ def verify_bigquery_tables() -> bool:
 
 # API Endpoints
 @api_blueprint.route('/health', methods=['GET'])
+@csrf_exempt
 def api_health_check():
     """API health check with service status."""
     service_manager = Config.get_service_manager()
@@ -209,6 +211,7 @@ def api_health_check():
 
 @api_blueprint.route('/stats', methods=['GET'])
 @limiter.limit("30 per minute")
+@csrf_exempt
 @require_api_key
 def get_stats():
     """Get platform statistics."""
@@ -295,6 +298,7 @@ def get_stats():
 
 @api_blueprint.route('/feeds', methods=['GET'])
 @limiter.limit("30 per minute")
+@csrf_exempt
 @require_api_key
 def get_feeds():
     """Get feed information."""
@@ -342,6 +346,7 @@ def get_feeds():
 
 @api_blueprint.route('/iocs', methods=['GET'])
 @limiter.limit("30 per minute")
+@csrf_exempt
 @require_api_key
 def get_iocs():
     """Get IOC data."""
@@ -398,8 +403,228 @@ def get_iocs():
         report_error(e)
         return jsonify({"error": str(e)}), 500
 
+@api_blueprint.route('/ai/analyses', methods=['GET'])
+@limiter.limit("30 per minute")
+@csrf_exempt
+@require_api_key
+def get_ai_analyses():
+    """Get AI analysis data."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        # Mock response structure based on frontend expectations
+        ai_analyses = {
+            'overall_threat_level': 'Medium',
+            'total_indicators': 0,
+            'emerging_threats_count': 0,
+            'critical_indicators': 0,
+            'threat_patterns': [],
+            'recommendations': [],
+            'recent_analyses': [],
+            'last_run_time': None
+        }
+        
+        if not verify_bigquery_tables():
+            return jsonify(ai_analyses)
+        
+        # Get analysis stats
+        analysis_query = f"""
+        SELECT 
+            COUNT(*) as total_analyzed,
+            COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
+            MAX(last_analyzed) as last_analysis_time
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE last_analyzed IS NOT NULL
+        AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        results = execute_bq_query(analysis_query)
+        if results:
+            ai_analyses['total_indicators'] = results[0].get('total_analyzed', 0)
+            ai_analyses['critical_indicators'] = results[0].get('critical_count', 0)
+            ai_analyses['last_run_time'] = results[0].get('last_analysis_time')
+        
+        # Get recent analysis results
+        recent_query = f"""
+        SELECT 
+            id,
+            type,
+            value as target,
+            'threat_assessment' as analysis_type,
+            analysis_summary as result,
+            CASE 
+                WHEN risk_score > 80 THEN 'critical'
+                WHEN risk_score > 60 THEN 'high'
+                WHEN risk_score > 40 THEN 'medium'
+                ELSE 'low'
+            END as result_severity,
+            confidence,
+            last_analyzed as timestamp
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE last_analyzed IS NOT NULL
+        ORDER BY last_analyzed DESC
+        LIMIT 10
+        """
+        
+        recent_results = execute_bq_query(recent_query)
+        if recent_results:
+            ai_analyses['recent_analyses'] = recent_results
+        
+        # Determine overall threat level based on critical indicators
+        if ai_analyses['critical_indicators'] > 50:
+            ai_analyses['overall_threat_level'] = 'Critical'
+        elif ai_analyses['critical_indicators'] > 20:
+            ai_analyses['overall_threat_level'] = 'High'
+        elif ai_analyses['critical_indicators'] > 5:
+            ai_analyses['overall_threat_level'] = 'Medium'
+        else:
+            ai_analyses['overall_threat_level'] = 'Low'
+        
+        return jsonify(ai_analyses)
+        
+    except Exception as e:
+        logger.error(f"Error getting AI analyses: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/threat_summary', methods=['GET'])
+@limiter.limit("30 per minute")
+@csrf_exempt
+@require_api_key
+def get_threat_summary():
+    """Get threat summary data."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        threat_summary = {
+            'overall_score': 50,
+            'threat_level': 'Medium',
+            'active_threats': 0,
+            'critical_indicators': 0,
+            'trending_ioc_types': [],
+            'top_threat_actors': [],
+            'risk_trend': 'stable'
+        }
+        
+        if not verify_bigquery_tables():
+            return jsonify(threat_summary)
+        
+        # Calculate threat metrics
+        summary_query = f"""
+        SELECT 
+            AVG(risk_score) as avg_risk_score,
+            COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
+            COUNT(DISTINCT threat_actor) as active_threat_actors
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        results = execute_bq_query(summary_query)
+        if results:
+            threat_summary['overall_score'] = int(results[0].get('avg_risk_score', 50))
+            threat_summary['critical_indicators'] = results[0].get('critical_count', 0)
+            threat_summary['active_threats'] = results[0].get('active_threat_actors', 0)
+        
+        # Determine threat level
+        if threat_summary['overall_score'] > 80:
+            threat_summary['threat_level'] = 'Critical'
+        elif threat_summary['overall_score'] > 60:
+            threat_summary['threat_level'] = 'High'
+        elif threat_summary['overall_score'] > 40:
+            threat_summary['threat_level'] = 'Medium'
+        else:
+            threat_summary['threat_level'] = 'Low'
+        
+        return jsonify(threat_summary)
+        
+    except Exception as e:
+        logger.error(f"Error getting threat summary: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/ai/summary', methods=['GET'])
+@limiter.limit("30 per minute")
+@csrf_exempt
+@require_api_key
+def get_ai_summary():
+    """Get AI summary for dashboard."""
+    try:
+        ai_summary = {
+            'risk_level': 'Medium',
+            'trending_threats': 'None detected',
+            'critical_indicators': 0,
+            'key_findings': [],
+            'last_updated': datetime.utcnow().isoformat()
+        }
+        
+        if not verify_bigquery_tables():
+            return jsonify(ai_summary)
+        
+        # Get critical indicators count
+        critical_query = f"""
+        SELECT COUNT(*) as critical_count
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE risk_score > 80
+        AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        """
+        
+        results = execute_bq_query(critical_query)
+        if results:
+            ai_summary['critical_indicators'] = results[0].get('critical_count', 0)
+        
+        # Determine risk level
+        if ai_summary['critical_indicators'] > 10:
+            ai_summary['risk_level'] = 'High'
+        elif ai_summary['critical_indicators'] > 5:
+            ai_summary['risk_level'] = 'Medium'
+        else:
+            ai_summary['risk_level'] = 'Low'
+        
+        return jsonify(ai_summary)
+        
+    except Exception as e:
+        logger.error(f"Error getting AI summary: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
+@api_blueprint.route('/iocs/geo', methods=['GET'])
+@limiter.limit("30 per minute")
+@csrf_exempt
+@require_api_key
+def get_iocs_geo():
+    """Get geographical statistics for IOCs."""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        geo_stats = {
+            'countries': [],
+            'top_sources': [],
+            'threat_map_data': []
+        }
+        
+        if not verify_bigquery_tables():
+            return jsonify(geo_stats)
+        
+        # Mock geographic data for now
+        # In production, this would query enriched IOC data with geo information
+        geo_stats['countries'] = [
+            {'country': 'US', 'count': 150, 'risk_level': 'high'},
+            {'country': 'RU', 'count': 120, 'risk_level': 'critical'},
+            {'country': 'CN', 'count': 100, 'risk_level': 'high'},
+            {'country': 'DE', 'count': 50, 'risk_level': 'medium'},
+            {'country': 'GB', 'count': 45, 'risk_level': 'medium'}
+        ]
+        
+        return jsonify(geo_stats)
+        
+    except Exception as e:
+        logger.error(f"Error getting geo stats: {str(e)}")
+        report_error(e)
+        return jsonify({"error": str(e)}), 500
+
 @api_blueprint.route('/admin/ingest', methods=['POST'])
 @limiter.limit("5 per minute")
+@csrf_exempt
 @require_api_key
 def trigger_ingest():
     """Trigger data ingestion."""
@@ -436,6 +661,7 @@ def trigger_ingest():
 
 @api_blueprint.route('/admin/analyze', methods=['POST'])
 @limiter.limit("5 per minute")
+@csrf_exempt
 @require_api_key
 def trigger_analysis():
     """Trigger data analysis."""
