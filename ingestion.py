@@ -138,6 +138,7 @@ class DataProcessor:
             
         value = value.strip().lower()
         
+        # Handle ip:port format specially (for ThreatFox)
         if re.match(r'^(\d{1,3}\.){3}\d{1,3}:\d+$', value):
             return 'ip:port'
         
@@ -247,6 +248,8 @@ def initialize_bigquery_tables() -> bool:
                 bigquery.SchemaField("last_analyzed", "TIMESTAMP", mode="NULLABLE"),
                 bigquery.SchemaField("risk_score", "INTEGER", mode="NULLABLE"),
                 bigquery.SchemaField("analysis_summary", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("threat_type", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("threat_id", "STRING", mode="NULLABLE"),
             ]
         }
         
@@ -439,6 +442,7 @@ def download_feed(url: str, headers: Dict = None, timeout: int = 60) -> Tuple[Op
             response = requests.get(url, headers=headers, timeout=timeout)
             
             if response.status_code == 429:
+                # Handle rate limiting
                 wait_time = int(response.headers.get('Retry-After', 60))
                 logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
@@ -488,7 +492,18 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         
         # Handle different formats
         processed_data = []
-        if isinstance(data, dict):
+        
+        # Handle ThreatFox format (threat IDs as keys)
+        if isinstance(data, dict) and all(key.isdigit() for key in list(data.keys())[:5]):
+            for threat_id, threat_items in data.items():
+                if isinstance(threat_items, list):
+                    for item in threat_items:
+                        if isinstance(item, dict):
+                            item_copy = item.copy()
+                            item_copy['threat_id'] = threat_id
+                            processed_data.append(item_copy)
+        # Handle regular JSON array or dict with 'data' field
+        elif isinstance(data, dict):
             for key, value in data.items():
                 if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
                     for item in value:
@@ -517,12 +532,18 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         else:
             content_str = content.decode('utf-8', errors='replace')
         
-        # Skip comment lines
+        # Skip comment lines at the beginning
         lines = content_str.splitlines()
         clean_lines = []
+        headers_found = False
+        
         for line in lines:
-            if not line.strip().startswith('#'):
-                clean_lines.append(line)
+            if line.strip().startswith('#'):
+                continue
+            # Once we find a non-comment line, we've found the headers or data
+            if not headers_found and not line.strip().startswith('#'):
+                headers_found = True
+            clean_lines.append(line)
         
         if not clean_lines:
             return []
@@ -535,6 +556,7 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
         csv_data = list(reader)
         
+        # Remove empty rows
         csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
         
         return csv_data
@@ -576,101 +598,116 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
     normalized = []
     
     for record in records:
-        # Handle different feed formats
-        if 'ioc_value' in record and 'ioc_type' in record:
-            # ThreatFox format
-            value = record['ioc_value']
-            ioc_type = record['ioc_type']
+        try:
+            # Handle ThreatFox format
+            if 'ioc_value' in record and 'ioc_type' in record:
+                value = record['ioc_value']
+                ioc_type = record['ioc_type']
+                
+                tags = record.get('tags', '')
+                if isinstance(tags, str):
+                    tags = [t.strip() for t in tags.split(',') if t.strip()]
+                elif not isinstance(tags, list):
+                    tags = []
+                
+                indicator = {
+                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "value": value,
+                    "type": ioc_type,
+                    "source": feed_name,
+                    "feed_id": feed_name,
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "confidence": int(record.get('confidence_level', 50)),
+                    "tags": tags,
+                    "description": f"Indicator from {feed_name}",
+                    "threat_type": record.get('threat_type'),
+                    "threat_id": record.get('threat_id'),
+                    "malware": record.get('malware'),
+                    "malware_printable": record.get('malware_printable'),
+                    "first_seen": record.get('first_seen_utc'),
+                    "last_seen": record.get('last_seen_utc'),
+                    "raw_data": json.dumps(record)
+                }
+                
+            # Handle URLhaus format (CSV with 'url' column)
+            elif 'url' in record and (feed_name.lower() == 'urlhaus' or 'threat' in record):
+                value = record['url']
+                
+                tags = record.get('tags', '')
+                if isinstance(tags, str):
+                    tags = [t.strip() for t in tags.split(',') if t.strip()]
+                elif not isinstance(tags, list):
+                    tags = []
+                
+                indicator = {
+                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "value": value,
+                    "type": 'url',
+                    "source": feed_name,
+                    "feed_id": feed_name,
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "confidence": 80 if record.get('url_status') == 'online' else 60,
+                    "tags": tags,
+                    "description": f"URL from {feed_name}",
+                    "threat_type": record.get('threat', 'malware_download'),
+                    "first_seen": record.get('dateadded'),
+                    "last_seen": record.get('last_online'),
+                    "raw_data": json.dumps(record)
+                }
+                
+            # Handle PhishTank format
+            elif 'url' in record and (feed_name.lower() == 'phishtank' or 'phish_id' in record):
+                value = record['url']
+                
+                indicator = {
+                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "value": value,
+                    "type": 'url',
+                    "source": feed_name,
+                    "feed_id": feed_name,
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "confidence": 90 if record.get('verified') == 'yes' else 70,
+                    "tags": ['phishing', 'verified'] if record.get('verified') == 'yes' else ['phishing'],
+                    "description": f"Phishing URL from {feed_name}",
+                    "threat_type": 'phishing',
+                    "first_seen": record.get('submission_time'),
+                    "last_seen": record.get('verification_time'),
+                    "raw_data": json.dumps(record)
+                }
+                
+            else:
+                # Generic format
+                value = record.get('value') or record.get('indicator') or record.get('ioc') or ''
+                if not value:
+                    continue
+                    
+                indicator = {
+                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "value": value,
+                    "type": record.get('type') or DataProcessor.determine_ioc_type(value),
+                    "source": feed_name,
+                    "feed_id": feed_name,
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "confidence": int(record.get('confidence', 50)),
+                    "tags": record.get('tags', []) if isinstance(record.get('tags'), list) else [],
+                    "description": record.get('description', f"Indicator from {feed_name}"),
+                    "raw_data": json.dumps(record)
+                }
             
-            tags = record.get('tags', '')
-            if isinstance(tags, str):
-                tags = [t.strip() for t in tags.split(',') if t.strip()]
-            
-            indicator = {
-                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-                "value": value,
-                "type": ioc_type,
-                "source": feed_name,
-                "feed_id": feed_name,
-                "created_at": datetime.datetime.utcnow().isoformat(),
-                "confidence": record.get('confidence_level', 50),
-                "tags": tags,
-                "description": f"Indicator from {feed_name}",
-                "threat_type": record.get('threat_type'),
-                "malware": record.get('malware'),
-                "first_seen": record.get('first_seen_utc'),
-                "last_seen": record.get('last_seen_utc'),
-                "raw_data": json.dumps(record)
-            }
-            
-        elif 'url' in record and 'threat' in record:
-            # URLhaus format
-            value = record['url']
-            
-            tags = record.get('tags', '')
-            if isinstance(tags, str):
-                tags = [t.strip() for t in tags.split(',') if t.strip()]
-            
-            indicator = {
-                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-                "value": value,
-                "type": 'url',
-                "source": feed_name,
-                "feed_id": feed_name,
-                "created_at": datetime.datetime.utcnow().isoformat(),
-                "confidence": 80 if record.get('url_status') == 'online' else 60,
-                "tags": tags,
-                "description": f"URL from {feed_name}",
-                "threat_type": record.get('threat'),
-                "first_seen": record.get('dateadded'),
-                "last_seen": record.get('last_online'),
-                "raw_data": json.dumps(record)
-            }
-            
-        elif 'url' in record:
-            # PhishTank format
-            value = record['url']
-            
-            indicator = {
-                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-                "value": value,
-                "type": 'url',
-                "source": feed_name,
-                "feed_id": feed_name,
-                "created_at": datetime.datetime.utcnow().isoformat(),
-                "confidence": 90 if record.get('verified') == 'yes' else 70,
-                "tags": ['phishing', 'verified'] if record.get('verified') == 'yes' else ['phishing'],
-                "description": f"Phishing URL from {feed_name}",
-                "threat_type": 'phishing',
-                "first_seen": record.get('submission_time'),
-                "last_seen": record.get('verification_time'),
-                "raw_data": json.dumps(record)
-            }
-            
-        else:
-            # Generic format
-            value = record.get('value') or record.get('indicator') or ''
-            if not value:
+            if not indicator['value']:
                 continue
                 
-            indicator = {
-                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-                "value": value,
-                "type": record.get('type') or DataProcessor.determine_ioc_type(value),
-                "source": feed_name,
-                "feed_id": feed_name,
-                "created_at": datetime.datetime.utcnow().isoformat(),
-                "confidence": record.get('confidence', 50),
-                "tags": record.get('tags', []),
-                "description": record.get('description', f"Indicator from {feed_name}"),
-                "raw_data": json.dumps(record)
-            }
-        
-        if not indicator['value']:
-            continue
+            # Ensure confidence is an integer
+            if not isinstance(indicator['confidence'], int):
+                indicator['confidence'] = 50
+                
+            normalized.append(indicator)
             
-        normalized.append(indicator)
+        except Exception as e:
+            logger.warning(f"Error normalizing record from {feed_name}: {str(e)}")
+            continue
     
+    logger.info(f"Normalized {len(normalized)} records from {feed_name}")
     return normalized
 
 # -------------------- Main Processing --------------------
@@ -711,6 +748,12 @@ def process_feed(feed_config: Dict) -> Dict:
         headers = feed_config.get("headers", {})
         timeout = feed_config.get("timeout", 60)
         
+        # Add specific headers for PhishTank if needed
+        if feed_id == "phishtank":
+            headers["User-Agent"] = f"ThreatIntelligencePlatform/{Config.VERSION}"
+            # Respect rate limiting - add delay if needed
+            time.sleep(2)
+        
         content_type, content = download_feed(url, headers, timeout)
         if not content:
             result["error"] = "Failed to download feed data"
@@ -719,7 +762,7 @@ def process_feed(feed_config: Dict) -> Dict:
         result["content_type"] = content_type
         
         # Store raw data
-        storage_path = feed_config.get("storage_path", f"feeds/{feed_name}")
+        storage_path = feed_config.get("storage_path", f"feeds/{feed_id}")
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
         format_type = feed_config.get("format", "")
@@ -761,7 +804,7 @@ def process_feed(feed_config: Dict) -> Dict:
             return result
         
         # Normalize data
-        normalized_data = normalize_indicators(parsed_data, feed_name)
+        normalized_data = normalize_indicators(parsed_data, feed_id)
         
         if not normalized_data:
             logger.info(f"No records to process in feed '{feed_name}'")
