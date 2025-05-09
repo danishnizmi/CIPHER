@@ -26,7 +26,7 @@ app = Flask(__name__)
 # Add proxy middleware to handle Cloud Run reverse proxy
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Basic configuration - fixed for Cloud Run with cloud-based sessions
+# Basic configuration - optimized for Cloud Run
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
     SESSION_COOKIE_SECURE=True,  # Enable for Cloud Run (HTTPS)
@@ -35,30 +35,29 @@ app.config.update(
     PREFERRED_URL_SCHEME='https',
     SERVER_NAME=None,
     APPLICATION_ROOT=None,
-    PERMANENT_SESSION_LIFETIME=43200,
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
+    PERMANENT_SESSION_LIFETIME=3600,  # 1 hour session
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB max request size
     WTF_CSRF_ENABLED=True,
     WTF_CSRF_SECRET_KEY=os.environ.get('SECRET_KEY', 'dev-secret-key'),
     WTF_CSRF_TIME_LIMIT=3600,
-    # Cloud-based session configuration
+    # Minimal session configuration
     SESSION_COOKIE_NAME='_threat_session',
     SESSION_COOKIE_DOMAIN=None,
     SESSION_COOKIE_PATH='/',
-    SESSION_REFRESH_EACH_REQUEST=False,
-    SESSION_USE_SIGNER=True,
-    SESSION_KEY_PREFIX='threat_intel:',
-    REMEMBER_COOKIE_DURATION=43200,
-    REMEMBER_COOKIE_SECURE=True,
-    REMEMBER_COOKIE_HTTPONLY=True,
-    REMEMBER_COOKIE_REFRESH_EACH_REQUEST=False,
-    SESSION_PROTECTION='basic'
+    SESSION_REFRESH_EACH_REQUEST=False
 )
 
-# Initialize CSRF protection
+# Initialize CSRF protection (keeping it for forms in the frontend)
 csrf = CSRFProtect(app)
 
 # Setup CORS
-CORS(app)
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-API-Key"]
+    }
+})
 
 # Setup rate limiting
 limiter = Limiter(
@@ -146,15 +145,46 @@ def internal_server_error(e):
 def handle_bad_request(e):
     """Handle 400 errors including CSRF errors."""
     logger.error(f"400 error: {str(e)}")
-    if 'CSRF' in str(e):
-        if request.path.startswith('/api/'):
-            return jsonify({'error': 'CSRF validation failed', 'message': 'Invalid or missing CSRF token'}), 400
-        return redirect(url_for('frontend.login'))
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Bad request', 'message': str(e)}), 400
+    
+    # For CSRF errors on web interface, show error page instead of redirecting to non-existent login
+    error_message = str(e)
+    if 'CSRF' in error_message:
+        error_message = "CSRF validation failed. Please refresh the page and try again."
+    
     return render_template('500.html', 
                          error_code=400, 
-                         error_message=f"Bad Request: {str(e)}"), 400
+                         error_message=f"Bad Request: {error_message}"), 400
+
+@app.errorhandler(403)
+def handle_forbidden(e):
+    """Handle 403 errors."""
+    logger.error(f"403 error: {str(e)}")
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Forbidden', 'message': 'Access denied'}), 403
+    return render_template('500.html', 
+                         error_code=403, 
+                         error_message="Access Denied"), 403
+
+@app.errorhandler(429)
+def handle_rate_limit(e):
+    """Handle rate limit errors."""
+    logger.warning(f"Rate limit exceeded: {request.url}")
+    if request.path.startswith('/api/'):
+        return jsonify({
+            'error': 'Too many requests', 
+            'message': 'Rate limit exceeded. Please try again later.'
+        }), 429
+    return render_template('500.html', 
+                         error_code=429, 
+                         error_message="Too Many Requests. Please try again later."), 429
+
+# Root route handler
+@app.route('/')
+def index():
+    """Root route handler."""
+    return redirect(url_for('frontend.dashboard'))
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
