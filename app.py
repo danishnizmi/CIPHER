@@ -200,23 +200,30 @@ def initialize_platform():
             else:
                 logger.warning("BigQuery tables initialization reported issues")
         
-        # 4. Register blueprints
-        from api import api_blueprint
-        from frontend import frontend_app as frontend_blueprint, format_datetime
-        
-        app.register_blueprint(api_blueprint, url_prefix='/api')
-        app.register_blueprint(frontend_blueprint)
-        
-        # Register template filters
-        app.template_filter('datetime')(format_datetime)
-        
-        # 5. Register event handlers
-        if hasattr(frontend_blueprint, '_deferred_functions'):
-            for func in frontend_blueprint._deferred_functions:
-                if hasattr(func, '__name__') and func.__name__ == 'register_event_handlers':
-                    func({'app': app})
-        
-        logger.info("Blueprints and event handlers registered")
+        # 4. Register blueprints with error handling
+        try:
+            from api import api_blueprint
+            from frontend import frontend_app as frontend_blueprint, format_datetime
+            
+            app.register_blueprint(api_blueprint, url_prefix='/api')
+            app.register_blueprint(frontend_blueprint)
+            
+            # Register template filters
+            app.template_filter('datetime')(format_datetime)
+            
+            # 5. Register event handlers
+            if hasattr(frontend_blueprint, '_deferred_functions'):
+                for func in frontend_blueprint._deferred_functions:
+                    if hasattr(func, '__name__') and func.__name__ == 'register_event_handlers':
+                        func({'app': app})
+            
+            logger.info("Blueprints and event handlers registered successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to register blueprints: {str(e)}")
+            logger.error(traceback.format_exc())
+            service_manager.update_status('app', ServiceStatus.ERROR, f"Blueprint registration failed: {str(e)}")
+            return False
         
         # 6. Update service status
         service_manager.update_status('app', ServiceStatus.READY)
@@ -295,6 +302,13 @@ def index():
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
+    # Check if frontend blueprint is registered
+    if 'frontend.dashboard' not in app.view_functions:
+        logger.warning("Frontend blueprint not registered, showing initialization message")
+        return render_template('500.html', 
+                             error_code=503, 
+                             error_message="Service is initializing. Please wait a moment and refresh."), 503
+    
     if status['overall'] == ServiceStatus.READY.value:
         return redirect(url_for('frontend.dashboard'))
     else:
@@ -313,7 +327,12 @@ def shutdown_services(error=None):
 if __name__ != '__main__':
     success = initialize_platform()
     if not success:
-        logger.error("Platform initialization failed")
+        logger.error("Platform initialization failed - application may not work correctly")
+        # Log detailed status
+        service_manager = Config.get_service_manager()
+        status = service_manager.get_status()
+        logger.error(f"Service status: {json.dumps(status, indent=2)}")
+        # Continue anyway to show error page, but the app will be in degraded state
     else:
         logger.info("Platform initialized successfully")
 
@@ -324,8 +343,8 @@ if __name__ == '__main__':
         success = initialize_platform()
         
         if not success:
-            logger.error("Platform initialization failed, exiting")
-            sys.exit(1)
+            logger.error("Platform initialization failed, starting in degraded mode")
+            # Continue to start the app so we can show error pages
         
         port = int(os.environ.get('PORT', 8080))
         app.run(
