@@ -66,36 +66,36 @@ spec:
           value: 'true'
         - name: AUTO_ANALYZE
           value: 'false'
+        - name: NLP_ENABLED
+          value: 'true'
+        - name: ANALYSIS_ENABLED
+          value: 'true'
+        - name: BIGQUERY_MAX_BYTES_BILLED
+          value: '104857600'
         - name: API_KEY
           valueFrom:
             secretKeyRef:
               key: latest
               name: api-keys
-        - name: SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              key: latest
-              name: auth-config
         resources:
           limits:
             cpu: '2'
             memory: 2Gi
+          requests:
+            cpu: '1'
+            memory: 1Gi
         volumeMounts:
         - name: tmp
           mountPath: /tmp
         - name: app-data
           mountPath: /app/data
+        - name: app-cache
+          mountPath: /app/cache
         - name: api-keys-volume
           mountPath: /app/secrets/api-keys
           readOnly: true
-        - name: auth-config-volume
-          mountPath: /app/secrets/auth-config
-          readOnly: true
         - name: feed-config-volume
           mountPath: /app/secrets/feed-config
-          readOnly: true
-        - name: admin-password-volume
-          mountPath: /app/secrets/admin-password
           readOnly: true
         startupProbe:
           httpGet:
@@ -112,25 +112,33 @@ spec:
           periodSeconds: 30
           timeoutSeconds: 5
           failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
       volumes:
       - name: tmp
         emptyDir:
           medium: Memory
+          sizeLimit: 512Mi
       - name: app-data
         emptyDir:
           medium: Memory
+          sizeLimit: 1Gi
+      - name: app-cache
+        emptyDir:
+          medium: Memory
+          sizeLimit: 512Mi
       - name: api-keys-volume
         secret:
           secretName: api-keys
-      - name: auth-config-volume
-        secret:
-          secretName: auth-config
       - name: feed-config-volume
         secret:
           secretName: feed-config
-      - name: admin-password-volume
-        secret:
-          secretName: admin-initial-password
   traffic:
   - percent: 100
     latestRevision: true
