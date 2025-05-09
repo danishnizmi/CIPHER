@@ -94,13 +94,53 @@ def clear_api_cache(prefix: str = None):
 
 @lru_cache(maxsize=1)
 def get_api_key() -> str:
-    """Get API key from config."""
+    """Get API key from config with proper handling."""
+    # First try to get from Config class
     api_key = getattr(Config, 'API_KEY', None)
-    if not api_key:
-        api_keys_config = config.get_cached_config('api-keys') if hasattr(config, 'get_cached_config') else None
-        if api_keys_config and 'platform_api_key' in api_keys_config:
-            api_key = api_keys_config['platform_api_key']
-    return api_key or os.environ.get('API_KEY', '')
+    
+    if api_key and api_key != 'default-api-key':
+        logger.debug(f"Using API key from Config: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+        return api_key
+    
+    # Try from environment variable
+    env_api_key = os.environ.get('API_KEY')
+    if env_api_key:
+        logger.debug(f"Using API key from environment: {env_api_key[:4]}...{env_api_key[-4:] if len(env_api_key) > 8 else ''}")
+        return env_api_key
+    
+    # Try from cached config
+    if hasattr(config, 'get_cached_config'):
+        api_keys_config = config.get_cached_config('api-keys')
+        if api_keys_config:
+            logger.debug(f"API keys config type: {type(api_keys_config)}")
+            
+            # Handle case where api_keys_config might be a JSON string
+            if isinstance(api_keys_config, str):
+                # Check if it's a raw API key
+                if not api_keys_config.startswith('{'):
+                    logger.debug("Using api_keys_config as raw API key")
+                    return api_keys_config.strip()
+                
+                # Try to parse as JSON
+                try:
+                    api_keys_config = json.loads(api_keys_config.strip())
+                    logger.debug("Parsed api_keys_config as JSON")
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Failed to parse api_keys_config as JSON: {e}")
+                    # If it's not valid JSON, use it as is
+                    return api_keys_config.strip()
+            
+            # If it's a dict, get the platform_api_key
+            if isinstance(api_keys_config, dict):
+                api_key = api_keys_config.get('platform_api_key')
+                if api_key:
+                    logger.debug(f"Using platform_api_key from config: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+                    return api_key
+    
+    # Fallback to default
+    default_key = 'default-api-key'
+    logger.warning(f"Using default API key: {default_key}")
+    return default_key
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
@@ -112,15 +152,20 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         base_url = request.url_root.rstrip('/')
         url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # Add API key
+        # Add API key - ensure it's a clean string
         headers = {"Content-Type": "application/json"}
-        api_key = get_api_key()
-        if api_key:
+        api_key = get_api_key().strip()
+        
+        # Log the API key being used for debugging
+        logger.debug(f"API request to {endpoint} using API key: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+        
+        if api_key and api_key != 'default-api-key':
             headers["X-API-Key"] = api_key
         
         # Make request with optimized retries
         max_retries = 3
         start_time = time.time()
+        response = None
         
         for attempt in range(max_retries):
             try:
@@ -132,8 +177,8 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
                 # Break on success or specific failure
                 if response.status_code < 500:
                     break
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                pass
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
                 
             # Exponential backoff
             if attempt < max_retries - 1:
@@ -145,17 +190,23 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
             logger.info(f"Slow API request ({request_time:.2f}s): {method} {url}")
         
         # Handle response
-        if not response or response.status_code != 200:
-            logger.warning(f"API request failed: {getattr(response, 'status_code', 'No response')} - {getattr(response, 'text', '')[:100]}")
+        if not response:
+            logger.error(f"No response received for API request: {method} {url}")
+            return {"error": "No response from API"}
+        
+        if response.status_code != 200:
+            logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
             return {
-                "error": f"API request failed with status {getattr(response, 'status_code', 'unknown')}",
-                "status_code": getattr(response, 'status_code', 500)
+                "error": f"API request failed with status {response.status_code}",
+                "status_code": response.status_code,
+                "message": response.text[:200]
             }
         
         # Parse JSON response
         try:
             return response.json() if response.text else {}
         except json.JSONDecodeError:
+            logger.error(f"Invalid JSON response from {endpoint}: {response.text[:100]}")
             return {"error": "Invalid JSON response"}
     
     except Exception as e:
@@ -179,10 +230,28 @@ def dashboard(view=None):
         current_view = view or request.args.get('view', 'dashboard')
         days = int(request.args.get('days', '30'))
         
-        # Base context
+        # Initialize context with all required default values
         context = {
             'current_view': current_view,
             'days': days,
+            'threat_score': 50,  # Default threat score
+            'feed_trend': 0,
+            'ioc_trend': 0,
+            'analysis_trend': 0,
+            'activity_dates': [],
+            'activity_counts': [],
+            'ioc_type_labels': [],
+            'ioc_type_values': [],
+            'top_iocs': [],
+            'geo_stats': [],
+            'ai_summary': None,
+            'threat_summary': {'overall_score': 50},  # Default threat summary
+            'stats': {
+                'feeds': {'total_sources': 0},
+                'iocs': {'total': 0, 'types': []},
+                'analyses': {'total_analyses': 0},
+                'timestamp': datetime.utcnow().isoformat()
+            }
         }
         
         # Set page metadata
@@ -216,50 +285,69 @@ def dashboard(view=None):
             'page_icon': metadata['icon']
         })
         
-        # Load statistics
-        stats_response = api_request('stats', params={"days": days}) or {}
-        
-        # Ensure stats structure
-        context['stats'] = {
-            'feeds': stats_response.get('feeds', {'total_sources': 0}),
-            'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
-            'analyses': stats_response.get('analyses', {'total_analyses': 0}),
-            'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
-        }
-        
-        # Calculate trends
-        context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
-        context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
-        context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
-        
-        # IOC type data
-        context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
-        context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+        # Load statistics with error handling
+        stats_response = api_request('stats', params={"days": days})
+        if not stats_response or 'error' in stats_response:
+            logger.warning(f"Failed to load stats: {stats_response}")
+        else:
+            # Update stats in context
+            context['stats'] = {
+                'feeds': stats_response.get('feeds', {'total_sources': 0}),
+                'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
+                'analyses': stats_response.get('analyses', {'total_analyses': 0}),
+                'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
+            }
+            
+            # Calculate trends safely
+            context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0) or 0
+            context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0) or 0
+            context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0) or 0
+            
+            # IOC type data
+            ioc_types = stats_response.get('iocs', {}).get('types', [])
+            context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
+            context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
         
         # Load view-specific data
         if current_view == 'feeds':
-            feeds_response = api_request('feeds') or {}
-            context['feed_items'] = feeds_response.get('feed_details', [])
+            feeds_response = api_request('feeds')
+            if not feeds_response or 'error' in feeds_response:
+                context['feed_items'] = []
+                if feeds_response and 'error' in feeds_response:
+                    flash(f"Error loading feeds: {feeds_response['error']}", 'warning')
+            else:
+                context['feed_items'] = feeds_response.get('feed_details', [])
             
         elif current_view == 'iocs':
-            iocs_response = api_request('iocs', params={"days": days}) or {}
-            context['ioc_items'] = iocs_response.get('records', [])
+            iocs_response = api_request('iocs', params={"days": days})
+            if not iocs_response or 'error' in iocs_response:
+                context['ioc_items'] = []
+                if iocs_response and 'error' in iocs_response:
+                    flash(f"Error loading IOCs: {iocs_response['error']}", 'warning')
+            else:
+                context['ioc_items'] = iocs_response.get('records', [])
             
         elif current_view == 'ai-analysis':
             # Load AI analysis data
-            ai_response = api_request('ai/analyses', params={"days": days}) or {}
-            context['ai_analyses'] = ai_response
-            context['last_ai_analysis'] = ai_response.get('last_run_time')
+            ai_response = api_request('ai/analyses', params={"days": days})
+            if not ai_response or 'error' in ai_response:
+                context['ai_analyses'] = {}
+                context['last_ai_analysis'] = None
+                if ai_response and 'error' in ai_response:
+                    flash(f"Error loading AI analysis: {ai_response['error']}", 'warning')
+            else:
+                context['ai_analyses'] = ai_response
+                context['last_ai_analysis'] = ai_response.get('last_run_time')
             
         else:
-            # Dashboard view
+            # Dashboard view - ensure all required data is present
             # Date range for activity chart
             today = datetime.now().date()
             date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
             context['activity_dates'] = date_range
             
             # Activity data
-            if 'visualization_data' in stats_response and 'daily_counts' in stats_response['visualization_data']:
+            if stats_response and 'visualization_data' in stats_response and 'daily_counts' in stats_response['visualization_data']:
                 counts = [0] * len(date_range)
                 date_to_index = {date: idx for idx, date in enumerate(date_range)}
                 
@@ -269,23 +357,28 @@ def dashboard(view=None):
                 
                 context['activity_counts'] = counts
             else:
+                # Default activity data
                 context['activity_counts'] = [20 + i * 2 for i in range(days)]
             
             # Load additional dashboard data
-            iocs_response = api_request('iocs', params={"days": days, "limit": 10}) or {}
-            context['top_iocs'] = iocs_response.get('records', [])
+            iocs_response = api_request('iocs', params={"days": days, "limit": 10})
+            if iocs_response and 'error' not in iocs_response:
+                context['top_iocs'] = iocs_response.get('records', [])
             
-            threat_summary = api_request('threat_summary', params={"days": days}) or {}
-            context['threat_summary'] = threat_summary
-            context['threat_score'] = threat_summary.get('overall_score', 75)
+            threat_summary = api_request('threat_summary', params={"days": days})
+            if threat_summary and 'error' not in threat_summary:
+                context['threat_summary'] = threat_summary
+                context['threat_score'] = threat_summary.get('overall_score', 50)
             
             # AI summary for dashboard
-            ai_summary = api_request('ai/summary') or {}
-            context['ai_summary'] = ai_summary
+            ai_summary = api_request('ai/summary')
+            if ai_summary and 'error' not in ai_summary:
+                context['ai_summary'] = ai_summary
             
             # Geographic statistics
-            geo_stats = api_request('iocs/geo', params={"days": days}) or {}
-            context['geo_stats'] = geo_stats.get('countries', [])
+            geo_stats = api_request('iocs/geo', params={"days": days})
+            if geo_stats and 'error' not in geo_stats:
+                context['geo_stats'] = geo_stats.get('countries', [])
         
         return render_template('dashboard.html', **context, now=datetime.now())
     
@@ -320,8 +413,8 @@ def dynamic_content_detail(content_type, identifier):
         
         # Get detailed data
         data = api_request(endpoint)
-        if data.get('error'):
-            flash(f'Error loading {content_type}: {data["error"]}', 'danger')
+        if not data or data.get('error'):
+            flash(f'Error loading {content_type}: {data.get("error", "Unknown error")}', 'danger')
             return redirect(url_for('frontend.dashboard'))
         
         context['data'] = data
@@ -329,7 +422,10 @@ def dynamic_content_detail(content_type, identifier):
         # Get related items if applicable
         if content_type == 'ioc':
             related = api_request(f'iocs/{identifier}/related')
-            context['related_items'] = related.get('items', [])
+            if related and 'error' not in related:
+                context['related_items'] = related.get('items', [])
+            else:
+                context['related_items'] = []
             context['view_type'] = 'iocs'
             context['icon'] = 'fingerprint'
         elif content_type == 'feed':
