@@ -32,9 +32,6 @@ API_CACHE_TIMESTAMP = {}
 
 # Configure logging
 logger = logging.getLogger('frontend')
-LOG_LEVEL = getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO)
-logging.basicConfig(level=LOG_LEVEL, 
-                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
 
 # Create Blueprint for the frontend module
 frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
@@ -92,54 +89,22 @@ def clear_api_cache(prefix: str = None):
 
 # ====== API Interaction Functions ======
 
-@lru_cache(maxsize=1)
 def get_api_key() -> str:
-    """Get API key from config with proper handling."""
-    # First try to get from Config class
-    api_key = getattr(Config, 'API_KEY', None)
-    
+    """Get API key from config with simplified logic."""
+    # 1. Check environment variable
+    api_key = os.environ.get('API_KEY')
     if api_key and api_key != 'default-api-key':
-        logger.debug(f"Using API key from Config: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+        logger.debug(f"Using API key from environment: {api_key[:4]}...")
         return api_key
     
-    # Try from environment variable
-    env_api_key = os.environ.get('API_KEY')
-    if env_api_key:
-        logger.debug(f"Using API key from environment: {env_api_key[:4]}...{env_api_key[-4:] if len(env_api_key) > 8 else ''}")
-        return env_api_key
+    # 2. Check Config class
+    if hasattr(Config, 'API_KEY') and Config.API_KEY and Config.API_KEY != 'default-api-key':
+        logger.debug(f"Using API key from Config: {Config.API_KEY[:4]}...")
+        return Config.API_KEY
     
-    # Try from cached config
-    if hasattr(config, 'get_cached_config'):
-        api_keys_config = config.get_cached_config('api-keys')
-        if api_keys_config:
-            logger.debug(f"API keys config type: {type(api_keys_config)}")
-            
-            # Handle case where api_keys_config might be a JSON string
-            if isinstance(api_keys_config, str):
-                # Check if it's a raw API key
-                if not api_keys_config.startswith('{'):
-                    logger.debug("Using api_keys_config as raw API key")
-                    return api_keys_config.strip()
-                
-                # Try to parse as JSON
-                try:
-                    api_keys_config = json.loads(api_keys_config.strip())
-                    logger.debug("Parsed api_keys_config as JSON")
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.error(f"Failed to parse api_keys_config as JSON: {e}")
-                    # If it's not valid JSON, use it as is
-                    return api_keys_config.strip()
-            
-            # If it's a dict, get the platform_api_key
-            if isinstance(api_keys_config, dict):
-                api_key = api_keys_config.get('platform_api_key')
-                if api_key:
-                    logger.debug(f"Using platform_api_key from config: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
-                    return api_key
-    
-    # Fallback to default
+    # 3. Return default
     default_key = 'default-api-key'
-    logger.warning(f"Using default API key: {default_key}")
+    logger.debug(f"Using default API key: {default_key}")
     return default_key
 
 @api_cache(timeout=CACHE_TIMEOUT)
@@ -152,12 +117,11 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         base_url = request.url_root.rstrip('/')
         url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # Add API key - ensure it's a clean string
+        # Add API key 
         headers = {"Content-Type": "application/json"}
-        api_key = get_api_key().strip()
+        api_key = get_api_key()
         
-        # Log the API key being used for debugging
-        logger.debug(f"API request to {endpoint} using API key: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+        logger.debug(f"API request to {endpoint} using API key: {api_key[:4]}...")
         
         if api_key and api_key != 'default-api-key':
             headers["X-API-Key"] = api_key
@@ -289,6 +253,7 @@ def dashboard(view=None):
         stats_response = api_request('stats', params={"days": days})
         if not stats_response or 'error' in stats_response:
             logger.warning(f"Failed to load stats: {stats_response}")
+            # Leave default stats in place
         else:
             # Update stats in context
             context['stats'] = {
@@ -866,10 +831,14 @@ def periodic_cache_cleanup():
             logger.error(f"Error in cache cleanup: {str(e)}")
             time.sleep(60)
 
-# Start cache cleanup thread
-cleanup_thread = threading.Thread(target=periodic_cache_cleanup)
-cleanup_thread.daemon = True
-cleanup_thread.start()
+# Start cache cleanup thread (only when module is imported, not running main)
+if __name__ != "__main__":
+    cleanup_thread = threading.Thread(target=periodic_cache_cleanup)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+    logger.info("Frontend module initialized successfully")
 
-# Initialize module
-logger.info("Frontend module initialized successfully")
+# Module testing functionality
+if __name__ == "__main__":
+    logger.info("Frontend module running in test mode")
+    # Add any test functionality here
