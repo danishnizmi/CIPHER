@@ -13,7 +13,7 @@ from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, abort, g, current_app, send_file, Response
+from flask import flash, abort, g, current_app, send_file, Response, session
 
 # Import config module for centralized configuration
 from config import Config, ServiceManager, ServiceStatus
@@ -85,8 +85,8 @@ def safe_report_exception(e=None):
 
 def cache_key(func_name: str, **params) -> str:
     """Generate cache key excluding sensitive parameters."""
-    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()) 
-                        if k not in ['api_key', 'token', 'password'])
+    param_str = "&".join(f"{k}={str(v)}" for k, v in sorted(params.items()) 
+                        if k not in ['api_key', 'token', 'password'] and v is not None)
     return f"{func_name}:{param_str}"
 
 def cache_valid(key: str, timeout: int = CACHE_TIMEOUT) -> bool:
@@ -173,9 +173,9 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                    response = requests.get(url, headers=headers, params=params, timeout=30)
                 else:
-                    response = requests.post(url, headers=headers, json=data, timeout=10)
+                    response = requests.post(url, headers=headers, json=data, timeout=30)
                 
                 # Break on success or non-retriable failure
                 if response.status_code < 500 or response.status_code == 401:
@@ -395,6 +395,172 @@ def dashboard(view=None):
         safe_report_exception(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
+
+# Additional routes that were missing
+
+@frontend_app.route('/feeds')
+def feeds():
+    """Redirect to dashboard feeds view."""
+    return redirect(url_for('frontend.dashboard', view='feeds'))
+
+@frontend_app.route('/iocs')
+def iocs():
+    """Redirect to dashboard IOCs view."""
+    return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/ioc/<ioc_id>/analyze', methods=['GET', 'POST'])
+def analyze_ioc(ioc_id):
+    """Trigger AI analysis for a specific IOC."""
+    try:
+        if request.method == 'POST':
+            result = api_request('admin/analyze', method='POST', data={
+                'indicator_ids': [ioc_id],
+                'force_reanalysis': True
+            })
+            
+            if result.get('error'):
+                flash(f'Error triggering IOC analysis: {result["error"]}', 'danger')
+            else:
+                flash('AI analysis triggered successfully for IOC', 'success')
+                clear_api_cache('ai')
+            
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        # For GET, trigger analysis and redirect
+        result = api_request('admin/analyze', method='POST', data={
+            'indicator_ids': [ioc_id],
+            'force_reanalysis': True
+        })
+        
+        if result.get('error'):
+            flash(f'Error triggering IOC analysis: {result["error"]}', 'danger')
+        else:
+            flash('AI analysis triggered successfully for IOC', 'success')
+        
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_ioc: {str(e)}")
+        safe_report_exception(e)
+        flash('Error triggering IOC analysis', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/export/iocs')
+def export_iocs():
+    """Export IOCs in various formats."""
+    try:
+        format_type = request.args.get('format', 'json')
+        days = int(request.args.get('days', 30))
+        ioc_type = request.args.get('type', '')
+        
+        # Get IOCs from API
+        params = {"days": days, "limit": 10000}
+        if ioc_type:
+            params['type'] = ioc_type
+            
+        iocs_response = api_request('iocs/export', params=params)
+        
+        if not iocs_response or 'error' in iocs_response:
+            flash('Error exporting IOCs', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        iocs = iocs_response.get('records', [])
+        
+        # Format based on requested type
+        if format_type == 'json':
+            return Response(
+                json.dumps(iocs, indent=2),
+                mimetype='application/json',
+                headers={'Content-Disposition': 'attachment; filename=iocs.json'}
+            )
+        elif format_type == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            if iocs:
+                writer = csv.DictWriter(output, fieldnames=iocs[0].keys())
+                writer.writeheader()
+                writer.writerows(iocs)
+            
+            return Response(
+                output.getvalue(),
+                mimetype='text/csv',
+                headers={'Content-Disposition': 'attachment; filename=iocs.csv'}
+            )
+        elif format_type == 'txt':
+            lines = []
+            for ioc in iocs:
+                lines.append(f"{ioc.get('type', 'unknown')}: {ioc.get('value', '')}")
+            
+            return Response(
+                '\n'.join(lines),
+                mimetype='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=iocs.txt'}
+            )
+        else:
+            flash('Unsupported export format', 'warning')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+            
+    except Exception as e:
+        logger.error(f"Error exporting IOCs: {str(e)}")
+        safe_report_exception(e)
+        flash('Error exporting IOCs', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/<content_type>/<path:identifier>')
+def dynamic_content_detail(content_type, identifier):
+    """Dynamic content detail view."""
+    try:
+        # Map content type to view
+        content_map = {
+            'ioc': 'ioc_detail',
+            'feed': 'feed_detail',
+            'analysis': 'analysis_detail',
+            'campaign': 'campaign_detail',
+            'threat_actor': 'threat_actor_detail'
+        }
+        
+        if content_type not in content_map:
+            abort(404)
+        
+        # Get data from API
+        endpoint = f"{content_type}s/{identifier}"
+        data = api_request(endpoint)
+        
+        if not data or 'error' in data:
+            flash(f'Error loading {content_type} details', 'danger')
+            return redirect(url_for('frontend.dashboard'))
+        
+        # Get related items if applicable
+        related_items = []
+        if content_type == 'ioc':
+            related_response = api_request(f"{endpoint}/related")
+            if related_response and 'error' not in related_response:
+                related_items = related_response.get('items', [])
+        
+        context = {
+            'content_type': content_type,
+            'identifier': identifier,
+            'data': data,
+            'related_items': related_items,
+            'view_type': content_type + 's',
+            'icon': {
+                'ioc': 'fingerprint',
+                'feed': 'rss',
+                'analysis': 'brain',
+                'campaign': 'bullhorn',
+                'threat_actor': 'user-secret'
+            }.get(content_type, 'info-circle')
+        }
+        
+        return render_template('detail.html', **context)
+    
+    except Exception as e:
+        logger.error(f"Error in dynamic_content_detail: {str(e)}")
+        safe_report_exception(e)
+        flash(f'Error loading {content_type} details', 'danger')
+        return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/ingest_threat_data', methods=['GET', 'POST'])
 def ingest_threat_data():
