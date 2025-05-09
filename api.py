@@ -23,16 +23,40 @@ logger = logging.getLogger(__name__)
 # Initialize API blueprint
 api_blueprint = Blueprint('api', __name__)
 
-# Initialize GCP clients
-bq_client = initialize_bigquery()
-storage_client = initialize_storage()
-publisher, subscriber = initialize_pubsub()
-
 # Initialize rate limiter for cost efficiency
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["1000 per day", "100 per hour"]
 )
+
+# Global clients (will be initialized by app.py)
+_bq_client = None
+_storage_client = None
+_publisher = None
+_subscriber = None
+
+def get_clients():
+    """Get initialized clients from the application context."""
+    global _bq_client, _storage_client, _publisher, _subscriber
+    
+    # First try to get from already initialized globals
+    if _bq_client and _storage_client and _publisher and _subscriber:
+        return _bq_client, _storage_client, _publisher, _subscriber
+    
+    # Otherwise try to initialize
+    _bq_client = initialize_bigquery()
+    _storage_client = initialize_storage()
+    _publisher, _subscriber = initialize_pubsub()
+    
+    return _bq_client, _storage_client, _publisher, _subscriber
+
+def set_clients(bq_client, storage_client, publisher, subscriber):
+    """Set the clients (called by app.py during initialization)."""
+    global _bq_client, _storage_client, _publisher, _subscriber
+    _bq_client = bq_client
+    _storage_client = storage_client
+    _publisher = publisher
+    _subscriber = subscriber
 
 # -------------------- Helper Functions --------------------
 
@@ -50,9 +74,11 @@ def format_bq_row(row: Dict) -> Dict:
 
 def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
     """Execute BigQuery query and return formatted results with improved error handling."""
+    bq_client, _, _, _ = get_clients()
+    
     if not bq_client:
         logger.error("BigQuery client not initialized")
-        raise Exception("Database connection unavailable")
+        return []  # Return empty result instead of raising
     
     job_config = bigquery.QueryJobConfig(
         query_parameters=params if params else []
@@ -67,14 +93,15 @@ def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
         if Config.ENVIRONMENT != 'production':
             logger.error(traceback.format_exc())
         report_error(e)
-        # Return empty result instead of raising, to prevent API errors
         return []
 
-def publish_to_topic(topic_name: str, message_data: Dict) -> str:
+def publish_to_topic(topic_name: str, message_data: Dict) -> Optional[str]:
     """Publish message to Pub/Sub topic."""
+    _, _, publisher, _ = get_clients()
+    
     if not publisher:
         logger.error("Pub/Sub publisher not initialized")
-        raise Exception("Pub/Sub connection unavailable")
+        return None
     
     topic_path = publisher.topic_path(Config.GCP_PROJECT, topic_name)
     message = json.dumps(message_data).encode("utf-8")
@@ -85,10 +112,12 @@ def publish_to_topic(topic_name: str, message_data: Dict) -> str:
         return message_id
     except Exception as e:
         logger.error(f"Error publishing to {topic_name}: {str(e)}")
-        raise
+        return None
 
 def check_table_exists(table_name: str) -> bool:
     """Check if BigQuery table exists with improved reliability."""
+    bq_client, _, _, _ = get_clients()
+    
     if not bq_client:
         return False
         
@@ -98,7 +127,11 @@ def check_table_exists(table_name: str) -> bool:
             return False
             
         # Parse full table ID
-        project_id, dataset_id, table_id = full_table_id.split('.')
+        parts = full_table_id.split('.')
+        if len(parts) != 3:
+            return False
+            
+        project_id, dataset_id, table_id = parts
         
         # Get table reference
         dataset_ref = bq_client.dataset(dataset_id, project=project_id)
@@ -122,6 +155,8 @@ def check_table_exists(table_name: str) -> bool:
 
 def verify_bigquery_tables() -> bool:
     """Verify that all required BigQuery tables exist and are queryable."""
+    bq_client, _, _, _ = get_clients()
+    
     if not bq_client:
         logger.error("BigQuery client not initialized")
         return False
@@ -146,7 +181,7 @@ def api_health_check():
     """Health check endpoint for readiness probe."""
     try:
         health_data = {
-            'status': 'ready',
+            'status': 'unknown',
             'timestamp': datetime.utcnow().isoformat(),
             'api_version': Config.API_VERSION,
             'version': Config.VERSION,
@@ -155,8 +190,11 @@ def api_health_check():
         
         # Add service dependency status
         dependencies = {}
+        all_healthy = True
         
         # Check BigQuery connection if client initialized
+        bq_client, storage_client, publisher, subscriber = get_clients()
+        
         if bq_client:
             try:
                 # Simple query to test connection
@@ -166,14 +204,18 @@ def api_health_check():
                 dependencies['bigquery'] = 'connected'
                 
                 # Check required tables
-                for table_key in Config.BIGQUERY_TABLES:
-                    table_exists = check_table_exists(table_key)
-                    dependencies[f'table_{table_key}'] = 'exists' if table_exists else 'missing'
+                tables_exist = verify_bigquery_tables()
+                dependencies['tables'] = 'ready' if tables_exist else 'missing'
+                if not tables_exist:
+                    all_healthy = False
+                    
             except Exception as e:
                 logger.warning(f"BigQuery health check failed: {str(e)}")
                 dependencies['bigquery'] = 'error'
+                all_healthy = False
         else:
             dependencies['bigquery'] = 'not_initialized'
+            all_healthy = False
             
         # Check Cloud Storage connection if client initialized
         if storage_client:
@@ -182,11 +224,15 @@ def api_health_check():
                 bucket_name = Config.GCS_BUCKET
                 bucket = storage_client.bucket(bucket_name)
                 dependencies['storage'] = 'connected' if bucket.exists() else 'bucket_not_found'
+                if dependencies['storage'] != 'connected':
+                    all_healthy = False
             except Exception as e:
                 logger.warning(f"Storage health check failed: {str(e)}")
                 dependencies['storage'] = 'error'
+                all_healthy = False
         else:
             dependencies['storage'] = 'not_initialized'
+            all_healthy = False
             
         # Check Pub/Sub connection if client initialized
         if publisher and subscriber:
@@ -196,19 +242,28 @@ def api_health_check():
             except Exception as e:
                 logger.warning(f"Pub/Sub health check failed: {str(e)}")
                 dependencies['pubsub'] = 'error'
+                all_healthy = False
         else:
             dependencies['pubsub'] = 'not_initialized'
+            all_healthy = False
         
         # Add dependencies to health data
         health_data['dependencies'] = dependencies
         
-        return jsonify(health_data), 200
+        # Determine overall status
+        if all_healthy:
+            health_data['status'] = 'healthy'
+            return jsonify(health_data), 200
+        else:
+            health_data['status'] = 'degraded'
+            return jsonify(health_data), 503
+            
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         report_error(e)
         return jsonify({
             'status': 'error',
-            'message': 'Service is not ready',
+            'message': 'Service health check failed',
             'timestamp': datetime.utcnow().isoformat()
         }), 503
 
@@ -221,16 +276,7 @@ def get_stats():
     try:
         days = int(request.args.get('days', 30))
         
-        # First verify BigQuery tables exist
-        if not verify_bigquery_tables():
-            # Try to trigger initialization through ingestion module
-            try:
-                from ingestion import initialize_bigquery_tables
-                initialize_bigquery_tables()
-            except Exception as import_err:
-                logger.error(f"Error importing initialization function: {str(import_err)}")
-        
-        # Get actual stats from BigQuery
+        # Default stats structure
         stats = {
             'feeds': {'total_sources': 0, 'growth_rate': 0},
             'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
@@ -240,6 +286,11 @@ def get_stats():
                 'daily_counts': []
             }
         }
+        
+        # Check if tables exist before querying
+        if not verify_bigquery_tables():
+            logger.warning("BigQuery tables not ready, returning default stats")
+            return jsonify(stats)
         
         # Query for feeds count
         feed_query = """
@@ -357,21 +408,22 @@ def get_feeds():
                 'update_frequency': feed.get('update_frequency', 'daily')
             }
             
-            # Query for feed record count
-            feed_query = """
-            SELECT 
-                COUNT(*) as count,
-                MAX(created_at) as last_updated
-            FROM `{table_id}`
-            WHERE source = @feed_id
-            """.format(table_id=Config.get_table_name('indicators'))
-            
-            params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed.get('id'))]
-            feed_results = execute_bq_query(feed_query, params)
-            
-            if feed_results:
-                feed_detail['record_count'] = feed_results[0].get('count', 0)
-                feed_detail['last_updated'] = feed_results[0].get('last_updated', None)
+            # Query for feed record count if tables exist
+            if verify_bigquery_tables():
+                feed_query = """
+                SELECT 
+                    COUNT(*) as count,
+                    MAX(created_at) as last_updated
+                FROM `{table_id}`
+                WHERE source = @feed_id
+                """.format(table_id=Config.get_table_name('indicators'))
+                
+                params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed.get('id'))]
+                feed_results = execute_bq_query(feed_query, params)
+                
+                if feed_results:
+                    feed_detail['record_count'] = feed_results[0].get('count', 0)
+                    feed_detail['last_updated'] = feed_results[0].get('last_updated', None)
             
             feed_details.append(feed_detail)
         
@@ -396,6 +448,18 @@ def get_iocs():
         limit = int(request.args.get('limit', 100))
         offset = int(request.args.get('offset', 0))
         ioc_type = request.args.get('type', '')
+        
+        # Default response structure
+        default_response = {
+            'records': [],
+            'count': 0,
+            'total_count': 0
+        }
+        
+        # Check if tables exist
+        if not verify_bigquery_tables():
+            logger.warning("Tables not ready, returning empty response")
+            return jsonify(default_response)
         
         # Build where clause
         where_conditions = ["created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {} DAY)".format(days)]
@@ -449,6 +513,9 @@ def get_iocs():
 def get_ioc_detail(ioc_id):
     """Get detailed information about a specific IOC."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         query = """
         SELECT *
         FROM `{table_id}`
@@ -483,6 +550,9 @@ def get_ioc_detail(ioc_id):
 def get_related_iocs(ioc_id):
     """Get IOCs related to a specific IOC."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         # First get the IOC details
         ioc_query = """
         SELECT *
@@ -537,6 +607,9 @@ def get_related_iocs(ioc_id):
 def export_iocs():
     """Export IOCs in bulk."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         days = int(request.args.get('days', 30))
         ioc_type = request.args.get('type', '')
         limit = int(request.args.get('limit', 10000))
@@ -579,6 +652,9 @@ def export_iocs():
 def get_ai_analyses():
     """Get AI analysis results."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         days = int(request.args.get('days', 30))
         
         # Query for recent analyses
@@ -627,15 +703,16 @@ def get_ai_analyses():
         }
         
         # Determine overall threat level
-        critical_ratio = summary['critical_indicators'] / max(1, summary['total_indicators'])
-        if critical_ratio > 0.3:
-            summary['overall_threat_level'] = 'Critical'
-        elif critical_ratio > 0.1:
-            summary['overall_threat_level'] = 'High'
-        elif critical_ratio > 0.05:
-            summary['overall_threat_level'] = 'Medium'
-        else:
-            summary['overall_threat_level'] = 'Low'
+        if len(results) > 0:
+            critical_ratio = summary['critical_indicators'] / summary['total_indicators']
+            if critical_ratio > 0.3:
+                summary['overall_threat_level'] = 'Critical'
+            elif critical_ratio > 0.1:
+                summary['overall_threat_level'] = 'High'
+            elif critical_ratio > 0.05:
+                summary['overall_threat_level'] = 'Medium'
+            else:
+                summary['overall_threat_level'] = 'Low'
         
         # Get last run time
         last_run_query = """
@@ -658,6 +735,9 @@ def get_ai_analyses():
 def get_ai_analysis_detail(analysis_id):
     """Get detailed AI analysis result."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         # For this implementation, analysis_id is the IOC id
         query = """
         SELECT *
@@ -702,6 +782,14 @@ def get_ai_analysis_detail(analysis_id):
 def get_ai_summary():
     """Get AI analysis summary for dashboard."""
     try:
+        if not verify_bigquery_tables():
+            # Return default values if tables aren't ready
+            return jsonify({
+                'risk_level': 'Unknown',
+                'critical_indicators': 0,
+                'trending_threats': 'None detected'
+            })
+            
         # Get recent high-risk indicators
         summary_query = """
         SELECT 
@@ -738,6 +826,9 @@ def get_ai_summary():
 def generate_ai_report():
     """Generate AI analysis report."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         req_data = request.get_json() or {}
         report_type = req_data.get('report_type', 'summary')
         period = req_data.get('period', 'monthly')
@@ -831,6 +922,15 @@ def generate_ai_report():
 def get_threat_summary():
     """Get threat summary data."""
     try:
+        if not verify_bigquery_tables():
+            # Return default values if tables aren't ready
+            return jsonify({
+                'high_risk_indicators': 0,
+                'recent_detections': 0,
+                'overall_score': 50,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            
         days = int(request.args.get('days', 30))
         
         # Query for high-risk indicators
@@ -895,6 +995,9 @@ def get_threat_summary():
 def get_geo_stats():
     """Get geographical IOC distribution."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({'countries': []})
+            
         days = int(request.args.get('days', 30))
         
         # Query for geographical distribution
@@ -945,6 +1048,9 @@ def get_geo_stats():
 def search():
     """Search across all threat intelligence data."""
     try:
+        if not verify_bigquery_tables():
+            return jsonify({"error": "Service not ready"}), 503
+            
         query_string = request.args.get('query', '')
         if not query_string:
             return jsonify({"error": "Query parameter required"}), 400
@@ -1011,11 +1117,18 @@ def trigger_ingest():
         
         message_id = publish_to_topic(Config.PUBSUB_TOPIC, message_data)
         
-        return jsonify({
-            'status': 'success',
-            'message': 'Ingestion triggered successfully',
-            'message_id': message_id
-        })
+        if message_id:
+            return jsonify({
+                'status': 'success',
+                'message': 'Ingestion triggered successfully',
+                'message_id': message_id
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to trigger ingestion'
+            }), 500
+            
     except Exception as e:
         logger.error(f"Error triggering ingestion: {str(e)}")
         report_error(e)
@@ -1043,11 +1156,18 @@ def trigger_analysis():
         
         message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message_data)
         
-        return jsonify({
-            'status': 'success',
-            'message': 'Analysis triggered successfully',
-            'message_id': message_id
-        })
+        if message_id:
+            return jsonify({
+                'status': 'success',
+                'message': 'Analysis triggered successfully',
+                'message_id': message_id
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to trigger analysis'
+            }), 500
+            
     except Exception as e:
         logger.error(f"Error triggering analysis: {str(e)}")
         report_error(e)
@@ -1095,11 +1215,17 @@ def initialize_tables():
             
             message_id = publish_to_topic(Config.PUBSUB_TOPIC, message_data)
             
-            return jsonify({
-                'status': 'success',
-                'message': 'BigQuery tables initialization triggered via Pub/Sub',
-                'message_id': message_id
-            })
+            if message_id:
+                return jsonify({
+                    'status': 'success',
+                    'message': 'BigQuery tables initialization triggered via Pub/Sub',
+                    'message_id': message_id
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to trigger table initialization'
+                }), 500
         except Exception as pub_err:
             logger.error(f"Error triggering table initialization via Pub/Sub: {str(pub_err)}")
             return jsonify({'error': f"Failed to initialize tables: {str(pub_err)}"}), 500
