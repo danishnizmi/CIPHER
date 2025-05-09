@@ -5,30 +5,388 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header mb-6">
-    <h1 class="text-2xl font-bold mb-2 flex items-center">
-        <i class="fas fa-info-circle text-accent mr-3"></i>
-        {{ content_type|title }} Details
-    </h1>
-    <p class="text-gray-600">Details for {{ identifier }}</p>
+<div class="page-header mb-6 flex justify-between items-center">
+    <div>
+        <h1 class="text-2xl font-bold mb-2 flex items-center">
+            <i class="fas fa-{{ icon|default('info-circle') }} text-accent mr-3"></i>
+            {{ content_type|title }} Details
+        </h1>
+        <p class="text-gray-600">Detailed view for {{ identifier }}</p>
+    </div>
+    <div class="flex space-x-2">
+        {% if content_type == 'ioc' and not data.ai_analyzed %}
+        <a href="{{ url_for('frontend.analyze_ioc', ioc_id=data.id) }}" class="btn btn-primary">
+            <i class="fas fa-brain mr-2"></i> Run AI Analysis
+        </a>
+        {% endif %}
+        <a href="{{ url_for('frontend.dashboard', view=view_type|default('dashboard')) }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left mr-2"></i> Back
+        </a>
+    </div>
 </div>
 
-<div class="panel">
+<!-- Main Content Panel -->
+<div class="panel mb-6">
     <div class="panel-header">
         <h3 class="panel-title">
             <i class="fas fa-database panel-icon"></i>
-            Information
+            Core Information
         </h3>
+        <div class="text-sm text-gray-500">
+            Last updated: {{ data.last_updated|default(data.created_at)|datetime }}
+        </div>
     </div>
     <div class="p-6">
-        <p class="text-gray-500">Detailed view for {{ content_type }}: {{ identifier }}</p>
-        <p class="mt-4 text-sm text-gray-400">This is a placeholder detail page. Full implementation coming soon.</p>
+        {% if content_type == 'ioc' %}
+        <!-- IOC Details -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Basic Information</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Type:</dt>
+                        <dd><span class="badge-ioc badge-{{ data.type }}">{{ data.type }}</span></dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Value:</dt>
+                        <dd class="font-mono text-sm break-all">{{ data.value }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Source:</dt>
+                        <dd>{{ data.source|default('Unknown') }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">First Seen:</dt>
+                        <dd>{{ data.first_seen|default(data.created_at)|datetime }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Last Seen:</dt>
+                        <dd>{{ data.last_seen|default(data.updated_at)|datetime }}</dd>
+                    </div>
+                </dl>
+            </div>
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Risk Assessment</h4>
+                <dl class="space-y-3">
+                    <div>
+                        <dt class="font-medium text-gray-600 mb-1">Risk Score:</dt>
+                        <dd>
+                            <div class="flex items-center">
+                                <div class="w-32 bg-gray-200 rounded-full h-3 mr-3">
+                                    <div class="h-3 rounded-full {% if data.risk_score > 75 %}bg-red-600{% elif data.risk_score > 50 %}bg-orange-500{% elif data.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" style="width: {{ data.risk_score|default(50) }}%"></div>
+                                </div>
+                                <span class="font-semibold">{{ data.risk_score|default(50) }}/100</span>
+                            </div>
+                        </dd>
+                    </div>
+                    <div>
+                        <dt class="font-medium text-gray-600 mb-1">Confidence:</dt>
+                        <dd>
+                            <div class="flex items-center">
+                                <div class="w-32 bg-gray-200 rounded-full h-3 mr-3">
+                                    <div class="bg-accent h-3 rounded-full" style="width: {{ data.confidence|default(50) }}%"></div>
+                                </div>
+                                <span class="font-semibold">{{ data.confidence|default(50) }}%</span>
+                            </div>
+                        </dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Severity:</dt>
+                        <dd>
+                            <span class="severity-badge {{ data.severity|default('medium') }}">
+                                {{ data.severity|default('Medium')|title }}
+                            </span>
+                        </dd>
+                    </div>
+                </dl>
+            </div>
+        </div>
+        
+        {% if data.description %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Description</h4>
+            <p class="text-gray-600">{{ data.description }}</p>
+        </div>
+        {% endif %}
+        
+        {% if data.tags %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Tags</h4>
+            <div class="flex flex-wrap gap-2">
+                {% for tag in data.tags %}
+                <span class="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">{{ tag }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+        
+        {% elif content_type == 'feed' %}
+        <!-- Feed Details -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Feed Information</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Name:</dt>
+                        <dd>{{ data.name }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">ID:</dt>
+                        <dd class="font-mono text-sm">{{ data.id }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Status:</dt>
+                        <dd>
+                            {% if data.enabled %}
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                    Active
+                                </span>
+                            {% else %}
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                                    Disabled
+                                </span>
+                            {% endif %}
+                        </dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Format:</dt>
+                        <dd>{{ data.format|upper }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Type:</dt>
+                        <dd>{{ data.type|title }}</dd>
+                    </div>
+                </dl>
+            </div>
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Statistics</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Records:</dt>
+                        <dd>{{ data.record_count|default(0) }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Last Updated:</dt>
+                        <dd>{{ data.last_updated|default('Never')|datetime }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Update Frequency:</dt>
+                        <dd>{{ data.update_frequency|title }}</dd>
+                    </div>
+                </dl>
+            </div>
+        </div>
+        
+        {% if data.description %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Description</h4>
+            <p class="text-gray-600">{{ data.description }}</p>
+        </div>
+        {% endif %}
+        
+        {% if data.url %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Source URL</h4>
+            <a href="{{ data.url }}" target="_blank" class="text-accent hover:underline">
+                {{ data.url }} <i class="fas fa-external-link-alt text-xs ml-1"></i>
+            </a>
+        </div>
+        {% endif %}
+        
+        {% elif content_type == 'analysis' %}
+        <!-- AI Analysis Details -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Analysis Information</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Analysis ID:</dt>
+                        <dd class="font-mono text-sm">{{ data.id }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Type:</dt>
+                        <dd>{{ data.type|title }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Target:</dt>
+                        <dd class="font-mono text-sm break-all">{{ data.target }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Model Used:</dt>
+                        <dd>{{ data.model|default('Vertex AI') }}</dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Timestamp:</dt>
+                        <dd>{{ data.timestamp|datetime }}</dd>
+                    </div>
+                </dl>
+            </div>
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Results</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Result:</dt>
+                        <dd>
+                            <span class="severity-badge {{ data.result_severity|default('medium') }}">
+                                {{ data.result|title }}
+                            </span>
+                        </dd>
+                    </div>
+                    <div>
+                        <dt class="font-medium text-gray-600 mb-1">Confidence:</dt>
+                        <dd>
+                            <div class="flex items-center">
+                                <div class="w-32 bg-gray-200 rounded-full h-3 mr-3">
+                                    <div class="bg-purple-600 h-3 rounded-full" style="width: {{ data.confidence|default(0) }}%"></div>
+                                </div>
+                                <span class="font-semibold">{{ data.confidence|default(0) }}%</span>
+                            </div>
+                        </dd>
+                    </div>
+                </dl>
+            </div>
+        </div>
+        
+        {% if data.findings %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Findings</h4>
+            <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                <pre class="whitespace-pre-wrap text-sm text-gray-800">{{ data.findings|tojson(indent=2) }}</pre>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if data.recommendations %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Recommendations</h4>
+            <ul class="space-y-2">
+                {% for rec in data.recommendations %}
+                <li class="flex items-start">
+                    <i class="fas fa-check-circle text-green-500 mt-1 mr-2"></i>
+                    <span>{{ rec }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% endif %}
     </div>
 </div>
 
-<div class="mt-6">
-    <a href="{{ url_for('frontend.dashboard') }}" class="btn btn-secondary">
-        <i class="fas fa-arrow-left mr-2"></i> Back to Dashboard
-    </a>
+<!-- AI Analysis Panel (for IOCs) -->
+{% if content_type == 'ioc' and data.ai_analysis %}
+<div class="panel mb-6">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-brain panel-icon text-purple-600"></i>
+            AI Analysis Results
+        </h3>
+        <div class="text-sm text-gray-500">
+            Analyzed: {{ data.ai_analysis.timestamp|datetime }}
+        </div>
+    </div>
+    <div class="p-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Analysis Summary</h4>
+                <p class="text-gray-600">{{ data.ai_analysis.summary }}</p>
+            </div>
+            <div>
+                <h4 class="font-semibold text-gray-700 mb-3">Risk Assessment</h4>
+                <dl class="space-y-2">
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Risk Level:</dt>
+                        <dd>
+                            <span class="severity-badge {{ data.ai_analysis.risk_level|lower }}">
+                                {{ data.ai_analysis.risk_level }}
+                            </span>
+                        </dd>
+                    </div>
+                    <div class="flex">
+                        <dt class="font-medium text-gray-600 w-32">Confidence:</dt>
+                        <dd>{{ data.ai_analysis.confidence }}%</dd>
+                    </div>
+                </dl>
+            </div>
+        </div>
+        
+        {% if data.ai_analysis.indicators %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">Related Indicators Detected</h4>
+            <div class="flex flex-wrap gap-2">
+                {% for indicator in data.ai_analysis.indicators %}
+                <span class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm">
+                    {{ indicator }}
+                </span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if data.ai_analysis.mitre_mapping %}
+        <div class="mt-6">
+            <h4 class="font-semibold text-gray-700 mb-3">MITRE ATT&CK Mapping</h4>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                {% for tactic in data.ai_analysis.mitre_mapping %}
+                <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <div class="font-medium text-gray-800">{{ tactic.name }}</div>
+                    <div class="text-sm text-gray-600">{{ tactic.id }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
 </div>
+{% endif %}
+
+<!-- Related Items Panel -->
+{% if related_items %}
+<div class="panel">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-link panel-icon"></i>
+            Related Items
+        </h3>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="data-table">
+            <thead class="table-header">
+                <tr>
+                    <th>Type</th>
+                    <th>Value</th>
+                    <th>Relationship</th>
+                    <th>Confidence</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody class="table-body">
+                {% for item in related_items %}
+                <tr>
+                    <td>
+                        <span class="badge-ioc badge-{{ item.type }}">{{ item.type }}</span>
+                    </td>
+                    <td>
+                        <a href="{{ url_for('frontend.dynamic_content_detail', content_type=item.type, identifier=item.id) }}" class="text-accent hover:underline">
+                            {{ item.value[:40] }}{{ '...' if item.value|length > 40 else '' }}
+                        </a>
+                    </td>
+                    <td class="text-sm">{{ item.relationship }}</td>
+                    <td>
+                        <div class="w-16 bg-gray-200 rounded-full h-1.5">
+                            <div class="bg-accent h-1.5 rounded-full" style="width: {{ item.confidence }}%"></div>
+                        </div>
+                    </td>
+                    <td>
+                        <a href="{{ url_for('frontend.dynamic_content_detail', content_type=item.type, identifier=item.id) }}" class="text-accent hover:text-accent-dark text-sm">
+                            <i class="fas fa-eye"></i> View
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
 {% endblock %}
