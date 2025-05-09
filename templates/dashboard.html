@@ -470,4 +470,409 @@
                     {% for ioc in ioc_items %}
                     <tr data-type="{{ ioc.type|default('unknown') }}">
                         <td>
-                            <span class="badge-ioc badge-{{ ioc.type|default
+                            <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">{{ ioc.type|default('unknown') }}</span>
+                        </td>
+                        <td>
+                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-accent hover:underline" title="{{ ioc.value }}">
+                                {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
+                            </a>
+                        </td>
+                        <td class="text-sm text-gray-500">
+                            {{ ioc.source|default('Unknown') }}
+                        </td>
+                        <td>
+                            <div class="flex items-center">
+                                <div class="w-16 bg-gray-200 rounded-full h-2 mr-2">
+                                    <div class="h-2 rounded-full {% if ioc.risk_score > 75 %}bg-red-600{% elif ioc.risk_score > 50 %}bg-orange-500{% elif ioc.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" style="width: {{ ioc.risk_score|default(50) }}%"></div>
+                                </div>
+                                <span class="text-sm">{{ ioc.risk_score|default(50) }}</span>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="w-16 bg-gray-200 rounded-full h-1.5">
+                                <div class="bg-accent h-1.5 rounded-full" style="width: {{ ioc.confidence|default(50) }}%"></div>
+                            </div>
+                            <span class="text-xs text-gray-500">{{ ioc.confidence|default(50) }}%</span>
+                        </td>
+                        <td>
+                            {% if ioc.ai_analyzed %}
+                                <span class="text-sm text-purple-600">
+                                    <i class="fas fa-check-circle"></i> Analyzed
+                                </span>
+                            {% else %}
+                                <span class="text-sm text-gray-400">
+                                    <i class="fas fa-clock"></i> Pending
+                                </span>
+                            {% endif %}
+                        </td>
+                        <td class="text-sm text-gray-500">
+                            {{ ioc.first_seen|default(ioc.created_at)|datetime }}
+                        </td>
+                        <td>
+                            <a href="{{ url_for('frontend.analyze_ioc', ioc_id=ioc.id) }}" class="text-purple-600 hover:text-purple-700 text-sm">
+                                <i class="fas fa-brain"></i> Analyze
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-12 text-center">
+            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
+                <i class="fas fa-fingerprint text-accent text-5xl"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">No IOCs Available</h3>
+            <p class="text-gray-600 mb-6">No indicators of compromise have been collected or processed yet.</p>
+            <a href="{{ url_for('frontend.ingest_threat_data') }}" class="btn btn-primary">
+                <i class="fas fa-sync-alt mr-2"></i> Refresh Threat Data
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{% elif current_view == 'ai-analysis' %}
+<!-- AI Analysis View -->
+<div class="panel mb-8">
+    <div class="panel-header">
+        <h3 class="panel-title">
+            <i class="fas fa-brain panel-icon text-purple-600"></i>
+            AI-Powered Threat Analysis
+        </h3>
+        <div class="flex items-center space-x-2">
+            <span class="text-sm text-gray-500">
+                Last run: {{ last_ai_analysis|default('Never')|datetime }}
+            </span>
+            <a href="{{ url_for('frontend.run_ai_analysis') }}" class="btn btn-primary btn-sm">
+                <i class="fas fa-brain mr-1"></i> Run Analysis
+            </a>
+        </div>
+    </div>
+    <div class="p-6">
+        {% if ai_analyses %}
+        <!-- AI Analysis Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-purple-50 rounded-lg p-4 border border-purple-100">
+                <h4 class="font-semibold text-purple-800 mb-2">Overall Threat Level</h4>
+                <div class="text-3xl font-bold text-purple-900">{{ ai_analyses.overall_threat_level|default('Medium') }}</div>
+                <p class="text-sm text-purple-600 mt-1">Analyzed from {{ ai_analyses.total_indicators|default(0) }} indicators</p>
+            </div>
+            <div class="bg-blue-50 rounded-lg p-4 border border-blue-100">
+                <h4 class="font-semibold text-blue-800 mb-2">Emerging Threats</h4>
+                <div class="text-3xl font-bold text-blue-900">{{ ai_analyses.emerging_threats_count|default(0) }}</div>
+                <p class="text-sm text-blue-600 mt-1">New patterns detected</p>
+            </div>
+            <div class="bg-orange-50 rounded-lg p-4 border border-orange-100">
+                <h4 class="font-semibold text-orange-800 mb-2">Critical Indicators</h4>
+                <div class="text-3xl font-bold text-orange-900">{{ ai_analyses.critical_indicators|default(0) }}</div>
+                <p class="text-sm text-orange-600 mt-1">Require immediate attention</p>
+            </div>
+        </div>
+
+        <!-- Threat Patterns Detected -->
+        <div class="mb-8">
+            <h4 class="text-lg font-semibold mb-4">Detected Threat Patterns</h4>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {% for pattern in ai_analyses.threat_patterns|default([]) %}
+                <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                    <h5 class="font-medium text-gray-800 mb-2">{{ pattern.name }}</h5>
+                    <p class="text-sm text-gray-600 mb-3">{{ pattern.description }}</p>
+                    <div class="flex justify-between items-center">
+                        <span class="text-sm text-gray-500">
+                            {{ pattern.indicators_count }} indicators
+                        </span>
+                        <span class="severity-badge {{ pattern.severity }}">
+                            {{ pattern.severity|title }}
+                        </span>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- AI Recommendations -->
+        <div class="mb-8">
+            <h4 class="text-lg font-semibold mb-4">AI Recommendations</h4>
+            <div class="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-6 border border-purple-100">
+                {% if ai_analyses.recommendations %}
+                <ul class="space-y-3">
+                    {% for rec in ai_analyses.recommendations %}
+                    <li class="flex items-start">
+                        <div class="flex-shrink-0 w-6 h-6 bg-purple-600 text-white rounded-full flex items-center justify-center mr-3 mt-0.5">
+                            <i class="fas fa-chevron-right text-xs"></i>
+                        </div>
+                        <div>
+                            <p class="text-gray-800">{{ rec.text }}</p>
+                            <p class="text-sm text-gray-600 mt-1">Priority: {{ rec.priority }}</p>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-gray-600">No specific recommendations available at this time.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Recent AI Analysis Results -->
+        <div>
+            <h4 class="text-lg font-semibold mb-4">Recent Analysis Results</h4>
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="table-header">
+                        <tr>
+                            <th>Analysis ID</th>
+                            <th>Type</th>
+                            <th>Target</th>
+                            <th>Result</th>
+                            <th>Confidence</th>
+                            <th>Timestamp</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="table-body">
+                        {% for analysis in ai_analyses.recent_analyses|default([]) %}
+                        <tr>
+                            <td class="text-sm font-mono">{{ analysis.id[:8] }}...</td>
+                            <td>
+                                <span class="text-sm bg-purple-100 text-purple-800 px-2 py-1 rounded">
+                                    {{ analysis.type }}
+                                </span>
+                            </td>
+                            <td class="text-sm">{{ analysis.target[:30] }}{{ '...' if analysis.target|length > 30 else '' }}</td>
+                            <td>
+                                <span class="severity-badge {{ analysis.result_severity }}">
+                                    {{ analysis.result }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="flex items-center">
+                                    <div class="w-16 bg-gray-200 rounded-full h-1.5 mr-2">
+                                        <div class="bg-purple-600 h-1.5 rounded-full" style="width: {{ analysis.confidence }}%"></div>
+                                    </div>
+                                    <span class="text-sm">{{ analysis.confidence }}%</span>
+                                </div>
+                            </td>
+                            <td class="text-sm text-gray-500">{{ analysis.timestamp|datetime }}</td>
+                            <td>
+                                <a href="{{ url_for('frontend.dynamic_content_detail', content_type='analysis', identifier=analysis.id) }}" class="text-accent hover:text-accent-dark text-sm">
+                                    <i class="fas fa-eye"></i> View
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="text-center py-12">
+            <div class="inline-block p-6 rounded-full bg-purple-50 mb-4">
+                <i class="fas fa-brain text-purple-600 text-5xl"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-800 mb-2">No AI Analysis Available</h3>
+            <p class="text-gray-600 mb-6">AI analysis has not been performed yet or no data is available for analysis.</p>
+            <a href="{{ url_for('frontend.run_ai_analysis') }}" class="btn btn-primary">
+                <i class="fas fa-brain mr-2"></i> Run AI Analysis
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Loading Template -->
+<div id="loading-template" style="display: none;">
+    <div class="loading-overlay fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50">
+        <div class="text-center">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-accent"></div>
+            <p class="mt-4 text-gray-700">Loading data...</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Time Range Dropdown Toggle
+    const timeRangeButton = document.getElementById('timeRangeButton');
+    const timeRangeDropdown = document.getElementById('timeRangeDropdown');
+    
+    if (timeRangeButton && timeRangeDropdown) {
+        timeRangeButton.addEventListener('click', () => {
+            timeRangeDropdown.classList.toggle('hidden');
+        });
+        
+        document.addEventListener('click', (event) => {
+            if (!timeRangeButton.contains(event.target)) {
+                timeRangeDropdown.classList.add('hidden');
+            }
+        });
+    }
+    
+    // IOC Types Chart
+    const iocTypesData = {
+        labels: {{ ioc_type_labels|default([])|tojson }},
+        values: {{ ioc_type_values|default([])|tojson }}
+    };
+    
+    if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0) {
+        Plotly.newPlot('iocTypesChart', [{
+            labels: iocTypesData.labels,
+            values: iocTypesData.values,
+            type: 'pie',
+            hole: 0.4,
+            textinfo: 'label+percent',
+            marker: {
+                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
+            }
+        }], {
+            margin: { t: 0, b: 30, l: 30, r: 30 },
+            showlegend: true,
+            legend: { orientation: 'h', y: -0.2 }
+        });
+    }
+    
+    // Activity Chart
+    const activityData = {
+        dates: {{ activity_dates|default([])|tojson }},
+        counts: {{ activity_counts|default([])|tojson }}
+    };
+    
+    if (document.getElementById('activityChart') && activityData.dates.length > 0) {
+        Plotly.newPlot('activityChart', [{
+            x: activityData.dates,
+            y: activityData.counts,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: '#3b82f6', shape: 'spline', width: 3 },
+            marker: { color: '#3b82f6', size: 6 },
+            fill: 'tozeroy',
+            fillcolor: 'rgba(59, 130, 246, 0.1)'
+        }], {
+            margin: { t: 10, b: 30, l: 40, r: 10 },
+            xaxis: { title: '' },
+            yaxis: { title: 'Records' },
+            hovermode: 'closest'
+        });
+    }
+    
+    // Mini Trend Charts
+    const createSparkline = (elementId, trend = 1, color = '#3b82f6') => {
+        const element = document.getElementById(elementId);
+        if (!element) return;
+        
+        const y = [];
+        for (let i = 0; i < 10; i++) {
+            y.push(25 + (i * trend) + (Math.random() * 10));
+        }
+        
+        Plotly.newPlot(elementId, [{
+            y: y,
+            type: 'scatter',
+            mode: 'lines',
+            fill: 'tozeroy',
+            fillcolor: `${color}15`,
+            line: { color: color, width: 2, shape: 'spline' }
+        }], {
+            margin: { t: 0, r: 0, l: 0, b: 0 },
+            xaxis: { showticklabels: false, showgrid: false, zeroline: false },
+            yaxis: { showticklabels: false, showgrid: false, zeroline: false },
+            showlegend: false,
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)'
+        });
+    };
+    
+    // Create sparklines if elements exist
+    if (document.getElementById('feedTrendChart')) createSparkline('feedTrendChart', {{ feed_trend|default(0) }}, '#3b82f6');
+    if (document.getElementById('iocTrendChart')) createSparkline('iocTrendChart', {{ ioc_trend|default(0) }}, '#ef4444');
+    if (document.getElementById('analysisTrendChart')) createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#9333ea');
+    if (document.getElementById('threatScoreChart')) createSparkline('threatScoreChart', -0.5, '#f97316');
+    
+    // Threat Map
+    if (document.getElementById('threatMap')) {
+        const locations = ['USA', 'RUS', 'CHN', 'IND', 'BRA', 'DEU', 'GBR', 'FRA', 'ITA', 'CAN'];
+        const sizes = [30, 25, 20, 15, 10, 8, 7, 6, 5, 4];
+        const colors = ['#ef4444', '#ef4444', '#f97316', '#f97316', '#fbbf24', '#fbbf24', '#4ade80', '#4ade80', '#4ade80', '#4ade80'];
+        
+        Plotly.newPlot('threatMap', [{
+            type: 'scattergeo',
+            mode: 'markers',
+            locations: locations,
+            marker: {
+                size: sizes,
+                color: colors,
+                opacity: 0.7,
+                line: { color: 'black', width: 1 }
+            },
+            text: locations.map((loc, i) => `${loc}: ${sizes[i]} threats`),
+            hoverinfo: 'text'
+        }], {
+            geo: {
+                scope: 'world',
+                showland: true,
+                landcolor: '#F5F5F5',
+                countrycolor: '#D3D3D3',
+                showcountries: true,
+                projection: { type: 'natural earth' }
+            },
+            margin: { l: 0, r: 0, t: 0, b: 0 }
+        }, {responsive: true});
+        
+        // Remove loading indicator
+        const loadingDiv = document.querySelector('#threatMap > div:first-child');
+        if (loadingDiv) loadingDiv.style.display = 'none';
+    }
+    
+    // IOC Search and Filtering
+    if (document.getElementById('iocSearch')) {
+        const iocSearch = document.getElementById('iocSearch');
+        const iocTypeFilter = document.getElementById('iocTypeFilter');
+        const iocTable = document.getElementById('iocTable');
+        
+        const filterTable = () => {
+            if (!iocTable) return;
+            
+            const searchTerm = iocSearch.value.toLowerCase();
+            const selectedType = iocTypeFilter.value;
+            const rows = iocTable.querySelectorAll('tr');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                const rowType = row.getAttribute('data-type');
+                
+                const matchesSearch = text.includes(searchTerm);
+                const matchesType = !selectedType || rowType === selectedType;
+                
+                row.style.display = matchesSearch && matchesType ? '' : 'none';
+            });
+        };
+        
+        iocSearch.addEventListener('keyup', filterTable);
+        iocTypeFilter.addEventListener('change', filterTable);
+    }
+    
+    // Export IOCs functionality
+    if (document.getElementById('exportIocs')) {
+        document.getElementById('exportIocs').addEventListener('click', () => {
+            window.location.href = '{{ url_for("frontend.export_iocs") }}';
+        });
+    }
+    
+    // Handle action buttons with loading states
+    document.querySelectorAll('[href*="/ingest_threat_data"], [href*="/run_ai_analysis"]').forEach(link => {
+        link.addEventListener('click', function(e) {
+            if (this.classList.contains('btn')) {
+                e.preventDefault();
+                const originalHtml = this.innerHTML;
+                this.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Processing...';
+                this.classList.add('pointer-events-none', 'opacity-75');
+                window.location.href = this.href;
+            }
+        });
+    });
+</script>
+{% endblock %}
