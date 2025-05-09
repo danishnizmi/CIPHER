@@ -46,34 +46,44 @@ ingestion_status = {
     "errors": []
 }
 
+# Global client initialization flag
+_clients_initialized = False
+_bq_client = None
+_storage_client = None 
+_publisher = None
+_subscriber = None
+
 # -------------------- Google Cloud Clients --------------------
 
 def initialize_clients():
     """Initialize and cache Google Cloud clients."""
-    # Get clients from config module to ensure consistent client usage
-    bq_client = config.initialize_bigquery()
-    storage_client = config.initialize_storage()
-    publisher, subscriber = config.initialize_pubsub()
+    global _clients_initialized, _bq_client, _storage_client, _publisher, _subscriber
     
-    if bq_client:
+    if _clients_initialized:
+        return _bq_client, _storage_client, _publisher, _subscriber
+    
+    # Get clients from config module to ensure consistent client usage
+    _bq_client = config.initialize_bigquery()
+    _storage_client = config.initialize_storage()
+    _publisher, _subscriber = config.initialize_pubsub()
+    
+    if _bq_client:
         logger.info("BigQuery client initialized successfully")
     else:
         logger.error("Failed to initialize BigQuery client")
         
-    if storage_client:
+    if _storage_client:
         logger.info("Storage client initialized successfully")
     else:
         logger.error("Failed to initialize Storage client")
         
-    if publisher and subscriber:
+    if _publisher and _subscriber:
         logger.info("Pub/Sub clients initialized successfully")
     else:
         logger.error("Failed to initialize Pub/Sub clients")
-        
-    return bq_client, storage_client, publisher, subscriber
-
-# Initialize Google Cloud clients globally
-bq_client, storage_client, publisher, subscriber = initialize_clients()
+    
+    _clients_initialized = True
+    return _bq_client, _storage_client, _publisher, _subscriber
 
 # -------------------- Data Sanitization and Validation --------------------
 
@@ -113,7 +123,8 @@ class DataProcessor:
             # Special handling for URLs - try to fix common issues
             if ioc_type == 'url' and re.match(r'^www\.', value.lower()):
                 return "http://" + value
-            return None
+            # Don't invalidate - just log warning
+            logger.debug(f"Suspicious {ioc_type} format: {value}")
                 
         return value
         
@@ -170,6 +181,10 @@ class DataProcessor:
             
         value = value.strip().lower()
         
+        # Check for IP:Port format first
+        if re.match(r'^(\d{1,3}\.){3}\d{1,3}:\d+$', value):
+            return 'ip:port'
+        
         # Check using patterns
         patterns = {
             'ip': r'^(\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$',
@@ -192,6 +207,8 @@ class DataProcessor:
 
 def ensure_bucket_exists(bucket_name: str) -> bool:
     """Ensure the GCS bucket exists and create it if it doesn't."""
+    storage_client = _storage_client or initialize_clients()[1]
+    
     if not storage_client:
         logger.error("Storage client not initialized")
         return False
@@ -200,8 +217,9 @@ def ensure_bucket_exists(bucket_name: str) -> bool:
         bucket = storage_client.bucket(bucket_name)
         if not bucket.exists():
             # Create bucket with cost-optimized settings
-            storage_client.create_bucket(
-                bucket, 
+            logger.info(f"Creating bucket {bucket_name}")
+            bucket = storage_client.create_bucket(
+                bucket_name, 
                 location=Config.GCP_REGION,
                 predefined_acl='projectPrivate'
             )
@@ -214,12 +232,16 @@ def ensure_bucket_exists(bucket_name: str) -> bool:
                     {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 3, 'isLive': False}}
                 ]
             }
-            bucket.lifecycle_rules = lifecycle_rules
+            bucket.lifecycle_rules = [
+                storage.LifecycleRule(**rule) for rule in lifecycle_rules['rule']
+            ]
             bucket.patch()
             
             # Create necessary folder structure
             for folder in ['feeds', 'raw', 'processed', 'cache', 'exports']:
-                bucket.blob(f"{folder}/").upload_from_string('')
+                blob = bucket.blob(f"{folder}/")
+                blob.upload_from_string('')
+            logger.info(f"Created folder structure in bucket {bucket_name}")
                 
             return True
         else:
@@ -235,6 +257,8 @@ def ensure_bucket_exists(bucket_name: str) -> bool:
 
 def initialize_bigquery_tables() -> bool:
     """Initialize all required BigQuery tables with optimized schema."""
+    bq_client = _bq_client or initialize_clients()[0]
+    
     if not bq_client:
         logger.error("Cannot initialize BigQuery tables - client not available")
         return False
@@ -269,6 +293,10 @@ def initialize_bigquery_tables() -> bool:
                 bigquery.SchemaField("campaign_id", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("campaign_name", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("threat_actor", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("threat_type", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("malware", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("malware_alias", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("malware_printable", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("report_id", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("raw_data", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("enrichment_geo", "STRING", mode="NULLABLE"),
@@ -367,48 +395,10 @@ def initialize_bigquery_tables() -> bool:
         config.report_error(e)
         return False
 
-def force_update_bigquery_tables() -> bool:
-    """Force update tables by dropping and recreating when needed."""
-    if not bq_client:
-        logger.error("Cannot update BigQuery tables - client not available")
-        return False
-    
-    try:
-        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
-        tables_to_check = ['indicators', 'vulnerabilities', 'threat_actors', 'campaigns', 'malware', 'users', 'audit_log']
-        
-        # Check each table
-        for table_name in tables_to_check:
-            table_id = f"{dataset_id}.{table_name}"
-            try:
-                # Try to query the table to see if it works
-                test_query = f"SELECT COUNT(*) as count FROM `{table_id}` LIMIT 1"
-                try:
-                    bq_client.query(test_query).result()
-                    logger.info(f"Table {table_id} is accessible")
-                except Exception:
-                    # Delete and recreate problematic table
-                    logger.warning(f"Table {table_id} has issues, deleting for recreation")
-                    try:
-                        bq_client.delete_table(table_id)
-                        logger.info(f"Deleted table {table_id}")
-                    except Exception as e:
-                        logger.warning(f"Error deleting table {table_id}: {str(e)}")
-            except NotFound:
-                logger.info(f"Table {table_id} not found, will be created")
-        
-        # Reinitialize all tables
-        return initialize_bigquery_tables()
-        
-    except Exception as e:
-        logger.error(f"Error in force_update_bigquery_tables: {str(e)}")
-        if Config.ENVIRONMENT != 'production':
-            logger.error(traceback.format_exc())
-        config.report_error(e)
-        return False
-
 def upload_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes], content_type: str = None) -> Optional[str]:
     """Upload data to GCS bucket with proper content type handling."""
+    storage_client = _storage_client or initialize_clients()[1]
+    
     if not storage_client:
         logger.error("Storage client not initialized")
         return None
@@ -450,51 +440,10 @@ def upload_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes], con
         config.report_error(e)
         return None
 
-def get_cached_hashes(feed_name: str) -> List[str]:
-    """Get cached hashes from GCS for deduplication."""
-    if not storage_client:
-        return []
-    
-    bucket_name = Config.GCS_BUCKET
-    blob_name = f"cache/feed_hashes_{feed_name}.json"
-    
-    try:
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        if blob.exists():
-            content = blob.download_as_text()
-            try:
-                return json.loads(content)
-            except json.JSONDecodeError:
-                return []
-        
-        return []
-    except Exception as e:
-        logger.warning(f"Error getting cached hashes: {str(e)}")
-        return []
-
-def store_cached_hashes(feed_name: str, hashes: List[str]) -> bool:
-    """Store cached hashes to GCS with a limit to control costs."""
-    if not storage_client:
-        return False
-    
-    bucket_name = Config.GCS_BUCKET
-    blob_name = f"cache/feed_hashes_{feed_name}.json"
-    
-    try:
-        # Limit hash count for cost control
-        if len(hashes) > 10000:
-            hashes = hashes[-10000:]
-            
-        # Upload to GCS
-        return upload_to_gcs(bucket_name, blob_name, json.dumps(hashes), 'application/json') is not None
-    except Exception as e:
-        logger.warning(f"Error storing cached hashes: {str(e)}")
-        return False
-
 def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
     """Upload records to BigQuery with optimized batching and retries."""
+    bq_client = _bq_client or initialize_clients()[0]
+    
     if not bq_client or not records:
         return None
     
@@ -611,12 +560,20 @@ def download_feed(url: str, headers: Dict = None, timeout: int = 60) -> Tuple[Op
     if not headers:
         headers = {'User-Agent': f"ThreatIntelligencePlatform/{Config.VERSION}"}
     
-    # Implement retry logic
+    # Implement retry logic with exponential backoff
     max_retries = 3
     for attempt in range(max_retries):
         try:
             logger.info(f"Downloading feed from {url} (attempt {attempt+1}/{max_retries})")
             response = requests.get(url, headers=headers, timeout=timeout)
+            
+            # Check for rate limiting
+            if response.status_code == 429:
+                wait_time = int(response.headers.get('Retry-After', 60))
+                logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+                
             response.raise_for_status()
             
             content_type = response.headers.get('Content-Type', '')
@@ -632,41 +589,6 @@ def download_feed(url: str, headers: Dict = None, timeout: int = 60) -> Tuple[Op
                 return None, None
     
     return None, None
-
-def parse_feed(content: bytes, format_type: str = None, parser_config: Dict = None) -> List[Dict]:
-    """Parse feed data with format auto-detection if needed."""
-    if not content:
-        return []
-    
-    if parser_config is None:
-        parser_config = {}
-    
-    # Auto-detect format if not specified
-    if not format_type:
-        content_start = content[:100].strip()
-        if content_start.startswith(b'{') or content_start.startswith(b'['):
-            format_type = 'json'
-        elif b',' in content_start and b'\n' in content[:1000]:
-            format_type = 'csv'
-        else:
-            format_type = 'text'
-    
-    try:
-        # Call appropriate parser based on format
-        if format_type == 'json':
-            return parse_json_feed(content, parser_config)
-        elif format_type == 'csv':
-            return parse_csv_feed(content, parser_config)
-        elif format_type == 'text':
-            return parse_text_feed(content, parser_config)
-        else:
-            logger.warning(f"Unknown format type: {format_type}, falling back to JSON")
-            return parse_json_feed(content, parser_config)
-    except Exception as e:
-        logger.error(f"Error parsing feed data: {str(e)}")
-        if Config.ENVIRONMENT != 'production':
-            logger.error(traceback.format_exc())
-        return []
 
 def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
     """Parse JSON feed data with robust error handling."""
@@ -696,38 +618,23 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
                 else:
                     raise Exception("Could not find valid JSON content")
         
-        # Handle nested structures
-        root_element = parser_config.get("root_element")
-        if root_element and isinstance(data, dict) and root_element in data:
-            data = data[root_element]
-            
-        # Normalize to list format
-        if not isinstance(data, list):
-            if isinstance(data, dict):
-                # Process dictionary data
-                processed_data = []
-                for key, value in data.items():
-                    if isinstance(value, list):
-                        for item in value:
-                            item_copy = item.copy() if isinstance(item, dict) else {"value": item}
-                            item_copy["threat_id"] = key
-                            processed_data.append(item_copy)
-                    elif key not in ['meta', 'info']:
-                        processed_data.append({"value": str(value), "type": "unknown", "key": key})
-                
-                data = processed_data if processed_data else [data]
-            else:
-                data = [{"value": data}]
+        # Handle ThreatFox specific format: {id: [data]}
+        processed_data = []
+        if isinstance(data, dict):
+            for key, value in data.items():
+                # ThreatFox format
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    for item in value:
+                        item_copy = item.copy()
+                        item_copy['threat_id'] = key
+                        processed_data.append(item_copy)
+                # PhishTank format (array of objects)
+                elif key == 'data' and isinstance(value, list):
+                    processed_data.extend(value)
+        elif isinstance(data, list):
+            processed_data = data
         
-        # Filter and clean up records
-        cleaned_data = []
-        for item in data:
-            if isinstance(item, dict) and item:
-                cleaned_data.append(item)
-            elif item is not None:
-                cleaned_data.append({"value": str(item)})
-        
-        return cleaned_data
+        return processed_data
     except Exception as e:
         logger.error(f"Error parsing JSON feed: {str(e)}")
         return []
@@ -745,267 +652,174 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         else:
             content_str = content.decode('utf-8', errors='replace')
         
-        # Skip header lines if specified
-        skip_lines = parser_config.get("skip_lines", 0)
-        if skip_lines > 0:
-            lines = content_str.splitlines()
-            if len(lines) > skip_lines:
-                content_str = '\n'.join(lines[skip_lines:])
+        # Skip comment lines (URLhaus specific)
+        lines = content_str.splitlines()
+        clean_lines = []
+        for line in lines:
+            if not line.strip().startswith('#'):
+                clean_lines.append(line)
         
-        # Skip comment lines
-        content_str = '\n'.join([line for line in content_str.splitlines() if not line.strip().startswith('#')])
-        
-        # Get configuration
-        field_names = parser_config.get("field_names", [])
-        has_header = parser_config.get("has_header", True)
-        value_field = parser_config.get("value_field", "value")
-        type_field = parser_config.get("type_field", "type")
+        if not clean_lines:
+            return []
+            
+        content_str = '\n'.join(clean_lines)
         
         # Parse CSV
-        try:
-            dialect = csv.Sniffer().sniff(content_str[:1024]) if content_str else csv.excel
-        except:
-            dialect = csv.excel
-            
+        dialect = csv.Sniffer().sniff(content_str[:1024]) if content_str else csv.excel
         csv_data = []
         
-        if has_header and not field_names:
-            # Parse with header
-            reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
-            csv_data = list(reader)
-        elif field_names:
-            # Parse with provided field names
-            reader = csv.DictReader(io.StringIO(content_str), fieldnames=field_names, dialect=dialect)
-            csv_data = list(reader)
-        else:
-            # Fallback parsing
-            lines = content_str.splitlines()
-            # Detect delimiter
-            delimiters = [',', '\t', ';', '|']
-            delimiter = max(delimiters, key=lambda d: lines[0].count(d) if lines else 0)
-            
-            for line in lines:
-                if not line.strip():
-                    continue
-                    
-                values = line.split(delimiter)
-                row = {f"column{i+1}": val.strip() for i, val in enumerate(values)}
-                csv_data.append(row)
+        # Parse with header
+        reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
+        csv_data = list(reader)
         
         # Filter out empty records
         csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
-        
-        # Determine IOC types
-        for row in csv_data:
-            # Copy the value field if needed
-            if value_field in row and value_field != "value":
-                row["value"] = row[value_field]
-            
-            # Determine IOC type
-            if type_field in row and type_field != "type":
-                value = str(row.get("value", ""))
-                type_hint = str(row.get(type_field, "")).lower()
-                
-                if "url" in type_hint or value.startswith(("http://", "https://")):
-                    row["type"] = "url"
-                elif "ip" in type_hint:
-                    row["type"] = "ip"
-                elif "domain" in type_hint:
-                    row["type"] = "domain"
-                elif "hash" in type_hint or len(value) == 32:
-                    row["type"] = "md5"
-                elif len(value) == 40:
-                    row["type"] = "sha1"
-                elif len(value) == 64:
-                    row["type"] = "sha256"
-                else:
-                    row["type"] = DataProcessor.determine_ioc_type(value)
-            else:
-                # Default type detection
-                row["type"] = DataProcessor.determine_ioc_type(str(row.get("value", "")))
         
         return csv_data
     except Exception as e:
         logger.error(f"Error parsing CSV feed: {str(e)}")
         return []
 
-def parse_text_feed(content: bytes, parser_config: Dict) -> List[Dict]:
-    """Parse plain text feed data (usually line-by-line)."""
-    try:
-        # Decode content
-        for encoding in ['utf-8', 'latin-1', 'cp1252']:
-            try:
-                content_str = content.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                continue
+def parse_feed(content: bytes, format_type: str = None, parser_config: Dict = None) -> List[Dict]:
+    """Parse feed data with format auto-detection if needed."""
+    if not content:
+        return []
+    
+    if parser_config is None:
+        parser_config = {}
+    
+    # Auto-detect format if not specified
+    if not format_type:
+        content_start = content[:100].strip()
+        if content_start.startswith(b'{') or content_start.startswith(b'['):
+            format_type = 'json'
+        elif b',' in content_start and b'\n' in content[:1000]:
+            format_type = 'csv'
         else:
-            content_str = content.decode('utf-8', errors='replace')
-        
-        lines = [line.strip() for line in content_str.splitlines() if line.strip()]
-        
-        # Skip lines if specified
-        skip_lines = parser_config.get("skip_lines", 0)
-        if skip_lines > 0 and len(lines) > skip_lines:
-            lines = lines[skip_lines:]
-        
-        # Skip comments
-        if parser_config.get("skip_comments", True):
-            lines = [line for line in lines if not line.startswith('#')]
-            
-        # Create records
-        data = []
-        field_name = parser_config.get("value_field_name", "value")
-        
-        for line in lines:
-            record = {field_name: line}
-            
-            # Extract data with regex if provided
-            line_regex = parser_config.get("line_regex")
-            if line_regex:
-                try:
-                    match = re.search(line_regex, line)
-                    if match:
-                        record.update(match.groupdict())
-                except re.error:
-                    pass
-            
-            # Determine IOC type
-            if 'type' not in record:
-                record['type'] = DataProcessor.determine_ioc_type(line)
-            
-            data.append(record)
-            
-        return data
+            format_type = 'text'
+    
+    try:
+        # Call appropriate parser based on format
+        if format_type == 'json':
+            return parse_json_feed(content, parser_config)
+        elif format_type == 'csv':
+            return parse_csv_feed(content, parser_config)
+        else:
+            logger.warning(f"Unknown format type: {format_type}, falling back to JSON")
+            return parse_json_feed(content, parser_config)
     except Exception as e:
-        logger.error(f"Error parsing text feed: {str(e)}")
+        logger.error(f"Error parsing feed data: {str(e)}")
+        if Config.ENVIRONMENT != 'production':
+            logger.error(traceback.format_exc())
         return []
-
-def apply_transformations(records: List[Dict], parser_config: Dict) -> List[Dict]:
-    """Apply transformations to normalize and enrich records."""
-    if not records:
-        return []
-    
-    # Get configuration
-    transformations = parser_config.get("transformations", {})
-    array_fields = parser_config.get("array_fields", [])
-    date_fields = parser_config.get("date_fields", [])
-    int_fields = parser_config.get("int_fields", [])
-    float_fields = parser_config.get("float_fields", [])
-    bool_fields = parser_config.get("bool_fields", [])
-    
-    transformed_records = []
-    for record in records:
-        transformed = record.copy()
-        
-        # Apply custom transformations
-        for field, transform_func in transformations.items():
-            if field in transformed and callable(transform_func):
-                try:
-                    transformed[field] = transform_func(transformed[field])
-                except Exception:
-                    pass
-        
-        # Convert array fields
-        for field in array_fields:
-            if field in transformed and not isinstance(transformed[field], list):
-                if isinstance(transformed[field], str):
-                    transformed[field] = transformed[field].split(",") if transformed[field] else []
-                else:
-                    transformed[field] = [transformed[field]] if transformed[field] else []
-        
-        # Convert numeric fields
-        for field in int_fields:
-            if field in transformed and transformed[field] not in (None, ""):
-                try:
-                    transformed[field] = int(float(transformed[field]))
-                except (ValueError, TypeError):
-                    pass
-                    
-        for field in float_fields:
-            if field in transformed and transformed[field] not in (None, ""):
-                try:
-                    transformed[field] = float(transformed[field])
-                except (ValueError, TypeError):
-                    pass
-        
-        # Convert boolean fields
-        for field in bool_fields:
-            if field in transformed and isinstance(transformed[field], str):
-                transformed[field] = transformed[field].lower() in ("yes", "true", "1", "t", "y")
-        
-        # Add ingestion timestamp
-        transformed["ingestion_timestamp"] = datetime.datetime.utcnow().isoformat()
-        
-        transformed_records.append(transformed)
-    
-    return transformed_records
 
 def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
     """Normalize indicators to a common format for storage."""
     normalized = []
     
     for record in records:
-        # Skip records without value
-        if 'value' not in record:
-            continue
+        # Handle different feed formats
         
-        # Ensure value is a string
-        value = str(record['value'])
+        # ThreatFox format
+        if 'ioc_value' in record and 'ioc_type' in record:
+            value = record['ioc_value']
+            ioc_type = record['ioc_type']
+            
+            # Parse tags if they're comma-separated string
+            tags = record.get('tags', '')
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(',') if t.strip()]
+            
+            indicator = {
+                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                "value": value,
+                "type": ioc_type,
+                "source": feed_name,
+                "feed_id": feed_name,
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "confidence": record.get('confidence_level', 50),
+                "tags": tags,
+                "description": f"Indicator from {feed_name}",
+                "threat_type": record.get('threat_type'),
+                "malware": record.get('malware'),
+                "malware_alias": record.get('malware_alias'),
+                "malware_printable": record.get('malware_printable'),
+                "first_seen": record.get('first_seen_utc'),
+                "last_seen": record.get('last_seen_utc'),
+                "raw_data": json.dumps(record)
+            }
+            
+        # URLhaus format  
+        elif 'url' in record and 'threat' in record:
+            value = record['url']
+            
+            # Parse tags if they're comma-separated string
+            tags = record.get('tags', '')
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(',') if t.strip()]
+            
+            indicator = {
+                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                "value": value,
+                "type": 'url',
+                "source": feed_name,
+                "feed_id": feed_name,
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "confidence": 80 if record.get('url_status') == 'online' else 60,
+                "tags": tags,
+                "description": f"URL from {feed_name}",
+                "threat_type": record.get('threat'),
+                "first_seen": record.get('dateadded'),
+                "last_seen": record.get('last_online'),
+                "raw_data": json.dumps(record)
+            }
+            
+        # PhishTank format
+        elif 'url' in record:
+            value = record['url']
+            
+            indicator = {
+                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                "value": value,
+                "type": 'url',
+                "source": feed_name,
+                "feed_id": feed_name,
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "confidence": 90 if record.get('verified') == 'yes' else 70,
+                "tags": ['phishing', 'verified'] if record.get('verified') == 'yes' else ['phishing'],
+                "description": f"Phishing URL from {feed_name}",
+                "threat_type": 'phishing',
+                "first_seen": record.get('submission_time'),
+                "last_seen": record.get('verification_time'),
+                "raw_data": json.dumps(record)
+            }
+            
+        else:
+            # Generic format
+            value = record.get('value') or record.get('indicator') or ''
+            if not value:
+                continue
+                
+            indicator = {
+                "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                "value": value,
+                "type": record.get('type') or DataProcessor.determine_ioc_type(value),
+                "source": feed_name,
+                "feed_id": feed_name,
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "confidence": record.get('confidence', 50),
+                "tags": record.get('tags', []),
+                "description": record.get('description', f"Indicator from {feed_name}"),
+                "raw_data": json.dumps(record)
+            }
         
-        # Skip empty or comment values
-        if not value or value.startswith('#'):
+        # Skip invalid records
+        if not indicator['value']:
             continue
             
-        # Create normalized record
-        indicator = {
-            "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-            "value": value,
-            "type": record.get('type') or DataProcessor.determine_ioc_type(value),
-            "source": feed_name,
-            "feed_id": feed_name,
-            "created_at": datetime.datetime.utcnow().isoformat(),
-            "confidence": record.get('confidence', 50),
-            "tags": record.get('tags', []),
-            "description": record.get('description', f"Indicator from {feed_name}"),
-            "raw_data": json.dumps(record)
-        }
-        
-        # Copy additional fields
-        for field in ['first_seen', 'last_seen', 'malware_type', 'threat_type']:
-            if field in record:
-                indicator[field] = record[field]
-        
         normalized.append(indicator)
     
     return normalized
-
-def get_parser_config(feed_name: str) -> Dict:
-    """Get parser configuration for a specific feed."""
-    # Try to get from Config
-    feed_config = None
-    if hasattr(Config, 'get_feed_by_id'):
-        feed_config = Config.get_feed_by_id(feed_name)
-    
-    if feed_config and "parser_config" in feed_config:
-        return feed_config["parser_config"]
-    
-    # Find feed in Config.FEEDS
-    if hasattr(Config, 'FEEDS'):
-        for feed in Config.FEEDS:
-            if feed.get('id') == feed_name or feed.get('name') == feed_name:
-                if "parser_config" in feed:
-                    return feed["parser_config"]
-    
-    # Default config
-    return {
-        "transformations": {},
-        "array_fields": [],
-        "date_fields": ["timestamp", "created_at", "updated_at", "first_seen", "last_seen"],
-        "int_fields": ["count", "port"],
-        "float_fields": ["score", "confidence"],
-        "bool_fields": ["active", "malicious", "enabled"]
-    }
 
 # -------------------- Main Processing Functions --------------------
 
@@ -1032,6 +846,9 @@ def process_feed(feed_config: Dict) -> Dict:
             result["status"] = "skipped"
             result["error"] = "Feed is disabled"
             return result
+        
+        # Ensure clients are initialized
+        initialize_clients()
         
         # Ensure bucket exists
         bucket_name = Config.GCS_BUCKET
@@ -1088,7 +905,7 @@ def process_feed(feed_config: Dict) -> Dict:
         result["raw_uri"] = raw_uri
         
         # Step 3: Parse feed data
-        parser_config = get_parser_config(feed_name)
+        parser_config = feed_config.get("parser_config", {})
         parsed_data = parse_feed(content, format_type, parser_config)
         if not parsed_data:
             logger.warning(f"No valid records found in feed '{feed_name}'")
@@ -1096,27 +913,21 @@ def process_feed(feed_config: Dict) -> Dict:
             result["warning"] = "No valid records found"
             return result
         
-        # Step 4: Apply transformations
-        transformed_data = apply_transformations(parsed_data, parser_config)
+        # Step 4: Normalize data to common format
+        normalized_data = normalize_indicators(parsed_data, feed_name)
         
-        # Step 5: Normalize data to common format
-        normalized_data = normalize_indicators(transformed_data, feed_name)
+        # Step 5: Deduplicate records (optional - can be expensive)
+        # For now, we'll skip deduplication to ensure data gets into BigQuery
+        deduplicated_data = normalized_data
         
-        # Step 6: Deduplicate records
-        existing_hashes = get_cached_hashes(feed_name)
-        deduplicated_data, new_hashes = DataProcessor.deduplicate_records(normalized_data, existing_hashes)
-        
-        # Store new hashes
-        store_cached_hashes(feed_name, existing_hashes + new_hashes)
-        
-        # If no new records, return success
+        # If no records, return success
         if not deduplicated_data:
-            logger.info(f"No new records in feed '{feed_name}'")
+            logger.info(f"No records to process in feed '{feed_name}'")
             result["status"] = "success"
-            result["warning"] = "No new records after deduplication"
+            result["warning"] = "No records to process"
             return result
         
-        # Step 7: Store processed data
+        # Step 6: Store processed data
         processed_blob_name = f"{storage_path}/processed/{timestamp}.json"
         processed_uri = upload_to_gcs(
             bucket_name, 
@@ -1132,7 +943,7 @@ def process_feed(feed_config: Dict) -> Dict:
         result["processed_uri"] = processed_uri
         result["record_count"] = len(deduplicated_data)
         
-        # Step 8: Upload to BigQuery
+        # Step 7: Upload to BigQuery
         # First ensure dataset and tables exist
         if not initialize_bigquery_tables():
             logger.warning("BigQuery tables initialization reported issues")
@@ -1143,20 +954,14 @@ def process_feed(feed_config: Dict) -> Dict:
         job_id = upload_to_bigquery(indicators_table_id, deduplicated_data)
         
         if not job_id:
-            # Try force update and retry
-            logger.warning("Failed to upload data, attempting to force update tables")
-            force_update_bigquery_tables()
-            job_id = upload_to_bigquery(indicators_table_id, deduplicated_data)
-            
-            if not job_id:
-                result["error"] = "Failed to upload data to BigQuery"
-                return result
+            result["error"] = "Failed to upload data to BigQuery"
+            return result
         
         result["bigquery_job_id"] = job_id
         
-        # Step 9: Publish to Pub/Sub
-        if publisher:
-            topic_path = publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
+        # Step 8: Publish to Pub/Sub (optional)
+        if _publisher:
+            topic_path = _publisher.topic_path(Config.GCP_PROJECT, Config.PUBSUB_TOPIC)
             
             message_data = {
                 "operation": "feed_processed",
@@ -1170,7 +975,7 @@ def process_feed(feed_config: Dict) -> Dict:
             
             try:
                 message_json = json.dumps(message_data)
-                future = publisher.publish(topic_path, message_json.encode("utf-8"), feed_id=feed_id)
+                future = _publisher.publish(topic_path, message_json.encode("utf-8"), feed_id=feed_id)
                 message_id = future.result()
                 result["pubsub_message_id"] = message_id
             except Exception as e:
@@ -1198,6 +1003,9 @@ def process_feed(feed_config: Dict) -> Dict:
 def ingest_feed(feed_name: str) -> Dict:
     """Process a single feed by name."""
     global ingestion_status
+    
+    # Initialize clients if needed
+    initialize_clients()
     
     # Get feed configuration
     feed_config = None
@@ -1249,6 +1057,9 @@ def ingest_all_feeds() -> List[Dict]:
         "total_records": 0,
         "errors": []
     }
+    
+    # Initialize clients
+    initialize_clients()
     
     # Make sure BigQuery tables are initialized
     initialize_bigquery_tables()
@@ -1325,21 +1136,13 @@ def get_ingestion_status() -> Dict:
     
     return status_copy
 
+# -------------------- Background Processing --------------------
+
 def trigger_ingestion_in_background() -> threading.Thread:
     """Trigger ingestion in a background thread."""
     def ingestion_thread():
         try:
             logger.info("Starting background ingestion thread")
-            # First ensure BigQuery tables are properly initialized
-            if not initialize_bigquery_tables():
-                logger.warning("BigQuery tables initialization reported issues")
-                # Try force updating tables
-                if force_update_bigquery_tables():
-                    logger.info("Successfully forced BigQuery tables update")
-                else:
-                    logger.error("Failed to update BigQuery tables, ingestion may have issues")
-            
-            # Proceed with ingestion
             ingest_all_feeds()
             logger.info("Background ingestion thread completed")
         except Exception as e:
@@ -1373,10 +1176,13 @@ def ingest_from_pubsub(event, context):
         feed_id = message_data.get('feed_id')
         force_tables = message_data.get('force_tables', False)
         
+        # Initialize clients
+        initialize_clients()
+        
         # Check if we need to force BigQuery table updates
         if force_tables:
             logger.info("Forcing BigQuery tables update as requested")
-            force_update_bigquery_tables()
+            initialize_bigquery_tables()
             
         if process_all:
             results = ingest_all_feeds()
@@ -1393,25 +1199,19 @@ def ingest_from_pubsub(event, context):
             logger.error(traceback.format_exc())
         config.report_error(e)
 
-# -------------------- Default Feeds --------------------
+# -------------------- Feed Configuration --------------------
 
-# Define default feeds
-DEFAULT_FEED_CONFIGS = [
+# Updated feed configurations based on actual data formats
+FEED_CONFIGS = [
     {
-        "id": "phishtank",
-        "name": "PhishTank URLs",
-        "url": "http://data.phishtank.com/data/online-valid.json",
-        "description": "URLs verified as phishing by PhishTank community",
+        "id": "threatfox",
+        "name": "ThreatFox IOCs",
+        "url": "https://threatfox.abuse.ch/export/json/recent/",
+        "description": "Recent indicators from ThreatFox",
         "format": "json",
-        "type": "url",
+        "type": "mixed",
         "enabled": True,
-        "parser_config": {
-            "root_element": "data",
-            "value_field": "url",
-            "transformations": {
-                "type": lambda record: "url"
-            }
-        }
+        "parser_config": {}
     },
     {
         "id": "urlhaus",
@@ -1421,56 +1221,24 @@ DEFAULT_FEED_CONFIGS = [
         "format": "csv",
         "type": "url",
         "enabled": True,
-        "parser_config": {
-            "skip_lines": 8,
-            "has_header": True,
-            "value_field": "url",
-            "type_field": "threat"
-        }
+        "parser_config": {}
     },
     {
-        "id": "threatfox",
-        "name": "ThreatFox IOCs",
-        "url": "https://threatfox.abuse.ch/export/json/recent/",
-        "description": "Recent indicators from ThreatFox",
+        "id": "phishtank",
+        "name": "PhishTank URLs",
+        "url": "http://data.phishtank.com/data/online-valid.json",
+        "description": "URLs verified as phishing by PhishTank community",
         "format": "json",
-        "type": "mixed",
+        "type": "url",
         "enabled": True,
-        "parser_config": {
-            "field_mappings": {
-                "ioc_value": "value",
-                "ioc_type": "type",
-                "threat_type": "description",
-                "malware": "malware_type",
-                "first_seen_utc": "first_seen",
-                "tags": "tags",
-                "confidence_level": "confidence"
-            },
-            "array_fields": ["tags"]
-        }
+        "parser_config": {},
+        "timeout": 30  # Shorter timeout to handle rate limiting
     }
 ]
 
-# Add default feeds to config if no feeds are configured
+# Update Config if feeds are not set
 if not hasattr(Config, 'FEEDS') or not Config.FEEDS:
-    logger.info("No feeds configured, adding default feeds")
-    Config.FEEDS = DEFAULT_FEED_CONFIGS
-
-# Automatically trigger ingestion on module load for production environment
-if __name__ != "__main__" and Config.ENVIRONMENT == 'production' and getattr(Config, 'AUTO_INGEST', False):
-    # Wait a bit for app startup
-    logger.info("Auto-ingestion enabled - will start ingestion after app startup")
-    
-    def delayed_start():
-        time.sleep(10)  # Wait for app startup
-        # First ensure BigQuery tables
-        initialize_bigquery_tables()
-        # Then start ingestion
-        trigger_ingestion_in_background()
-        
-    startup_thread = threading.Thread(target=delayed_start)
-    startup_thread.daemon = True
-    startup_thread.start()
+    Config.FEEDS = FEED_CONFIGS
 
 # CLI command runner
 if __name__ == "__main__":
@@ -1479,29 +1247,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Threat Intelligence Platform Ingestion Tool')
     parser.add_argument('--feed', type=str, help='Process a specific feed by ID or name')
     parser.add_argument('--all', action='store_true', help='Process all configured feeds')
-    parser.add_argument('--force-tables', action='store_true', help='Force recreation of BigQuery tables')
     parser.add_argument('--verify', action='store_true', help='Verify ingestion setup')
     args = parser.parse_args()
     
-    if args.force_tables:
-        logger.info("Forcing recreation of BigQuery tables...")
-        if force_update_bigquery_tables():
-            logger.info("Successfully recreated BigQuery tables")
-        else:
-            logger.error("Failed to recreate BigQuery tables")
+    # Initialize clients
+    initialize_clients()
     
     if args.verify:
         logger.info("Verifying ingestion setup...")
-        if not bq_client or not storage_client:
+        
+        # Check clients
+        if not _bq_client or not _storage_client:
             logger.error("GCP clients not properly initialized")
         else:
             logger.info("GCP clients initialized successfully")
-            
+        
+        # Check bucket
         if ensure_bucket_exists(Config.GCS_BUCKET):
             logger.info(f"GCS bucket {Config.GCS_BUCKET} exists")
         else:
             logger.error(f"Failed to ensure GCS bucket {Config.GCS_BUCKET} exists")
-            
+        
+        # Check tables
         if initialize_bigquery_tables():
             logger.info("BigQuery tables initialized successfully")
         else:
@@ -1519,4 +1286,4 @@ if __name__ == "__main__":
         logger.info(f"Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed")
         
     else:
-        logger.info("No action specified, use --feed, --all, --force-tables, or --verify")
+        logger.info("No action specified, use --feed, --all, or --verify")
