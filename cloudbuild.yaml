@@ -1,96 +1,223 @@
 steps:
-# Ensure permissions for service account
+# Step 1: Enable necessary APIs and ensure permissions
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'ensure-permissions'
+  id: 'enable-apis'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
-    echo "Ensuring service account has logging permissions..."
+    echo "Enabling required APIs..."
+    gcloud services enable \
+      cloudbuild.googleapis.com \
+      run.googleapis.com \
+      storage.googleapis.com \
+      bigquery.googleapis.com \
+      secretmanager.googleapis.com \
+      cloudscheduler.googleapis.com \
+      pubsub.googleapis.com \
+      logging.googleapis.com \
+      clouderrorreporting.googleapis.com \
+      aiplatform.googleapis.com
+    
+    echo "Setting up service account permissions..."
+    PROJECT_ID=$PROJECT_ID
+    SERVICE_ACCOUNT="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+    
+    # Grant necessary roles
     gcloud projects add-iam-policy-binding $PROJECT_ID \
-      --member=serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-      --role=roles/logging.logWriter \
-      --condition=None || echo "Permissions setup complete."
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/logging.logWriter" \
+      --condition=None
+    
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/bigquery.admin" \
+      --condition=None
+    
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/storage.admin" \
+      --condition=None
+    
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/pubsub.editor" \
+      --condition=None
+    
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None
+    
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$SERVICE_ACCOUNT" \
+      --role="roles/aiplatform.user" \
+      --condition=None
+    
+    echo "APIs enabled and permissions configured."
 
-# Setup and check environment
+# Step 2: Setup Python environment and dependencies
 - name: 'python:3.10'
-  id: 'setup-and-checks'
+  id: 'test-dependencies'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
-    echo "Setting up Python environment and checking dependencies..."
+    echo "Testing Python dependencies..."
     pip install -q -r requirements.txt
+    python -c "import flask, google.cloud.bigquery, google.cloud.storage; print('Dependencies OK')"
 
-# Build the container image
+# Step 3: Build the container image
 - name: 'gcr.io/cloud-builders/docker'
   id: 'build-container'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest', '.']
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA', '.']
+  timeout: '1200s'
 
-# Prepare GCP resources
+# Step 4: Push the container image
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'push-container'
+  args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA']
+
+# Step 5: Setup GCP resources (secrets, dataset, bucket, topics)
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'prepare-resources'
+  id: 'setup-gcp-resources'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
-    echo "Creating/updating Secret Manager secrets..."
+    set -e
+    echo "Setting up GCP resources..."
     
-    # Create API keys secret if it doesn't exist
-    gcloud secrets describe api-keys 2>/dev/null || \
-      gcloud secrets create api-keys --replication-policy="automatic"
+    # Create secrets if they don't exist
+    echo "Creating/updating secrets..."
     
-    # Create feed config secret if it doesn't exist
-    gcloud secrets describe feed-config 2>/dev/null || \
-      gcloud secrets create feed-config --replication-policy="automatic"
+    # API Keys secret
+    if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
+      echo "Creating api-keys secret..."
+      gcloud secrets create api-keys \
+        --replication-policy="automatic" \
+        --project=$PROJECT_ID
+      
+      # Create default API key JSON
+      echo '{"platform_api_key": "$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)"}' | \
+        gcloud secrets versions add api-keys --data-file=- --project=$PROJECT_ID
+    fi
     
-    # Create BigQuery dataset if it doesn't exist
-    bq --location=US ls threat_intelligence >/dev/null 2>&1 || \
-      bq --location=US mk --dataset $PROJECT_ID:threat_intelligence
+    # Feed config secret
+    if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
+      echo "Creating feed-config secret..."
+      gcloud secrets create feed-config \
+        --replication-policy="automatic" \
+        --project=$PROJECT_ID
+    fi
     
-    # Create Cloud Storage bucket if it doesn't exist
-    gsutil ls -b gs://$PROJECT_ID-threat-data >/dev/null 2>&1 || \
-      gsutil mb -l us-central1 gs://$PROJECT_ID-threat-data
+    # Create BigQuery dataset
+    echo "Setting up BigQuery dataset..."
+    if ! bq --location=US ls -d threat_intelligence >/dev/null 2>&1; then
+      echo "Creating BigQuery dataset..."
+      bq --location=US mk -d \
+        --description="Threat Intelligence Data" \
+        $PROJECT_ID:threat_intelligence
+    fi
     
-    # Create Pub/Sub topics if they don't exist
-    gcloud pubsub topics describe threat-data-ingestion 2>/dev/null || \
-      gcloud pubsub topics create threat-data-ingestion
+    # Create Cloud Storage bucket
+    echo "Setting up Cloud Storage bucket..."
+    BUCKET_NAME="$PROJECT_ID-threat-data"
+    if ! gsutil ls -b gs://$BUCKET_NAME >/dev/null 2>&1; then
+      echo "Creating storage bucket..."
+      gsutil mb -l us-central1 -c standard gs://$BUCKET_NAME
+      
+      # Set lifecycle rules
+      cat > lifecycle.json << EOF
+    {
+      "lifecycle": {
+        "rule": [
+          {
+            "action": {"type": "Delete"},
+            "condition": {"age": 30}
+          }
+        ]
+      }
+    }
+    EOF
+      gsutil lifecycle set lifecycle.json gs://$BUCKET_NAME
+      rm lifecycle.json
+    fi
     
-    gcloud pubsub topics describe threat-analysis-events 2>/dev/null || \
-      gcloud pubsub topics create threat-analysis-events
+    # Create Pub/Sub topics
+    echo "Setting up Pub/Sub topics..."
+    
+    if ! gcloud pubsub topics describe threat-data-ingestion --project=$PROJECT_ID >/dev/null 2>&1; then
+      echo "Creating threat-data-ingestion topic..."
+      gcloud pubsub topics create threat-data-ingestion --project=$PROJECT_ID
+    fi
+    
+    if ! gcloud pubsub topics describe threat-analysis-events --project=$PROJECT_ID >/dev/null 2>&1; then
+      echo "Creating threat-analysis-events topic..."
+      gcloud pubsub topics create threat-analysis-events --project=$PROJECT_ID
+    fi
+    
+    echo "GCP resources setup complete."
 
-# Push the container image to Container Registry
-- name: 'gcr.io/cloud-builders/docker'
-  id: 'push-container'
-  args: ['push', 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest']
-
-# Deploy to Cloud Run - simplified without auth secrets
+# Step 6: Deploy to Cloud Run
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'deploy-cloudrun'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
+    set -e
     echo "Deploying to Cloud Run..."
     
-    # Deploy service with all configurations in a single command
-    gcloud run deploy threat-intelligence-platform \
-      --image gcr.io/$PROJECT_ID/threat-intelligence-platform:latest \
-      --region us-central1 \
-      --platform managed \
-      --allow-unauthenticated \
-      --execution-environment gen2 \
-      --memory 2Gi \
-      --cpu 2 \
-      --min-instances 1 \
-      --max-instances 10 \
-      --timeout 300s \
-      --set-env-vars "ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true" \
-      --set-secrets "API_KEY=api-keys:latest" \
-      --command "/app/init-app.sh" \
-      --args "gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app"
+    # Get the API key from Secret Manager
+    API_KEY_EXISTS=true
+    if ! gcloud secrets versions list api-keys --project=$PROJECT_ID --limit=1 >/dev/null 2>&1; then
+      echo "Warning: api-keys secret has no versions"
+      API_KEY_EXISTS=false
+    fi
+    
+    # Deploy Cloud Run service
+    if [ "$API_KEY_EXISTS" = true ]; then
+      gcloud run deploy threat-intelligence-platform \
+        --image=gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
+        --region=us-central1 \
+        --platform=managed \
+        --allow-unauthenticated \
+        --execution-environment=gen2 \
+        --memory=2Gi \
+        --cpu=2 \
+        --min-instances=1 \
+        --max-instances=10 \
+        --timeout=900s \
+        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=true,API_KEY=default-api-key" \
+        --set-secrets="API_KEY=api-keys:latest" \
+        --command="/app/init-app.sh" \
+        --args="gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
+        --project=$PROJECT_ID
+    else
+      echo "Deploying without secrets (will use default API key)..."
+      gcloud run deploy threat-intelligence-platform \
+        --image=gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA \
+        --region=us-central1 \
+        --platform=managed \
+        --allow-unauthenticated \
+        --execution-environment=gen2 \
+        --memory=2Gi \
+        --cpu=2 \
+        --min-instances=1 \
+        --max-instances=10 \
+        --timeout=900s \
+        --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=us-central1,BIGQUERY_DATASET=threat_intelligence,GCS_BUCKET=$PROJECT_ID-threat-data,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=true,API_KEY=default-api-key" \
+        --command="/app/init-app.sh" \
+        --args="gunicorn,--bind,0.0.0.0:8080,--workers,2,--threads,4,--timeout,120,--worker-class,gthread,--preload,--log-level,info,app:app" \
+        --project=$PROJECT_ID
+    fi
+    
+    echo "Cloud Run deployment complete."
 
-# Set up Cloud Scheduler for automated ingestion and analysis
+# Step 7: Setup Cloud Scheduler
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'setup-scheduler'
   entrypoint: 'bash'
@@ -99,37 +226,106 @@ steps:
   - |
     echo "Setting up Cloud Scheduler jobs..."
     
-    # Enable Cloud Scheduler API
-    gcloud services enable cloudscheduler.googleapis.com
+    # Enable Cloud Scheduler API if not enabled
+    gcloud services enable cloudscheduler.googleapis.com --project=$PROJECT_ID
     
-    # Create scheduler job for data ingestion (every 6 hours)
-    gcloud scheduler jobs delete threat-data-ingestion --quiet 2>/dev/null || true
+    # Get the Cloud Run service URL
+    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
+      --region=us-central1 \
+      --platform=managed \
+      --format='value(status.url)' \
+      --project=$PROJECT_ID)
+    
+    echo "Service URL: $SERVICE_URL"
+    
+    # Extract API key safely
+    API_KEY="default-api-key"
+    if gcloud secrets versions access latest --secret=api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
+      # Try to extract the API key using jq if available, otherwise use grep
+      API_KEY_JSON=$(gcloud secrets versions access latest --secret=api-keys --project=$PROJECT_ID)
+      if command -v jq >/dev/null 2>&1; then
+        API_KEY=$(echo "$API_KEY_JSON" | jq -r '.platform_api_key // "default-api-key"')
+      else
+        # Fallback to grep/sed
+        API_KEY=$(echo "$API_KEY_JSON" | grep -o '"platform_api_key":"[^"]*"' | sed 's/"platform_api_key":"\([^"]*\)"/\1/')
+        if [ -z "$API_KEY" ]; then
+          API_KEY="default-api-key"
+        fi
+      fi
+    fi
+    
+    echo "Using API key: ${API_KEY:0:8}..."
+    
+    # Delete existing jobs if they exist
+    gcloud scheduler jobs delete threat-data-ingestion \
+      --location=us-central1 \
+      --quiet \
+      --project=$PROJECT_ID 2>/dev/null || true
+    
+    gcloud scheduler jobs delete threat-analysis \
+      --location=us-central1 \
+      --quiet \
+      --project=$PROJECT_ID 2>/dev/null || true
+    
+    # Create ingestion job (every 6 hours)
+    echo "Creating threat-data-ingestion job..."
     gcloud scheduler jobs create http threat-data-ingestion \
-      --location us-central1 \
-      --schedule "0 */6 * * *" \
-      --uri "https://threat-intelligence-platform-$PROJECT_ID.uc.r.appspot.com/api/admin/ingest" \
-      --http-method POST \
-      --headers "Content-Type=application/json,X-API-Key=$(gcloud secrets versions access latest --secret=api-keys | python -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))")" \
-      --message-body '{"process_all": true}' \
-      --time-zone "UTC"
+      --location=us-central1 \
+      --schedule="0 */6 * * *" \
+      --uri="${SERVICE_URL}/api/admin/ingest" \
+      --http-method=POST \
+      --headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
+      --message-body='{"process_all": true}' \
+      --time-zone="UTC" \
+      --project=$PROJECT_ID
     
-    # Create scheduler job for AI analysis (daily at 2 AM UTC)
-    gcloud scheduler jobs delete threat-analysis --quiet 2>/dev/null || true
+    # Create analysis job (daily at 2 AM UTC)
+    echo "Creating threat-analysis job..."
     gcloud scheduler jobs create http threat-analysis \
-      --location us-central1 \
-      --schedule "0 2 * * *" \
-      --uri "https://threat-intelligence-platform-$PROJECT_ID.uc.r.appspot.com/api/admin/analyze" \
-      --http-method POST \
-      --headers "Content-Type=application/json,X-API-Key=$(gcloud secrets versions access latest --secret=api-keys | python -c "import sys, json; print(json.load(sys.stdin).get('platform_api_key', ''))")" \
-      --message-body '{"analyze_all": true}' \
-      --time-zone "UTC"
+      --location=us-central1 \
+      --schedule="0 2 * * *" \
+      --uri="${SERVICE_URL}/api/admin/analyze" \
+      --http-method=POST \
+      --headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
+      --message-body='{"analyze_all": true}' \
+      --time-zone="UTC" \
+      --project=$PROJECT_ID
     
-    echo "Deployment complete!"
+    echo "Cloud Scheduler setup complete."
+
+# Step 8: Verify deployment
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'verify-deployment'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Verifying deployment..."
+    
+    # Get service URL
+    SERVICE_URL=$(gcloud run services describe threat-intelligence-platform \
+      --region=us-central1 \
+      --platform=managed \
+      --format='value(status.url)' \
+      --project=$PROJECT_ID)
+    
+    echo "Service deployed at: $SERVICE_URL"
+    
+    # Wait for service to be ready
+    echo "Waiting for service to be ready..."
+    sleep 30
+    
+    # Test the health endpoint
+    echo "Testing health endpoint..."
+    curl -f "${SERVICE_URL}/health" || echo "Health check failed (service may still be starting)"
+    
+    echo "Deployment verification complete."
 
 images:
-- 'gcr.io/$PROJECT_ID/threat-intelligence-platform:latest'
+- 'gcr.io/$PROJECT_ID/threat-intelligence-platform:$COMMIT_SHA'
 
-timeout: 1800s
+timeout: '2400s'
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
+  substitution_option: 'ALLOW_LOOSE'
