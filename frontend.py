@@ -1,26 +1,23 @@
 """
 Optimized frontend module for Threat Intelligence Platform.
-Handles web interface, user authentication, and dashboard views.
+Handles web interface, dashboard views, and AI-powered analysis.
 """
 
 import os
 import json
 import logging
-import hashlib
 import time
-import secrets
 import threading
 from datetime import datetime, timedelta
 from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, session, abort, g, current_app
-from werkzeug.exceptions import BadRequest
+from flask import flash, abort, g, current_app, send_file, Response
 
 # Import config module for centralized configuration
 import config
-from config import Config, SecretManager
+from config import Config
 
 # Environment settings with defaults
 VERSION = os.environ.get("VERSION", "1.0.3")
@@ -41,17 +38,6 @@ logging.basicConfig(level=LOG_LEVEL,
 
 # Create Blueprint for the frontend module
 frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
-
-# ====== Session and Security Functions ======
-
-@frontend_app.before_request
-def before_request():
-    """Ensure session is properly established."""
-    if '_id' not in session:
-        session.permanent = True
-        session['_id'] = secrets.token_hex(16)
-        if DEBUG_MODE:
-            logger.debug(f"New session created: {session.get('_id')}")
 
 # ====== Helper Functions ======
 
@@ -78,10 +64,6 @@ def api_cache(timeout: int = CACHE_TIMEOUT):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # Skip cache for authenticated users
-            if session.get('logged_in'):
-                return func(*args, **kwargs)
-            
             key = cache_key(func.__name__, **kwargs)
             if cache_valid(key, timeout):
                 return API_CACHE[key]
@@ -112,17 +94,12 @@ def clear_api_cache(prefix: str = None):
 
 @lru_cache(maxsize=1)
 def get_api_key() -> str:
-    """Get API key from config with optimized caching."""
-    # Try config module attributes
+    """Get API key from config."""
     api_key = getattr(Config, 'API_KEY', None)
-    
-    # Try cached config
     if not api_key:
         api_keys_config = config.get_cached_config('api-keys') if hasattr(config, 'get_cached_config') else None
         if api_keys_config and 'platform_api_key' in api_keys_config:
             api_key = api_keys_config['platform_api_key']
-    
-    # Fall back to environment variable
     return api_key or os.environ.get('API_KEY', '')
 
 @api_cache(timeout=CACHE_TIMEOUT)
@@ -135,15 +112,11 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         base_url = request.url_root.rstrip('/')
         url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
-        # Add API key and CSRF token
+        # Add API key
         headers = {"Content-Type": "application/json"}
         api_key = get_api_key()
         if api_key:
             headers["X-API-Key"] = api_key
-        
-        csrf_token = session.get('csrf_token')
-        if csrf_token:
-            headers["X-CSRF-Token"] = csrf_token
         
         # Make request with optimized retries
         max_retries = 3
@@ -176,323 +149,29 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
             logger.warning(f"API request failed: {getattr(response, 'status_code', 'No response')} - {getattr(response, 'text', '')[:100]}")
             return {
                 "error": f"API request failed with status {getattr(response, 'status_code', 'unknown')}",
-                "status_code": getattr(response, 'status_code', 500),
-                # Default structure for templates
-                "feeds": {"total_sources": 0},
-                "iocs": {"total": 0, "types": []},
-                "campaigns": {"total_campaigns": 0},
-                "analyses": {"total_analyses": 0}
+                "status_code": getattr(response, 'status_code', 500)
             }
         
         # Parse JSON response
         try:
             return response.json() if response.text else {}
         except json.JSONDecodeError:
-            return {
-                "error": "Invalid JSON response",
-                # Default structure for templates
-                "feeds": {"total_sources": 0},
-                "iocs": {"total": 0, "types": []},
-                "campaigns": {"total_campaigns": 0},
-                "analyses": {"total_analyses": 0}
-            }
+            return {"error": "Invalid JSON response"}
     
     except Exception as e:
         logger.error(f"API request error ({endpoint}): {str(e)}")
         safe_report_exception(e)
-        return {
-            "error": f"API error: {str(e)}",
-            # Default structure for templates
-            "feeds": {"total_sources": 0},
-            "iocs": {"total": 0, "types": []},
-            "campaigns": {"total_campaigns": 0},
-            "analyses": {"total_analyses": 0}
-        }
-
-# ====== Authentication Functions ======
-
-def login_required(func):
-    """Decorator requiring login for views."""
-    @wraps(func)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            session['next_url'] = request.url
-            flash('Please log in to continue', 'info')
-            return redirect(url_for('frontend.login'))
-        return func(*args, **kwargs)
-    return decorated_function
-
-def admin_required(func):
-    """Decorator requiring admin role."""
-    @wraps(func)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            session['next_url'] = request.url
-            flash('Please log in to continue', 'info')
-            return redirect(url_for('frontend.login'))
-        if session.get('role') != 'admin':
-            flash('Admin privileges required', 'danger')
-            return render_template('auth.html', page_type='not_authorized')
-        return func(*args, **kwargs)
-    return decorated_function
-
-def load_users() -> Dict[str, Dict]:
-    """Load user data with optimized config access."""
-    try:
-        # Try to ensure admin password sync first (critical fix)
-        if hasattr(SecretManager, 'ensure_password_sync'):
-            SecretManager.ensure_password_sync()
-        
-        # Try config module first
-        auth_config = None
-        if hasattr(config, 'get_cached_config'):
-            auth_config = config.get_cached_config('auth-config', force_refresh=True)
-        
-        if auth_config and 'users' in auth_config and auth_config['users']:
-            logger.info(f"Loaded {len(auth_config['users'])} users from auth config")
-            return auth_config.get('users', {})
-        
-        # Check environment variables
-        admin_password = os.environ.get('ADMIN_PASSWORD')
-        if admin_password:
-            logger.info("Loaded admin password from environment variables")
-            return {
-                'admin': {
-                    'password': hash_password(admin_password),
-                    'role': 'admin',
-                    'created_at': datetime.utcnow().isoformat()
-                }
-            }
-            
-        # Development fallback
-        if ENVIRONMENT != 'production':
-            logger.warning("Using default admin account for development")
-            return {
-                'admin': {
-                    'password': hash_password('admin'),
-                    'role': 'admin',
-                    'created_at': datetime.utcnow().isoformat()
-                }
-            }
-        
-        # Config module fallback
-        if hasattr(Config, 'ADMIN_PASSWORD') and Config.ADMIN_PASSWORD:
-            logger.info("Using admin password from Config class")
-            return {
-                'admin': {
-                    'password': hash_password(Config.ADMIN_PASSWORD),
-                    'role': 'admin',
-                    'created_at': datetime.utcnow().isoformat()
-                }
-            }
-            
-        logger.error("No user accounts found")
-        return {}
-        
-    except Exception as e:
-        logger.error(f"Error loading users: {str(e)}")
-        safe_report_exception(e)
-        
-        # Development fallback
-        if ENVIRONMENT != 'production':
-            return {
-                'admin': {
-                    'password': hash_password('admin'),
-                    'role': 'admin',
-                    'created_at': datetime.utcnow().isoformat()
-                }
-            }
-        return {}
-
-def verify_password(stored_password: str, provided_password: str) -> bool:
-    """Verify password with support for multiple hash formats."""
-    if not stored_password or not provided_password:
-        return False
-    
-    # Simple hash comparison
-    provided_hash = hash_password(provided_password)
-    if stored_password == provided_hash:
-        return True
-    
-    # Direct string comparison in dev mode (dangerous in production)
-    if ENVIRONMENT != 'production' and stored_password == provided_password:
-        logger.warning("Dev-mode direct password comparison used")
-        return True
-        
-    # Werkzeug compatibility for legacy hashes
-    if stored_password.startswith('pbkdf2:sha256:'):
-        try:
-            from werkzeug.security import check_password_hash
-            return check_password_hash(stored_password, provided_password)
-        except ImportError:
-            pass
-    
-    # Always log failures to help debug authentication issues
-    logger.warning(f"Password verification failed. Stored hash: {stored_password[:10]}... Provided hash: {provided_hash[:10]}...")
-    
-    return False
-
-def hash_password(password: str) -> str:
-    """Hash password using secure method."""
-    if not password:
-        return ""
-    return hashlib.sha256(password.encode()).hexdigest()
+        return {"error": f"API error: {str(e)}"}
 
 # ====== Route Handlers ======
 
 @frontend_app.route('/')
 def index():
-    """Root redirects to dashboard or login."""
-    if session.get('logged_in'):
-        return redirect(url_for('frontend.dashboard'))
-    return redirect(url_for('frontend.login'))
-
-@frontend_app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Login page handler."""
-    error = None
-    
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        remember = request.form.get('remember') == 'on'
-        
-        if not username or not password:
-            error = "Username and password are required"
-            return render_template('auth.html', page_type='login', error=error, now=datetime.now())
-        
-        # Load users from config - force refresh to ensure we have the latest data
-        users = load_users()
-        
-        if username in users:
-            user = users[username]
-            
-            # Additional logging for transparency
-            logger.info(f"Login attempt for {username}")
-            
-            # Verify password - improved with better error handling
-            if verify_password(user.get('password', ''), password):
-                # Set up session
-                session.clear()
-                session.permanent = remember
-                session['logged_in'] = True
-                session['username'] = username
-                session['role'] = user.get('role', 'readonly')
-                session['_id'] = secrets.token_hex(16)
-                
-                # Update last login time
-                try:
-                    auth_config = config.get_cached_config('auth-config', force_refresh=True)
-                    if auth_config and 'users' in auth_config and username in auth_config['users']:
-                        auth_config['users'][username]['last_login'] = datetime.utcnow().isoformat()
-                        config.create_or_update_secret('auth-config', auth_config)
-                except Exception as e:
-                    logger.warning(f"Failed to update last login time: {str(e)}")
-                
-                logger.info(f"Successful login: {username}")
-                flash(f'Welcome, {username}!', 'success')
-                
-                # Clear cache and redirect
-                clear_api_cache()
-                next_page = session.pop('next_url', None) or request.args.get('next')
-                if next_page and next_page.startswith('/'):
-                    return redirect(next_page)
-                return redirect(url_for('frontend.dashboard'))
-            else:
-                error = "Invalid password"
-                logger.warning(f"Failed login: Invalid password for {username}")
-                
-                # Debug logging to help diagnose authentication issues
-                if DEBUG_MODE:
-                    stored_hash = user.get('password', '')
-                    provided_hash = hash_password(password)
-                    logger.debug(f"Auth debug - Stored hash: {stored_hash[:10]}... Provided hash: {provided_hash[:10]}...")
-        else:
-            error = "Invalid username"
-            logger.warning(f"Failed login: Invalid username {username}")
-    
-    return render_template('auth.html', page_type='login', error=error, now=datetime.now())
-
-@frontend_app.route('/profile')
-@login_required
-def profile():
-    """User profile page."""
-    try:
-        users = load_users()
-        user = users.get(session.get('username'))
-        
-        if not user:
-            flash('User not found', 'error')
-            return redirect(url_for('frontend.dashboard'))
-        
-        return render_template('auth.html', 
-                             page_type='profile', 
-                             username=session.get('username'),
-                             user=user)
-    except Exception as e:
-        logger.error(f"Error loading profile: {str(e)}")
-        flash('Error loading profile', 'error')
-        safe_report_exception(e)
-        return redirect(url_for('frontend.dashboard'))
-
-@frontend_app.route('/change_password', methods=['POST'])
-@login_required
-def change_password():
-    """Handle password change requests."""
-    try:
-        current_password = request.form.get('current_password')
-        new_password = request.form.get('new_password')
-        
-        users = load_users()
-        user = users.get(session.get('username'))
-        
-        if not user or not verify_password(user.get('password', ''), current_password):
-            flash('Current password is incorrect', 'danger')
-            return redirect(url_for('frontend.profile'))
-        
-        # Create updated password hash
-        password_hash = hash_password(new_password)
-        
-        # Update in Secret Manager if possible
-        try:
-            auth_config = config.get_cached_config('auth-config')
-            if auth_config and 'users' in auth_config:
-                auth_config['users'][session.get('username')]['password'] = password_hash
-                config.create_or_update_secret('auth-config', auth_config)
-                flash('Password changed successfully', 'success')
-                
-                # Special handling for admin user
-                if session.get('username') == 'admin':
-                    # Also update admin-initial-password if it exists
-                    config.create_or_update_secret('admin-initial-password', new_password)
-                    logger.info("Updated admin-initial-password after password change")
-            else:
-                flash('Could not update password in configuration', 'warning')
-        except Exception as e:
-            logger.warning(f"Error updating password: {str(e)}")
-            flash('Password updated in memory only', 'warning')
-        
-        return redirect(url_for('frontend.profile'))
-    except Exception as e:
-        logger.error(f"Error changing password: {str(e)}")
-        safe_report_exception(e)
-        flash('Error changing password', 'danger')
-        return redirect(url_for('frontend.profile'))
-
-@frontend_app.route('/logout')
-def logout():
-    """Logout handler."""
-    username = session.get('username')
-    if username:
-        logger.info(f"User logged out: {username}")
-    
-    session.clear()
-    flash('You have been logged out', 'info')
-    return redirect(url_for('frontend.login'))
+    """Root redirects to dashboard."""
+    return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/dashboard')
 @frontend_app.route('/dashboard/<view>')
-@login_required
 def dashboard(view=None):
     """Dashboard view with dynamic content loading."""
     try:
@@ -518,10 +197,10 @@ def dashboard(view=None):
                 'subtitle': 'Observed indicators and threat artifacts',
                 'icon': 'fingerprint'
             },
-            'campaigns': {
-                'title': 'Threat Campaigns',
-                'subtitle': 'Detected threat actor campaigns and activities',
-                'icon': 'project-diagram'
+            'ai-analysis': {
+                'title': 'AI-Powered Analysis',
+                'subtitle': 'Machine learning threat intelligence analysis',
+                'icon': 'brain'
             },
             'dashboard': {
                 'title': 'Threat Intelligence Dashboard',
@@ -538,274 +217,137 @@ def dashboard(view=None):
         })
         
         # Load statistics
-        try:
-            stats_response = api_request('stats', params={"days": days}) or {}
+        stats_response = api_request('stats', params={"days": days}) or {}
+        
+        # Ensure stats structure
+        context['stats'] = {
+            'feeds': stats_response.get('feeds', {'total_sources': 0}),
+            'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
+            'analyses': stats_response.get('analyses', {'total_analyses': 0}),
+            'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
+        }
+        
+        # Calculate trends
+        context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
+        context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
+        context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
+        
+        # IOC type data
+        context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
+        context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+        
+        # Load view-specific data
+        if current_view == 'feeds':
+            feeds_response = api_request('feeds') or {}
+            context['feed_items'] = feeds_response.get('feed_details', [])
             
-            # Ensure stats structure
-            context['stats'] = {
-                'feeds': stats_response.get('feeds', {'total_sources': 0}),
-                'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
-                'campaigns': stats_response.get('campaigns', {'total_campaigns': 0}),
-                'analyses': stats_response.get('analyses', {'total_analyses': 0}),
-                'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
-            }
+        elif current_view == 'iocs':
+            iocs_response = api_request('iocs', params={"days": days}) or {}
+            context['ioc_items'] = iocs_response.get('records', [])
             
-            # Extract trends
-            if isinstance(stats_response, dict) and 'feeds' in stats_response:
-                context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0)
-                context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0)
-                context['campaign_trend'] = stats_response.get('campaigns', {}).get('growth_rate', 0)
-                context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0)
-                
-                # IOC type data
-                context['ioc_type_labels'] = [item.get('type', '') for item in stats_response.get('iocs', {}).get('types', [])]
-                context['ioc_type_values'] = [item.get('count', 0) for item in stats_response.get('iocs', {}).get('types', [])]
+        elif current_view == 'ai-analysis':
+            # Load AI analysis data
+            ai_response = api_request('ai/analyses', params={"days": days}) or {}
+            context['ai_analyses'] = ai_response
+            context['last_ai_analysis'] = ai_response.get('last_run_time')
             
-            # Load view-specific data
-            if current_view == 'feeds':
-                feeds_response = api_request('feeds') or {}
-                context['feed_items'] = feeds_response.get('feed_details', [])
-                context['feed_type_descriptions'] = {
-                    feed.get('name', ''): feed.get('description', 'Threat Intelligence Feed') 
-                    for feed in context['feed_items'] if isinstance(feed, dict) and 'name' in feed
-                }
+        else:
+            # Dashboard view
+            # Date range for activity chart
+            today = datetime.now().date()
+            date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
+            context['activity_dates'] = date_range
+            
+            # Activity data
+            if 'visualization_data' in stats_response and 'daily_counts' in stats_response['visualization_data']:
+                counts = [0] * len(date_range)
+                date_to_index = {date: idx for idx, date in enumerate(date_range)}
                 
-            elif current_view == 'iocs':
-                iocs_response = api_request('iocs', params={"days": days}) or {}
-                context['ioc_items'] = iocs_response.get('records', [])
+                for entry in stats_response['visualization_data']['daily_counts']:
+                    if isinstance(entry, dict) and 'date' in entry and entry.get('date') in date_to_index:
+                        counts[date_to_index[entry['date']]] = entry.get('count', 0)
                 
-            elif current_view == 'campaigns':
-                campaigns_response = api_request('campaigns', params={"days": days}) or {}
-                context['campaigns'] = campaigns_response.get('campaigns', [])
-                
+                context['activity_counts'] = counts
             else:
-                # Dashboard view extras
-                today = datetime.now().date()
-                date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
-                context['activity_dates'] = date_range
-                
-                # Activity data
-                if (isinstance(stats_response, dict) and 
-                    'visualization_data' in stats_response and 
-                    'daily_counts' in stats_response['visualization_data']):
-                    
-                    counts = [0] * len(date_range)
-                    date_to_index = {date: idx for idx, date in enumerate(date_range)}
-                    
-                    for entry in stats_response['visualization_data']['daily_counts']:
-                        if isinstance(entry, dict) and 'date' in entry and entry.get('date') in date_to_index:
-                            counts[date_to_index[entry['date']]] = entry.get('count', 0)
-                    
-                    context['activity_counts'] = counts
-                else:
-                    context['activity_counts'] = [20 + i * 2 for i in range(days)]
-                
-                # Load additional dashboard data
-                campaigns_response = api_request('campaigns', params={"days": days}) or {}
-                context['campaigns'] = campaigns_response.get('campaigns', [])[:3]
-                
-                iocs_response = api_request('iocs', params={"days": days}) or {}
-                context['top_iocs'] = iocs_response.get('records', [])[:4]
-                
-                threat_summary = api_request(f"threat_summary", params={"days": days}) or {}
-                context['threat_summary'] = threat_summary
-                
-                geo_stats = api_request(f"iocs/geo", params={"days": days}) or {}
-                context['geo_stats'] = geo_stats.get('countries', [])
-                
-        except Exception as e:
-            logger.error(f"Error loading dashboard data: {str(e)}")
-            safe_report_exception(e)
-            
-            # Initialize empty data structures
-            context.update({
-                'stats': {'feeds': {}, 'campaigns': {}, 'iocs': {'types': []}, 'analyses': {}},
-                'feed_trend': 0,
-                'ioc_trend': 0,
-                'campaign_trend': 0,
-                'analysis_trend': 0,
-                'ioc_type_labels': [],
-                'ioc_type_values': []
-            })
-            
-            if current_view == 'feeds':
-                context['feed_items'] = []
-                context['feed_type_descriptions'] = {}
-            elif current_view == 'iocs':
-                context['ioc_items'] = []
-            elif current_view == 'campaigns':
-                context['campaigns'] = []
-            else:
-                # Dashboard view
-                today = datetime.now().date()
-                context['activity_dates'] = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
                 context['activity_counts'] = [20 + i * 2 for i in range(days)]
-                context['campaigns'] = []
-                context['top_iocs'] = []
-                context['geo_stats'] = []
-                
-            flash('Could not load all dashboard data. Some information may be missing.', 'warning')
+            
+            # Load additional dashboard data
+            iocs_response = api_request('iocs', params={"days": days, "limit": 10}) or {}
+            context['top_iocs'] = iocs_response.get('records', [])
+            
+            threat_summary = api_request('threat_summary', params={"days": days}) or {}
+            context['threat_summary'] = threat_summary
+            context['threat_score'] = threat_summary.get('overall_score', 75)
+            
+            # AI summary for dashboard
+            ai_summary = api_request('ai/summary') or {}
+            context['ai_summary'] = ai_summary
+            
+            # Geographic statistics
+            geo_stats = api_request('iocs/geo', params={"days": days}) or {}
+            context['geo_stats'] = geo_stats.get('countries', [])
         
         return render_template('dashboard.html', **context, now=datetime.now())
+    
     except Exception as e:
-        logger.error(f"Unexpected dashboard error: {str(e)}")
+        logger.error(f"Dashboard error: {str(e)}")
         safe_report_exception(e)
-        flash('An unexpected error occurred', 'danger')
-        return redirect(url_for('frontend.login'))
+        flash('An error occurred while loading the dashboard', 'danger')
+        return redirect(url_for('frontend.index'))
 
-# User Management Routes
-@frontend_app.route('/users')
-@login_required
-@admin_required
-def users():
-    """User management page."""
+@frontend_app.route('/detail/<content_type>/<path:identifier>')
+def dynamic_content_detail(content_type, identifier):
+    """Generic detail page for different content types."""
     try:
-        users = load_users()
-        return render_template('content.html', page_type='users', users=users)
+        # Prepare context
+        context = {
+            'content_type': content_type,
+            'identifier': identifier,
+            'title': f"{content_type.title()} Detail"
+        }
+        
+        # Map content types to API endpoints
+        api_endpoints = {
+            'ioc': f'iocs/{identifier}',
+            'feed': f'feeds/{identifier}',
+            'analysis': f'ai/analyses/{identifier}'
+        }
+        
+        endpoint = api_endpoints.get(content_type)
+        if not endpoint:
+            flash('Invalid content type', 'danger')
+            return redirect(url_for('frontend.dashboard'))
+        
+        # Get detailed data
+        data = api_request(endpoint)
+        if data.get('error'):
+            flash(f'Error loading {content_type}: {data["error"]}', 'danger')
+            return redirect(url_for('frontend.dashboard'))
+        
+        context['data'] = data
+        
+        # Get related items if applicable
+        if content_type == 'ioc':
+            related = api_request(f'iocs/{identifier}/related')
+            context['related_items'] = related.get('items', [])
+            context['view_type'] = 'iocs'
+            context['icon'] = 'fingerprint'
+        elif content_type == 'feed':
+            context['view_type'] = 'feeds'
+            context['icon'] = 'rss'
+        elif content_type == 'analysis':
+            context['view_type'] = 'ai-analysis'
+            context['icon'] = 'brain'
+        
+        return render_template('detail.html', **context, now=datetime.now())
+    
     except Exception as e:
-        logger.error(f"Error loading users page: {str(e)}")
+        logger.error(f"Error loading detail page: {str(e)}")
         safe_report_exception(e)
-        flash('Error loading users page', 'danger')
+        flash(f'Error loading {content_type} detail', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
-@frontend_app.route('/user/add', methods=['GET', 'POST'])
-@login_required
-@admin_required
-def add_user_route():
-    """Add new user."""
-    if request.method == 'POST':
-        try:
-            username = request.form.get('username')
-            password = request.form.get('password')
-            role = request.form.get('role', 'readonly')
-            
-            # Load existing users
-            auth_config = config.get_cached_config('auth-config')
-            if not auth_config:
-                auth_config = {"users": {}}
-            elif "users" not in auth_config:
-                auth_config["users"] = {}
-                
-            # Check if user exists
-            if username in auth_config["users"]:
-                flash('Username already exists', 'danger')
-                return redirect(url_for('frontend.add_user_route'))
-            
-            # Create new user
-            auth_config["users"][username] = {
-                'password': hash_password(password),
-                'role': role,
-                'created_at': datetime.utcnow().isoformat()
-            }
-            
-            # Save to Secret Manager
-            if config.create_or_update_secret('auth-config', auth_config):
-                flash(f'User {username} created successfully', 'success')
-            else:
-                flash(f'User created but not saved to configuration', 'warning')
-                
-            return redirect(url_for('frontend.users'))
-            
-        except Exception as e:
-            logger.error(f"Error adding user: {str(e)}")
-            safe_report_exception(e)
-            flash('Error creating user', 'danger')
-    
-    return render_template('auth.html', page_type='user_add')
-
-@frontend_app.route('/user/edit/<username>', methods=['GET', 'POST'])
-@login_required
-@admin_required
-def edit_user(username):
-    """Edit user."""
-    users = load_users()
-    if username not in users:
-        flash('User not found', 'danger')
-        return redirect(url_for('frontend.users'))
-    
-    if request.method == 'POST':
-        try:
-            password = request.form.get('password')
-            role = request.form.get('role')
-            
-            # Get auth config
-            auth_config = config.get_cached_config('auth-config')
-            if not auth_config or "users" not in auth_config or username not in auth_config["users"]:
-                flash('User configuration not found', 'danger')
-                return redirect(url_for('frontend.users'))
-            
-            # Update user
-            if password:
-                auth_config["users"][username]['password'] = hash_password(password)
-                
-                # Special handling for admin user
-                if username == 'admin':
-                    # Also update admin-initial-password
-                    config.create_or_update_secret('admin-initial-password', password)
-                    logger.info("Updated admin-initial-password during user edit")
-                    
-            if role:
-                auth_config["users"][username]['role'] = role
-            
-            # Save to configuration
-            if config.create_or_update_secret('auth-config', auth_config):
-                flash(f'User {username} updated successfully', 'success')
-                
-                # Re-sync passwords if admin
-                if username == 'admin' and hasattr(SecretManager, 'ensure_password_sync'):
-                    SecretManager.ensure_password_sync()
-                    logger.info("Re-synchronized admin password after edit")
-            else:
-                flash(f'Changes not saved to configuration', 'warning')
-                
-            return redirect(url_for('frontend.users'))
-            
-        except Exception as e:
-            logger.error(f"Error editing user: {str(e)}")
-            safe_report_exception(e)
-            flash('Error updating user', 'danger')
-    
-    return render_template('auth.html', page_type='user_edit', username=username, user=users[username])
-
-@frontend_app.route('/user/delete/<username>', methods=['POST'])
-@login_required
-@admin_required
-def delete_user(username):
-    """Delete user."""
-    try:
-        # Prevent deleting admin user
-        if username == 'admin':
-            flash('Cannot delete admin user', 'danger')
-            return redirect(url_for('frontend.users'))
-            
-        # Get auth config
-        auth_config = config.get_cached_config('auth-config')
-        if not auth_config or "users" not in auth_config:
-            flash('User configuration not found', 'danger')
-            return redirect(url_for('frontend.users'))
-        
-        # Delete user
-        if username in auth_config["users"]:
-            del auth_config["users"][username]
-            
-            # Save changes
-            if config.create_or_update_secret('auth-config', auth_config):
-                flash(f'User {username} deleted successfully', 'success')
-            else:
-                flash(f'User deleted but changes not saved to configuration', 'warning')
-        else:
-            flash('User not found', 'warning')
-    except Exception as e:
-        logger.error(f"Error deleting user: {str(e)}")
-        safe_report_exception(e)
-        flash('Error deleting user', 'danger')
-    
-    return redirect(url_for('frontend.users'))
-
-# Admin Routes
 @frontend_app.route('/ingest_threat_data', methods=['GET', 'POST'])
-@login_required
-@admin_required
 def ingest_threat_data():
     """Trigger threat data ingestion."""
     try:
@@ -817,10 +359,11 @@ def ingest_threat_data():
                 flash(f'Error triggering ingestion: {result["error"]}', 'danger')
             else:
                 flash('Threat data ingestion triggered successfully', 'success')
+                clear_api_cache()  # Clear cache to show fresh data
             
             return redirect(url_for('frontend.dashboard'))
         
-        # For GET, render autosubmit form
+        # For GET, render loading page with auto-submit form
         return render_template('base.html', 
                               title="Triggering Data Ingestion", 
                               content="""
@@ -829,7 +372,6 @@ def ingest_threat_data():
                                 <h1 class="text-2xl font-bold mb-4">Triggering Threat Data Ingestion</h1>
                                 <p class="mb-6">Please wait while we process your request...</p>
                                 <form id="ingestForm" method="post">
-                                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 </form>
                                 <script>
                                   document.addEventListener('DOMContentLoaded', function() {
@@ -844,43 +386,290 @@ def ingest_threat_data():
         flash('Error triggering ingestion', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
+@frontend_app.route('/run_ai_analysis', methods=['GET', 'POST'])
+def run_ai_analysis():
+    """Trigger AI analysis on threat data."""
+    try:
+        if request.method == 'POST':
+            # Trigger AI analysis
+            result = api_request('admin/analyze', method='POST', data={
+                'analyze_all': True,
+                'force_reanalysis': request.form.get('force', False)
+            })
+            
+            if result.get('error'):
+                flash(f'Error triggering AI analysis: {result["error"]}', 'danger')
+            else:
+                flash('AI analysis triggered successfully. This may take a few minutes.', 'success')
+                clear_api_cache('ai')  # Clear AI-related cache
+            
+            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+        
+        # For GET, render loading page
+        return render_template('base.html', 
+                              title="Triggering AI Analysis", 
+                              content="""
+                              <div class="text-center py-8">
+                                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-purple-600 mb-4"></div>
+                                <h1 class="text-2xl font-bold mb-4">Running AI Analysis</h1>
+                                <p class="mb-6">AI is analyzing your threat intelligence data...</p>
+                                <form id="analysisForm" method="post">
+                                </form>
+                                <script>
+                                  document.addEventListener('DOMContentLoaded', function() {
+                                    document.getElementById('analysisForm').submit();
+                                  });
+                                </script>
+                              </div>
+                              """)
+    except Exception as e:
+        logger.error(f"Error in run_ai_analysis: {str(e)}")
+        safe_report_exception(e)
+        flash('Error triggering AI analysis', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/analyze_ioc/<ioc_id>')
+def analyze_ioc(ioc_id):
+    """Run AI analysis on a specific IOC."""
+    try:
+        # Trigger analysis for specific IOC
+        result = api_request('admin/analyze', method='POST', data={
+            'indicator_ids': [ioc_id],
+            'force_reanalysis': True
+        })
+        
+        if result.get('error'):
+            flash(f'Error analyzing IOC: {result["error"]}', 'danger')
+        else:
+            flash('IOC analysis started. Results will be available shortly.', 'success')
+        
+        return redirect(url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc_id))
+    
+    except Exception as e:
+        logger.error(f"Error analyzing IOC: {str(e)}")
+        safe_report_exception(e)
+        flash('Error analyzing IOC', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/export_iocs')
+def export_iocs():
+    """Export IOCs in various formats."""
+    try:
+        # Get parameters
+        format_type = request.args.get('format', 'json')
+        days = int(request.args.get('days', 30))
+        ioc_type = request.args.get('type', '')
+        
+        # Get IOCs from API
+        params = {
+            'days': days,
+            'type': ioc_type,
+            'limit': 10000  # Maximum export size
+        }
+        
+        iocs_response = api_request('iocs/export', params=params)
+        
+        if iocs_response.get('error'):
+            flash(f'Error exporting IOCs: {iocs_response["error"]}', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        # Prepare data for export
+        iocs = iocs_response.get('records', [])
+        
+        # Generate file based on format
+        if format_type == 'json':
+            data = json.dumps(iocs, indent=2)
+            mimetype = 'application/json'
+            filename = f'iocs_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        
+        elif format_type == 'csv':
+            import csv
+            from io import StringIO
+            
+            output = StringIO()
+            if iocs:
+                fieldnames = iocs[0].keys()
+                writer = csv.DictWriter(output, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(iocs)
+            
+            data = output.getvalue()
+            mimetype = 'text/csv'
+            filename = f'iocs_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        
+        elif format_type == 'txt':
+            # Simple text format - one IOC per line
+            lines = []
+            for ioc in iocs:
+                lines.append(f"{ioc.get('type', 'unknown')}:{ioc.get('value', '')}")
+            
+            data = '\n'.join(lines)
+            mimetype = 'text/plain'
+            filename = f'iocs_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+        
+        elif format_type == 'stix':
+            # STIX 2.1 format
+            stix_bundle = {
+                "type": "bundle",
+                "id": f"bundle--{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                "objects": []
+            }
+            
+            for ioc in iocs:
+                stix_obj = {
+                    "type": "indicator",
+                    "id": f"indicator--{ioc.get('id', '')}",
+                    "created": ioc.get('created_at', datetime.now().isoformat()),
+                    "modified": ioc.get('updated_at', datetime.now().isoformat()),
+                    "pattern": f"[{ioc.get('type', 'file')}:value = '{ioc.get('value', '')}']",
+                    "pattern_type": "stix",
+                    "valid_from": ioc.get('first_seen', ioc.get('created_at', datetime.now().isoformat()))
+                }
+                stix_bundle["objects"].append(stix_obj)
+            
+            data = json.dumps(stix_bundle, indent=2)
+            mimetype = 'application/json'
+            filename = f'iocs_stix_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        
+        else:
+            flash('Invalid export format', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        # Return file download
+        return Response(
+            data,
+            mimetype=mimetype,
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Content-Length': len(data)
+            }
+        )
+    
+    except Exception as e:
+        logger.error(f"Error exporting IOCs: {str(e)}")
+        safe_report_exception(e)
+        flash('Error exporting IOCs', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
+@frontend_app.route('/export_analysis')
+def export_analysis():
+    """Export AI analysis reports."""
+    try:
+        # Get parameters
+        report_type = request.args.get('report_type', 'summary')
+        format_type = request.args.get('format', 'pdf')
+        period = request.args.get('period', 'monthly')
+        
+        # Request analysis report from API
+        params = {
+            'report_type': report_type,
+            'period': period
+        }
+        
+        report_response = api_request('ai/generate_report', method='POST', data=params)
+        
+        if report_response.get('error'):
+            flash(f'Error generating report: {report_response["error"]}', 'danger')
+            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+        
+        # Get report content
+        report_data = report_response.get('report', {})
+        
+        # Generate file based on format
+        if format_type == 'pdf':
+            # PDF generation would require additional libraries like ReportLab
+            flash('PDF export is not yet implemented', 'warning')
+            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+        
+        elif format_type == 'html':
+            # Generate HTML report
+            html_content = render_template('report.html', report=report_data, now=datetime.now())
+            filename = f'threat_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html'
+            
+            return Response(
+                html_content,
+                mimetype='text/html',
+                headers={
+                    'Content-Disposition': f'attachment; filename={filename}',
+                    'Content-Length': len(html_content)
+                }
+            )
+        
+        elif format_type == 'json':
+            data = json.dumps(report_data, indent=2)
+            filename = f'threat_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            
+            return Response(
+                data,
+                mimetype='application/json',
+                headers={
+                    'Content-Disposition': f'attachment; filename={filename}',
+                    'Content-Length': len(data)
+                }
+            )
+        
+        else:
+            flash('Invalid export format', 'danger')
+            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+    
+    except Exception as e:
+        logger.error(f"Error exporting analysis: {str(e)}")
+        safe_report_exception(e)
+        flash('Error exporting analysis report', 'danger')
+        return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+
+@frontend_app.route('/search')
+def search():
+    """Search across all threat intelligence data."""
+    try:
+        query = request.args.get('q', '')
+        if not query:
+            return redirect(url_for('frontend.dashboard'))
+        
+        # Search via API
+        search_results = api_request('search', params={'query': query})
+        
+        if search_results.get('error'):
+            flash(f'Search error: {search_results["error"]}', 'danger')
+            return redirect(url_for('frontend.dashboard'))
+        
+        context = {
+            'page_type': 'search',
+            'query': query,
+            'results': search_results.get('results', [])
+        }
+        
+        return render_template('content.html', **context, now=datetime.now())
+    
+    except Exception as e:
+        logger.error(f"Search error: {str(e)}")
+        safe_report_exception(e)
+        flash('Error performing search', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/export')
+def export_page():
+    """Export data page."""
+    return render_template('content.html', page_type='export', now=datetime.now())
+
 # Shortcut routes
 @frontend_app.route('/feeds')
-@login_required
 def feeds():
     """Redirect to dashboard feeds view."""
     return redirect(url_for('frontend.dashboard', view='feeds'))
 
 @frontend_app.route('/iocs')
-@login_required
 def iocs():
     """Redirect to dashboard IOCs view."""
     return redirect(url_for('frontend.dashboard', view='iocs'))
 
-@frontend_app.route('/campaigns')
-@login_required
-def campaigns():
-    """Redirect to dashboard campaigns view."""
-    return redirect(url_for('frontend.dashboard', view='campaigns'))
-
-@frontend_app.route('/detail/<content_type>/<path:identifier>')
-@login_required
-def dynamic_content_detail(content_type, identifier):
-    """Generic detail page for different content types."""
-    try:
-        return render_template('detail.html', 
-                              content_type=content_type,
-                              identifier=identifier,
-                              title=f"{content_type.title()} Detail")
-    except Exception as e:
-        logger.error(f"Error loading detail page: {str(e)}")
-        safe_report_exception(e)
-        flash(f'Error loading {content_type} detail', 'danger')
-        return redirect(url_for('frontend.dashboard'))
+@frontend_app.route('/ai-analysis')
+def ai_analysis():
+    """Redirect to dashboard AI analysis view."""
+    return redirect(url_for('frontend.dashboard', view='ai-analysis'))
 
 # ====== Template Filters and Context ======
 
-# Define datetime formatter function
 def format_datetime(value):
     """Format a datetime string for display."""
     if not value:
@@ -900,45 +689,14 @@ def format_datetime(value):
 def page_not_found(e):
     """Handle 404 errors."""
     logger.info(f"Page not found: {request.path}")
-    try:
-        return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
-    except Exception:
-        return """
-        <html><body><h1>404 - Page Not Found</h1><p>The requested page does not exist.</p>
-        <p><a href="/">Return to Home</a></p></body></html>
-        """, 404
+    return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
 
 @frontend_app.errorhandler(500)
 def server_error(e):
     """Handle 500 errors."""
     logger.error(f"Server error: {str(e)}")
     safe_report_exception(e)
-    try:
-        return render_template('500.html'), 500
-    except Exception:
-        return """
-        <html><body><h1>500 - Server Error</h1><p>An unexpected error occurred.</p>
-        <p><a href="/">Return to Home</a></p></body></html>
-        """, 500
-
-@frontend_app.errorhandler(400)
-def handle_bad_request(e):
-    """Handle 400 errors including CSRF errors."""
-    logger.error(f"400 error: {str(e)}")
-    
-    # Handle CSRF errors
-    if isinstance(e, BadRequest) and 'CSRF' in str(e):
-        flash('Your session has expired or there was a security issue. Please try again.', 'danger')
-        return redirect(url_for('frontend.login'))
-    
-    # Handle other 400 errors
-    try:
-        return render_template('500.html', error_code=400, error_message=f"Bad Request: {str(e)}"), 400
-    except Exception:
-        return f"""
-        <html><body><h1>400 - Bad Request</h1><p>{str(e)}</p>
-        <p><a href="/">Return to Home</a></p></body></html>
-        """, 400
+    return render_template('500.html'), 500
 
 # ====== Context Processors ======
 
@@ -985,6 +743,37 @@ def utility_processor():
         'get_severity_class': get_severity_class,
         'get_confidence_width': get_confidence_width,
     }
+
+# ====== Cache Management ======
+
+def periodic_cache_cleanup():
+    """Periodically clean up expired cache entries."""
+    while True:
+        try:
+            current_time = time.time()
+            expired_keys = []
+            
+            for key, timestamp in API_CACHE_TIMESTAMP.items():
+                if current_time - timestamp > LONG_CACHE_TIMEOUT:
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                API_CACHE.pop(key, None)
+                API_CACHE_TIMESTAMP.pop(key, None)
+            
+            if expired_keys:
+                logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
+            
+            # Sleep for 10 minutes
+            time.sleep(600)
+        except Exception as e:
+            logger.error(f"Error in cache cleanup: {str(e)}")
+            time.sleep(60)
+
+# Start cache cleanup thread
+cleanup_thread = threading.Thread(target=periodic_cache_cleanup)
+cleanup_thread.daemon = True
+cleanup_thread.start()
 
 # Initialize module
 logger.info("Frontend module initialized successfully")
