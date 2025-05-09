@@ -68,6 +68,15 @@ limiter = Limiter(
     swallow_errors=True
 )
 
+# Global initialization state
+_initialization_status = {
+    'config': False,
+    'clients': False,
+    'tables': False,
+    'blueprints': False,
+    'complete': False
+}
+
 # Health check endpoint - must work immediately
 @app.route('/health', methods=['GET'])
 @csrf.exempt
@@ -76,7 +85,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.utcnow().isoformat(),
-        'app_ready': True
+        'app_ready': _initialization_status['complete']
     }), 200
 
 # Readiness probe
@@ -84,42 +93,78 @@ def health_check():
 @csrf.exempt
 def readiness_check():
     """Readiness probe for Cloud Run."""
-    return jsonify({
-        'status': 'ready',
-        'timestamp': datetime.utcnow().isoformat()
-    }), 200
+    if _initialization_status['complete']:
+        return jsonify({
+            'status': 'ready',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
+    else:
+        return jsonify({
+            'status': 'not_ready',
+            'timestamp': datetime.utcnow().isoformat(),
+            'initialization_status': _initialization_status
+        }), 503
 
-# Delayed registration of blueprints
-def register_late_components():
-    """Register components that require configuration after app startup."""
+def initialize_platform():
+    """Initialize all platform components in correct order."""
+    global _initialization_status
+    
     try:
-        # Import modules
-        import config
+        logger.info("Starting platform initialization...")
+        
+        # 1. Initialize configuration
         from config import Config
-        
-        # CRITICAL: Load configuration first to ensure SECRET_KEY is available
         Config.init_app()
-        
-        # Update app config with the loaded secret key
         if hasattr(Config, 'SECRET_KEY') and Config.SECRET_KEY:
             app.config['SECRET_KEY'] = Config.SECRET_KEY
             app.config['WTF_CSRF_SECRET_KEY'] = Config.SECRET_KEY
-            logger.info("Updated app configuration with loaded SECRET_KEY")
+        _initialization_status['config'] = True
+        logger.info("Configuration initialized")
         
+        # 2. Initialize GCP clients
+        from config import initialize_bigquery, initialize_storage, initialize_pubsub
+        
+        bq_client = initialize_bigquery()
+        storage_client = initialize_storage()
+        publisher, subscriber = initialize_pubsub()
+        
+        # Store clients for use by other modules
+        from api import set_clients
+        set_clients(bq_client, storage_client, publisher, subscriber)
+        
+        _initialization_status['clients'] = True
+        logger.info("GCP clients initialized")
+        
+        # 3. Ensure BigQuery tables exist (if client is available)
+        if bq_client:
+            from ingestion import initialize_bigquery_tables
+            if initialize_bigquery_tables():
+                _initialization_status['tables'] = True
+                logger.info("BigQuery tables initialized")
+            else:
+                logger.warning("BigQuery tables initialization reported issues")
+        
+        # 4. Register blueprints
         from api import api_blueprint
         from frontend import frontend_app as frontend_blueprint, format_datetime
         
-        # Register blueprints
         app.register_blueprint(api_blueprint, url_prefix='/api')
         app.register_blueprint(frontend_blueprint)
         
         # Register template filters
         app.template_filter('datetime')(format_datetime)
         
-        logger.info("Late components registered successfully")
+        _initialization_status['blueprints'] = True
+        logger.info("Blueprints registered")
+        
+        # 5. Mark initialization as complete
+        _initialization_status['complete'] = True
+        logger.info("Platform initialization complete")
+        
         return True
+        
     except Exception as e:
-        logger.error(f"Failed to register late components: {str(e)}")
+        logger.error(f"Failed to initialize platform: {str(e)}")
         logger.error(traceback.format_exc())
         return False
 
@@ -184,20 +229,32 @@ def handle_rate_limit(e):
 @app.route('/')
 def index():
     """Root route handler."""
-    return redirect(url_for('frontend.dashboard'))
+    if _initialization_status['complete']:
+        return redirect(url_for('frontend.dashboard'))
+    else:
+        # Show initialization status page
+        return render_template('500.html', 
+                             error_code=503, 
+                             error_message="Service is initializing. Please wait a moment and refresh."), 503
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
-    # Register late components
-    success = register_late_components()
+    # Initialize platform
+    success = initialize_platform()
     if not success:
-        logger.warning("Some components failed to register, but app will continue")
+        logger.error("Platform initialization failed")
+    else:
+        logger.info("Platform initialized successfully")
 
 # Entry point for local development
 if __name__ == '__main__':
     try:
         logger.info("=== Starting Flask Application in Development Mode ===")
-        register_late_components()
+        success = initialize_platform()
+        
+        if not success:
+            logger.error("Platform initialization failed, exiting")
+            sys.exit(1)
         
         port = int(os.environ.get('PORT', 8080))
         app.run(
