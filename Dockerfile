@@ -45,111 +45,71 @@ RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs
 # Copy all application code
 COPY . .
 
-# Create initialization script with robust error handling
-RUN cat > /app/init-app.sh << 'EOF'
-#!/bin/bash
-set -e
-
-echo "======================================"
-echo "Starting Threat Intelligence Platform"
-echo "======================================"
-echo "Time: $(date)"
-echo "PORT: ${PORT:-8080}"
-echo "GCP_PROJECT: ${GCP_PROJECT}"
-echo "ENVIRONMENT: ${ENVIRONMENT}"
-echo "======================================"
-
-# Function to check if port is available
-check_port() {
-    local port=$1
-    if nc -z localhost $port; then
-        echo "ERROR: Port $port is already in use"
-        exit 1
-    fi
-    echo "Port $port is available"
-}
-
-# Function to initialize config with timeout
-init_config() {
-    echo "Initializing application configuration..."
-    timeout ${STARTUP_TIMEOUT}s python3 -c "
-import os
-import sys
-import time
-import traceback
-
-start_time = time.time()
-
-try:
-    # Import and initialize configuration
-    from config import Config
-    Config.init_app()
-    
-    # Verify critical components
-    if not hasattr(Config, 'GCP_PROJECT') or not Config.GCP_PROJECT:
-        raise ValueError('GCP_PROJECT not configured')
-    
-    print(f'Configuration initialized successfully in {time.time() - start_time:.2f} seconds')
-    print(f'GCP_PROJECT: {Config.GCP_PROJECT}')
-    print(f'API_KEY configured: {\"API_KEY\" in os.environ or hasattr(Config, \"API_KEY\")}')
-    
-except Exception as e:
-    print(f'ERROR: Configuration initialization failed: {str(e)}')
-    traceback.print_exc()
-    sys.exit(1)
-" || {
-    echo "Configuration initialization failed or timed out"
-    exit 1
-}
-}
-
-# Function to verify GCP connectivity
-verify_gcp() {
-    echo "Verifying GCP connectivity..."
-    python3 -c "
-import sys
-try:
-    from google.cloud import storage
-    client = storage.Client()
-    print('GCP connectivity verified')
-except Exception as e:
-    print(f'WARNING: GCP connectivity issue: {str(e)}')
-    # Don't exit - app might still work with limited functionality
-"
-}
-
-# Main initialization
-echo "Starting initialization sequence..."
-
-# Check port availability
-check_port ${PORT:-8080}
-
-# Initialize configuration
-init_config
-
-# Verify GCP connectivity (non-blocking)
-verify_gcp
-
-# Create a health check file to indicate readiness
-touch /app/.ready
-
-echo "======================================"
-echo "Initialization complete, starting application..."
-echo "======================================"
-
-# Start the application
-exec "$@"
-EOF
+# Create initialization script
+RUN echo '#!/bin/bash' > /app/init-app.sh && \
+    echo 'set -e' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo 'echo "======================================"' >> /app/init-app.sh && \
+    echo 'echo "Starting Threat Intelligence Platform"' >> /app/init-app.sh && \
+    echo 'echo "======================================"' >> /app/init-app.sh && \
+    echo 'echo "Time: $(date)"' >> /app/init-app.sh && \
+    echo 'echo "PORT: ${PORT:-8080}"' >> /app/init-app.sh && \
+    echo 'echo "GCP_PROJECT: ${GCP_PROJECT}"' >> /app/init-app.sh && \
+    echo 'echo "ENVIRONMENT: ${ENVIRONMENT}"' >> /app/init-app.sh && \
+    echo 'echo "======================================"' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Function to check if port is available' >> /app/init-app.sh && \
+    echo 'check_port() {' >> /app/init-app.sh && \
+    echo '    local port=$1' >> /app/init-app.sh && \
+    echo '    if nc -z localhost $port; then' >> /app/init-app.sh && \
+    echo '        echo "ERROR: Port $port is already in use"' >> /app/init-app.sh && \
+    echo '        exit 1' >> /app/init-app.sh && \
+    echo '    fi' >> /app/init-app.sh && \
+    echo '    echo "Port $port is available"' >> /app/init-app.sh && \
+    echo '}' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Function to initialize config' >> /app/init-app.sh && \
+    echo 'init_config() {' >> /app/init-app.sh && \
+    echo '    echo "Initializing application configuration..."' >> /app/init-app.sh && \
+    echo '    python3 -c "' >> /app/init-app.sh && \
+    echo 'import os' >> /app/init-app.sh && \
+    echo 'import sys' >> /app/init-app.sh && \
+    echo 'try:' >> /app/init-app.sh && \
+    echo '    from config import Config' >> /app/init-app.sh && \
+    echo '    Config.init_app()' >> /app/init-app.sh && \
+    echo '    print(f\"Configuration initialized successfully\")' >> /app/init-app.sh && \
+    echo '    print(f\"GCP_PROJECT: {Config.GCP_PROJECT}\")' >> /app/init-app.sh && \
+    echo 'except Exception as e:' >> /app/init-app.sh && \
+    echo '    print(f\"ERROR: Configuration initialization failed: {str(e)}\")' >> /app/init-app.sh && \
+    echo '    sys.exit(1)' >> /app/init-app.sh && \
+    echo '"' >> /app/init-app.sh && \
+    echo '}' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Main initialization' >> /app/init-app.sh && \
+    echo 'echo "Starting initialization sequence..."' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Check port availability' >> /app/init-app.sh && \
+    echo 'check_port ${PORT:-8080}' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Initialize configuration' >> /app/init-app.sh && \
+    echo 'init_config' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Create a health check file to indicate readiness' >> /app/init-app.sh && \
+    echo 'touch /app/.ready' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo 'echo "======================================"' >> /app/init-app.sh && \
+    echo 'echo "Initialization complete, starting application..."' >> /app/init-app.sh && \
+    echo 'echo "======================================"' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Start the application' >> /app/init-app.sh && \
+    echo 'exec "$@"' >> /app/init-app.sh
 
 # Make script executable
 RUN chmod +x /app/init-app.sh
 
 # Create health check script
-RUN cat > /app/healthcheck.sh << 'EOF'
-#!/bin/bash
-# Simple health check that verifies the app is responding
-curl -f http://localhost:${PORT:-8080}/health || exit 1
-EOF
+RUN echo '#!/bin/bash' > /app/healthcheck.sh && \
+    echo 'curl -f http://localhost:${PORT:-8080}/health || exit 1' >> /app/healthcheck.sh
 
 # Make health check script executable
 RUN chmod +x /app/healthcheck.sh
