@@ -1,182 +1,215 @@
-# Use Python 3.10 slim image for reduced image size
-FROM python:3.10-slim
+# Cloud Build configuration for Threat Intelligence Platform
+substitutions:
+  _REGION: us-central1
+  _SERVICE_NAME: threat-intelligence-platform
+  _DATASET: threat_intelligence
+  _BUCKET_SUFFIX: threat-data
 
-# Set working directory
-WORKDIR /app
+steps:
+  # Step 0: Create necessary GCP resources
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        echo "Creating necessary GCP resources..."
+        
+        # Create BigQuery dataset if it doesn't exist
+        echo "Checking if BigQuery dataset exists: ${_DATASET}"
+        if bq show --project_id=$PROJECT_ID ${_DATASET} >/dev/null 2>&1; then
+          echo "BigQuery dataset already exists: ${_DATASET}"
+        else
+          echo "Creating BigQuery dataset: ${_DATASET}"
+          bq mk --dataset --location=US --project_id=$PROJECT_ID ${_DATASET}
+        fi
+        
+        # Create Cloud Storage bucket if it doesn't exist
+        BUCKET_NAME="${PROJECT_ID}-${_BUCKET_SUFFIX}"
+        echo "Checking Cloud Storage bucket: $${BUCKET_NAME}"
+        if gsutil ls -p $PROJECT_ID gs://$${BUCKET_NAME} >/dev/null 2>&1; then
+          echo "Cloud Storage bucket already exists: $${BUCKET_NAME}"
+        else
+          echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
+          gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
+          
+          # Set bucket lifecycle rules
+          cat > lifecycle.json << 'EOL'
+          {
+            "lifecycle": {
+              "rule": [
+                {
+                  "action": {"type": "Delete"},
+                  "condition": {"age": 30, "isLive": true}
+                },
+                {
+                  "action": {"type": "Delete"},
+                  "condition": {"numNewerVersions": 3, "isLive": false}
+                }
+              ]
+            }
+          }
+        EOL
+          gsutil lifecycle set lifecycle.json gs://$${BUCKET_NAME}
+          rm -f lifecycle.json
+        fi
+        
+        # Create Pub/Sub topics if they don't exist
+        for topic in threat-data-ingestion threat-analysis-events; do
+          if ! gcloud pubsub topics describe $${topic} --project=$PROJECT_ID >/dev/null 2>&1; then
+            echo "Creating Pub/Sub topic: $${topic}"
+            gcloud pubsub topics create $${topic} --project=$PROJECT_ID
+          else
+            echo "Pub/Sub topic already exists: $${topic}"
+          fi
+        done
+        
+        # Create API key secret if it doesn't exist
+        if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
+          echo "Creating secret: api-keys"
+          # Generate a default API key if not provided
+          if [ -z "$${API_KEY}" ]; then
+            API_KEY=$(openssl rand -hex 32)
+            echo "Generated API key: $${API_KEY}"
+          fi
+          echo -n "$${API_KEY}" | gcloud secrets create api-keys --data-file=- --project=$PROJECT_ID
+        else
+          echo "Secret already exists: api-keys"
+        fi
+        
+        # Create feed configuration secret if it doesn't exist
+        if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
+          echo "Creating secret: feed-config"
+          # Use default feed configuration
+          cat > feed-config.json << 'EOL'
+          {
+            "feeds": []
+          }
+        EOL
+          gcloud secrets create feed-config --data-file=feed-config.json --project=$PROJECT_ID
+          rm -f feed-config.json
+        else
+          echo "Secret already exists: feed-config"
+        fi
 
-# Set environment variables for optimization
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    FLASK_APP=app.py \
-    FLASK_ENV=production \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Default PORT for Cloud Run
-    PORT=8080 \
-    # BigQuery cost controls
-    BIGQUERY_MAX_BYTES_BILLED=104857600 \
-    # Timeout configurations
-    GUNICORN_TIMEOUT=120 \
-    STARTUP_TIMEOUT=60
+  # Step 1: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
+      - '.'
+    timeout: '600s'
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    gcc \
-    python3-dev \
-    libpq-dev \
-    netcat-traditional \
-    procps \
-    && rm -rf /var/lib/apt/lists/*
+  # Step 2: Push Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'push'
+      - '--all-tags'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
+    timeout: '300s'
 
-# Copy requirements file first (for better caching)
-COPY requirements.txt .
+  # Step 3: Deploy to Cloud Run with comprehensive configuration
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image=gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
+      - '--region=$_REGION'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--min-instances=1'
+      - '--max-instances=10'
+      - '--timeout=300'
+      - '--concurrency=80'
+      - '--cpu-boost'
+      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
+      - '--set-secrets=API_KEY=api-keys:latest'
+      - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
+    timeout: '600s'
 
-# Install Python dependencies with error handling
-RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
-    pip install --no-cache-dir --upgrade wheel setuptools && \
-    # Install numpy first to avoid compatibility issues
-    pip install --no-cache-dir numpy==1.24.3 && \
-    # Install pandas next (depends on numpy)
-    pip install --no-cache-dir pandas==1.5.3 && \
-    # Then install all remaining requirements
-    pip install --no-cache-dir -r requirements.txt
+  # Step 4: Configure service permissions
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        echo "Configuring service permissions..."
+        
+        # Get the service account used by Cloud Run
+        SERVICE_ACCOUNT="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        
+        # Grant necessary IAM roles
+        for role in \
+          "roles/bigquery.dataEditor" \
+          "roles/storage.objectAdmin" \
+          "roles/pubsub.editor" \
+          "roles/secretmanager.secretAccessor" \
+          "roles/aiplatform.user" \
+          "roles/logging.logWriter" \
+          "roles/errorreporting.writer"; do
+          
+          echo "Granting role: $${role}"
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$${SERVICE_ACCOUNT}" \
+            --role="$${role}" \
+            --condition=None
+        done
+        
+        echo "Permissions configured successfully"
 
-# Create necessary directories with proper permissions
-RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/cache && \
-    chmod -R 755 /app
+  # Step 5: Verify deployment
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        echo "Verifying deployment..."
+        
+        # Get the service URL
+        SERVICE_URL=$(gcloud run services describe $_SERVICE_NAME \
+          --platform managed \
+          --region $_REGION \
+          --format 'value(status.url)')
+        
+        echo "Service URL: $${SERVICE_URL}"
+        
+        # Wait for the service to be ready
+        echo "Waiting for service to be ready..."
+        for i in {1..30}; do
+          if curl -s "$${SERVICE_URL}/health" > /dev/null; then
+            echo "Service is ready!"
+            break
+          fi
+          echo "Attempt $${i}/30: Service not ready yet..."
+          sleep 10
+        done
+        
+        # Final health check
+        echo "Performing final health check..."
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health")
+        
+        if [ "$${HTTP_CODE}" -eq 200 ]; then
+          echo "Deployment successful! Service is healthy."
+        else
+          echo "WARNING: Service returned HTTP $${HTTP_CODE}"
+          echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+        fi
 
-# Copy all application code
-COPY . .
+images:
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
 
-# Create initialization script with robust error handling
-RUN cat > /app/init-app.sh << 'EOF'
-#!/bin/bash
-set -e
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
 
-echo "======================================"
-echo "Starting Threat Intelligence Platform"
-echo "======================================"
-echo "Time: $(date)"
-echo "PORT: ${PORT:-8080}"
-echo "GCP_PROJECT: ${GCP_PROJECT}"
-echo "ENVIRONMENT: ${ENVIRONMENT}"
-echo "======================================"
-
-# Function to check if port is available
-check_port() {
-    local port=$1
-    if nc -z localhost $port; then
-        echo "ERROR: Port $port is already in use"
-        exit 1
-    fi
-    echo "Port $port is available"
-}
-
-# Function to initialize config with timeout
-init_config() {
-    echo "Initializing application configuration..."
-    timeout ${STARTUP_TIMEOUT}s python3 -c "
-import os
-import sys
-import time
-import traceback
-
-start_time = time.time()
-
-try:
-    # Import and initialize configuration
-    from config import Config
-    Config.init_app()
-    
-    # Verify critical components
-    if not hasattr(Config, 'GCP_PROJECT') or not Config.GCP_PROJECT:
-        raise ValueError('GCP_PROJECT not configured')
-    
-    print(f'Configuration initialized successfully in {time.time() - start_time:.2f} seconds')
-    print(f'GCP_PROJECT: {Config.GCP_PROJECT}')
-    print(f'API_KEY configured: {\"API_KEY\" in os.environ or hasattr(Config, \"API_KEY\")}')
-    
-except Exception as e:
-    print(f'ERROR: Configuration initialization failed: {str(e)}')
-    traceback.print_exc()
-    sys.exit(1)
-" || {
-    echo "Configuration initialization failed or timed out"
-    exit 1
-}
-}
-
-# Function to verify GCP connectivity
-verify_gcp() {
-    echo "Verifying GCP connectivity..."
-    python3 -c "
-import sys
-try:
-    from google.cloud import storage
-    client = storage.Client()
-    print('GCP connectivity verified')
-except Exception as e:
-    print(f'WARNING: GCP connectivity issue: {str(e)}')
-    # Don't exit - app might still work with limited functionality
-"
-}
-
-# Main initialization
-echo "Starting initialization sequence..."
-
-# Check port availability
-check_port ${PORT:-8080}
-
-# Initialize configuration
-init_config
-
-# Verify GCP connectivity (non-blocking)
-verify_gcp
-
-# Create a health check file to indicate readiness
-touch /app/.ready
-
-echo "======================================"
-echo "Initialization complete, starting application..."
-echo "======================================"
-
-# Start the application
-exec "$@"
-EOF
-
-# Make script executable
-RUN chmod +x /app/init-app.sh
-
-# Create health check script
-RUN cat > /app/healthcheck.sh << 'EOF'
-#!/bin/bash
-# Simple health check that verifies the app is responding
-curl -f http://localhost:${PORT:-8080}/health || exit 1
-EOF
-RUN chmod +x /app/healthcheck.sh
-
-# Create non-root user for security
-RUN useradd -m -u 1000 -s /bin/bash appuser && \
-    chown -R appuser:appuser /app
-
-# Expose port
-EXPOSE 8080
-
-# Health check configuration
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD ["/app/healthcheck.sh"]
-
-# Switch to non-root user
-USER appuser
-
-# Set the working directory
-WORKDIR /app
-
-# Use the initialization script as entrypoint
-ENTRYPOINT ["/app/init-app.sh"]
-
-# Default command with optimized Gunicorn settings
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+timeout: '1800s'  # 30 minutes total timeout
