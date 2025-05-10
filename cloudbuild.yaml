@@ -81,7 +81,7 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
     timeout: '300s'
 
-  # Step 3: Deploy to Cloud Run (simplified without probes)
+  # Step 3: Deploy to Cloud Run (without PORT env var)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -99,7 +99,7 @@ steps:
       - '--timeout=300'
       - '--concurrency=80'
       - '--cpu-boost'
-      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false,PORT=8080'
+      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
       - '--set-secrets=API_KEY=api-keys:latest'
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
     timeout: '600s'
@@ -139,12 +139,15 @@ steps:
         if [ "$${HTTP_CODE}" -eq 200 ]; then
           echo "Deployment successful! Service is healthy."
           echo "Application URL: $${SERVICE_URL}"
+        elif [ "$${HTTP_CODE}" -eq 503 ] || [ "$${HTTP_CODE}" -eq 500 ]; then
+          echo "Service is still initializing (HTTP $${HTTP_CODE}), checking initialization status..."
+          curl -s "$${SERVICE_URL}/health" | jq '.' || true
+          echo "The service may need more time to fully initialize. Check logs for progress."
+          echo "Application URL: $${SERVICE_URL}"
         else
           echo "WARNING: Service returned HTTP $${HTTP_CODE}"
           echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
-          
-          # Still exit successfully to allow the deployment to complete
-          echo "Service may need more time to initialize. Please check the logs."
+          echo "Application URL: $${SERVICE_URL}"
         fi
 
 images:
