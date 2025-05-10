@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 import traceback
 import threading
@@ -205,7 +206,12 @@ def initialize_platform():
             from api import api_blueprint
             from frontend import frontend_app as frontend_blueprint, format_datetime
             
+            # Register API blueprint with CSRF exemption
             app.register_blueprint(api_blueprint, url_prefix='/api')
+            
+            # Exempt the entire API blueprint from CSRF protection
+            csrf.exempt(api_blueprint)
+            
             app.register_blueprint(frontend_blueprint)
             
             # Register template filters
