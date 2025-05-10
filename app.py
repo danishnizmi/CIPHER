@@ -72,8 +72,10 @@ class EventBus:
         self._running = False
         self._worker_thread.join(timeout=5)
 
-# Create Flask app
-app = Flask(__name__)
+# Create Flask app with proper template configuration
+app = Flask(__name__, 
+            template_folder='templates',
+            static_folder='static')
 
 # Add proxy middleware to handle Cloud Run reverse proxy
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -255,9 +257,17 @@ def handle_bad_request(e):
     if 'CSRF' in error_message:
         error_message = "CSRF validation failed. Please refresh the page and try again."
     
-    return render_template('500.html', 
-                         error_code=400, 
-                         error_message=f"Bad Request: {error_message}"), 400
+    try:
+        return render_template('500.html', 
+                             error_code=400, 
+                             error_message=f"Bad Request: {error_message}"), 400
+    except Exception as template_error:
+        logger.error(f"Error rendering template: {str(template_error)}")
+        return jsonify({
+            'error': 'Bad Request',
+            'message': error_message,
+            'code': 400
+        }), 400
 
 @app.errorhandler(403)
 def handle_forbidden(e):
@@ -265,9 +275,18 @@ def handle_forbidden(e):
     logger.error(f"403 error: {str(e)}")
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Forbidden', 'message': 'Access denied'}), 403
-    return render_template('500.html', 
-                         error_code=403, 
-                         error_message="Access Denied"), 403
+    
+    try:
+        return render_template('500.html', 
+                             error_code=403, 
+                             error_message="Access Denied"), 403
+    except Exception as template_error:
+        logger.error(f"Error rendering template: {str(template_error)}")
+        return jsonify({
+            'error': 'Forbidden',
+            'message': 'Access denied',
+            'code': 403
+        }), 403
 
 @app.errorhandler(404)
 def page_not_found(e):
@@ -275,9 +294,18 @@ def page_not_found(e):
     logger.warning(f"Page not found: {request.url}")
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': str(e)}), 404
-    return render_template('500.html', 
-                         error_code=404, 
-                         error_message="Page Not Found"), 404
+    
+    try:
+        return render_template('500.html', 
+                             error_code=404, 
+                             error_message="Page Not Found"), 404
+    except Exception as template_error:
+        logger.error(f"Error rendering template: {str(template_error)}")
+        return jsonify({
+            'error': 'Not Found',
+            'message': 'Page not found',
+            'code': 404
+        }), 404
 
 @app.errorhandler(429)
 def handle_rate_limit(e):
@@ -288,9 +316,18 @@ def handle_rate_limit(e):
             'error': 'Too many requests', 
             'message': 'Rate limit exceeded. Please try again later.'
         }), 429
-    return render_template('500.html', 
-                         error_code=429, 
-                         error_message="Too Many Requests. Please try again later."), 429
+    
+    try:
+        return render_template('500.html', 
+                             error_code=429, 
+                             error_message="Too Many Requests. Please try again later."), 429
+    except Exception as template_error:
+        logger.error(f"Error rendering template: {str(template_error)}")
+        return jsonify({
+            'error': 'Too Many Requests',
+            'message': 'Rate limit exceeded',
+            'code': 429
+        }), 429
 
 @app.errorhandler(500)
 def internal_server_error(e):
@@ -299,28 +336,66 @@ def internal_server_error(e):
     logger.error(traceback.format_exc())
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
-    return render_template('500.html'), 500
+    
+    try:
+        return render_template('500.html'), 500
+    except Exception as template_error:
+        logger.error(f"Error rendering template: {str(template_error)}")
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'An unexpected error occurred',
+            'code': 500
+        }), 500
 
 # Root route handler
 @app.route('/')
 def index():
     """Root route handler."""
-    service_manager = Config.get_service_manager()
-    status = service_manager.get_status()
+    logger.info("Index route accessed")
     
-    # Check if frontend blueprint is registered
-    if 'frontend.dashboard' not in app.view_functions:
-        logger.warning("Frontend blueprint not registered, showing initialization message")
-        return render_template('500.html', 
-                             error_code=503, 
-                             error_message="Service is initializing. Please wait a moment and refresh."), 503
-    
-    if status['overall'] == ServiceStatus.READY.value:
-        return redirect(url_for('frontend.dashboard'))
-    else:
-        return render_template('500.html', 
-                             error_code=503, 
-                             error_message="Service is initializing. Please wait a moment and refresh."), 503
+    try:
+        service_manager = Config.get_service_manager()
+        status = service_manager.get_status()
+        logger.info(f"Service status: {status}")
+        
+        # Check if frontend blueprint is registered
+        if 'frontend.dashboard' not in app.view_functions:
+            logger.warning("Frontend blueprint not registered, showing initialization message")
+            try:
+                return render_template('500.html', 
+                                     error_code=503, 
+                                     error_message="Service is initializing. Please wait a moment and refresh."), 503
+            except Exception as template_error:
+                logger.error(f"Error rendering template: {str(template_error)}")
+                return jsonify({
+                    'error': 'Service Unavailable',
+                    'message': 'Service is initializing. Please wait a moment and refresh.',
+                    'code': 503
+                }), 503
+        
+        if status['overall'] == ServiceStatus.READY.value:
+            return redirect(url_for('frontend.dashboard'))
+        else:
+            try:
+                return render_template('500.html', 
+                                     error_code=503, 
+                                     error_message="Service is initializing. Please wait a moment and refresh."), 503
+            except Exception as template_error:
+                logger.error(f"Error rendering template: {str(template_error)}")
+                return jsonify({
+                    'error': 'Service Unavailable',
+                    'message': 'Service is initializing. Please wait a moment and refresh.',
+                    'code': 503
+                }), 503
+                
+    except Exception as e:
+        logger.error(f"Error in index route: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'An unexpected error occurred',
+            'code': 500
+        }), 500
 
 # Shutdown handler
 @app.teardown_appcontext
@@ -331,6 +406,7 @@ def shutdown_services(error=None):
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
+    logger.info("Initializing platform for Gunicorn")
     success = initialize_platform()
     if not success:
         logger.error("Platform initialization failed - application may not work correctly")
@@ -353,6 +429,7 @@ if __name__ == '__main__':
             # Continue to start the app so we can show error pages
         
         port = int(os.environ.get('PORT', 8080))
+        logger.info(f"Starting server on port {port}")
         app.run(
             host='0.0.0.0', 
             port=port, 
