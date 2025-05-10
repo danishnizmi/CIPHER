@@ -32,26 +32,6 @@ steps:
         else
           echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
           gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
-          
-          # Set bucket lifecycle rules
-          cat > lifecycle.json << 'EOL'
-          {
-            "lifecycle": {
-              "rule": [
-                {
-                  "action": {"type": "Delete"},
-                  "condition": {"age": 30, "isLive": true}
-                },
-                {
-                  "action": {"type": "Delete"},
-                  "condition": {"numNewerVersions": 3, "isLive": false}
-                }
-              ]
-            }
-          }
-        EOL
-          gsutil lifecycle set lifecycle.json gs://$${BUCKET_NAME}
-          rm -f lifecycle.json
         fi
         
         # Create Pub/Sub topics if they don't exist
@@ -67,11 +47,8 @@ steps:
         # Create API key secret if it doesn't exist
         if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: api-keys"
-          # Generate a default API key if not provided
-          if [ -z "$${API_KEY}" ]; then
-            API_KEY=$(openssl rand -hex 32)
-            echo "Generated API key: $${API_KEY}"
-          fi
+          API_KEY=$(openssl rand -hex 32)
+          echo "Generated API key: $${API_KEY}"
           echo -n "$${API_KEY}" | gcloud secrets create api-keys --data-file=- --project=$PROJECT_ID
         else
           echo "Secret already exists: api-keys"
@@ -80,14 +57,7 @@ steps:
         # Create feed configuration secret if it doesn't exist
         if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: feed-config"
-          # Use default feed configuration
-          cat > feed-config.json << 'EOL'
-          {
-            "feeds": []
-          }
-        EOL
-          gcloud secrets create feed-config --data-file=feed-config.json --project=$PROJECT_ID
-          rm -f feed-config.json
+          echo '{"feeds": []}' | gcloud secrets create feed-config --data-file=- --project=$PROJECT_ID
         else
           echo "Secret already exists: feed-config"
         fi
@@ -111,7 +81,7 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
     timeout: '300s'
 
-  # Step 3: Deploy to Cloud Run with comprehensive configuration
+  # Step 3: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -134,38 +104,7 @@ steps:
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
     timeout: '600s'
 
-  # Step 4: Configure service permissions
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        set -e
-        echo "Configuring service permissions..."
-        
-        # Get the service account used by Cloud Run
-        SERVICE_ACCOUNT="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
-        
-        # Grant necessary IAM roles
-        for role in \
-          "roles/bigquery.dataEditor" \
-          "roles/storage.objectAdmin" \
-          "roles/pubsub.editor" \
-          "roles/secretmanager.secretAccessor" \
-          "roles/aiplatform.user" \
-          "roles/logging.logWriter" \
-          "roles/errorreporting.writer"; do
-          
-          echo "Granting role: $${role}"
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:$${SERVICE_ACCOUNT}" \
-            --role="$${role}" \
-            --condition=None
-        done
-        
-        echo "Permissions configured successfully"
-
-  # Step 5: Verify deployment
+  # Step 4: Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
