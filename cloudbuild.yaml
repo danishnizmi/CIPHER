@@ -16,16 +16,19 @@ steps:
         echo "Creating necessary GCP resources..."
         
         # Create BigQuery dataset if it doesn't exist
-        if ! bq ls -d --project_id=$PROJECT_ID | grep -q "^${_DATASET}$"; then
+        echo "Checking if BigQuery dataset exists: ${_DATASET}"
+        if bq show --project_id=$PROJECT_ID ${_DATASET} >/dev/null 2>&1; then
+          echo "BigQuery dataset already exists: ${_DATASET}"
+        else
           echo "Creating BigQuery dataset: ${_DATASET}"
           bq mk --dataset --location=US --project_id=$PROJECT_ID ${_DATASET}
-        else
-          echo "BigQuery dataset already exists: ${_DATASET}"
         fi
         
         # Create Cloud Storage bucket if it doesn't exist
         BUCKET_NAME="${PROJECT_ID}-${_BUCKET_SUFFIX}"
-        if ! gsutil ls -p $PROJECT_ID | grep -q "gs://$${BUCKET_NAME}/"; then
+        if gsutil ls -p $PROJECT_ID gs://$${BUCKET_NAME} >/dev/null 2>&1; then
+          echo "Cloud Storage bucket already exists: $${BUCKET_NAME}"
+        else
           echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
           gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
           
@@ -47,13 +50,11 @@ steps:
           }
         EOL
           gsutil lifecycle set lifecycle.json gs://$${BUCKET_NAME}
-        else
-          echo "Cloud Storage bucket already exists: $${BUCKET_NAME}"
         fi
         
         # Create Pub/Sub topics if they don't exist
         for topic in threat-data-ingestion threat-analysis-events; do
-          if ! gcloud pubsub topics describe $${topic} --project=$PROJECT_ID 2>/dev/null; then
+          if ! gcloud pubsub topics describe $${topic} --project=$PROJECT_ID >/dev/null 2>&1; then
             echo "Creating Pub/Sub topic: $${topic}"
             gcloud pubsub topics create $${topic} --project=$PROJECT_ID
           else
@@ -62,7 +63,7 @@ steps:
         done
         
         # Create API key secret if it doesn't exist
-        if ! gcloud secrets describe api-keys --project=$PROJECT_ID 2>/dev/null; then
+        if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: api-keys"
           # Generate a default API key if not provided
           if [ -z "$${API_KEY}" ]; then
@@ -75,7 +76,7 @@ steps:
         fi
         
         # Create feed configuration secret if it doesn't exist
-        if ! gcloud secrets describe feed-config --project=$PROJECT_ID 2>/dev/null; then
+        if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: feed-config"
           # Use default feed configuration
           cat > feed-config.json << 'EOL'
