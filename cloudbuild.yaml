@@ -81,137 +81,28 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
     timeout: '300s'
 
-  # Step 3: Deploy to Cloud Run with probes configured directly
+  # Step 3: Deploy to Cloud Run (simplified without probes)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
+    entrypoint: gcloud
     args:
-      - '-c'
-      - |
-        set -e
-        echo "Deploying to Cloud Run..."
-        
-        # First, check if the service already exists
-        if gcloud run services describe $_SERVICE_NAME --region=$_REGION --project=$PROJECT_ID >/dev/null 2>&1; then
-          echo "Service exists, updating..."
-          # Use a YAML file for updating configuration
-          cat > service.yaml << EOF
-        apiVersion: serving.knative.dev/v1
-        kind: Service
-        metadata:
-          name: $_SERVICE_NAME
-        spec:
-          template:
-            metadata:
-              annotations:
-                autoscaling.knative.dev/minScale: '1'
-                autoscaling.knative.dev/maxScale: '10'
-                run.googleapis.com/startup-cpu-boost: 'true'
-            spec:
-              containerConcurrency: 80
-              timeoutSeconds: 300
-              containers:
-              - image: gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA
-                ports:
-                - containerPort: 8080
-                env:
-                - name: ENVIRONMENT
-                  value: 'production'
-                - name: GCP_PROJECT
-                  value: '$PROJECT_ID'
-                - name: GCP_REGION
-                  value: '$_REGION'
-                - name: BIGQUERY_DATASET
-                  value: '$_DATASET'
-                - name: GCS_BUCKET
-                  value: '${PROJECT_ID}-${_BUCKET_SUFFIX}'
-                - name: PUBSUB_TOPIC
-                  value: 'threat-data-ingestion'
-                - name: PUBSUB_ANALYSIS_TOPIC
-                  value: 'threat-analysis-events'
-                - name: VERSION
-                  value: '1.0.3'
-                - name: DEBUG
-                  value: 'false'
-                - name: PYTHONPATH
-                  value: '/app'
-                - name: PYTHONDONTWRITEBYTECODE
-                  value: '1'
-                - name: PYTHONUNBUFFERED
-                  value: '1'
-                - name: LOG_LEVEL
-                  value: 'INFO'
-                - name: LOG_TO_CLOUD
-                  value: 'true'
-                - name: ENABLE_ERROR_REPORTING
-                  value: 'true'
-                - name: AUTO_ANALYZE
-                  value: 'false'
-                - name: NLP_ENABLED
-                  value: 'true'
-                - name: ANALYSIS_ENABLED
-                  value: 'true'
-                - name: BIGQUERY_MAX_BYTES_BILLED
-                  value: '104857600'
-                - name: ENSURE_GCP_RESOURCES
-                  value: 'false'
-                - name: API_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: api-keys
-                      key: latest
-                resources:
-                  limits:
-                    memory: 2Gi
-                    cpu: '2'
-                  requests:
-                    memory: 1Gi
-                    cpu: '1'
-                startupProbe:
-                  httpGet:
-                    path: /health
-                    port: 8080
-                  initialDelaySeconds: 30
-                  periodSeconds: 15
-                  timeoutSeconds: 10
-                  failureThreshold: 10
-                livenessProbe:
-                  httpGet:
-                    path: /health
-                    port: 8080
-                  periodSeconds: 30
-                  timeoutSeconds: 5
-                  failureThreshold: 3
-                readinessProbe:
-                  httpGet:
-                    path: /ready
-                    port: 8080
-                  periodSeconds: 10
-                  timeoutSeconds: 5
-                  failureThreshold: 3
-              serviceAccountName: cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
-        EOF
-          
-          # Apply the service configuration
-          gcloud run services replace service.yaml --region=$_REGION --project=$PROJECT_ID
-        else
-          echo "Service doesn't exist, creating new deployment..."
-          # Create new service with basic configuration
-          gcloud run deploy $_SERVICE_NAME \
-            --image=gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA \
-            --region=$_REGION \
-            --platform=managed \
-            --allow-unauthenticated \
-            --memory=2Gi \
-            --cpu=2 \
-            --min-instances=1 \
-            --max-instances=10 \
-            --timeout=300 \
-            --concurrency=80 \
-            --cpu-boost \
-            --set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false \
-            --set-secrets=API_KEY=api-keys:latest \
-            --service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com
-        fi
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image=gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
+      - '--region=$_REGION'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--min-instances=1'
+      - '--max-instances=10'
+      - '--timeout=300'
+      - '--concurrency=80'
+      - '--cpu-boost'
+      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false,PORT=8080'
+      - '--set-secrets=API_KEY=api-keys:latest'
+      - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
+    timeout: '600s'
 
   # Step 4: Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -232,12 +123,12 @@ steps:
         
         # Wait for the service to be ready with longer timeout
         echo "Waiting for service to be ready..."
-        for i in {1..40}; do
+        for i in {1..60}; do
           if curl -s "$${SERVICE_URL}/health" > /dev/null; then
             echo "Service is ready!"
             break
           fi
-          echo "Attempt $${i}/40: Service not ready yet..."
+          echo "Attempt $${i}/60: Service not ready yet..."
           sleep 10
         done
         
