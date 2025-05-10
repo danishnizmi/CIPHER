@@ -61,86 +61,24 @@ RUN ls -la /app/templates/ && \
     test -f /app/templates/detail.html && \
     test -f /app/templates/content.html
 
-# Create initialization script
-RUN echo '#!/bin/bash' > /app/init-app.sh && \
-    echo 'set -e' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo 'echo "======================================"' >> /app/init-app.sh && \
-    echo 'echo "Starting Threat Intelligence Platform"' >> /app/init-app.sh && \
-    echo 'echo "======================================"' >> /app/init-app.sh && \
-    echo 'echo "Time: $(date)"' >> /app/init-app.sh && \
-    echo 'echo "PORT: ${PORT:-8080}"' >> /app/init-app.sh && \
-    echo 'echo "GCP_PROJECT: ${GCP_PROJECT}"' >> /app/init-app.sh && \
-    echo 'echo "ENVIRONMENT: ${ENVIRONMENT}"' >> /app/init-app.sh && \
-    echo 'echo "======================================"' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Function to check if port is available' >> /app/init-app.sh && \
-    echo 'check_port() {' >> /app/init-app.sh && \
-    echo '    local port=$1' >> /app/init-app.sh && \
-    echo '    if nc -z localhost $port; then' >> /app/init-app.sh && \
-    echo '        echo "ERROR: Port $port is already in use"' >> /app/init-app.sh && \
-    echo '        exit 1' >> /app/init-app.sh && \
-    echo '    fi' >> /app/init-app.sh && \
-    echo '    echo "Port $port is available"' >> /app/init-app.sh && \
-    echo '}' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Function to verify environment' >> /app/init-app.sh && \
-    echo 'verify_environment() {' >> /app/init-app.sh && \
-    echo '    echo "Verifying environment..."' >> /app/init-app.sh && \
-    echo '    if [ ! -f /app/app.py ]; then' >> /app/init-app.sh && \
-    echo '        echo "ERROR: app.py not found"' >> /app/init-app.sh && \
-    echo '        exit 1' >> /app/init-app.sh && \
-    echo '    fi' >> /app/init-app.sh && \
-    echo '    if [ ! -d /app/templates ]; then' >> /app/init-app.sh && \
-    echo '        echo "ERROR: templates directory not found"' >> /app/init-app.sh && \
-    echo '        exit 1' >> /app/init-app.sh && \
-    echo '    fi' >> /app/init-app.sh && \
-    echo '    echo "Environment verified successfully"' >> /app/init-app.sh && \
-    echo '}' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Function to initialize config' >> /app/init-app.sh && \
-    echo 'init_config() {' >> /app/init-app.sh && \
-    echo '    echo "Initializing application configuration..."' >> /app/init-app.sh && \
-    echo '    python3 -c "' >> /app/init-app.sh && \
-    echo 'import os' >> /app/init-app.sh && \
-    echo 'import sys' >> /app/init-app.sh && \
-    echo 'try:' >> /app/init-app.sh && \
-    echo '    from config import Config' >> /app/init-app.sh && \
-    echo '    Config.init_app()' >> /app/init-app.sh && \
-    echo '    print(f\"Configuration initialized successfully\")' >> /app/init-app.sh && \
-    echo '    print(f\"GCP_PROJECT: {Config.GCP_PROJECT}\")' >> /app/init-app.sh && \
-    echo 'except Exception as e:' >> /app/init-app.sh && \
-    echo '    print(f\"ERROR: Configuration initialization failed: {str(e)}\")' >> /app/init-app.sh && \
-    echo '    import traceback' >> /app/init-app.sh && \
-    echo '    traceback.print_exc()' >> /app/init-app.sh && \
-    echo '    sys.exit(1)' >> /app/init-app.sh && \
-    echo '"' >> /app/init-app.sh && \
-    echo '}' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Main initialization' >> /app/init-app.sh && \
-    echo 'echo "Starting initialization sequence..."' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Verify environment first' >> /app/init-app.sh && \
-    echo 'verify_environment' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Check port availability' >> /app/init-app.sh && \
-    echo 'check_port ${PORT:-8080}' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Initialize configuration' >> /app/init-app.sh && \
-    echo 'init_config' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Create a health check file to indicate readiness' >> /app/init-app.sh && \
-    echo 'touch /app/.ready' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo 'echo "======================================"' >> /app/init-app.sh && \
-    echo 'echo "Initialization complete, starting application..."' >> /app/init-app.sh && \
-    echo 'echo "======================================"' >> /app/init-app.sh && \
-    echo '' >> /app/init-app.sh && \
-    echo '# Start the application' >> /app/init-app.sh && \
-    echo 'exec "$@"' >> /app/init-app.sh
+# Create startup script
+RUN echo '#!/bin/bash' > /app/startup.sh && \
+    echo 'set -e' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo 'echo "Starting Threat Intelligence Platform"' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo 'echo "Time: $(date)"' >> /app/startup.sh && \
+    echo 'echo "PORT: ${PORT:-8080}"' >> /app/startup.sh && \
+    echo 'echo "GCP_PROJECT: ${GCP_PROJECT}"' >> /app/startup.sh && \
+    echo 'echo "ENVIRONMENT: ${ENVIRONMENT}"' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Start the application' >> /app/startup.sh && \
+    echo 'exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 2 --threads 4 --timeout 120 --worker-class gthread --preload --log-level info --access-logfile - --error-logfile - app:app' >> /app/startup.sh
 
 # Make script executable
-RUN chmod +x /app/init-app.sh
+RUN chmod +x /app/startup.sh
 
 # Create health check script
 RUN echo '#!/bin/bash' > /app/healthcheck.sh && \
@@ -166,8 +104,5 @@ USER appuser
 # Set the working directory
 WORKDIR /app
 
-# Use the initialization script as entrypoint
-ENTRYPOINT ["/app/init-app.sh"]
-
-# Default command with optimized Gunicorn settings
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+# Use the startup script
+ENTRYPOINT ["/app/startup.sh"]
