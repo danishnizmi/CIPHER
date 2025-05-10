@@ -39,11 +39,27 @@ RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
     pip install --no-cache-dir -r requirements.txt
 
 # Create necessary directories with proper permissions
-RUN mkdir -p /app/static/src /app/static/dist /app/templates /app/data /app/logs /app/tmp /app/cache && \
+RUN mkdir -p /app/static/src \
+    /app/static/dist \
+    /app/templates \
+    /app/data \
+    /app/logs \
+    /app/tmp \
+    /app/cache && \
     chmod -R 755 /app
 
-# Copy all application code
-COPY . .
+# Copy application code (order matters for caching)
+COPY *.py /app/
+COPY requirements.txt /app/
+COPY templates /app/templates/
+
+# Verify templates are copied
+RUN ls -la /app/templates/ && \
+    test -f /app/templates/base.html && \
+    test -f /app/templates/500.html && \
+    test -f /app/templates/dashboard.html && \
+    test -f /app/templates/detail.html && \
+    test -f /app/templates/content.html
 
 # Create initialization script
 RUN echo '#!/bin/bash' > /app/init-app.sh && \
@@ -68,6 +84,20 @@ RUN echo '#!/bin/bash' > /app/init-app.sh && \
     echo '    echo "Port $port is available"' >> /app/init-app.sh && \
     echo '}' >> /app/init-app.sh && \
     echo '' >> /app/init-app.sh && \
+    echo '# Function to verify environment' >> /app/init-app.sh && \
+    echo 'verify_environment() {' >> /app/init-app.sh && \
+    echo '    echo "Verifying environment..."' >> /app/init-app.sh && \
+    echo '    if [ ! -f /app/app.py ]; then' >> /app/init-app.sh && \
+    echo '        echo "ERROR: app.py not found"' >> /app/init-app.sh && \
+    echo '        exit 1' >> /app/init-app.sh && \
+    echo '    fi' >> /app/init-app.sh && \
+    echo '    if [ ! -d /app/templates ]; then' >> /app/init-app.sh && \
+    echo '        echo "ERROR: templates directory not found"' >> /app/init-app.sh && \
+    echo '        exit 1' >> /app/init-app.sh && \
+    echo '    fi' >> /app/init-app.sh && \
+    echo '    echo "Environment verified successfully"' >> /app/init-app.sh && \
+    echo '}' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
     echo '# Function to initialize config' >> /app/init-app.sh && \
     echo 'init_config() {' >> /app/init-app.sh && \
     echo '    echo "Initializing application configuration..."' >> /app/init-app.sh && \
@@ -81,12 +111,17 @@ RUN echo '#!/bin/bash' > /app/init-app.sh && \
     echo '    print(f\"GCP_PROJECT: {Config.GCP_PROJECT}\")' >> /app/init-app.sh && \
     echo 'except Exception as e:' >> /app/init-app.sh && \
     echo '    print(f\"ERROR: Configuration initialization failed: {str(e)}\")' >> /app/init-app.sh && \
+    echo '    import traceback' >> /app/init-app.sh && \
+    echo '    traceback.print_exc()' >> /app/init-app.sh && \
     echo '    sys.exit(1)' >> /app/init-app.sh && \
     echo '"' >> /app/init-app.sh && \
     echo '}' >> /app/init-app.sh && \
     echo '' >> /app/init-app.sh && \
     echo '# Main initialization' >> /app/init-app.sh && \
     echo 'echo "Starting initialization sequence..."' >> /app/init-app.sh && \
+    echo '' >> /app/init-app.sh && \
+    echo '# Verify environment first' >> /app/init-app.sh && \
+    echo 'verify_environment' >> /app/init-app.sh && \
     echo '' >> /app/init-app.sh && \
     echo '# Check port availability' >> /app/init-app.sh && \
     echo 'check_port ${PORT:-8080}' >> /app/init-app.sh && \
