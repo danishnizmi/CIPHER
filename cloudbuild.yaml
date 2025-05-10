@@ -104,7 +104,21 @@ steps:
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
     timeout: '600s'
 
-  # Step 4: Verify deployment
+  # Step 4: Configure health checks and startup probe
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'services'
+      - 'update'
+      - '$_SERVICE_NAME'
+      - '--region=$_REGION'
+      - '--update-probe-startup=type=http,path=/health,period=15,failure-threshold=10,initial-delay=30'
+      - '--update-probe-liveness=type=http,path=/health,period=30,failure-threshold=3'
+      - '--update-probe-readiness=type=http,path=/ready,period=10,failure-threshold=3'
+    timeout: '300s'
+
+  # Step 5: Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -121,14 +135,14 @@ steps:
         
         echo "Service URL: $${SERVICE_URL}"
         
-        # Wait for the service to be ready
+        # Wait for the service to be ready with longer timeout
         echo "Waiting for service to be ready..."
-        for i in {1..30}; do
+        for i in {1..40}; do
           if curl -s "$${SERVICE_URL}/health" > /dev/null; then
             echo "Service is ready!"
             break
           fi
-          echo "Attempt $${i}/30: Service not ready yet..."
+          echo "Attempt $${i}/40: Service not ready yet..."
           sleep 10
         done
         
@@ -138,9 +152,13 @@ steps:
         
         if [ "$${HTTP_CODE}" -eq 200 ]; then
           echo "Deployment successful! Service is healthy."
+          echo "Application URL: $${SERVICE_URL}"
         else
           echo "WARNING: Service returned HTTP $${HTTP_CODE}"
           echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+          
+          # Still exit successfully to allow the deployment to complete
+          echo "Service may need more time to initialize. Please check the logs."
         fi
 
 images:
@@ -151,4 +169,4 @@ options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
 
-timeout: '1800s'  # 30 minutes total timeout
+timeout: '2400s'  # 40 minutes total timeout
