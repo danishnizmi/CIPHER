@@ -176,7 +176,8 @@ def readiness_check():
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
-    if status['overall'] == ServiceStatus.READY.value:
+    # Consider the app ready if it's initializing or ready
+    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value]:
         return jsonify({
             'status': 'ready',
             'timestamp': datetime.utcnow().isoformat()
@@ -223,14 +224,14 @@ def initialize_platform():
         # 4. Register blueprints with error handling
         try:
             from api import api_blueprint
-            from frontend import frontend_app  # FIX: Changed from frontend_blueprint to frontend_app
+            from frontend import frontend_app  # FIXED: Changed from frontend_blueprint to frontend_app
             
             # Register API blueprint with CSRF exemption
             app.register_blueprint(api_blueprint, url_prefix='/api')
             csrf.exempt(api_blueprint)
             
             # Register frontend blueprint
-            app.register_blueprint(frontend_app)  # FIX: Changed to frontend_app
+            app.register_blueprint(frontend_app)
             
             logger.info("Blueprints registered successfully")
             
@@ -360,7 +361,8 @@ def index():
             return jsonify({
                 'error': 'Service Unavailable',
                 'message': 'Service is initializing. Please wait a moment and refresh.',
-                'code': 503
+                'code': 503,
+                'status': status
             }), 503
         
         # Redirect to dashboard
@@ -374,6 +376,24 @@ def index():
             'message': 'An unexpected error occurred',
             'code': 500
         }), 500
+
+# API info endpoint
+@app.route('/api')
+@csrf.exempt
+def api_info():
+    """API information endpoint."""
+    return jsonify({
+        'name': 'Threat Intelligence Platform API',
+        'version': Config.VERSION,
+        'status': 'active',
+        'endpoints': {
+            '/api/health': 'Service health check',
+            '/api/stats': 'Platform statistics',
+            '/api/feeds': 'Threat feed information',
+            '/api/iocs': 'Indicators of compromise',
+            '/api/ai/analyses': 'AI analysis results'
+        }
+    })
 
 # Shutdown handler
 @app.teardown_appcontext
