@@ -223,14 +223,14 @@ def initialize_platform():
         # 4. Register blueprints with error handling
         try:
             from api import api_blueprint
-            from frontend import frontend_blueprint
+            from frontend import frontend_app  # FIX: Changed from frontend_blueprint to frontend_app
             
             # Register API blueprint with CSRF exemption
             app.register_blueprint(api_blueprint, url_prefix='/api')
             csrf.exempt(api_blueprint)
             
             # Register frontend blueprint
-            app.register_blueprint(frontend_blueprint)
+            app.register_blueprint(frontend_app)  # FIX: Changed to frontend_app
             
             logger.info("Blueprints registered successfully")
             
@@ -281,17 +281,11 @@ def handle_bad_request(e):
     if 'CSRF' in error_message:
         error_message = "CSRF validation failed. Please refresh the page and try again."
     
-    try:
-        return render_template('500.html', 
-                             error_code=400, 
-                             error_message=f"Bad Request: {error_message}"), 400
-    except Exception as template_error:
-        logger.error(f"Error rendering template: {str(template_error)}")
-        return jsonify({
-            'error': 'Bad Request',
-            'message': error_message,
-            'code': 400
-        }), 400
+    return jsonify({
+        'error': 'Bad Request',
+        'message': error_message,
+        'code': 400
+    }), 400
 
 @app.errorhandler(403)
 def handle_forbidden(e):
@@ -300,17 +294,11 @@ def handle_forbidden(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Forbidden', 'message': 'Access denied'}), 403
     
-    try:
-        return render_template('500.html', 
-                             error_code=403, 
-                             error_message="Access Denied"), 403
-    except Exception as template_error:
-        logger.error(f"Error rendering template: {str(template_error)}")
-        return jsonify({
-            'error': 'Forbidden',
-            'message': 'Access denied',
-            'code': 403
-        }), 403
+    return jsonify({
+        'error': 'Forbidden',
+        'message': 'Access denied',
+        'code': 403
+    }), 403
 
 @app.errorhandler(404)
 def page_not_found(e):
@@ -319,17 +307,11 @@ def page_not_found(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': str(e)}), 404
     
-    try:
-        return render_template('500.html', 
-                             error_code=404, 
-                             error_message="Page Not Found"), 404
-    except Exception as template_error:
-        logger.error(f"Error rendering template: {str(template_error)}")
-        return jsonify({
-            'error': 'Not Found',
-            'message': 'Page not found',
-            'code': 404
-        }), 404
+    return jsonify({
+        'error': 'Not Found',
+        'message': 'Page not found',
+        'code': 404
+    }), 404
 
 @app.errorhandler(429)
 def handle_rate_limit(e):
@@ -341,17 +323,11 @@ def handle_rate_limit(e):
             'message': 'Rate limit exceeded. Please try again later.'
         }), 429
     
-    try:
-        return render_template('500.html', 
-                             error_code=429, 
-                             error_message="Too Many Requests. Please try again later."), 429
-    except Exception as template_error:
-        logger.error(f"Error rendering template: {str(template_error)}")
-        return jsonify({
-            'error': 'Too Many Requests',
-            'message': 'Rate limit exceeded',
-            'code': 429
-        }), 429
+    return jsonify({
+        'error': 'Too Many Requests',
+        'message': 'Rate limit exceeded',
+        'code': 429
+    }), 429
 
 @app.errorhandler(500)
 def internal_server_error(e):
@@ -361,15 +337,11 @@ def internal_server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
     
-    try:
-        return render_template('500.html'), 500
-    except Exception as template_error:
-        logger.error(f"Error rendering template: {str(template_error)}")
-        return jsonify({
-            'error': 'Internal Server Error',
-            'message': 'An unexpected error occurred',
-            'code': 500
-        }), 500
+    return jsonify({
+        'error': 'Internal Server Error',
+        'message': 'An unexpected error occurred',
+        'code': 500
+    }), 500
 
 # Root route handler
 @app.route('/')
@@ -385,17 +357,11 @@ def index():
         # Check if frontend blueprint is registered
         if 'frontend.dashboard' not in app.view_functions:
             logger.warning("Frontend blueprint not registered, showing initialization message")
-            try:
-                return render_template('500.html', 
-                                     error_code=503, 
-                                     error_message="Service is initializing. Please wait a moment and refresh."), 503
-            except Exception as template_error:
-                logger.error(f"Error rendering template: {str(template_error)}")
-                return jsonify({
-                    'error': 'Service Unavailable',
-                    'message': 'Service is initializing. Please wait a moment and refresh.',
-                    'code': 503
-                }), 503
+            return jsonify({
+                'error': 'Service Unavailable',
+                'message': 'Service is initializing. Please wait a moment and refresh.',
+                'code': 503
+            }), 503
         
         # Redirect to dashboard
         return redirect(url_for('frontend.dashboard'))
