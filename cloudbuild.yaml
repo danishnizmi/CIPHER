@@ -16,18 +16,18 @@ steps:
         echo "Creating necessary GCP resources..."
         
         # Create BigQuery dataset if it doesn't exist
-        if ! bq ls -d --project_id=$PROJECT_ID | grep -q "^$${_DATASET}$$"; then
-          echo "Creating BigQuery dataset: $${_DATASET}"
-          bq mk --dataset --location=US --project_id=$PROJECT_ID $${_DATASET}
+        if ! bq ls -d --project_id=$PROJECT_ID | grep -q "^${_DATASET}$"; then
+          echo "Creating BigQuery dataset: ${_DATASET}"
+          bq mk --dataset --location=US --project_id=$PROJECT_ID ${_DATASET}
         else
-          echo "BigQuery dataset already exists: $${_DATASET}"
+          echo "BigQuery dataset already exists: ${_DATASET}"
         fi
         
         # Create Cloud Storage bucket if it doesn't exist
-        BUCKET_NAME="${PROJECT_ID}-$${_BUCKET_SUFFIX}"
+        BUCKET_NAME="${PROJECT_ID}-${_BUCKET_SUFFIX}"
         if ! gsutil ls -p $PROJECT_ID | grep -q "gs://$${BUCKET_NAME}/"; then
           echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
-          gsutil mb -p $PROJECT_ID -l $${_REGION} gs://$${BUCKET_NAME}
+          gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
           
           # Set bucket lifecycle rules
           cat > lifecycle.json << 'EOL'
