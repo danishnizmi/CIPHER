@@ -12,11 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FLASK_ENV=production \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Default PORT for Cloud Run
     PORT=8080 \
-    # BigQuery cost controls
     BIGQUERY_MAX_BYTES_BILLED=104857600 \
-    # Timeout configurations
     GUNICORN_TIMEOUT=120 \
     STARTUP_TIMEOUT=60
 
@@ -37,11 +34,8 @@ COPY requirements.txt .
 # Install Python dependencies with error handling
 RUN pip install --no-cache-dir --upgrade pip==23.1.2 && \
     pip install --no-cache-dir --upgrade wheel setuptools && \
-    # Install numpy first to avoid compatibility issues
     pip install --no-cache-dir numpy==1.24.3 && \
-    # Install pandas next (depends on numpy)
     pip install --no-cache-dir pandas==1.5.3 && \
-    # Then install all remaining requirements
     pip install --no-cache-dir -r requirements.txt
 
 # Create necessary directories with proper permissions
@@ -156,6 +150,8 @@ RUN cat > /app/healthcheck.sh << 'EOF'
 # Simple health check that verifies the app is responding
 curl -f http://localhost:${PORT:-8080}/health || exit 1
 EOF
+
+# Make health check script executable
 RUN chmod +x /app/healthcheck.sh
 
 # Create non-root user for security
