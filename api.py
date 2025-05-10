@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Any
 from flask import Blueprint, jsonify, request, current_app, abort, Response, g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from flask_wtf.csrf import csrf_exempt
 from functools import wraps
 from google.cloud import bigquery, storage, pubsub_v1
 from google.cloud.exceptions import NotFound
@@ -187,7 +186,6 @@ def verify_bigquery_tables() -> bool:
 
 # API Endpoints
 @api_blueprint.route('/health', methods=['GET'])
-@csrf_exempt
 def api_health_check():
     """API health check with service status."""
     service_manager = Config.get_service_manager()
@@ -211,7 +209,6 @@ def api_health_check():
 
 @api_blueprint.route('/stats', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_stats():
     """Get platform statistics."""
@@ -298,7 +295,6 @@ def get_stats():
 
 @api_blueprint.route('/feeds', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_feeds():
     """Get feed information."""
@@ -346,7 +342,6 @@ def get_feeds():
 
 @api_blueprint.route('/iocs', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_iocs():
     """Get IOC data."""
@@ -405,7 +400,6 @@ def get_iocs():
 
 @api_blueprint.route('/ai/analyses', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_ai_analyses():
     """Get AI analysis data."""
@@ -489,7 +483,6 @@ def get_ai_analyses():
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_threat_summary():
     """Get threat summary data."""
@@ -544,7 +537,6 @@ def get_threat_summary():
 
 @api_blueprint.route('/ai/summary', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_ai_summary():
     """Get AI summary for dashboard."""
@@ -589,7 +581,6 @@ def get_ai_summary():
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
 @limiter.limit("30 per minute")
-@csrf_exempt
 @require_api_key
 def get_iocs_geo():
     """Get geographical statistics for IOCs."""
@@ -624,7 +615,6 @@ def get_iocs_geo():
 
 @api_blueprint.route('/admin/ingest', methods=['POST'])
 @limiter.limit("5 per minute")
-@csrf_exempt
 @require_api_key
 def trigger_ingest():
     """Trigger data ingestion."""
@@ -661,7 +651,6 @@ def trigger_ingest():
 
 @api_blueprint.route('/admin/analyze', methods=['POST'])
 @limiter.limit("5 per minute")
-@csrf_exempt
 @require_api_key
 def trigger_analysis():
     """Trigger data analysis."""
