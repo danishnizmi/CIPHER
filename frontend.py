@@ -1,6 +1,6 @@
 """
 Optimized frontend module for Threat Intelligence Platform.
-Handles web interface, dashboard views, and AI-powered analysis.
+Handles web interface, dashboard views, and real-time data display.
 """
 
 import os
@@ -21,7 +21,7 @@ from config import Config, ServiceManager, ServiceStatus
 # Environment settings
 VERSION = os.environ.get("VERSION", "1.0.3")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
-ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'production')
 
 # Cache settings
 CACHE_TIMEOUT = 300  # 5 minutes
@@ -130,7 +130,6 @@ def clear_api_cache(prefix: str = None):
 
 def get_api_key() -> str:
     """Get API key from config."""
-    # Get from Config class
     if hasattr(Config, 'API_KEY') and Config.API_KEY:
         return Config.API_KEY.strip()
     
@@ -164,9 +163,9 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         if api_key and api_key != 'default-api-key':
             headers["X-API-Key"] = api_key
         
-        logger.debug(f"API request to {endpoint} with API key: {api_key[:4]}...")
+        logger.debug(f"API request to {endpoint}")
         
-        # Make request with optimized retries
+        # Make request with retries
         max_retries = 3
         start_time = time.time()
         response = None
@@ -199,7 +198,7 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
             return {"error": "No response from API"}
         
         if response.status_code != 200:
-            logger.warning(f"API request failed: {response.status_code} - {response.text[:100]}")
+            logger.warning(f"API request failed: {response.status_code}")
             return {
                 "error": f"API request failed with status {response.status_code}",
                 "status_code": response.status_code,
@@ -210,13 +209,47 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         try:
             return response.json() if response.text else {}
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON response from {endpoint}: {response.text[:100]}")
+            logger.error(f"Invalid JSON response from {endpoint}")
             return {"error": "Invalid JSON response"}
     
     except Exception as e:
         logger.error(f"API request error ({endpoint}): {str(e)}")
         safe_report_exception(e)
         return {"error": f"API error: {str(e)}"}
+
+# ====== Auto Ingestion ======
+
+def trigger_auto_ingestion():
+    """Trigger automatic data ingestion on startup and periodically."""
+    def ingestion_loop():
+        # Initial delay to let services start
+        time.sleep(30)
+        
+        while True:
+            try:
+                logger.info("Triggering automatic data ingestion")
+                result = api_request('admin/ingest', method='POST', data={'process_all': True})
+                
+                if result.get('error'):
+                    logger.error(f"Auto ingestion failed: {result['error']}")
+                else:
+                    logger.info("Auto ingestion triggered successfully")
+                
+                # Run every 2 hours
+                time.sleep(7200)
+                
+            except Exception as e:
+                logger.error(f"Error in auto ingestion loop: {str(e)}")
+                time.sleep(900)  # Wait 15 minutes on error
+    
+    # Start in background thread
+    thread = threading.Thread(target=ingestion_loop, daemon=True)
+    thread.start()
+    logger.info("Started auto ingestion thread")
+
+# Start auto ingestion when module loads
+if ENVIRONMENT == 'production':
+    trigger_auto_ingestion()
 
 # ====== Route Handlers ======
 
@@ -308,8 +341,6 @@ def dashboard(view=None):
         stats_response = api_request('stats', params={"days": days})
         if not stats_response or 'error' in stats_response:
             logger.warning(f"Failed to load stats: {stats_response}")
-            if stats_response and 'error' in stats_response:
-                flash(f"Error loading statistics: {stats_response['error']}", 'warning')
         else:
             context['stats'] = {
                 'feeds': stats_response.get('feeds', {'total_sources': 0}),
@@ -355,8 +386,6 @@ def dashboard(view=None):
             feeds_response = api_request('feeds')
             if not feeds_response or 'error' in feeds_response:
                 context['feed_items'] = []
-                if feeds_response and 'error' in feeds_response:
-                    flash(f"Error loading feeds: {feeds_response['error']}", 'warning')
             else:
                 context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
             
@@ -364,8 +393,6 @@ def dashboard(view=None):
             iocs_response = api_request('iocs', params={"days": days, "limit": 100})
             if not iocs_response or 'error' in iocs_response:
                 context['ioc_items'] = []
-                if iocs_response and 'error' in iocs_response:
-                    flash(f"Error loading IOCs: {iocs_response['error']}", 'warning')
             else:
                 context['ioc_items'] = iocs_response.get('records', [])
             
@@ -380,11 +407,6 @@ def dashboard(view=None):
             
         else:
             # Dashboard view - load additional data
-            # Date range for activity chart
-            today = datetime.now().date()
-            date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
-            context['activity_dates'] = date_range
-            
             # Get recent IOCs
             iocs_response = api_request('iocs', params={"days": days, "limit": 10})
             if iocs_response and 'error' not in iocs_response:
@@ -413,85 +435,6 @@ def dashboard(view=None):
         safe_report_exception(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
-
-@frontend_app.route('/ingest_threat_data', methods=['GET', 'POST'])
-def ingest_threat_data():
-    """Trigger threat data ingestion."""
-    try:
-        if request.method == 'POST':
-            result = api_request('admin/ingest', method='POST', data={'process_all': True})
-            
-            if result.get('error'):
-                flash(f'Error triggering ingestion: {result["error"]}', 'danger')
-            else:
-                flash('Threat data ingestion triggered successfully', 'success')
-                clear_api_cache()  # Clear cache to show fresh data
-            
-            return redirect(url_for('frontend.dashboard'))
-        
-        # For GET, render loading page
-        return render_template('base.html', 
-                              title="Triggering Data Ingestion", 
-                              content="""
-                              <div class="text-center py-8">
-                                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-accent mb-4"></div>
-                                <h1 class="text-2xl font-bold mb-4">Triggering Threat Data Ingestion</h1>
-                                <p class="mb-6">Please wait while we process your request...</p>
-                                <form id="ingestForm" method="post">
-                                </form>
-                                <script>
-                                  document.addEventListener('DOMContentLoaded', function() {
-                                    document.getElementById('ingestForm').submit();
-                                  });
-                                </script>
-                              </div>
-                              """)
-    except Exception as e:
-        logger.error(f"Error in ingest_threat_data: {str(e)}")
-        safe_report_exception(e)
-        flash('Error triggering ingestion', 'danger')
-        return redirect(url_for('frontend.dashboard'))
-
-@frontend_app.route('/run_ai_analysis', methods=['GET', 'POST'])
-def run_ai_analysis():
-    """Trigger AI analysis on threat data."""
-    try:
-        if request.method == 'POST':
-            result = api_request('admin/analyze', method='POST', data={
-                'analyze_all': True,
-                'force_reanalysis': request.form.get('force', False)
-            })
-            
-            if result.get('error'):
-                flash(f'Error triggering AI analysis: {result["error"]}', 'danger')
-            else:
-                flash('AI analysis triggered successfully. This may take a few minutes.', 'success')
-                clear_api_cache('ai')  # Clear AI-related cache
-            
-            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
-        
-        # For GET, render loading page
-        return render_template('base.html', 
-                              title="Triggering AI Analysis", 
-                              content="""
-                              <div class="text-center py-8">
-                                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-purple-600 mb-4"></div>
-                                <h1 class="text-2xl font-bold mb-4">Running AI Analysis</h1>
-                                <p class="mb-6">AI is analyzing your threat intelligence data...</p>
-                                <form id="analysisForm" method="post">
-                                </form>
-                                <script>
-                                  document.addEventListener('DOMContentLoaded', function() {
-                                    document.getElementById('analysisForm').submit();
-                                  });
-                                </script>
-                              </div>
-                              """)
-    except Exception as e:
-        logger.error(f"Error in run_ai_analysis: {str(e)}")
-        safe_report_exception(e)
-        flash('Error triggering AI analysis', 'danger')
-        return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/export/iocs')
 def export_iocs():
@@ -640,29 +583,8 @@ def dynamic_content_detail(content_type, identifier):
         flash('Error loading content details', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
-@frontend_app.route('/ioc/<ioc_id>/analyze')
-def analyze_ioc(ioc_id):
-    """Trigger AI analysis for a specific IOC."""
-    try:
-        result = api_request('admin/analyze', method='POST', data={
-            'indicator_ids': [ioc_id],
-            'force_reanalysis': True
-        })
-        
-        if result.get('error'):
-            flash(f'Error analyzing IOC: {result["error"]}', 'danger')
-        else:
-            flash('IOC analysis started successfully', 'success')
-            clear_api_cache(f'iocs_{ioc_id}')
-        
-        return redirect(url_for('frontend.dashboard', view='iocs'))
-        
-    except Exception as e:
-        logger.error(f"Error analyzing IOC: {str(e)}")
-        flash('Error triggering IOC analysis', 'danger')
-        return redirect(url_for('frontend.dashboard', view='iocs'))
-
 # Template filters and context processors
+@frontend_app.template_filter('datetime')
 def format_datetime(value):
     """Format a datetime string for display."""
     if not value:
@@ -728,7 +650,6 @@ def periodic_cache_cleanup():
 
 # Start cache cleanup thread
 if __name__ != "__main__":
-    cleanup_thread = threading.Thread(target=periodic_cache_cleanup)
-    cleanup_thread.daemon = True
+    cleanup_thread = threading.Thread(target=periodic_cache_cleanup, daemon=True)
     cleanup_thread.start()
     logger.info("Frontend module initialized successfully")
