@@ -24,6 +24,27 @@ steps:
           bq mk --dataset --location=US --project_id=$PROJECT_ID ${_DATASET}
         fi
         
+        # Create all required BigQuery tables
+        echo "Creating required BigQuery tables..."
+        TABLES=("indicators" "vulnerabilities" "threat_actors" "campaigns" "malware")
+        for table in "${TABLES[@]}"; do
+          if bq show --project_id=$PROJECT_ID ${_DATASET}.${table} >/dev/null 2>&1; then
+            echo "Table already exists: ${table}"
+          else
+            echo "Creating table: ${table}"
+            # Create table with initial schema - the app will handle schema updates
+            if [ "$table" = "indicators" ]; then
+              bq mk --table --project_id=$PROJECT_ID \
+                ${_DATASET}.${table} \
+                id:STRING,value:STRING,type:STRING,created_at:TIMESTAMP
+            else
+              bq mk --table --project_id=$PROJECT_ID \
+                ${_DATASET}.${table} \
+                id:STRING,created_at:TIMESTAMP
+            fi
+          fi
+        done
+        
         # Create Cloud Storage bucket if it doesn't exist
         BUCKET_NAME="${PROJECT_ID}-${_BUCKET_SUFFIX}"
         echo "Checking Cloud Storage bucket: $${BUCKET_NAME}"
@@ -32,6 +53,13 @@ steps:
         else
           echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
           gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
+          
+          # Create folder structure
+          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/feeds/
+          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/raw/
+          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/processed/
+          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/cache/
+          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/exports/
         fi
         
         # Create Pub/Sub topics if they don't exist
@@ -57,10 +85,67 @@ steps:
         # Create feed configuration secret if it doesn't exist
         if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: feed-config"
-          echo '{"feeds": []}' | gcloud secrets create feed-config --data-file=- --project=$PROJECT_ID
+          cat > /tmp/feed-config.json << 'EOF'
+        {
+          "feeds": [
+            {
+              "id": "threatfox",
+              "name": "ThreatFox IOCs",
+              "url": "https://threatfox.abuse.ch/export/json/recent/",
+              "description": "Recent indicators from ThreatFox",
+              "format": "json",
+              "type": "mixed",
+              "update_frequency": "daily",
+              "enabled": true
+            },
+            {
+              "id": "urlhaus",
+              "name": "URLhaus Malware",
+              "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+              "description": "Recent malware URLs from URLhaus",
+              "format": "csv",
+              "type": "url",
+              "update_frequency": "daily",
+              "enabled": true
+            }
+          ]
+        }
+        EOF
+          cat /tmp/feed-config.json | gcloud secrets create feed-config --data-file=- --project=$PROJECT_ID
         else
           echo "Secret already exists: feed-config"
         fi
+        
+        # Grant necessary permissions to the service account
+        SA="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        
+        echo "Granting permissions to service account: $${SA}"
+        
+        # Grant Logs Writer permission if not already present
+        if ! gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "roles/logging.logWriter,$${SA}"; then
+          echo "Granting Logs Writer role..."
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$${SA}" \
+            --role="roles/logging.logWriter"
+        fi
+        
+        # Grant other necessary permissions
+        ROLES=(
+          "roles/bigquery.dataEditor"
+          "roles/storage.objectAdmin"
+          "roles/pubsub.editor"
+          "roles/secretmanager.secretAccessor"
+          "roles/run.developer"
+        )
+        
+        for role in "${ROLES[@]}"; do
+          if ! gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "$${role},$${SA}"; then
+            echo "Granting role: $${role}"
+            gcloud projects add-iam-policy-binding $PROJECT_ID \
+              --member="serviceAccount:$${SA}" \
+              --role="$${role}"
+          fi
+        done
 
   # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
@@ -81,7 +166,7 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
     timeout: '300s'
 
-  # Step 3: Deploy to Cloud Run (without PORT env var)
+  # Step 3: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -123,32 +208,43 @@ steps:
         
         # Wait for the service to be ready with longer timeout
         echo "Waiting for service to be ready..."
-        for i in {1..60}; do
-          if curl -s "$${SERVICE_URL}/health" > /dev/null; then
+        MAX_ATTEMPTS=60
+        for i in $(seq 1 $MAX_ATTEMPTS); do
+          echo "Attempt $${i}/$${MAX_ATTEMPTS}: Checking service health..."
+          
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health" || echo "000")
+          
+          if [ "$${HTTP_CODE}" -eq 200 ]; then
             echo "Service is ready!"
             break
+          elif [ "$${HTTP_CODE}" -eq 503 ] || [ "$${HTTP_CODE}" -eq 500 ]; then
+            echo "Service is initializing (HTTP $${HTTP_CODE})..."
+            RESPONSE=$(curl -s "$${SERVICE_URL}/health" || echo "{}")
+            echo "Response: $${RESPONSE}" | jq '.' || echo "$${RESPONSE}"
+          else
+            echo "Service returned HTTP $${HTTP_CODE}"
           fi
-          echo "Attempt $${i}/60: Service not ready yet..."
+          
+          if [ $i -eq $MAX_ATTEMPTS ]; then
+            echo "WARNING: Service health check not successful after $${MAX_ATTEMPTS} attempts"
+            echo "The service may need more time to fully initialize."
+          fi
+          
           sleep 10
         done
         
-        # Final health check
-        echo "Performing final health check..."
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health")
+        # Final status check
+        echo "Performing final status check..."
+        STATUS_RESPONSE=$(curl -s "$${SERVICE_URL}/status" || echo "{}")
+        echo "Service status: $${STATUS_RESPONSE}" | jq '.' || echo "$${STATUS_RESPONSE}"
         
-        if [ "$${HTTP_CODE}" -eq 200 ]; then
-          echo "Deployment successful! Service is healthy."
-          echo "Application URL: $${SERVICE_URL}"
-        elif [ "$${HTTP_CODE}" -eq 503 ] || [ "$${HTTP_CODE}" -eq 500 ]; then
-          echo "Service is still initializing (HTTP $${HTTP_CODE}), checking initialization status..."
-          curl -s "$${SERVICE_URL}/health" | jq '.' || true
-          echo "The service may need more time to fully initialize. Check logs for progress."
-          echo "Application URL: $${SERVICE_URL}"
-        else
-          echo "WARNING: Service returned HTTP $${HTTP_CODE}"
-          echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
-          echo "Application URL: $${SERVICE_URL}"
-        fi
+        # Log deployment information
+        echo "======================================"
+        echo "Deployment Information:"
+        echo "Service URL: $${SERVICE_URL}"
+        echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+        echo "Cloud Run console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$PROJECT_ID"
+        echo "======================================"
 
 images:
   - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
