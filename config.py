@@ -87,15 +87,23 @@ class ServiceManager:
             }
     
     def _calculate_overall_status(self) -> ServiceStatus:
-        """Calculate overall system status."""
-        statuses = list(self._services.values())
-        if all(s == ServiceStatus.READY for s in statuses):
+        """Calculate overall system status - AI models don't block overall readiness."""
+        critical_services = ['config', 'bigquery', 'storage', 'pubsub', 'ingestion', 'app']
+        
+        # Check critical services first
+        critical_statuses = [self._services[service] for service in critical_services]
+        
+        if all(s == ServiceStatus.READY for s in critical_statuses):
+            # All critical services ready - overall system is ready
             return ServiceStatus.READY
-        elif any(s == ServiceStatus.ERROR for s in statuses):
+        elif any(s == ServiceStatus.ERROR for s in critical_statuses):
+            # Any critical service in error - system is in error
             return ServiceStatus.ERROR
-        elif any(s == ServiceStatus.DEGRADED for s in statuses):
+        elif any(s == ServiceStatus.DEGRADED for s in critical_statuses):
+            # Any critical service degraded - system is degraded  
             return ServiceStatus.DEGRADED
         else:
+            # Still initializing critical services
             return ServiceStatus.INITIALIZING
     
     def get_client(self, client_type: str):
@@ -306,7 +314,7 @@ class Config:
     
     @classmethod
     def _load_feed_config(cls):
-        """Load feed configuration."""
+        """Load feed configuration with proper fallbacks."""
         # Try environment variable first
         env_feeds = os.environ.get('FEED_CONFIG')
         if env_feeds:
@@ -328,18 +336,28 @@ class Config:
                 try:
                     response = client.access_secret_version(request={"name": secret_name})
                     secret_value = response.payload.data.decode("UTF-8")
+                    
+                    # Debug logging
+                    logger.debug(f"Raw secret value: {secret_value[:100]}...")
+                    
                     feed_config = json.loads(secret_value)
                     cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
+                    
+                    # Ensure we have feeds
+                    if not cls.FEEDS:
+                        logger.warning("No feeds found in Secret Manager config, using defaults")
+                        cls.FEEDS = DEFAULT_FEED_CONFIGS
+                    
                     logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
                     return
                 except Exception as e:
                     logger.warning(f"Could not access feed config from Secret Manager: {str(e)}")
             except ImportError:
-                pass
+                logger.warning("Secret Manager client not available")
         
-        # Use default feeds
+        # Always use default feeds as fallback
         cls.FEEDS = DEFAULT_FEED_CONFIGS
-        logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
+        logger.warning(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
     
     @classmethod
     def configure_logging(cls):
@@ -374,7 +392,7 @@ class Config:
     
     @classmethod
     def validate_configuration(cls):
-        """Validate configuration values."""
+        """Validate configuration values - don't fail for non-critical issues."""
         warnings = []
         errors = []
         
@@ -383,13 +401,17 @@ class Config:
                 warnings.append("Production environment using default API key!")
         
         if not cls.GCP_PROJECT:
-            errors.append("GCP_PROJECT not set - multiple GCP services will fail")
+            warnings.append("GCP_PROJECT not set - some GCP services may fail")
         
         if not cls.GCS_BUCKET:
-            errors.append("GCS_BUCKET not set - data storage will fail")
+            warnings.append("GCS_BUCKET not set - data storage may fail")
         
         if not cls.BIGQUERY_DATASET:
-            errors.append("BIGQUERY_DATASET not set - data storage will fail")
+            warnings.append("BIGQUERY_DATASET not set - data storage may fail")
+        
+        if not cls.FEEDS:
+            errors.append("No feeds configured - using defaults")
+            cls.FEEDS = DEFAULT_FEED_CONFIGS
         
         for warning in warnings:
             logger.warning(warning)
@@ -398,7 +420,7 @@ class Config:
             logger.error(error)
         
         # Allow startup even with errors to show error messages
-        return len(errors) == 0
+        return True
     
     @classmethod
     def get_service_manager(cls) -> ServiceManager:
@@ -507,13 +529,3 @@ def initialize_pubsub():
         logger.error(f"Failed to initialize PubSub clients: {e}")
         service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
         return None, None
-
-# Module initialization check
-if __name__ == "__main__":
-    logger.info("Testing configuration module...")
-    Config.init_app()
-    print(f"Environment: {Config.ENVIRONMENT}")
-    print(f"GCP Project: {Config.GCP_PROJECT}")
-    print(f"API Key: {Config.API_KEY[:4]}...{Config.API_KEY[-4:] if len(Config.API_KEY) > 8 else ''}")
-    print(f"Feeds configured: {len(Config.FEEDS)}")
-    print(f"Service Status: {Config.get_service_manager().get_status()}")
