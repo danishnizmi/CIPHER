@@ -94,7 +94,8 @@ class DataProcessor:
             'md5': r'^[a-f0-9]{32}$',
             'sha1': r'^[a-f0-9]{40}$',
             'sha256': r'^[a-f0-9]{64}$',
-            'email': r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            'email': r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
+            'ip:port': r'^(\d{1,3}\.){3}\d{1,3}:\d+$'
         }
         
         if ioc_type in patterns and not re.match(patterns[ioc_type], value.lower()):
@@ -250,6 +251,68 @@ def initialize_bigquery_tables() -> bool:
                 bigquery.SchemaField("analysis_summary", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("threat_type", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("threat_id", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("malware_printable", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("reference", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("reporter", "STRING", mode="NULLABLE"),
+            ],
+            'vulnerabilities': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("cve_id", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("title", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("severity", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("cvss_score", "FLOAT", mode="NULLABLE"),
+                bigquery.SchemaField("affected_products", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("published_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("source", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("references", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("tags", "STRING", mode="REPEATED"),
+            ],
+            'threat_actors': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("aliases", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("country", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("motivation", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("first_seen", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("last_seen", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("tactics", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("techniques", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("tools", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("targets", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'campaigns': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("threat_actor_id", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("start_date", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("end_date", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("targets", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("tactics", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("techniques", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("indicators", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
+            ],
+            'malware': [
+                bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("aliases", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("type", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("platform", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("capabilities", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("indicators", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("first_seen", "TIMESTAMP", mode="NULLABLE"),
+                bigquery.SchemaField("last_seen", "TIMESTAMP", mode="NULLABLE"),
             ]
         }
         
@@ -280,7 +343,7 @@ def initialize_bigquery_tables() -> bool:
                 
             except Exception as e:
                 logger.warning(f"Issue with table {table_id}: {str(e)}")
-                return False
+                # Continue with other tables
                 
         return True
         
@@ -604,12 +667,21 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                 value = record['ioc_value']
                 ioc_type = record['ioc_type']
                 
+                # Parse tags
                 tags = record.get('tags', '')
                 if isinstance(tags, str):
                     tags = [t.strip() for t in tags.split(',') if t.strip()]
                 elif not isinstance(tags, list):
                     tags = []
                 
+                # Parse malware aliases
+                malware_aliases = record.get('malware_alias', '')
+                if isinstance(malware_aliases, str):
+                    malware_aliases = [a.strip() for a in malware_aliases.split(',') if a.strip()]
+                elif not isinstance(malware_aliases, list):
+                    malware_aliases = []
+                
+                # Create indicator
                 indicator = {
                     "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
                     "value": value,
@@ -626,8 +698,15 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                     "malware_printable": record.get('malware_printable'),
                     "first_seen": record.get('first_seen_utc'),
                     "last_seen": record.get('last_seen_utc'),
+                    "reference": record.get('reference'),
+                    "reporter": record.get('reporter'),
                     "raw_data": json.dumps(record)
                 }
+                
+                # Add malware aliases to tags
+                for alias in malware_aliases:
+                    if alias not in indicator['tags']:
+                        indicator['tags'].append(f"malware:{alias}")
                 
             # Handle URLhaus format (CSV with 'url' column)
             elif 'url' in record and (feed_name.lower() == 'urlhaus' or 'threat' in record):
@@ -652,26 +731,8 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                     "threat_type": record.get('threat', 'malware_download'),
                     "first_seen": record.get('dateadded'),
                     "last_seen": record.get('last_online'),
-                    "raw_data": json.dumps(record)
-                }
-                
-            # Handle PhishTank format
-            elif 'url' in record and (feed_name.lower() == 'phishtank' or 'phish_id' in record):
-                value = record['url']
-                
-                indicator = {
-                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
-                    "value": value,
-                    "type": 'url',
-                    "source": feed_name,
-                    "feed_id": feed_name,
-                    "created_at": datetime.datetime.utcnow().isoformat(),
-                    "confidence": 90 if record.get('verified') == 'yes' else 70,
-                    "tags": ['phishing', 'verified'] if record.get('verified') == 'yes' else ['phishing'],
-                    "description": f"Phishing URL from {feed_name}",
-                    "threat_type": 'phishing',
-                    "first_seen": record.get('submission_time'),
-                    "last_seen": record.get('verification_time'),
+                    "reporter": record.get('reporter'),
+                    "reference": record.get('urlhaus_link'),
                     "raw_data": json.dumps(record)
                 }
                 
@@ -701,6 +762,10 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
             if not isinstance(indicator['confidence'], int):
                 indicator['confidence'] = 50
                 
+            # Calculate initial risk score
+            risk_score = calculate_initial_risk_score(indicator)
+            indicator['risk_score'] = risk_score
+                
             normalized.append(indicator)
             
         except Exception as e:
@@ -709,6 +774,42 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
     
     logger.info(f"Normalized {len(normalized)} records from {feed_name}")
     return normalized
+
+def calculate_initial_risk_score(indicator: Dict) -> int:
+    """Calculate initial risk score for an indicator."""
+    base_score = indicator.get('confidence', 50)
+    
+    # Adjust based on threat type
+    threat_type = indicator.get('threat_type', '').lower()
+    if 'botnet' in threat_type:
+        base_score += 20
+    elif 'malware' in threat_type:
+        base_score += 15
+    elif 'phishing' in threat_type:
+        base_score += 10
+    
+    # Adjust based on malware type
+    malware = indicator.get('malware', '').lower()
+    if 'ransomware' in malware:
+        base_score += 25
+    elif 'cobalt' in malware or 'strike' in malware:
+        base_score += 20
+    elif 'remcos' in malware or 'rat' in malware:
+        base_score += 15
+    
+    # Adjust based on activity
+    if indicator.get('first_seen'):
+        try:
+            first_seen = datetime.datetime.fromisoformat(indicator['first_seen'].replace('Z', '+00:00'))
+            age_days = (datetime.datetime.utcnow() - first_seen).days
+            if age_days < 7:
+                base_score += 10
+            elif age_days < 30:
+                base_score += 5
+        except:
+            pass
+    
+    return min(max(base_score, 0), 100)
 
 # -------------------- Main Processing --------------------
 
@@ -747,12 +848,6 @@ def process_feed(feed_config: Dict) -> Dict:
         url = feed_config["url"]
         headers = feed_config.get("headers", {})
         timeout = feed_config.get("timeout", 60)
-        
-        # Add specific headers for PhishTank if needed
-        if feed_id == "phishtank":
-            headers["User-Agent"] = f"ThreatIntelligencePlatform/{Config.VERSION}"
-            # Respect rate limiting - add delay if needed
-            time.sleep(2)
         
         content_type, content = download_feed(url, headers, timeout)
         if not content:
