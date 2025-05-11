@@ -57,7 +57,8 @@ class ServiceManager:
             'ingestion': ServiceStatus.INITIALIZING,
             'analysis': ServiceStatus.INITIALIZING,
             'frontend': ServiceStatus.INITIALIZING,
-            'api': ServiceStatus.INITIALIZING
+            'api': ServiceStatus.INITIALIZING,
+            'app': ServiceStatus.INITIALIZING
         }
         self._clients = {}
         self._errors = {}
@@ -125,12 +126,12 @@ SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 # Default feed configurations
 DEFAULT_FEED_CONFIGS = [
     {
-        "id": "phishtank",
-        "name": "PhishTank URLs",
-        "url": "http://data.phishtank.com/data/online-valid.json",
-        "description": "URLs verified as phishing by PhishTank community",
+        "id": "threatfox",
+        "name": "ThreatFox IOCs",
+        "url": "https://threatfox.abuse.ch/export/json/recent/",
+        "description": "Recent indicators from ThreatFox",
         "format": "json",
-        "type": "url",
+        "type": "mixed",
         "update_frequency": "daily",
         "enabled": True
     },
@@ -141,16 +142,6 @@ DEFAULT_FEED_CONFIGS = [
         "description": "Recent malware URLs from URLhaus",
         "format": "csv",
         "type": "url",
-        "update_frequency": "daily",
-        "enabled": True
-    },
-    {
-        "id": "threatfox",
-        "name": "ThreatFox IOCs",
-        "url": "https://threatfox.abuse.ch/export/json/recent/",
-        "description": "Recent indicators from ThreatFox",
-        "format": "json",
-        "type": "mixed",
         "update_frequency": "daily",
         "enabled": True
     }
@@ -327,6 +318,25 @@ class Config:
             except json.JSONDecodeError:
                 logger.warning("Invalid JSON in FEED_CONFIG environment variable")
         
+        # Try Secret Manager for feed config
+        if cls.GCP_PROJECT:
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                secret_name = f"projects/{cls.GCP_PROJECT}/secrets/feed-config/versions/latest"
+                
+                try:
+                    response = client.access_secret_version(request={"name": secret_name})
+                    secret_value = response.payload.data.decode("UTF-8")
+                    feed_config = json.loads(secret_value)
+                    cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
+                    logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
+                    return
+                except Exception as e:
+                    logger.warning(f"Could not access feed config from Secret Manager: {str(e)}")
+            except ImportError:
+                pass
+        
         # Use default feeds
         cls.FEEDS = DEFAULT_FEED_CONFIGS
         logger.info(f"Using default feed configuration with {len(cls.FEEDS)} feeds")
@@ -375,12 +385,19 @@ class Config:
         if not cls.GCP_PROJECT:
             errors.append("GCP_PROJECT not set - multiple GCP services will fail")
         
+        if not cls.GCS_BUCKET:
+            errors.append("GCS_BUCKET not set - data storage will fail")
+        
+        if not cls.BIGQUERY_DATASET:
+            errors.append("BIGQUERY_DATASET not set - data storage will fail")
+        
         for warning in warnings:
             logger.warning(warning)
         
         for error in errors:
             logger.error(error)
         
+        # Allow startup even with errors to show error messages
         return len(errors) == 0
     
     @classmethod
