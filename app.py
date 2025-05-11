@@ -212,19 +212,23 @@ def initialize_platform():
             logger.warning(f"Some GCP clients failed to initialize: {e}")
             # Continue anyway
         
-        # 3. Ensure BigQuery tables exist (non-blocking)
+        # 3. Ensure BigQuery tables exist (blocking for critical tables)
         try:
             if bq_client:
                 from ingestion import initialize_bigquery_tables
-                threading.Thread(target=initialize_bigquery_tables, daemon=True).start()
-                logger.info("BigQuery table initialization started in background")
+                logger.info("Ensuring BigQuery tables exist...")
+                if initialize_bigquery_tables():
+                    logger.info("BigQuery tables initialized successfully")
+                else:
+                    logger.error("Failed to initialize BigQuery tables")
+                    # Continue anyway, tables might be created later
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
         # 4. Register blueprints with error handling
         try:
             from api import api_blueprint
-            from frontend import frontend_app  # FIXED: Changed from frontend_blueprint to frontend_app
+            from frontend import frontend_app
             
             # Register API blueprint with CSRF exemption
             app.register_blueprint(api_blueprint, url_prefix='/api')
@@ -246,19 +250,36 @@ def initialize_platform():
         
         # 6. Start background processes (non-blocking)
         try:
-            # Start other services in background threads
-            def init_other_services():
-                try:
-                    # Initialize other services with timeout
-                    threading.Timer(5.0, lambda: service_manager.update_status('frontend', ServiceStatus.READY)).start()
-                    threading.Timer(5.0, lambda: service_manager.update_status('api', ServiceStatus.READY)).start()
-                    threading.Timer(10.0, lambda: service_manager.update_status('ingestion', ServiceStatus.READY)).start()
-                    threading.Timer(10.0, lambda: service_manager.update_status('analysis', ServiceStatus.READY)).start()
-                    threading.Timer(15.0, lambda: service_manager.update_status('ai_models', ServiceStatus.READY)).start()
-                except Exception as e:
-                    logger.error(f"Error initializing services: {e}")
+            # Start service monitoring
+            def monitor_services():
+                service_manager = Config.get_service_manager()
+                while True:
+                    try:
+                        status = service_manager.get_status()
+                        overall = status['overall']
+                        
+                        # Gradually mark services as ready
+                        for service in ['frontend', 'api', 'ingestion', 'analysis']:
+                            current_status = status['services'].get(service)
+                            if current_status == ServiceStatus.INITIALIZING.value:
+                                service_manager.update_status(service, ServiceStatus.READY)
+                        
+                        if overall == ServiceStatus.ERROR.value:
+                            logger.warning("System in error state, checking services...")
+                    except Exception as e:
+                        logger.error(f"Error in service monitor: {e}")
+                    
+                    time.sleep(30)
             
-            threading.Thread(target=init_other_services, daemon=True).start()
+            monitor_thread = threading.Thread(target=monitor_services, daemon=True)
+            monitor_thread.start()
+            
+            # Start ingestion if enabled
+            if Config.AUTO_ANALYZE:
+                from ingestion import trigger_ingestion_in_background
+                trigger_ingestion_in_background()
+                logger.info("Started background ingestion")
+        
         except Exception as e:
             logger.warning(f"Background service initialization error: {e}")
         
@@ -308,11 +329,7 @@ def page_not_found(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': str(e)}), 404
     
-    return jsonify({
-        'error': 'Not Found',
-        'message': 'Page not found',
-        'code': 404
-    }), 404
+    return render_template('404.html'), 404
 
 @app.errorhandler(429)
 def handle_rate_limit(e):
@@ -338,11 +355,7 @@ def internal_server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
     
-    return jsonify({
-        'error': 'Internal Server Error',
-        'message': 'An unexpected error occurred',
-        'code': 500
-    }), 500
+    return render_template('500.html'), 500
 
 # Root route handler
 @app.route('/')
@@ -358,12 +371,9 @@ def index():
         # Check if frontend blueprint is registered
         if 'frontend.dashboard' not in app.view_functions:
             logger.warning("Frontend blueprint not registered, showing initialization message")
-            return jsonify({
-                'error': 'Service Unavailable',
-                'message': 'Service is initializing. Please wait a moment and refresh.',
-                'code': 503,
-                'status': status
-            }), 503
+            return render_template('500.html', 
+                                 error_code=503,
+                                 error_message="Service is initializing. Please wait a moment and refresh.")
         
         # Redirect to dashboard
         return redirect(url_for('frontend.dashboard'))
@@ -371,11 +381,7 @@ def index():
     except Exception as e:
         logger.error(f"Error in index route: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({
-            'error': 'Internal Server Error',
-            'message': 'An unexpected error occurred',
-            'code': 500
-        }), 500
+        return render_template('500.html'), 500
 
 # API info endpoint
 @app.route('/api')
@@ -392,6 +398,29 @@ def api_info():
             '/api/feeds': 'Threat feed information',
             '/api/iocs': 'Indicators of compromise',
             '/api/ai/analyses': 'AI analysis results'
+        }
+    })
+
+# Status endpoint
+@app.route('/status')
+@csrf.exempt
+def status_check():
+    """Detailed status check."""
+    service_manager = Config.get_service_manager()
+    status = service_manager.get_status()
+    
+    return jsonify({
+        'status': status['overall'],
+        'timestamp': datetime.utcnow().isoformat(),
+        'version': Config.VERSION,
+        'environment': Config.ENVIRONMENT,
+        'services': status['services'],
+        'errors': status['errors'],
+        'config': {
+            'gcp_project': Config.GCP_PROJECT,
+            'bigquery_dataset': Config.BIGQUERY_DATASET,
+            'gcs_bucket': Config.GCS_BUCKET,
+            'feeds_configured': len(Config.FEEDS)
         }
     })
 
