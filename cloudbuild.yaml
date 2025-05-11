@@ -1,5 +1,4 @@
 # Cloud Build configuration for Threat Intelligence Platform
-# Production-ready configuration with proper error handling and deployment steps
 
 substitutions:
   _REGION: us-central1
@@ -15,6 +14,8 @@ steps:
   # Step 0: Create necessary GCP resources
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
+    env:
+      - 'PROJECT_ID=$PROJECT_ID'
     args:
       - '-c'
       - |
@@ -22,32 +23,33 @@ steps:
         echo "======================================"
         echo "Creating necessary GCP resources..."
         echo "======================================"
+        echo "PROJECT_ID: $$PROJECT_ID"
         
         # Create BigQuery dataset if it doesn't exist
         echo "Checking BigQuery dataset: ${_DATASET}"
-        if bq show --project_id=$$PROJECT_ID ${_DATASET} >/dev/null 2>&1; then
+        if bq show --project_id=$$PROJECT_ID "$$PROJECT_ID:${_DATASET}" >/dev/null 2>&1; then
           echo "BigQuery dataset already exists: ${_DATASET}"
         else
           echo "Creating BigQuery dataset: ${_DATASET}"
-          bq mk --dataset --location=US --project_id=$$PROJECT_ID ${_DATASET}
+          bq mk --project_id=$$PROJECT_ID --location=US "$$PROJECT_ID:${_DATASET}"
         fi
         
         # Create all required BigQuery tables
         echo "Creating required BigQuery tables..."
         TABLES=("indicators" "vulnerabilities" "threat_actors" "campaigns" "malware")
         for table in "$${TABLES[@]}"; do
-          if bq show --project_id=$$PROJECT_ID ${_DATASET}.$${table} >/dev/null 2>&1; then
+          if bq show --project_id=$$PROJECT_ID "$$PROJECT_ID:${_DATASET}.$${table}" >/dev/null 2>&1; then
             echo "Table already exists: $${table}"
           else
             echo "Creating table: $${table}"
             # Create table with minimal schema - the app will handle schema updates
             if [ "$${table}" = "indicators" ]; then
-              bq mk --table --project_id=$$PROJECT_ID \
-                ${_DATASET}.$${table} \
+              bq mk --project_id=$$PROJECT_ID \
+                "$$PROJECT_ID:${_DATASET}.$${table}" \
                 id:STRING,value:STRING,type:STRING,created_at:TIMESTAMP
             else
-              bq mk --table --project_id=$$PROJECT_ID \
-                ${_DATASET}.$${table} \
+              bq mk --project_id=$$PROJECT_ID \
+                "$$PROJECT_ID:${_DATASET}.$${table}" \
                 id:STRING,created_at:TIMESTAMP
             fi
           fi
@@ -66,7 +68,7 @@ steps:
           echo "Creating folder structure..."
           for folder in feeds raw processed cache exports; do
             echo "Creating folder: $${folder}/"
-            gsutil -m cp /dev/null gs://$${BUCKET_NAME}/$${folder}/
+            gsutil -m cp /dev/null gs://$${BUCKET_NAME}/$${folder}/ || true
           done
         fi
         
@@ -123,7 +125,7 @@ steps:
         }
         EOF
           cat /tmp/feed-config.json | gcloud secrets create feed-config --data-file=- --project=$$PROJECT_ID
-          rm /tmp/feed-config.json
+          rm -f /tmp/feed-config.json
         else
           echo "Secret already exists: feed-config"
         fi
@@ -141,6 +143,7 @@ steps:
           "roles/run.developer"
           "roles/logging.logWriter"
           "roles/errorreporting.writer"
+          "roles/monitoring.metricWriter"
         )
         
         for role in "$${ROLES[@]}"; do
@@ -197,6 +200,7 @@ steps:
       - '--timeout=900'
       - '--concurrency=80'
       - '--cpu-boost'
+      - '--execution-environment=gen2'
       - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
       - '--set-secrets=API_KEY=api-keys:latest'
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
@@ -205,6 +209,8 @@ steps:
   # Step 4: Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
+    env:
+      - 'PROJECT_ID=$PROJECT_ID'
     args:
       - '-c'
       - |
@@ -217,6 +223,7 @@ steps:
         SERVICE_URL=$$(gcloud run services describe $_SERVICE_NAME \
           --platform managed \
           --region $_REGION \
+          --project $$PROJECT_ID \
           --format 'value(status.url)')
         
         echo "Service URL: $${SERVICE_URL}"
@@ -265,6 +272,7 @@ steps:
         gcloud run services describe $_SERVICE_NAME \
           --platform managed \
           --region $_REGION \
+          --project $$PROJECT_ID \
           --format 'value(status.url,status.conditions.type,status.conditions.status)' | sed 's/\t/ = /g'
         
         # Final status check
@@ -280,13 +288,13 @@ steps:
         echo "Service URL: $${SERVICE_URL}"
         echo "Service Name: $_SERVICE_NAME"
         echo "Region: $_REGION"
-        echo "Image: gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA"
+        echo "Image: gcr.io/$$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA"
         echo ""
         echo "Useful links:"
         echo "- Service URL: $${SERVICE_URL}"
-        echo "- Logs: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
-        echo "- Cloud Run Console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$PROJECT_ID"
-        echo "- BigQuery Dataset: https://console.cloud.google.com/bigquery?project=$PROJECT_ID&ws=!1m4!1m3!3m2!1s$PROJECT_ID!2s$_DATASET"
+        echo "- Logs: https://console.cloud.google.com/logs/viewer?project=$$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+        echo "- Cloud Run Console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$$PROJECT_ID"
+        echo "- BigQuery Dataset: https://console.cloud.google.com/bigquery?project=$$PROJECT_ID&ws=!1m4!1m3!3m2!1s$$PROJECT_ID!2s$_DATASET"
         echo "======================================"
         echo "Deployment completed successfully!"
         echo "======================================"
