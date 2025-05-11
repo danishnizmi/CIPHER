@@ -146,6 +146,7 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
+    # Allow requests during initialization
     if status['overall'] == ServiceStatus.ERROR.value:
         return {"error": "Services unavailable", "status": "error"}
     
@@ -520,7 +521,7 @@ def export_iocs():
             
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(['Type', 'Value', 'Risk Score', 'Confidence', 'Source', 'First Seen', 'Last Seen'])
+            writer.writerow(['Type', 'Value', 'Risk Score', 'Confidence', 'Source', 'First Seen', 'Last Seen', 'Malware', 'Threat Type'])
             
             for ioc in iocs:
                 writer.writerow([
@@ -530,7 +531,9 @@ def export_iocs():
                     ioc.get('confidence', ''),
                     ioc.get('source', ''),
                     ioc.get('first_seen', ioc.get('created_at', '')),
-                    ioc.get('last_seen', '')
+                    ioc.get('last_seen', ''),
+                    ioc.get('malware', ''),
+                    ioc.get('threat_type', '')
                 ])
             
             output.seek(0)
@@ -678,7 +681,7 @@ def format_datetime(value):
 def page_not_found(e):
     """Handle 404 errors."""
     logger.info(f"Page not found: {request.path}")
-    return render_template('500.html', error_code=404, error_message="Page Not Found"), 404
+    return render_template('404.html', error_code=404, error_message="Page Not Found"), 404
 
 @frontend_app.errorhandler(500)
 def server_error(e):
