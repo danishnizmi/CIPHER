@@ -61,92 +61,86 @@ RUN ls -la /app/templates/ && \
     test -f /app/templates/detail.html || echo "detail.html missing" && \
     test -f /app/templates/content.html || echo "content.html missing"
 
-# Create startup script directly in Dockerfile
-RUN cat > /app/startup.sh << 'EOF'
-#!/bin/bash
-set -e
-
-echo "======================================"
-echo "Starting Threat Intelligence Platform"
-echo "======================================"
-echo "Time: $(date)"
-echo "PORT: ${PORT:-8080}"
-echo "GCP_PROJECT: ${GCP_PROJECT}"
-echo "ENVIRONMENT: ${ENVIRONMENT}"
-echo "======================================"
-
-# Function to check if port is available
-check_port() {
-    local port=${1:-8080}
-    if nc -z localhost $port; then
-        echo "ERROR: Port $port is already in use"
-        exit 1
-    fi
-    echo "Port $port is available"
-}
-
-# Basic health check function
-basic_health_check() {
-    echo "Running basic health check..."
-    if [ ! -f /app/app.py ]; then
-        echo "ERROR: app.py not found"
-        exit 1
-    fi
-    if [ ! -d /app/templates ]; then
-        echo "ERROR: templates directory not found"
-        exit 1
-    fi
-    echo "Basic health check passed"
-}
-
-# Initialize application
-echo "Initializing application..."
-basic_health_check
-
-# Check port availability
-check_port ${PORT:-8080}
-
-# Export environment variables
-export PYTHONPATH=/app
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
-
-# Log Python version and installed packages
-echo "Python version:"
-python --version
-echo "Installed packages:"
-pip list | grep -E "Flask|gunicorn|google-cloud"
-
-echo "======================================"
-echo "Starting Gunicorn..."
-echo "======================================"
-
-# Start Gunicorn with the PORT environment variable
-exec gunicorn \
-    --bind "0.0.0.0:${PORT:-8080}" \
-    --workers 2 \
-    --threads 4 \
-    --timeout 120 \
-    --worker-class gthread \
-    --preload \
-    --log-level info \
-    --access-logfile - \
-    --error-logfile - \
-    --enable-stdio-inheritance \
-    app:app
-EOF
+# Create startup script separately to avoid heredoc issues
+RUN echo '#!/bin/bash' > /app/startup.sh && \
+    echo 'set -e' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo 'echo "Starting Threat Intelligence Platform"' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo 'echo "Time: $(date)"' >> /app/startup.sh && \
+    echo 'echo "PORT: ${PORT:-8080}"' >> /app/startup.sh && \
+    echo 'echo "GCP_PROJECT: ${GCP_PROJECT}"' >> /app/startup.sh && \
+    echo 'echo "ENVIRONMENT: ${ENVIRONMENT}"' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Function to check if port is available' >> /app/startup.sh && \
+    echo 'check_port() {' >> /app/startup.sh && \
+    echo '    local port=${1:-8080}' >> /app/startup.sh && \
+    echo '    if nc -z localhost $port; then' >> /app/startup.sh && \
+    echo '        echo "ERROR: Port $port is already in use"' >> /app/startup.sh && \
+    echo '        exit 1' >> /app/startup.sh && \
+    echo '    fi' >> /app/startup.sh && \
+    echo '    echo "Port $port is available"' >> /app/startup.sh && \
+    echo '}' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Basic health check function' >> /app/startup.sh && \
+    echo 'basic_health_check() {' >> /app/startup.sh && \
+    echo '    echo "Running basic health check..."' >> /app/startup.sh && \
+    echo '    if [ ! -f /app/app.py ]; then' >> /app/startup.sh && \
+    echo '        echo "ERROR: app.py not found"' >> /app/startup.sh && \
+    echo '        exit 1' >> /app/startup.sh && \
+    echo '    fi' >> /app/startup.sh && \
+    echo '    if [ ! -d /app/templates ]; then' >> /app/startup.sh && \
+    echo '        echo "ERROR: templates directory not found"' >> /app/startup.sh && \
+    echo '        exit 1' >> /app/startup.sh && \
+    echo '    fi' >> /app/startup.sh && \
+    echo '    echo "Basic health check passed"' >> /app/startup.sh && \
+    echo '}' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Initialize application' >> /app/startup.sh && \
+    echo 'echo "Initializing application..."' >> /app/startup.sh && \
+    echo 'basic_health_check' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Check port availability' >> /app/startup.sh && \
+    echo 'check_port ${PORT:-8080}' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Export environment variables' >> /app/startup.sh && \
+    echo 'export PYTHONPATH=/app' >> /app/startup.sh && \
+    echo 'export PYTHONDONTWRITEBYTECODE=1' >> /app/startup.sh && \
+    echo 'export PYTHONUNBUFFERED=1' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Log Python version and installed packages' >> /app/startup.sh && \
+    echo 'echo "Python version:"' >> /app/startup.sh && \
+    echo 'python --version' >> /app/startup.sh && \
+    echo 'echo "Installed packages:"' >> /app/startup.sh && \
+    echo 'pip list | grep -E "Flask|gunicorn|google-cloud"' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo 'echo "Starting Gunicorn..."' >> /app/startup.sh && \
+    echo 'echo "======================================"' >> /app/startup.sh && \
+    echo '' >> /app/startup.sh && \
+    echo '# Start Gunicorn with the PORT environment variable' >> /app/startup.sh && \
+    echo 'exec gunicorn \' >> /app/startup.sh && \
+    echo '    --bind "0.0.0.0:${PORT:-8080}" \' >> /app/startup.sh && \
+    echo '    --workers 2 \' >> /app/startup.sh && \
+    echo '    --threads 4 \' >> /app/startup.sh && \
+    echo '    --timeout 120 \' >> /app/startup.sh && \
+    echo '    --worker-class gthread \' >> /app/startup.sh && \
+    echo '    --preload \' >> /app/startup.sh && \
+    echo '    --log-level info \' >> /app/startup.sh && \
+    echo '    --access-logfile - \' >> /app/startup.sh && \
+    echo '    --error-logfile - \' >> /app/startup.sh && \
+    echo '    --enable-stdio-inheritance \' >> /app/startup.sh && \
+    echo '    app:app' >> /app/startup.sh
 
 # Make startup script executable
 RUN chmod +x /app/startup.sh
 
 # Create health check script
-RUN cat > /app/healthcheck.sh << 'EOF'
-#!/bin/bash
-curl -f http://localhost:${PORT:-8080}/health || exit 1
-EOF
-
-# Make health check script executable
-RUN chmod +x /app/healthcheck.sh
+RUN echo '#!/bin/bash' > /app/healthcheck.sh && \
+    echo 'curl -f http://localhost:${PORT:-8080}/health || exit 1' >> /app/healthcheck.sh && \
+    chmod +x /app/healthcheck.sh
 
 # Create non-root user for security
 RUN useradd -m -u 1000 -s /bin/bash appuser && \
@@ -162,7 +156,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
 # Switch to non-root user
 USER appuser
 
-# Set the working directory
+# Set working directory (comment without the word SET)
 WORKDIR /app
 
 # Use startup script as entrypoint
