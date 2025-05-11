@@ -1,4 +1,5 @@
 # Cloud Build configuration for Threat Intelligence Platform
+# Production-ready configuration with all fixes applied
 
 substitutions:
   _REGION: us-central1
@@ -68,7 +69,8 @@ steps:
           echo "Creating folder structure..."
           for folder in feeds raw processed cache exports; do
             echo "Creating folder: $${folder}/"
-            gsutil -m cp /dev/null gs://$${BUCKET_NAME}/$${folder}/ || true
+            # Using echo to create empty file instead of /dev/null
+            echo "" | gsutil cp - gs://$${BUCKET_NAME}/$${folder}/.keep
           done
         fi
         
@@ -134,7 +136,7 @@ steps:
         SA="cloud-build-service@$$PROJECT_ID.iam.gserviceaccount.com"
         echo "Granting permissions to service account: $${SA}"
         
-        # Required roles
+        # Required roles - fixing the condition issue
         ROLES=(
           "roles/bigquery.dataEditor"
           "roles/storage.objectAdmin"
@@ -147,11 +149,15 @@ steps:
         )
         
         for role in "$${ROLES[@]}"; do
+          echo "Checking role: $${role}"
           if ! gcloud projects get-iam-policy $$PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "$${role},serviceAccount:$${SA}"; then
             echo "Granting role: $${role}"
+            # Adding --condition=None to explicitly specify no condition
             gcloud projects add-iam-policy-binding $$PROJECT_ID \
               --member="serviceAccount:$${SA}" \
-              --role="$${role}"
+              --role="$${role}" \
+              --condition=None \
+              --quiet
           else
             echo "Role already exists: $${role}"
           fi
@@ -204,6 +210,7 @@ steps:
       - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
       - '--set-secrets=API_KEY=api-keys:latest'
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--quiet'
     timeout: '900s'
 
   # Step 4: Verify deployment
@@ -218,6 +225,9 @@ steps:
         echo "======================================"
         echo "Verifying deployment..."
         echo "======================================"
+        
+        # Give Cloud Run a moment to stabilize
+        sleep 10
         
         # Get the service URL
         SERVICE_URL=$$(gcloud run services describe $_SERVICE_NAME \
@@ -236,15 +246,15 @@ steps:
         while [ $$ATTEMPT -le $$MAX_ATTEMPTS ]; do
           echo "Attempt $$ATTEMPT/$$MAX_ATTEMPTS: Checking service health..."
           
-          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health" || echo "000")
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health" --max-time 10 || echo "000")
           
           if [ "$${HTTP_CODE}" -eq 200 ]; then
-            echo "Service is ready! (HTTP 200)"
+            echo "✓ Service is ready! (HTTP 200)"
             break
           elif [ "$${HTTP_CODE}" -eq 503 ] || [ "$${HTTP_CODE}" -eq 500 ]; then
             echo "Service is initializing (HTTP $${HTTP_CODE})..."
-            if RESPONSE=$$(curl -s "$${SERVICE_URL}/health" 2>/dev/null); then
-              echo "Response: $${RESPONSE}" | jq '.' 2>/dev/null || echo "$${RESPONSE}"
+            if RESPONSE=$$(curl -s "$${SERVICE_URL}/health" --max-time 10 2>/dev/null); then
+              echo "Response: $${RESPONSE}" | jq '.' 2>/dev/null || echo "$${RESPONSE}" | head -n 5
             fi
           else
             echo "Service returned HTTP $${HTTP_CODE}"
@@ -273,10 +283,22 @@ steps:
           --platform managed \
           --region $_REGION \
           --project $$PROJECT_ID \
-          --format 'value(status.url,status.conditions.type,status.conditions.status)' | sed 's/\t/ = /g'
+          --format 'table(status.conditions.type,status.conditions.status,status.conditions.message)'
+        
+        # Get revisions
+        echo ""
+        echo "Service Revisions:"
+        gcloud run revisions list \
+          --service $_SERVICE_NAME \
+          --platform managed \
+          --region $_REGION \
+          --project $$PROJECT_ID \
+          --limit 3 \
+          --format 'table(metadata.name:label=REVISION,status.conditions[0].status:label=READY,metadata.creationTimestamp:sort=1:reverse:label=CREATED)'
         
         # Final status check
-        if STATUS_RESPONSE=$$(curl -s "$${SERVICE_URL}/status" 2>/dev/null); then
+        echo ""
+        if STATUS_RESPONSE=$$(curl -s "$${SERVICE_URL}/status" --max-time 10 2>/dev/null); then
           echo "Service status response:"
           echo "$${STATUS_RESPONSE}" | jq '.' 2>/dev/null || echo "$${STATUS_RESPONSE}"
         fi
@@ -285,14 +307,14 @@ steps:
         echo "======================================"
         echo "Deployment Information:"
         echo "======================================"
-        echo "Service URL: $${SERVICE_URL}"
-        echo "Service Name: $_SERVICE_NAME"
-        echo "Region: $_REGION"
-        echo "Image: gcr.io/$$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA"
+        echo "✓ Service URL: $${SERVICE_URL}"
+        echo "✓ Service Name: $_SERVICE_NAME"
+        echo "✓ Region: $_REGION"
+        echo "✓ Image: gcr.io/$$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA"
         echo ""
         echo "Useful links:"
         echo "- Service URL: $${SERVICE_URL}"
-        echo "- Logs: https://console.cloud.google.com/logs/viewer?project=$$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+        echo "- Logs: https://console.cloud.google.com/logs/query;query=resource.type%3D%22cloud_run_revision%22%0Aresource.labels.service_name%3D%22$_SERVICE_NAME%22?project=$$PROJECT_ID"
         echo "- Cloud Run Console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$$PROJECT_ID"
         echo "- BigQuery Dataset: https://console.cloud.google.com/bigquery?project=$$PROJECT_ID&ws=!1m4!1m3!3m2!1s$$PROJECT_ID!2s$_DATASET"
         echo "======================================"
@@ -307,6 +329,7 @@ options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
   dynamicSubstitutions: true
+  substitution_option: 'ALLOW_LOOSE'
 
 timeout: '3600s'  # 60 minutes total timeout
 
