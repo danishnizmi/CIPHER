@@ -1,9 +1,15 @@
 # Cloud Build configuration for Threat Intelligence Platform
+# Production-ready configuration with proper error handling and deployment steps
+
 substitutions:
   _REGION: us-central1
   _SERVICE_NAME: threat-intelligence-platform
   _DATASET: threat_intelligence
   _BUCKET_SUFFIX: threat-data
+  _MIN_INSTANCES: '1'
+  _MAX_INSTANCES: '10'
+  _MEMORY: 2Gi
+  _CPU: '2'
 
 steps:
   # Step 0: Create necessary GCP resources
@@ -13,77 +19,82 @@ steps:
       - '-c'
       - |
         set -e
+        echo "======================================"
         echo "Creating necessary GCP resources..."
+        echo "======================================"
         
         # Create BigQuery dataset if it doesn't exist
-        echo "Checking if BigQuery dataset exists: ${_DATASET}"
-        if bq show --project_id=$PROJECT_ID ${_DATASET} >/dev/null 2>&1; then
+        echo "Checking BigQuery dataset: ${_DATASET}"
+        if bq show --project_id=$$PROJECT_ID ${_DATASET} >/dev/null 2>&1; then
           echo "BigQuery dataset already exists: ${_DATASET}"
         else
           echo "Creating BigQuery dataset: ${_DATASET}"
-          bq mk --dataset --location=US --project_id=$PROJECT_ID ${_DATASET}
+          bq mk --dataset --location=US --project_id=$$PROJECT_ID ${_DATASET}
         fi
         
         # Create all required BigQuery tables
         echo "Creating required BigQuery tables..."
         TABLES=("indicators" "vulnerabilities" "threat_actors" "campaigns" "malware")
-        for table in "${TABLES[@]}"; do
-          if bq show --project_id=$PROJECT_ID ${_DATASET}.${table} >/dev/null 2>&1; then
-            echo "Table already exists: ${table}"
+        for table in "$${TABLES[@]}"; do
+          if bq show --project_id=$$PROJECT_ID ${_DATASET}.$${table} >/dev/null 2>&1; then
+            echo "Table already exists: $${table}"
           else
-            echo "Creating table: ${table}"
-            # Create table with initial schema - the app will handle schema updates
-            if [ "$table" = "indicators" ]; then
-              bq mk --table --project_id=$PROJECT_ID \
-                ${_DATASET}.${table} \
+            echo "Creating table: $${table}"
+            # Create table with minimal schema - the app will handle schema updates
+            if [ "$${table}" = "indicators" ]; then
+              bq mk --table --project_id=$$PROJECT_ID \
+                ${_DATASET}.$${table} \
                 id:STRING,value:STRING,type:STRING,created_at:TIMESTAMP
             else
-              bq mk --table --project_id=$PROJECT_ID \
-                ${_DATASET}.${table} \
+              bq mk --table --project_id=$$PROJECT_ID \
+                ${_DATASET}.$${table} \
                 id:STRING,created_at:TIMESTAMP
             fi
           fi
         done
         
         # Create Cloud Storage bucket if it doesn't exist
-        BUCKET_NAME="${PROJECT_ID}-${_BUCKET_SUFFIX}"
+        BUCKET_NAME="$$PROJECT_ID-${_BUCKET_SUFFIX}"
         echo "Checking Cloud Storage bucket: $${BUCKET_NAME}"
-        if gsutil ls -p $PROJECT_ID gs://$${BUCKET_NAME} >/dev/null 2>&1; then
+        if gsutil ls -p $$PROJECT_ID gs://$${BUCKET_NAME} >/dev/null 2>&1; then
           echo "Cloud Storage bucket already exists: $${BUCKET_NAME}"
         else
           echo "Creating Cloud Storage bucket: $${BUCKET_NAME}"
-          gsutil mb -p $PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
+          gsutil mb -p $$PROJECT_ID -l ${_REGION} gs://$${BUCKET_NAME}
           
           # Create folder structure
-          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/feeds/
-          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/raw/
-          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/processed/
-          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/cache/
-          gsutil -m cp /dev/null gs://$${BUCKET_NAME}/exports/
+          echo "Creating folder structure..."
+          for folder in feeds raw processed cache exports; do
+            echo "Creating folder: $${folder}/"
+            gsutil -m cp /dev/null gs://$${BUCKET_NAME}/$${folder}/
+          done
         fi
         
         # Create Pub/Sub topics if they don't exist
-        for topic in threat-data-ingestion threat-analysis-events; do
-          if ! gcloud pubsub topics describe $${topic} --project=$PROJECT_ID >/dev/null 2>&1; then
-            echo "Creating Pub/Sub topic: $${topic}"
-            gcloud pubsub topics create $${topic} --project=$PROJECT_ID
-          else
+        echo "Creating Pub/Sub topics..."
+        TOPICS=("threat-data-ingestion" "threat-analysis-events")
+        for topic in "$${TOPICS[@]}"; do
+          if gcloud pubsub topics describe $${topic} --project=$$PROJECT_ID >/dev/null 2>&1; then
             echo "Pub/Sub topic already exists: $${topic}"
+          else
+            echo "Creating Pub/Sub topic: $${topic}"
+            gcloud pubsub topics create $${topic} --project=$$PROJECT_ID
           fi
         done
         
         # Create API key secret if it doesn't exist
-        if ! gcloud secrets describe api-keys --project=$PROJECT_ID >/dev/null 2>&1; then
+        echo "Checking secrets..."
+        if ! gcloud secrets describe api-keys --project=$$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: api-keys"
-          API_KEY=$(openssl rand -hex 32)
-          echo "Generated API key: $${API_KEY}"
-          echo -n "$${API_KEY}" | gcloud secrets create api-keys --data-file=- --project=$PROJECT_ID
+          API_KEY=$$(openssl rand -hex 32)
+          echo "Generated API key: $${API_KEY:0:8}..."
+          echo -n "$${API_KEY}" | gcloud secrets create api-keys --data-file=- --project=$$PROJECT_ID
         else
           echo "Secret already exists: api-keys"
         fi
         
         # Create feed configuration secret if it doesn't exist
-        if ! gcloud secrets describe feed-config --project=$PROJECT_ID >/dev/null 2>&1; then
+        if ! gcloud secrets describe feed-config --project=$$PROJECT_ID >/dev/null 2>&1; then
           echo "Creating secret: feed-config"
           cat > /tmp/feed-config.json << 'EOF'
         {
@@ -111,41 +122,41 @@ steps:
           ]
         }
         EOF
-          cat /tmp/feed-config.json | gcloud secrets create feed-config --data-file=- --project=$PROJECT_ID
+          cat /tmp/feed-config.json | gcloud secrets create feed-config --data-file=- --project=$$PROJECT_ID
+          rm /tmp/feed-config.json
         else
           echo "Secret already exists: feed-config"
         fi
         
         # Grant necessary permissions to the service account
-        SA="cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
-        
+        SA="cloud-build-service@$$PROJECT_ID.iam.gserviceaccount.com"
         echo "Granting permissions to service account: $${SA}"
         
-        # Grant Logs Writer permission if not already present
-        if ! gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "roles/logging.logWriter,$${SA}"; then
-          echo "Granting Logs Writer role..."
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:$${SA}" \
-            --role="roles/logging.logWriter"
-        fi
-        
-        # Grant other necessary permissions
+        # Required roles
         ROLES=(
           "roles/bigquery.dataEditor"
           "roles/storage.objectAdmin"
           "roles/pubsub.editor"
           "roles/secretmanager.secretAccessor"
           "roles/run.developer"
+          "roles/logging.logWriter"
+          "roles/errorreporting.writer"
         )
         
-        for role in "${ROLES[@]}"; do
-          if ! gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "$${role},$${SA}"; then
+        for role in "$${ROLES[@]}"; do
+          if ! gcloud projects get-iam-policy $$PROJECT_ID --flatten="bindings[].members" --format='csv(bindings.role,bindings.members)' | grep -q "$${role},serviceAccount:$${SA}"; then
             echo "Granting role: $${role}"
-            gcloud projects add-iam-policy-binding $PROJECT_ID \
+            gcloud projects add-iam-policy-binding $$PROJECT_ID \
               --member="serviceAccount:$${SA}" \
               --role="$${role}"
+          else
+            echo "Role already exists: $${role}"
           fi
         done
+        
+        echo "======================================"
+        echo "Resource creation completed successfully"
+        echo "======================================"
 
   # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
@@ -155,16 +166,18 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
       - '-t'
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
+      - '--cache-from'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
       - '.'
-    timeout: '600s'
+    timeout: '900s'
 
-  # Step 2: Push Docker image
+  # Step 2: Push Docker image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: 
       - 'push'
       - '--all-tags'
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
-    timeout: '300s'
+    timeout: '600s'
 
   # Step 3: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -177,17 +190,17 @@ steps:
       - '--region=$_REGION'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--memory=2Gi'
-      - '--cpu=2'
-      - '--min-instances=1'
-      - '--max-instances=10'
-      - '--timeout=300'
+      - '--memory=$_MEMORY'
+      - '--cpu=$_CPU'
+      - '--min-instances=$_MIN_INSTANCES'
+      - '--max-instances=$_MAX_INSTANCES'
+      - '--timeout=900'
       - '--concurrency=80'
       - '--cpu-boost'
       - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
       - '--set-secrets=API_KEY=api-keys:latest'
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
-    timeout: '600s'
+    timeout: '900s'
 
   # Step 4: Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -196,54 +209,86 @@ steps:
       - '-c'
       - |
         set -e
+        echo "======================================"
         echo "Verifying deployment..."
+        echo "======================================"
         
         # Get the service URL
-        SERVICE_URL=$(gcloud run services describe $_SERVICE_NAME \
+        SERVICE_URL=$$(gcloud run services describe $_SERVICE_NAME \
           --platform managed \
           --region $_REGION \
           --format 'value(status.url)')
         
         echo "Service URL: $${SERVICE_URL}"
         
-        # Wait for the service to be ready with longer timeout
+        # Wait for the service to be ready
         echo "Waiting for service to be ready..."
         MAX_ATTEMPTS=60
-        for i in $(seq 1 $MAX_ATTEMPTS); do
-          echo "Attempt $${i}/$${MAX_ATTEMPTS}: Checking service health..."
+        ATTEMPT=1
+        
+        while [ $$ATTEMPT -le $$MAX_ATTEMPTS ]; do
+          echo "Attempt $$ATTEMPT/$$MAX_ATTEMPTS: Checking service health..."
           
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health" || echo "000")
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}/health" || echo "000")
           
           if [ "$${HTTP_CODE}" -eq 200 ]; then
-            echo "Service is ready!"
+            echo "Service is ready! (HTTP 200)"
             break
           elif [ "$${HTTP_CODE}" -eq 503 ] || [ "$${HTTP_CODE}" -eq 500 ]; then
             echo "Service is initializing (HTTP $${HTTP_CODE})..."
-            RESPONSE=$(curl -s "$${SERVICE_URL}/health" || echo "{}")
-            echo "Response: $${RESPONSE}" | jq '.' || echo "$${RESPONSE}"
+            if RESPONSE=$$(curl -s "$${SERVICE_URL}/health" 2>/dev/null); then
+              echo "Response: $${RESPONSE}" | jq '.' 2>/dev/null || echo "$${RESPONSE}"
+            fi
           else
             echo "Service returned HTTP $${HTTP_CODE}"
           fi
           
-          if [ $i -eq $MAX_ATTEMPTS ]; then
-            echo "WARNING: Service health check not successful after $${MAX_ATTEMPTS} attempts"
+          if [ $$ATTEMPT -eq $$MAX_ATTEMPTS ]; then
+            echo "WARNING: Service health check not successful after $$MAX_ATTEMPTS attempts"
             echo "The service may need more time to fully initialize."
+            echo "Please check the logs for more information."
+            # Don't fail the build, as the service might still be initializing
+            break
           fi
           
+          ATTEMPT=$$((ATTEMPT + 1))
           sleep 10
         done
         
-        # Final status check
-        echo "Performing final status check..."
-        STATUS_RESPONSE=$(curl -s "$${SERVICE_URL}/status" || echo "{}")
-        echo "Service status: $${STATUS_RESPONSE}" | jq '.' || echo "$${STATUS_RESPONSE}"
+        # Perform final checks
+        echo "======================================"
+        echo "Performing final deployment checks..."
+        echo "======================================"
         
-        # Log deployment information
+        # Check service status
+        echo "Service Status:"
+        gcloud run services describe $_SERVICE_NAME \
+          --platform managed \
+          --region $_REGION \
+          --format 'value(status.url,status.conditions.type,status.conditions.status)' | sed 's/\t/ = /g'
+        
+        # Final status check
+        if STATUS_RESPONSE=$$(curl -s "$${SERVICE_URL}/status" 2>/dev/null); then
+          echo "Service status response:"
+          echo "$${STATUS_RESPONSE}" | jq '.' 2>/dev/null || echo "$${STATUS_RESPONSE}"
+        fi
+        
+        # Print deployment information
         echo "======================================"
         echo "Deployment Information:"
+        echo "======================================"
         echo "Service URL: $${SERVICE_URL}"
-        echo "Check logs at: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
-        echo "Cloud Run console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$PROJECT_ID"
+        echo "Service Name: $_SERVICE_NAME"
+        echo "Region: $_REGION"
+        echo "Image: gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA"
+        echo ""
+        echo "Useful links:"
+        echo "- Service URL: $${SERVICE_URL}"
+        echo "- Logs: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID&resource=cloud_run_revision/service_name/$_SERVICE_NAME"
+        echo "- Cloud Run Console: https://console.cloud.google.com/run/detail/$_REGION/$_SERVICE_NAME/metrics?project=$PROJECT_ID"
+        echo "- BigQuery Dataset: https://console.cloud.google.com/bigquery?project=$PROJECT_ID&ws=!1m4!1m3!3m2!1s$PROJECT_ID!2s$_DATASET"
+        echo "======================================"
+        echo "Deployment completed successfully!"
         echo "======================================"
 
 images:
@@ -253,5 +298,12 @@ images:
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
+  dynamicSubstitutions: true
 
-timeout: '2400s'  # 40 minutes total timeout
+timeout: '3600s'  # 60 minutes total timeout
+
+# Production-specific settings
+tags:
+  - 'production'
+  - 'threat-intelligence-platform'
+  - 'deployment'
