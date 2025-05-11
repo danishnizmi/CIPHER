@@ -180,7 +180,18 @@ def verify_bigquery_tables() -> bool:
     
     if missing_tables:
         logger.warning(f"The following tables are missing: {', '.join(missing_tables)}")
-        return False
+        # Try to create missing tables
+        try:
+            from ingestion import initialize_bigquery_tables
+            if initialize_bigquery_tables():
+                logger.info("Successfully created missing tables")
+                return True
+            else:
+                logger.error("Failed to create missing tables")
+                return False
+        except Exception as e:
+            logger.error(f"Error creating tables: {str(e)}")
+            return False
     
     return True
 
@@ -287,6 +298,25 @@ def get_stats():
                 for row in daily_results
             ]
         
+        # Calculate growth rates
+        if days > 0:
+            # Previous period query
+            previous_ioc_query = f"""
+            SELECT COUNT(*) as total
+            FROM `{Config.get_table_name('indicators')}`
+            WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days * 2} DAY)
+            AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+            """
+            
+            previous_results = execute_bq_query(previous_ioc_query)
+            if previous_results:
+                previous_total = previous_results[0].get('total', 0)
+                current_total = stats['iocs']['total']
+                
+                if previous_total > 0:
+                    growth_rate = ((current_total - previous_total) / previous_total) * 100
+                    stats['iocs']['growth_rate'] = round(growth_rate, 1)
+        
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
@@ -372,12 +402,21 @@ def get_iocs():
         SELECT *
         FROM `{Config.get_table_name('indicators')}`
         WHERE {" AND ".join(where_conditions)}
-        ORDER BY created_at DESC
+        ORDER BY risk_score DESC, created_at DESC
         LIMIT {limit}
         OFFSET {offset}
         """
         
         iocs = execute_bq_query(ioc_query, params)
+        
+        # Format IOCs for frontend display
+        for ioc in iocs:
+            # Ensure risk_score is present
+            if 'risk_score' not in ioc or ioc['risk_score'] is None:
+                ioc['risk_score'] = 50
+            
+            # Add AI analysis status
+            ioc['ai_analyzed'] = bool(ioc.get('last_analyzed'))
         
         count_query = f"""
         SELECT COUNT(*) as total
@@ -426,7 +465,8 @@ def get_ai_analyses():
         SELECT 
             COUNT(*) as total_analyzed,
             COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
-            MAX(last_analyzed) as last_analysis_time
+            MAX(last_analyzed) as last_analysis_time,
+            AVG(risk_score) as avg_risk_score
         FROM `{Config.get_table_name('indicators')}`
         WHERE last_analyzed IS NOT NULL
         AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
@@ -437,6 +477,16 @@ def get_ai_analyses():
             ai_analyses['total_indicators'] = results[0].get('total_analyzed', 0)
             ai_analyses['critical_indicators'] = results[0].get('critical_count', 0)
             ai_analyses['last_run_time'] = results[0].get('last_analysis_time')
+            
+            avg_risk = results[0].get('avg_risk_score', 50)
+            if avg_risk > 75:
+                ai_analyses['overall_threat_level'] = 'Critical'
+            elif avg_risk > 60:
+                ai_analyses['overall_threat_level'] = 'High'
+            elif avg_risk > 40:
+                ai_analyses['overall_threat_level'] = 'Medium'
+            else:
+                ai_analyses['overall_threat_level'] = 'Low'
         
         # Get recent analysis results
         recent_query = f"""
@@ -464,15 +514,52 @@ def get_ai_analyses():
         if recent_results:
             ai_analyses['recent_analyses'] = recent_results
         
-        # Determine overall threat level based on critical indicators
-        if ai_analyses['critical_indicators'] > 50:
-            ai_analyses['overall_threat_level'] = 'Critical'
-        elif ai_analyses['critical_indicators'] > 20:
-            ai_analyses['overall_threat_level'] = 'High'
-        elif ai_analyses['critical_indicators'] > 5:
-            ai_analyses['overall_threat_level'] = 'Medium'
-        else:
-            ai_analyses['overall_threat_level'] = 'Low'
+        # Get threat patterns
+        patterns_query = f"""
+        SELECT 
+            malware,
+            threat_type,
+            COUNT(*) as indicators_count,
+            AVG(risk_score) as avg_risk_score
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND (malware IS NOT NULL OR threat_type IS NOT NULL)
+        GROUP BY malware, threat_type
+        ORDER BY COUNT(*) DESC
+        LIMIT 5
+        """
+        
+        patterns_results = execute_bq_query(patterns_query)
+        if patterns_results:
+            for pattern in patterns_results:
+                name = pattern.get('malware') or pattern.get('threat_type') or 'Unknown'
+                severity = 'high' if pattern.get('avg_risk_score', 0) > 70 else 'medium'
+                
+                ai_analyses['threat_patterns'].append({
+                    'name': name,
+                    'description': f"Detected {name} threat pattern",
+                    'indicators_count': pattern.get('indicators_count', 0),
+                    'severity': severity
+                })
+        
+        # Generate recommendations
+        if ai_analyses['critical_indicators'] > 10:
+            ai_analyses['recommendations'].append({
+                'text': 'Critical threat level detected. Immediate investigation recommended.',
+                'priority': 'Critical'
+            })
+        
+        if ai_analyses['total_indicators'] > 100:
+            ai_analyses['recommendations'].append({
+                'text': 'High volume of threat indicators detected. Consider implementing additional security measures.',
+                'priority': 'High'
+            })
+        
+        if not ai_analyses['recommendations']:
+            ai_analyses['recommendations'].append({
+                'text': 'Continue monitoring threat landscape. No immediate action required.',
+                'priority': 'Low'
+            })
         
         return jsonify(ai_analyses)
         
@@ -507,7 +594,8 @@ def get_threat_summary():
         SELECT 
             AVG(risk_score) as avg_risk_score,
             COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
-            COUNT(DISTINCT threat_actor) as active_threat_actors
+            COUNT(DISTINCT threat_actor) as active_threat_actors,
+            COUNT(DISTINCT malware) as malware_families
         FROM `{Config.get_table_name('indicators')}`
         WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         """
@@ -516,7 +604,7 @@ def get_threat_summary():
         if results:
             threat_summary['overall_score'] = int(results[0].get('avg_risk_score', 50))
             threat_summary['critical_indicators'] = results[0].get('critical_count', 0)
-            threat_summary['active_threats'] = results[0].get('active_threat_actors', 0)
+            threat_summary['active_threats'] = results[0].get('active_threat_actors', 0) + results[0].get('malware_families', 0)
         
         # Determine threat level
         if threat_summary['overall_score'] > 80:
@@ -527,6 +615,43 @@ def get_threat_summary():
             threat_summary['threat_level'] = 'Medium'
         else:
             threat_summary['threat_level'] = 'Low'
+        
+        # Get trending IOC types
+        trending_query = f"""
+        SELECT 
+            type,
+            COUNT(*) as count,
+            AVG(risk_score) as avg_risk_score
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        GROUP BY type
+        ORDER BY count DESC
+        LIMIT 5
+        """
+        
+        trending_results = execute_bq_query(trending_query)
+        if trending_results:
+            threat_summary['trending_ioc_types'] = trending_results
+        
+        # Risk trend analysis
+        current_avg = threat_summary['overall_score']
+        previous_query = f"""
+        SELECT AVG(risk_score) as avg_risk_score
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days * 2} DAY)
+        AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        """
+        
+        previous_results = execute_bq_query(previous_query)
+        if previous_results:
+            previous_avg = previous_results[0].get('avg_risk_score', 50)
+            
+            if current_avg > previous_avg + 5:
+                threat_summary['risk_trend'] = 'increasing'
+            elif current_avg < previous_avg - 5:
+                threat_summary['risk_trend'] = 'decreasing'
+            else:
+                threat_summary['risk_trend'] = 'stable'
         
         return jsonify(threat_summary)
         
@@ -572,6 +697,28 @@ def get_ai_summary():
         else:
             ai_summary['risk_level'] = 'Low'
         
+        # Get trending threats
+        threats_query = f"""
+        SELECT malware, threat_type, COUNT(*) as count
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        AND (malware IS NOT NULL OR threat_type IS NOT NULL)
+        GROUP BY malware, threat_type
+        ORDER BY count DESC
+        LIMIT 3
+        """
+        
+        threats_results = execute_bq_query(threats_query)
+        if threats_results:
+            threats = []
+            for threat in threats_results:
+                name = threat.get('malware') or threat.get('threat_type')
+                if name:
+                    threats.append(name)
+            
+            if threats:
+                ai_summary['trending_threats'] = ', '.join(threats[:3])
+        
         return jsonify(ai_summary)
         
     except Exception as e:
@@ -596,8 +743,7 @@ def get_iocs_geo():
         if not verify_bigquery_tables():
             return jsonify(geo_stats)
         
-        # Mock geographic data for now
-        # In production, this would query enriched IOC data with geo information
+        # For now, return mock data
         geo_stats['countries'] = [
             {'country': 'US', 'count': 150, 'risk_level': 'high'},
             {'country': 'RU', 'count': 120, 'risk_level': 'critical'},
