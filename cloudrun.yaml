@@ -28,8 +28,8 @@ spec:
       containers:
       - name: threat-intelligence-platform-1
         image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
+        # Explicitly use init-app.sh as the entrypoint
         command: ["/app/init-app.sh"]
-        args: ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "--worker-class", "gthread", "--preload", "--log-level", "info", "app:app"]
         ports:
         - name: http1
           containerPort: 8080
@@ -64,14 +64,17 @@ spec:
           value: 'true'
         - name: ENABLE_ERROR_REPORTING
           value: 'true'
+        # Critical for data ingestion and processing
         - name: AUTO_ANALYZE
-          value: 'false'
+          value: 'true'
         - name: NLP_ENABLED
           value: 'true'
         - name: ANALYSIS_ENABLED
           value: 'true'
         - name: BIGQUERY_MAX_BYTES_BILLED
           value: '104857600'
+        - name: FEED_CONFIG
+          value: '{"feeds":[{"id":"threatfox","name":"ThreatFox IOCs","url":"https://threatfox.abuse.ch/export/json/recent/","description":"Recent indicators from ThreatFox","format":"json","type":"mixed","update_frequency":"daily","enabled":true},{"id":"urlhaus","name":"URLhaus Malware","url":"https://urlhaus.abuse.ch/downloads/csv_recent/","description":"Recent malware URLs from URLhaus","format":"csv","type":"url","update_frequency":"daily","enabled":true}]}'
         - name: API_KEY
           valueFrom:
             secretKeyRef:
@@ -97,27 +100,28 @@ spec:
         - name: feed-config-volume
           mountPath: /app/secrets/feed-config
           readOnly: true
+        # Increased timeouts for probes to allow for initialization
         startupProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 15
           timeoutSeconds: 10
-          failureThreshold: 6
+          failureThreshold: 10
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
           periodSeconds: 30
-          timeoutSeconds: 5
+          timeoutSeconds: 10
           failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /ready
             port: 8080
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: 10
           successThreshold: 1
           failureThreshold: 3
       volumes:
