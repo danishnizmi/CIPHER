@@ -628,63 +628,151 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         return []
 
 def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
-    """Parse CSV feed data."""
+    """Parse CSV feed data with improved URLhaus handling."""
     try:
+        # Try different encodings to handle various CSV files
+        content_str = None
         for encoding in ['utf-8', 'latin-1', 'cp1252', 'utf-16']:
             try:
                 content_str = content.decode(encoding)
-                break
+                # Check if decoding worked reasonably well
+                if len(content_str) > 0 and ',' in content_str[:1000]:
+                    break
             except UnicodeDecodeError:
                 continue
-        else:
+        
+        if not content_str:
+            # Last resort decoding with error replacement
             content_str = content.decode('utf-8', errors='replace')
         
-        # Skip comment lines at the beginning
+        # Log a sample for debugging
+        logger.debug(f"CSV sample (first 200 chars): {content_str[:200]}")
+        
+        # Skip comment lines at the beginning (specifically for URLhaus)
         lines = content_str.splitlines()
         clean_lines = []
-        headers_found = False
+        url_haus_format = False
         
-        for line in lines:
-            if line.strip().startswith('#'):
-                continue
-            # Once we find a non-comment line, we've found the headers or data
-            if not headers_found and not line.strip().startswith('#'):
-                headers_found = True
-            clean_lines.append(line)
+        # Check if this is likely URLhaus format
+        if any(line.startswith('#') for line in lines[:5]) and any('URLhaus' in line for line in lines[:10]):
+            url_haus_format = True
+            logger.info("Detected URLhaus CSV format")
+            
+            # Find the header line - in URLhaus it's the first non-comment with expected columns
+            header_line_idx = -1
+            for i, line in enumerate(lines):
+                if not line.startswith('#') and 'url,date_added' in line.lower():
+                    header_line_idx = i
+                    break
+                    
+            if header_line_idx >= 0:
+                # Add only header and data lines
+                clean_lines = [lines[header_line_idx]] + lines[header_line_idx+1:]
+            else:
+                # Fall back to standard comment skipping if we can't find URLhaus header
+                clean_lines = [line for line in lines if not line.startswith('#')]
+        else:
+            # Standard comment skipping for other feeds
+            clean_lines = [line for line in lines if not line.startswith('#')]
         
         if not clean_lines:
-            logger.warning("No valid CSV content found")
+            logger.warning("No valid CSV content found after filtering comments")
             return []
             
+        # Rejoin into a string
         content_str = '\n'.join(clean_lines)
         
         # Try to detect dialect
         try:
-            dialect = csv.Sniffer().sniff(content_str[:1024] if content_str else '')
+            dialect = csv.Sniffer().sniff(content_str[:1024] if len(content_str) > 1024 else content_str)
+            logger.debug(f"Detected CSV dialect: delimiter={dialect.delimiter}, quotechar={dialect.quotechar}")
         except:
+            # Fall back to standard dialect if detection fails
             dialect = csv.excel
-            
-        csv_data = []
+            logger.debug("Using default CSV dialect (excel)")
         
+        # First try standard DictReader
+        csv_data = []
         reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
+        
+        # Validate column headers
+        if not reader.fieldnames:
+            logger.warning("CSV has no headers, attempting manual header detection")
+            
+            # Fall back to manual header detection - sometimes headers are malformed
+            first_line = clean_lines[0].strip() if clean_lines else ""
+            header_candidates = first_line.split(dialect.delimiter)
+            
+            # Remove quotes from headers if present
+            header_candidates = [h.strip('"\'') for h in header_candidates]
+            
+            # Use manual headers if they look valid
+            if len(header_candidates) > 1:
+                logger.info(f"Using manual headers: {header_candidates}")
+                reader = csv.DictReader(
+                    io.StringIO('\n'.join(clean_lines[1:])), 
+                    fieldnames=header_candidates,
+                    dialect=dialect
+                )
+            else:
+                logger.error("Failed to detect CSV headers")
+                return []
+        
         csv_data = list(reader)
         
+        # Special handling for URLhaus
+        if url_haus_format:
+            logger.info(f"Processing URLhaus data with {len(csv_data)} rows")
+            
+            # Convert URLhaus format to standard format
+            standardized_data = []
+            for row in csv_data:
+                # Skip empty rows
+                if not row or not any(row.values()):
+                    continue
+                
+                # Log a sample row for debugging
+                if len(standardized_data) == 0:
+                    logger.debug(f"URLhaus sample row: {row}")
+                
+                # Create a standardized record
+                std_record = {
+                    'ioc_type': 'url',
+                    'ioc_value': row.get('url', '').strip(),
+                    'threat_type': row.get('tags', '').strip() or 'malware',
+                    'first_seen_utc': row.get('date_added', '').strip(),
+                    'reporter': row.get('reporter', '').strip(),
+                    'reference': row.get('urlhaus_reference', '').strip() or f"https://urlhaus.abuse.ch/url/{hashlib.md5(row.get('url', '').encode()).hexdigest()[:16]}/",
+                    'source': 'urlhaus'
+                }
+                
+                # Add additional fields if present
+                if 'status' in row:
+                    std_record['status'] = row.get('status', '').strip()
+                if 'threat' in row:
+                    std_record['threat_type'] = row.get('threat', '').strip()
+                if 'tags' in row:
+                    std_record['tags'] = row.get('tags', '').strip()
+                if 'gsb' in row:
+                    std_record['gsb'] = row.get('gsb', '').strip()
+                if 'url_status' in row:
+                    std_record['url_status'] = row.get('url_status', '').strip()
+                
+                # Only add if we have a valid URL
+                if std_record['ioc_value'] and not std_record['ioc_value'].startswith('#'):
+                    standardized_data.append(std_record)
+            
+            logger.info(f"Standardized {len(standardized_data)} URLhaus records")
+            return standardized_data
+        
+        # Standard processing for other CSV feeds
         # Remove empty rows
         csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
-        
-        # For URLhaus format, convert to standard format
-        if len(csv_data) > 0 and 'url' in csv_data[0] and 'threat' in csv_data[0]:
-            for item in csv_data:
-                if 'ioc_type' not in item:
-                    item['ioc_type'] = 'url'
-                if 'ioc_value' not in item:
-                    item['ioc_value'] = item.get('url', '')
-                if 'threat_type' not in item:
-                    item['threat_type'] = item.get('threat', '')
         
         return csv_data
     except Exception as e:
         logger.error(f"Error parsing CSV feed: {str(e)}")
+        logger.error(traceback.format_exc())
         return []
 
 def parse_feed(content: bytes, format_type: str = None, parser_config: Dict = None) -> List[Dict]:
@@ -705,15 +793,20 @@ def parse_feed(content: bytes, format_type: str = None, parser_config: Dict = No
             format_type = 'text'
     
     try:
+        logger.info(f"Parsing feed data as {format_type} format")
         if format_type == 'json':
-            return parse_json_feed(content, parser_config)
+            results = parse_json_feed(content, parser_config)
         elif format_type == 'csv':
-            return parse_csv_feed(content, parser_config)
+            results = parse_csv_feed(content, parser_config)
         else:
             logger.warning(f"Unknown format type: {format_type}, falling back to JSON")
-            return parse_json_feed(content, parser_config)
+            results = parse_json_feed(content, parser_config)
+            
+        logger.info(f"Successfully parsed {len(results)} records from feed")
+        return results
     except Exception as e:
         logger.error(f"Error parsing feed data: {str(e)}")
+        logger.error(traceback.format_exc())
         return []
 
 def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
@@ -722,6 +815,10 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
     
     for record in records:
         try:
+            # Skip empty records
+            if not record:
+                continue
+                
             # Handle ThreatFox format
             if 'ioc_value' in record and 'ioc_type' in record:
                 value = record['ioc_value']
@@ -769,8 +866,15 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                         indicator['tags'].append(f"malware:{alias}")
                 
             # Handle URLhaus format (CSV with 'url' column)
-            elif 'url' in record and (feed_name.lower() == 'urlhaus' or 'threat' in record):
-                value = record['url']
+            elif ('url' in record or 'ioc_value' in record) and (feed_name.lower() == 'urlhaus' or 'threat' in record):
+                value = record.get('ioc_value') or record.get('url', '')
+                
+                # Ensure we have a proper URL
+                if not value.startswith(('http://', 'https://', 'ftp://')):
+                    if value.startswith('www.'):
+                        value = 'http://' + value
+                    elif '.' in value and not value.startswith('#'):
+                        value = 'http://' + value
                 
                 tags = record.get('tags', '')
                 if isinstance(tags, str):
@@ -788,17 +892,17 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                     "confidence": 80 if record.get('url_status') == 'online' else 60,
                     "tags": tags,
                     "description": f"URL from {feed_name}",
-                    "threat_type": record.get('threat', 'malware_download'),
-                    "first_seen": record.get('dateadded'),
-                    "last_seen": record.get('last_online'),
+                    "threat_type": record.get('threat_type') or record.get('threat', 'malware_download'),
+                    "first_seen": record.get('first_seen_utc') or record.get('date_added'),
+                    "last_seen": record.get('last_seen_utc') or record.get('last_online'),
                     "reporter": record.get('reporter'),
-                    "reference": record.get('urlhaus_link'),
+                    "reference": record.get('reference') or record.get('urlhaus_reference'),
                     "raw_data": json.dumps(record)
                 }
                 
             else:
                 # Generic format
-                value = record.get('value') or record.get('indicator') or record.get('ioc') or ''
+                value = record.get('value') or record.get('indicator') or record.get('ioc') or record.get('url') or ''
                 if not value:
                     continue
                     
