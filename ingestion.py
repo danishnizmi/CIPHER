@@ -434,7 +434,7 @@ def upload_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes], con
         return None
 
 def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
-    """Upload records to BigQuery with optimized batching."""
+    """Upload records to BigQuery with optimized batching and rate limiting."""
     bq_client, _, _, _ = get_clients()
     
     if not bq_client or not records:
@@ -442,13 +442,31 @@ def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
     
     logger.info(f"Uploading {len(records)} records to {table_id}")
     
-    batch_size = 50
+    # Smaller batch size to avoid rate limit issues
+    batch_size = 40
     job_ids = []
+    
+    # Rate limiting variables
+    max_batch_per_minute = 15
+    batch_counter = 0
+    minute_start = time.time()
     
     for i in range(0, len(records), batch_size):
         batch = records[i:i+batch_size]
         batch_num = i//batch_size + 1
         logger.info(f"Processing batch {batch_num}/{(len(records) + batch_size - 1) // batch_size}")
+        
+        # Apply rate limiting
+        batch_counter += 1
+        if batch_counter >= max_batch_per_minute:
+            elapsed = time.time() - minute_start
+            if elapsed < 60:
+                sleep_time = 60 - elapsed + 5  # Add 5 seconds buffer
+                logger.info(f"Rate limiting: pausing for {sleep_time:.1f} seconds to avoid BigQuery quota limits")
+                time.sleep(sleep_time)
+            # Reset counters
+            batch_counter = 0
+            minute_start = time.time()
         
         try:
             processed_batch = []
@@ -513,7 +531,10 @@ def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
                     if job.errors:
                         logger.error(f"Errors in batch {batch_num}: {job.errors}")
                         if attempt < max_retries - 1:
-                            time.sleep(2 ** attempt)
+                            # Add exponential backoff with longer wait times
+                            backoff_time = 5 * (2 ** attempt)
+                            logger.info(f"Retrying batch {batch_num} in {backoff_time} seconds")
+                            time.sleep(backoff_time)
                             continue
                     else:
                         job_ids.append(job.job_id)
@@ -523,8 +544,13 @@ def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
                         
                 except Exception as e:
                     logger.error(f"Error uploading batch {batch_num}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
+                    if "Exceeded rate limits" in str(e):
+                        # Add longer backoff for rate limit errors
+                        backoff_time = 30 + (15 * attempt)
+                        logger.info(f"Rate limit exceeded, retrying batch {batch_num} in {backoff_time} seconds")
+                        time.sleep(backoff_time)
+                    elif attempt < max_retries - 1:
+                        time.sleep(5 * (2 ** attempt))
                     else:
                         logger.error(f"Failed to upload batch {batch_num} after {max_retries} attempts")
             
@@ -654,14 +680,14 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         url_haus_format = False
         
         # Check if this is likely URLhaus format
-        if any(line.startswith('#') for line in lines[:5]) and any('URLhaus' in line for line in lines[:10]):
+        if any(line.startswith('#') for line in lines[:5]) and any('"url"' in line.lower() or '"date_added"' in line.lower() for line in lines[:15]):
             url_haus_format = True
             logger.info("Detected URLhaus CSV format")
             
-            # Find the header line - in URLhaus it's the first non-comment with expected columns
+            # Find the header line - in URLhaus it's the first non-comment line with expected columns
             header_line_idx = -1
             for i, line in enumerate(lines):
-                if not line.startswith('#') and 'url,date_added' in line.lower():
+                if not line.startswith('#') and any(column in line.lower() for column in ['"url"', '"date_added"', '"threat"']):
                     header_line_idx = i
                     break
                     
@@ -675,7 +701,7 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             # Standard comment skipping for other feeds
             clean_lines = [line for line in lines if not line.startswith('#')]
         
-        if not clean_lines:
+        if not clean_lines or len(clean_lines) < 2:
             logger.warning("No valid CSV content found after filtering comments")
             return []
             
@@ -685,50 +711,58 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         # Try to detect dialect
         try:
             dialect = csv.Sniffer().sniff(content_str[:1024] if len(content_str) > 1024 else content_str)
-            logger.debug(f"Detected CSV dialect: delimiter={dialect.delimiter}, quotechar={dialect.quotechar}")
+            logger.debug(f"Detected CSV dialect: delimiter={repr(dialect.delimiter)}, quotechar={repr(dialect.quotechar)}")
         except:
             # Fall back to standard dialect if detection fails
             dialect = csv.excel
             logger.debug("Using default CSV dialect (excel)")
+            
+            # For URLhaus, try explicit comma delimiter if sniffing failed
+            if url_haus_format:
+                dialect.delimiter = ','
+                dialect.quotechar = '"'
+                logger.debug("Using explicit comma delimiter for URLhaus format")
         
         # First try standard DictReader
-        csv_data = []
         reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
         
-        # Validate column headers
-        if not reader.fieldnames:
-            logger.warning("CSV has no headers, attempting manual header detection")
-            
-            # Fall back to manual header detection - sometimes headers are malformed
-            first_line = clean_lines[0].strip() if clean_lines else ""
-            header_candidates = first_line.split(dialect.delimiter)
-            
-            # Remove quotes from headers if present
-            header_candidates = [h.strip('"\'') for h in header_candidates]
-            
-            # Use manual headers if they look valid
-            if len(header_candidates) > 1:
-                logger.info(f"Using manual headers: {header_candidates}")
-                reader = csv.DictReader(
-                    io.StringIO('\n'.join(clean_lines[1:])), 
-                    fieldnames=header_candidates,
-                    dialect=dialect
-                )
-            else:
-                logger.error("Failed to detect CSV headers")
-                return []
-        
-        csv_data = list(reader)
-        
-        # Special handling for URLhaus
+        # Special handling for URLhaus format
         if url_haus_format:
-            logger.info(f"Processing URLhaus data with {len(csv_data)} rows")
+            logger.info("Processing URLhaus format with explicit column mapping")
             
-            # Convert URLhaus format to standard format
+            # For URLhaus, sometimes the first row can contain column headers
+            fieldnames = None
+            
+            # Check if we have headers
+            if reader.fieldnames and any(name.lower() in ['url', 'date_added', 'status'] for name in reader.fieldnames):
+                fieldnames = reader.fieldnames
+                logger.debug(f"Using detected fieldnames: {fieldnames}")
+            else:
+                # Try to construct fieldnames from the first row
+                first_row = clean_lines[0].split(dialect.delimiter)
+                potential_headers = [h.strip(dialect.quotechar + ' \t') for h in first_row]
+                
+                if any(h.lower() in ['url', 'date_added', 'status'] for h in potential_headers):
+                    fieldnames = potential_headers
+                    # Skip the first line which contains headers
+                    content_str = '\n'.join(clean_lines[1:])
+                    logger.debug(f"Using constructed fieldnames: {fieldnames}")
+                else:
+                    # Default fieldnames for URLhaus
+                    fieldnames = ['id', 'date_added', 'url', 'url_status', 'threat', 'tags', 'urlhaus_link', 'reporter']
+                    logger.debug(f"Using default URLhaus fieldnames: {fieldnames}")
+            
+            # Reset reader with proper fieldnames
+            reader = csv.DictReader(io.StringIO(content_str), fieldnames=fieldnames, dialect=dialect)
+            
+            csv_data = list(reader)
+            logger.info(f"Read {len(csv_data)} raw URLhaus rows")
+            
+            # Process URLhaus data
             standardized_data = []
             for row in csv_data:
-                # Skip empty rows
-                if not row or not any(row.values()):
+                # Skip rows with no url or empty values
+                if not row or not any(row.values()) or not row.get('url'):
                     continue
                 
                 # Log a sample row for debugging
@@ -738,25 +772,14 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
                 # Create a standardized record
                 std_record = {
                     'ioc_type': 'url',
-                    'ioc_value': row.get('url', '').strip(),
-                    'threat_type': row.get('tags', '').strip() or 'malware',
-                    'first_seen_utc': row.get('date_added', '').strip(),
-                    'reporter': row.get('reporter', '').strip(),
-                    'reference': row.get('urlhaus_reference', '').strip() or f"https://urlhaus.abuse.ch/url/{hashlib.md5(row.get('url', '').encode()).hexdigest()[:16]}/",
+                    'ioc_value': row.get('url', '').strip('"\''),
+                    'threat_type': row.get('threat', '').strip('"\'') or 'malware',
+                    'first_seen_utc': row.get('date_added', '').strip('"\''),
+                    'reporter': row.get('reporter', '').strip('"\''),
+                    'reference': row.get('urlhaus_link', '').strip('"\''),
+                    'status': row.get('url_status', '').strip('"\''),
                     'source': 'urlhaus'
                 }
-                
-                # Add additional fields if present
-                if 'status' in row:
-                    std_record['status'] = row.get('status', '').strip()
-                if 'threat' in row:
-                    std_record['threat_type'] = row.get('threat', '').strip()
-                if 'tags' in row:
-                    std_record['tags'] = row.get('tags', '').strip()
-                if 'gsb' in row:
-                    std_record['gsb'] = row.get('gsb', '').strip()
-                if 'url_status' in row:
-                    std_record['url_status'] = row.get('url_status', '').strip()
                 
                 # Only add if we have a valid URL
                 if std_record['ioc_value'] and not std_record['ioc_value'].startswith('#'):
@@ -766,10 +789,14 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             return standardized_data
         
         # Standard processing for other CSV feeds
+        csv_data = list(reader)
+        
         # Remove empty rows
         csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
         
+        logger.info(f"Processed {len(csv_data)} CSV records")
         return csv_data
+        
     except Exception as e:
         logger.error(f"Error parsing CSV feed: {str(e)}")
         logger.error(traceback.format_exc())
