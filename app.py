@@ -5,6 +5,7 @@ import logging
 import traceback
 import threading
 import queue
+import time  # Added missing import for time module
 from datetime import datetime
 from typing import Any, Callable
 from flask import Flask, jsonify, render_template, request, redirect, url_for, session, g
@@ -214,18 +215,17 @@ def initialize_platform():
         
         # 3. Ensure BigQuery tables exist (blocking for critical tables)
         try:
-            if bq_client:
-                from ingestion import initialize_bigquery_tables
-                logger.info("Ensuring BigQuery tables exist...")
-                if initialize_bigquery_tables():
-                    logger.info("BigQuery tables initialized successfully")
-                else:
-                    logger.error("Failed to initialize BigQuery tables")
-                    # Continue anyway, tables might be created later
+            from ingestion import initialize_bigquery_tables
+            logger.info("Ensuring BigQuery tables exist...")
+            if initialize_bigquery_tables():
+                logger.info("BigQuery tables initialized successfully")
+            else:
+                logger.error("Failed to initialize BigQuery tables")
+                # Continue anyway, tables might be created later
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints with error handling
+        # 4. Register blueprints - IMPORTANT: This is now moved BEFORE the service status update
         try:
             from api import api_blueprint
             from frontend import frontend_app
@@ -239,10 +239,13 @@ def initialize_platform():
             
             logger.info("Blueprints registered successfully")
             
+            # Mark frontend as ready
+            service_manager.update_status('frontend', ServiceStatus.READY)
+            
         except Exception as e:
             logger.error(f"Failed to register blueprints: {str(e)}")
             logger.error(traceback.format_exc())
-            # Still mark app as ready to show error pages
+            # Still continue to show error pages
         
         # 5. Update service status to ready
         service_manager.update_status('app', ServiceStatus.READY)
@@ -274,12 +277,18 @@ def initialize_platform():
             monitor_thread = threading.Thread(target=monitor_services, daemon=True)
             monitor_thread.start()
             
-            # Start ingestion if enabled
+            # If enabled, trigger data ingestion immediately
             if Config.AUTO_ANALYZE:
-                from ingestion import trigger_ingestion_in_background
-                trigger_ingestion_in_background()
-                logger.info("Started background ingestion")
-        
+                # Direct import and call to avoid threading issues
+                from ingestion import ingest_all_feeds
+                try:
+                    logger.info("Triggering initial data ingestion...")
+                    ingestion_thread = threading.Thread(target=ingest_all_feeds, daemon=True)
+                    ingestion_thread.start()
+                    logger.info("Started initial ingestion thread")
+                except Exception as e:
+                    logger.error(f"Error triggering initial ingestion: {e}")
+                
         except Exception as e:
             logger.warning(f"Background service initialization error: {e}")
         
@@ -289,7 +298,7 @@ def initialize_platform():
         logger.error(f"Failed to initialize platform: {str(e)}")
         logger.error(traceback.format_exc())
         service_manager.update_status('app', ServiceStatus.ERROR, str(e))
-        return True  # Still return True to allow the app to start and show error pages
+        return False  # Still return True to allow the app to start and show error pages
 
 # Error handlers
 @app.errorhandler(400)
@@ -369,14 +378,15 @@ def index():
         logger.info(f"Service status: {status}")
         
         # Check if frontend blueprint is registered
-        if 'frontend.dashboard' not in app.view_functions:
+        if 'frontend.dashboard' in app.view_functions:
+            # Redirect to dashboard
+            return redirect(url_for('frontend.dashboard'))
+        else:
+            # Show initialization message if frontend isn't ready
             logger.warning("Frontend blueprint not registered, showing initialization message")
             return render_template('500.html', 
                                  error_code=503,
                                  error_message="Service is initializing. Please wait a moment and refresh.")
-        
-        # Redirect to dashboard
-        return redirect(url_for('frontend.dashboard'))
                 
     except Exception as e:
         logger.error(f"Error in index route: {str(e)}")
