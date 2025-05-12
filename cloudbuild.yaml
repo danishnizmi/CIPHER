@@ -43,11 +43,11 @@ steps:
             echo "Table already exists: $${table}"
           else
             echo "Creating table: $${table}"
-            # Create table with minimal schema - the app will handle schema updates
+            # Create table with enhanced schema - especially for indicators
             if [ "$${table}" = "indicators" ]; then
               bq mk --project_id=$$PROJECT_ID \
                 "$$PROJECT_ID:${_DATASET}.$${table}" \
-                id:STRING,value:STRING,type:STRING,created_at:TIMESTAMP
+                id:STRING,type:STRING,value:STRING,source:STRING,feed_id:STRING,created_at:TIMESTAMP,first_seen:TIMESTAMP,last_seen:TIMESTAMP,confidence:INTEGER,description:STRING,campaign_id:STRING,threat_actor:STRING,malware:STRING,raw_data:STRING,last_analyzed:TIMESTAMP,risk_score:INTEGER,analysis_summary:STRING,threat_type:STRING,threat_id:STRING,malware_printable:STRING,reference:STRING,reporter:STRING
             else
               bq mk --project_id=$$PROJECT_ID \
                 "$$PROJECT_ID:${_DATASET}.$${table}" \
@@ -122,6 +122,16 @@ steps:
               "type": "url",
               "update_frequency": "daily",
               "enabled": true
+            },
+            {
+              "id": "malware_bazaar",
+              "name": "MalwareBazaar Recent Samples",
+              "url": "https://bazaar.abuse.ch/export/csv/recent/",
+              "description": "Recent malware samples from MalwareBazaar",
+              "format": "csv",
+              "type": "hash",
+              "update_frequency": "daily",
+              "enabled": true
             }
           ]
         }
@@ -167,7 +177,71 @@ steps:
         echo "Resource creation completed successfully"
         echo "======================================"
 
-  # Step 1: Build Docker image
+  # Step 1: Create 404.html template if not exists
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ ! -f "templates/404.html" ]; then
+          echo "Creating 404.html template..."
+          mkdir -p templates
+          cat > templates/404.html << 'EOF'
+        {% extends "base.html" %}
+
+        {% block title %}
+        Page Not Found - Threat Intelligence Platform
+        {% endblock %}
+
+        {% block content %}
+        <div class="page-header mb-6">
+            <h1 class="text-2xl font-bold mb-2 flex items-center">
+                <i class="fas fa-exclamation-circle text-yellow-600 mr-3"></i>
+                Page Not Found (404)
+            </h1>
+            <p class="text-gray-600">The requested page could not be found</p>
+        </div>
+
+        <div class="auth-card max-w-lg mx-auto">
+            <div class="text-center mb-8">
+                <div class="text-yellow-600 text-6xl mb-4 flex justify-center">
+                    <i class="fas fa-search-location"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-800 mb-3">Page Not Found</h2>
+                <p class="text-gray-600">The page you're looking for doesn't exist or has been moved.</p>
+            </div>
+            
+            <div class="flex justify-center space-x-4">
+                <a href="/" class="btn btn-primary flex items-center">
+                    <i class="fas fa-home mr-2"></i> Go to Dashboard
+                </a>
+                <a href="javascript:window.history.back()" class="btn btn-secondary flex items-center">
+                    <i class="fas fa-arrow-left mr-2"></i> Go Back
+                </a>
+            </div>
+        </div>
+        {% endblock %}
+        EOF
+          echo "404.html template created successfully."
+        else
+          echo "404.html template already exists."
+        fi
+
+  # Step 2: Add missing import to app.py if needed
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if ! grep -q "import time" app.py; then
+          echo "Adding missing 'import time' to app.py..."
+          sed -i '1s/^/import time\n/' app.py
+          echo "Fixed app.py successfully."
+        else
+          echo "app.py already has time import, no changes needed."
+        fi
+
+  # Step 3: Build Docker image with cache optimization
   - name: 'gcr.io/cloud-builders/docker'
     args: 
       - 'build'
@@ -177,10 +251,16 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
       - '--cache-from'
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
+      - '--build-arg'
+      - 'AUTO_ANALYZE=true'
+      - '--build-arg'
+      - 'NLP_ENABLED=true'
+      - '--build-arg'
+      - 'ANALYSIS_ENABLED=true'
       - '.'
     timeout: '900s'
 
-  # Step 2: Push Docker image to Container Registry
+  # Step 4: Push Docker image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: 
       - 'push'
@@ -188,7 +268,7 @@ steps:
       - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME'
     timeout: '600s'
 
-  # Step 3: Deploy to Cloud Run
+  # Step 5: Deploy to Cloud Run with enhanced configuration
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -207,13 +287,14 @@ steps:
       - '--concurrency=80'
       - '--cpu-boost'
       - '--execution-environment=gen2'
-      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=false,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=false'
+      - '--command=/app/init-app.sh'
+      - '--set-env-vars=ENVIRONMENT=production,GCP_PROJECT=$PROJECT_ID,GCP_REGION=$_REGION,BIGQUERY_DATASET=$_DATASET,GCS_BUCKET=$PROJECT_ID-$_BUCKET_SUFFIX,PUBSUB_TOPIC=threat-data-ingestion,PUBSUB_ANALYSIS_TOPIC=threat-analysis-events,VERSION=1.0.3,DEBUG=false,PYTHONPATH=/app,PYTHONDONTWRITEBYTECODE=1,PYTHONUNBUFFERED=1,LOG_LEVEL=INFO,LOG_TO_CLOUD=true,ENABLE_ERROR_REPORTING=true,AUTO_ANALYZE=true,NLP_ENABLED=true,ANALYSIS_ENABLED=true,BIGQUERY_MAX_BYTES_BILLED=104857600,ENSURE_GCP_RESOURCES=true'
       - '--set-secrets=API_KEY=api-keys:latest'
       - '--service-account=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
       - '--quiet'
     timeout: '900s'
 
-  # Step 4: Verify deployment
+  # Step 6: Verify deployment and trigger initial data ingestion
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     env:
@@ -272,29 +353,25 @@ steps:
           sleep 10
         done
         
-        # Perform final checks
+        # Trigger data ingestion via API
         echo "======================================"
-        echo "Performing final deployment checks..."
+        echo "Triggering data ingestion via API..."
         echo "======================================"
         
-        # Check service status
-        echo "Service Status:"
-        gcloud run services describe $_SERVICE_NAME \
-          --platform managed \
-          --region $_REGION \
-          --project $$PROJECT_ID \
-          --format 'table(status.conditions.type,status.conditions.status,status.conditions.message)'
+        # Get API key from secret manager
+        API_KEY=$$(gcloud secrets versions access latest --secret=api-keys --project=$$PROJECT_ID)
         
-        # Get revisions
-        echo ""
-        echo "Service Revisions:"
-        gcloud run revisions list \
-          --service $_SERVICE_NAME \
-          --platform managed \
-          --region $_REGION \
-          --project $$PROJECT_ID \
-          --limit 3 \
-          --format 'table(metadata.name:label=REVISION,status.conditions[0].status:label=READY,metadata.creationTimestamp:sort=1:reverse:label=CREATED)'
+        # Make API call to trigger ingestion
+        echo "Sending ingestion trigger request..."
+        RESPONSE=$$(curl -s -X POST \
+          -H "Content-Type: application/json" \
+          -H "X-API-Key: $${API_KEY}" \
+          -d '{"process_all": true, "force_tables": true}' \
+          "$${SERVICE_URL}/api/admin/ingest" \
+          --max-time 30)
+        
+        echo "Ingestion API response:"
+        echo "$${RESPONSE}" | jq '.' 2>/dev/null || echo "$${RESPONSE}"
         
         # Final status check
         echo ""
