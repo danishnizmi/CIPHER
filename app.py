@@ -5,7 +5,7 @@ import logging
 import traceback
 import threading
 import queue
-import time  # Added missing import for time module
+import time
 from datetime import datetime
 from typing import Any, Callable
 from flask import Flask, jsonify, render_template, request, redirect, url_for, session, g
@@ -215,36 +215,56 @@ def initialize_platform():
         
         # 3. Ensure BigQuery tables exist (blocking for critical tables)
         try:
-            from ingestion import initialize_bigquery_tables
+            from ingestion import initialize_bigquery_tables, ensure_bucket_exists
             logger.info("Ensuring BigQuery tables exist...")
             if initialize_bigquery_tables():
                 logger.info("BigQuery tables initialized successfully")
+                
+                # Ensure GCS bucket exists as well
+                bucket_name = Config.GCS_BUCKET
+                if ensure_bucket_exists(bucket_name):
+                    logger.info(f"GCS bucket {bucket_name} initialized successfully")
+                else:
+                    logger.warning(f"Failed to initialize GCS bucket {bucket_name}")
             else:
                 logger.error("Failed to initialize BigQuery tables")
                 # Continue anyway, tables might be created later
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints - IMPORTANT: This is now moved BEFORE the service status update
+        # 4. Register blueprints with proper validation
         try:
+            # Import modules first to catch any import errors
             from api import api_blueprint
             from frontend import frontend_app
             
             # Register API blueprint with CSRF exemption
             app.register_blueprint(api_blueprint, url_prefix='/api')
             csrf.exempt(api_blueprint)
+            logger.info("API blueprint registered successfully")
             
-            # Register frontend blueprint
+            # Register frontend blueprint and verify it worked
             app.register_blueprint(frontend_app)
             
-            logger.info("Blueprints registered successfully")
+            # Verify that the frontend blueprint was registered correctly
+            frontend_routes = ['frontend.dashboard', 'frontend.index']
+            registered_routes = app.view_functions.keys()
             
-            # Mark frontend as ready
-            service_manager.update_status('frontend', ServiceStatus.READY)
+            frontend_registered = any(route in registered_routes for route in frontend_routes)
+            if frontend_registered:
+                logger.info("Frontend blueprint registered successfully")
+                # Mark frontend as ready only if routes were successfully registered
+                service_manager.update_status('frontend', ServiceStatus.READY)
+            else:
+                logger.error("Frontend blueprint routes not found after registration!")
+                service_manager.update_status('frontend', ServiceStatus.ERROR, 
+                                             "Frontend routes not registered correctly")
+                # Don't fail completely - we'll try again later
             
         except Exception as e:
             logger.error(f"Failed to register blueprints: {str(e)}")
             logger.error(traceback.format_exc())
+            service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
             # Still continue to show error pages
         
         # 5. Update service status to ready
@@ -261,8 +281,22 @@ def initialize_platform():
                         status = service_manager.get_status()
                         overall = status['overall']
                         
+                        # Check if frontend needs recovery
+                        frontend_status = status['services'].get('frontend')
+                        if frontend_status != ServiceStatus.READY.value:
+                            logger.info("Attempting to recover frontend...")
+                            try:
+                                if 'frontend.dashboard' not in app.view_functions:
+                                    # Try re-registering frontend blueprint
+                                    from frontend import frontend_app
+                                    app.register_blueprint(frontend_app)
+                                    logger.info("Frontend blueprint re-registered successfully")
+                                    service_manager.update_status('frontend', ServiceStatus.READY)
+                            except Exception as e:
+                                logger.error(f"Failed to recover frontend: {e}")
+                        
                         # Gradually mark services as ready
-                        for service in ['frontend', 'api', 'ingestion', 'analysis']:
+                        for service in ['api', 'ingestion', 'analysis']:
                             current_status = status['services'].get(service)
                             if current_status == ServiceStatus.INITIALIZING.value:
                                 service_manager.update_status(service, ServiceStatus.READY)
@@ -377,12 +411,24 @@ def index():
         status = service_manager.get_status()
         logger.info(f"Service status: {status}")
         
-        # Check if frontend blueprint is registered
+        # Check if frontend blueprint is registered by checking for specific routes
         if 'frontend.dashboard' in app.view_functions:
             # Redirect to dashboard
             return redirect(url_for('frontend.dashboard'))
         else:
-            # Show initialization message if frontend isn't ready
+            # If frontend routes aren't registered but we think frontend is ready, try to re-register
+            if status['services'].get('frontend') == ServiceStatus.READY.value:
+                try:
+                    logger.warning("Frontend routes missing but service marked ready, attempting recovery")
+                    from frontend import frontend_app
+                    app.register_blueprint(frontend_app)
+                    # Now check if registration worked
+                    if 'frontend.dashboard' in app.view_functions:
+                        return redirect(url_for('frontend.dashboard'))
+                except Exception as e:
+                    logger.error(f"Error recovering frontend: {e}")
+            
+            # Show initialization message if frontend isn't ready or recovery failed
             logger.warning("Frontend blueprint not registered, showing initialization message")
             return render_template('500.html', 
                                  error_code=503,
