@@ -228,12 +228,21 @@ def trigger_auto_ingestion():
         while True:
             try:
                 logger.info("Triggering automatic data ingestion")
-                result = api_request('admin/ingest', method='POST', data={'process_all': True})
+                # Direct import and call instead of using API - fixes request context issue
+                from ingestion import ingest_all_feeds
                 
-                if result.get('error'):
-                    logger.error(f"Auto ingestion failed: {result['error']}")
-                else:
-                    logger.info("Auto ingestion triggered successfully")
+                try:
+                    result = ingest_all_feeds()
+                    
+                    if result:
+                        success_count = sum(1 for r in result if r.get('status') == 'success')
+                        logger.info(f"Auto ingestion completed: {success_count}/{len(result)} feeds processed")
+                    else:
+                        logger.error("Auto ingestion failed: No results returned")
+                except Exception as e:
+                    logger.error(f"Error during ingestion: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                 
                 # Run every 2 hours
                 time.sleep(7200)
@@ -247,8 +256,8 @@ def trigger_auto_ingestion():
     thread.start()
     logger.info("Started auto ingestion thread")
 
-# Start auto ingestion when module loads
-if ENVIRONMENT == 'production':
+# Start auto ingestion when module loads if enabled
+if ENVIRONMENT == 'production' and os.environ.get('AUTO_ANALYZE', 'false').lower() == 'true':
     trigger_auto_ingestion()
 
 # ====== Route Handlers ======
@@ -582,6 +591,50 @@ def dynamic_content_detail(content_type, identifier):
         logger.error(f"Error in dynamic_content_detail: {str(e)}")
         flash('Error loading content details', 'danger')
         return redirect(url_for('frontend.dashboard'))
+
+# API route to force ingestion and analysis (for debugging/testing)
+@frontend_app.route('/force-ingestion', methods=['GET'])
+def force_ingestion_route():
+    """Force ingestion route for debugging."""
+    try:
+        # Import and run ingestion directly
+        from ingestion import ingest_all_feeds
+        
+        results = ingest_all_feeds()
+        
+        # Process and display results
+        if results:
+            success_count = sum(1 for r in results if r.get('status') == 'success')
+            flash(f'Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed', 'success')
+        else:
+            flash('No feeds processed', 'warning')
+        
+        return redirect(url_for('frontend.dashboard'))
+    except Exception as e:
+        logger.error(f"Error in force ingestion: {str(e)}")
+        flash(f'Error triggering ingestion: {str(e)}', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+# Route to analyze a specific IOC (for debugging/testing)
+@frontend_app.route('/analyze-ioc/<ioc_id>', methods=['GET'])
+def analyze_ioc(ioc_id):
+    """Analyze a specific IOC."""
+    try:
+        # Import and run analysis directly
+        from analysis import analyze_indicator
+        
+        result = analyze_indicator(ioc_id, force_reanalysis=True)
+        
+        if result.get('error'):
+            flash(f'Error analyzing IOC: {result["error"]}', 'danger')
+        else:
+            flash('IOC analysis completed successfully', 'success')
+        
+        return redirect(url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=f"{result.get('indicator_type', 'unknown')}/{result.get('indicator_value', ioc_id)}"))
+    except Exception as e:
+        logger.error(f"Error analyzing IOC: {str(e)}")
+        flash(f'Error analyzing IOC: {str(e)}', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
 
 # Template filters and context processors
 @frontend_app.template_filter('datetime')
