@@ -43,6 +43,30 @@ ingestion_status = {
 # Lock for thread-safe operations
 _ingestion_lock = threading.Lock()
 
+# Default feed configs for testing
+DEFAULT_FEEDS = [
+    {
+        "id": "threatfox",
+        "name": "ThreatFox IOCs",
+        "url": "https://threatfox.abuse.ch/export/json/recent/",
+        "description": "Recent indicators from ThreatFox",
+        "format": "json",
+        "type": "mixed",
+        "update_frequency": "daily",
+        "enabled": True
+    },
+    {
+        "id": "urlhaus",
+        "name": "URLhaus Malware",
+        "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+        "description": "Recent malware URLs from URLhaus",
+        "format": "csv",
+        "type": "url",
+        "update_frequency": "daily",
+        "enabled": True
+    }
+]
+
 # -------------------- Helper Functions --------------------
 
 def get_clients():
@@ -65,6 +89,24 @@ def publish_event(event_type: str, data: dict = None):
             logger.debug(f"Published event: {event_type}")
     except Exception as e:
         logger.debug(f"Not in Flask context, skipping event publish: {e}")
+
+def ensure_default_feeds():
+    """Ensure default feeds exist if none configured."""
+    if not hasattr(Config, 'FEEDS') or not Config.FEEDS:
+        logger.warning("No feeds configured, using defaults")
+        Config.FEEDS = DEFAULT_FEEDS
+        
+        # Try to save to environment for future loads
+        os.environ['FEED_CONFIG'] = json.dumps({"feeds": DEFAULT_FEEDS})
+        
+        # Also save to a local file
+        try:
+            with open('/tmp/feed_config.json', 'w') as f:
+                json.dump({"feeds": DEFAULT_FEEDS}, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save feed config to disk: {e}")
+    
+    return Config.FEEDS
 
 # -------------------- Data Processing --------------------
 
@@ -193,7 +235,7 @@ def ensure_bucket_exists(bucket_name: str) -> bool:
             
             # Create folder structure
             for folder in ['feeds', 'raw', 'processed', 'cache', 'exports']:
-                blob = bucket.blob(f"{folder}/")
+                blob = bucket.blob(f"{folder}/.keep")
                 blob.upload_from_string('')
             logger.info(f"Created bucket {bucket_name}")
                 
@@ -557,7 +599,9 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         processed_data = []
         
         # Handle ThreatFox format (threat IDs as keys)
-        if isinstance(data, dict) and all(key.isdigit() for key in list(data.keys())[:5]):
+        if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list):
+            processed_data = data['data']
+        elif isinstance(data, dict) and all(key.isdigit() for key in list(data.keys())[:5]):
             for threat_id, threat_items in data.items():
                 if isinstance(threat_items, list):
                     for item in threat_items:
@@ -586,7 +630,7 @@ def parse_json_feed(content: bytes, parser_config: Dict) -> List[Dict]:
 def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
     """Parse CSV feed data."""
     try:
-        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+        for encoding in ['utf-8', 'latin-1', 'cp1252', 'utf-16']:
             try:
                 content_str = content.decode(encoding)
                 break
@@ -609,11 +653,17 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
             clean_lines.append(line)
         
         if not clean_lines:
+            logger.warning("No valid CSV content found")
             return []
             
         content_str = '\n'.join(clean_lines)
         
-        dialect = csv.Sniffer().sniff(content_str[:1024]) if content_str else csv.excel
+        # Try to detect dialect
+        try:
+            dialect = csv.Sniffer().sniff(content_str[:1024] if content_str else '')
+        except:
+            dialect = csv.excel
+            
         csv_data = []
         
         reader = csv.DictReader(io.StringIO(content_str), dialect=dialect)
@@ -621,6 +671,16 @@ def parse_csv_feed(content: bytes, parser_config: Dict) -> List[Dict]:
         
         # Remove empty rows
         csv_data = [row for row in csv_data if any(value.strip() if isinstance(value, str) else value for value in row.values())]
+        
+        # For URLhaus format, convert to standard format
+        if len(csv_data) > 0 and 'url' in csv_data[0] and 'threat' in csv_data[0]:
+            for item in csv_data:
+                if 'ioc_type' not in item:
+                    item['ioc_type'] = 'url'
+                if 'ioc_value' not in item:
+                    item['ioc_value'] = item.get('url', '')
+                if 'threat_type' not in item:
+                    item['threat_type'] = item.get('threat', '')
         
         return csv_data
     except Exception as e:
@@ -1049,9 +1109,7 @@ def ingest_all_feeds() -> List[Dict]:
     initialize_bigquery_tables()
     
     # Ensure feed configuration
-    if not hasattr(Config, 'FEEDS') or not Config.FEEDS:
-        if hasattr(Config, 'ensure_feed_configuration'):
-            Config.ensure_feed_configuration()
+    ensure_default_feeds()
     
     feeds = []
     if hasattr(Config, 'get_enabled_feeds'):
@@ -1227,4 +1285,7 @@ if __name__ == "__main__":
         logger.info(f"Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed")
         
     else:
-        logger.info("No action specified, use --feed, --all, or --verify")
+        logger.info("No action specified, using --all")
+        results = ingest_all_feeds()
+        success_count = sum(1 for r in results if r.get('status') == 'success')
+        logger.info(f"Processed {len(results)} feeds: {success_count} successful, {len(results) - success_count} failed")
