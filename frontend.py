@@ -69,11 +69,31 @@ def register_event_handlers(state):
         app.event_bus.subscribe('analysis_completed', invalidate_cache_on_analysis)
         app.event_bus.subscribe('ingestion_completed', invalidate_cache_on_ingestion)
         
+        # Register template filter on app, not blueprint
+        register_template_filters(app)
+        
         # Update service status
         service_manager = Config.get_service_manager()
         service_manager.update_status('frontend', ServiceStatus.READY)
 
 # ====== Helper Functions ======
+
+def register_template_filters(app):
+    """Register template filters at the app level, not the blueprint."""
+    @app.template_filter('datetime')
+    def format_datetime(value):
+        """Format a datetime string for display."""
+        if not value:
+            return 'N/A'
+        try:
+            if isinstance(value, str):
+                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            else:
+                dt = value
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            return str(value)
+    logger.info("Template filters registered successfully")
 
 def safe_report_exception(e=None):
     """Safely report exception using config module."""
@@ -635,21 +655,6 @@ def analyze_ioc(ioc_id):
         logger.error(f"Error analyzing IOC: {str(e)}")
         flash(f'Error analyzing IOC: {str(e)}', 'danger')
         return redirect(url_for('frontend.dashboard', view='iocs'))
-
-# Template filters and context processors
-@frontend_app.template_filter('datetime')
-def format_datetime(value):
-    """Format a datetime string for display."""
-    if not value:
-        return 'N/A'
-    try:
-        if isinstance(value, str):
-            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-        else:
-            dt = value
-        return dt.strftime('%Y-%m-%d %H:%M:%S')
-    except:
-        return str(value)
 
 # Error handlers
 @frontend_app.errorhandler(404)
