@@ -3,659 +3,868 @@
 {% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
 {% block content %}
-<div class="page-header mb-6 flex justify-between items-center">
-    <div>
-        <h1 class="text-2xl font-bold mb-2 flex items-center">
-            <i class="fas fa-{{ page_icon|default('tachometer-alt') }} text-accent mr-3"></i>
-            {{ page_title }}
-        </h1>
-        <p class="text-gray-600">{{ page_subtitle }}</p>
-    </div>
-    <div class="relative inline-block text-left">
-        <button id="timeRangeButton" class="btn btn-light flex items-center">
-            <i class="far fa-calendar-alt mr-2"></i>
-            <span>{{ days }} Days</span>
-            <i class="fas fa-chevron-down text-xs ml-2"></i>
-        </button>
-        <div id="timeRangeDropdown" class="hidden origin-top-right absolute right-0 mt-2 w-40 rounded-lg shadow-lg bg-white ring-1 ring-black ring-opacity-5 border border-gray-100 focus:outline-none z-10">
-            <div class="py-1">
-                <a href="{{ url_for('frontend.dashboard', view=current_view, days=7) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">7 Days</a>
-                <a href="{{ url_for('frontend.dashboard', view=current_view, days=30) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">30 Days</a>
-                <a href="{{ url_for('frontend.dashboard', view=current_view, days=90) }}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">90 Days</a>
+<!-- Page Header -->
+<div class="page-header mb-8 fade-in">
+    <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0">
+        <div>
+            <h1 class="text-3xl font-bold mb-2 flex items-center">
+                <i class="fas fa-{{ page_icon|default('tachometer-alt') }} text-accent mr-4"></i>
+                {{ page_title|default('Threat Intelligence Dashboard') }}
+            </h1>
+            <p class="text-gray-600 dark:text-gray-400 text-lg">
+                {{ page_subtitle|default('Platform overview and threat summary') }}
+            </p>
+        </div>
+        
+        <div class="flex items-center space-x-3">
+            <!-- Time Range Selector -->
+            <div class="relative">
+                <button id="timeRangeButton" class="btn btn-light flex items-center space-x-2">
+                    <i class="far fa-calendar-alt"></i>
+                    <span>{{ days }} Days</span>
+                    <i class="fas fa-chevron-down text-xs"></i>
+                </button>
+                <div id="timeRangeDropdown" class="hidden absolute right-0 mt-2 w-40 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-30">
+                    <div class="py-1">
+                        <a href="{{ url_for('frontend.dashboard', view=current_view, days=7) }}" 
+                           class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">7 Days</a>
+                        <a href="{{ url_for('frontend.dashboard', view=current_view, days=30) }}" 
+                           class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">30 Days</a>
+                        <a href="{{ url_for('frontend.dashboard', view=current_view, days=90) }}" 
+                           class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">90 Days</a>
+                    </div>
+                </div>
             </div>
+            
+            <!-- Export Button -->
+            {% if current_view == 'iocs' %}
+            <button id="exportIocs" class="btn btn-secondary flex items-center space-x-2">
+                <i class="fas fa-download"></i>
+                <span>Export</span>
+            </button>
+            {% endif %}
+            
+            <!-- Force Ingestion Button (Admin) -->
+            {% if current_view == 'dashboard' %}
+            <button id="forceIngestionBtn" class="btn btn-success flex items-center space-x-2" title="Force data ingestion">
+                <i class="fas fa-sync"></i>
+                <span class="hidden sm:inline">Ingest</span>
+            </button>
+            {% endif %}
         </div>
     </div>
 </div>
 
-<!-- Main metrics -->
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-    <!-- Feed stats -->
+<!-- Main Metrics Dashboard -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 fade-in">
+    <!-- Active Feeds Card -->
     <div class="stat-card">
-        <div class="flex justify-between">
+        <div class="flex items-center justify-between">
             <div>
                 <div class="text-4xl text-blue-600 mb-4">
                     <i class="fas fa-rss"></i>
                 </div>
-                <div class="text-3xl font-bold text-gray-800">{{ stats.feeds.total_sources|default(0)|int }}</div>
-                <div class="text-gray-500">Active Feeds</div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    {{ stats.feeds.total_sources|default(0)|int }}
+                </div>
+                <div class="text-gray-500 dark:text-gray-400">Active Feeds</div>
             </div>
-            <div class="self-center">
+            <div class="text-right">
                 <div id="feedTrendChart" class="w-24 h-12"></div>
+                <div class="mt-2 text-sm {% if feed_trend > 0 %}text-green-600{% elif feed_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                    <i class="fas fa-{% if feed_trend > 0 %}arrow-up{% elif feed_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                    {% if feed_trend != 0 %}{{ feed_trend|abs }}%{% else %}Stable{% endif %}
+                </div>
             </div>
-        </div>
-        <div class="mt-2 text-sm {% if feed_trend > 0 %}text-green-600{% elif feed_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %} flex items-center">
-            <i class="fas fa-{% if feed_trend > 0 %}arrow-up{% elif feed_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-            <span>{% if feed_trend != 0 %}{{ feed_trend|abs }}% from last period{% else %}No change{% endif %}</span>
         </div>
     </div>
     
-    <!-- IOC stats -->
+    <!-- IOCs Card -->
     <div class="stat-card">
-        <div class="flex justify-between">
+        <div class="flex items-center justify-between">
             <div>
                 <div class="text-4xl text-red-600 mb-4">
                     <i class="fas fa-fingerprint"></i>
                 </div>
-                <div class="text-3xl font-bold text-gray-800">{{ stats.iocs.total|default(0)|int }}</div>
-                <div class="text-gray-500">Indicators</div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    {{ stats.iocs.total|default(0)|int }}
+                </div>
+                <div class="text-gray-500 dark:text-gray-400">Indicators</div>
             </div>
-            <div class="self-center">
+            <div class="text-right">
                 <div id="iocTrendChart" class="w-24 h-12"></div>
+                <div class="mt-2 text-sm {% if ioc_trend > 0 %}text-green-600{% elif ioc_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                    <i class="fas fa-{% if ioc_trend > 0 %}arrow-up{% elif ioc_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                    {% if ioc_trend != 0 %}{{ ioc_trend|abs }}%{% else %}Stable{% endif %}
+                </div>
             </div>
-        </div>
-        <div class="mt-2 text-sm {% if ioc_trend > 0 %}text-green-600{% elif ioc_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %} flex items-center">
-            <i class="fas fa-{% if ioc_trend > 0 %}arrow-up{% elif ioc_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-            <span>{% if ioc_trend != 0 %}{{ ioc_trend|abs }}% from last period{% else %}No change{% endif %}</span>
         </div>
     </div>
     
-    <!-- AI Analysis stats -->
+    <!-- AI Analyses Card -->
     <div class="stat-card">
-        <div class="flex justify-between">
+        <div class="flex items-center justify-between">
             <div>
                 <div class="text-4xl text-purple-600 mb-4">
                     <i class="fas fa-brain"></i>
                 </div>
-                <div class="text-3xl font-bold text-gray-800">{{ stats.analyses.total_analyses|default(0)|int }}</div>
-                <div class="text-gray-500">AI Analyses</div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    {{ stats.analyses.total_analyses|default(0)|int }}
+                </div>
+                <div class="text-gray-500 dark:text-gray-400">AI Analyses</div>
             </div>
-            <div class="self-center">
+            <div class="text-right">
                 <div id="analysisTrendChart" class="w-24 h-12"></div>
+                <div class="mt-2 text-sm {% if analysis_trend > 0 %}text-green-600{% elif analysis_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                    <i class="fas fa-{% if analysis_trend > 0 %}arrow-up{% elif analysis_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                    {% if analysis_trend != 0 %}{{ analysis_trend|abs }}%{% else %}Stable{% endif %}
+                </div>
             </div>
         </div>
-        <div class="mt-2 text-sm {% if analysis_trend > 0 %}text-green-600{% elif analysis_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %} flex items-center">
-            <i class="fas fa-{% if analysis_trend > 0 %}arrow-up{% elif analysis_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-            <span>{% if analysis_trend != 0 %}{{ analysis_trend|abs }}% from last period{% else %}No change{% endif %}</span>
+        <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full">
+                Batch Analysis Mode
+            </span>
         </div>
     </div>
     
-    <!-- Threat Score -->
+    <!-- Threat Score Card -->
     <div class="stat-card">
-        <div class="flex justify-between">
+        <div class="flex items-center justify-between">
             <div>
                 <div class="text-4xl text-orange-600 mb-4">
                     <i class="fas fa-exclamation-triangle"></i>
                 </div>
-                <div class="text-3xl font-bold text-gray-800">{{ threat_score|default(50) }}</div>
-                <div class="text-gray-500">Threat Score</div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    {{ threat_score|default(50) }}
+                </div>
+                <div class="text-gray-500 dark:text-gray-400">Threat Score</div>
             </div>
-            <div class="self-center">
+            <div class="text-right">
                 <div id="threatScoreChart" class="w-24 h-12"></div>
+                <div class="mt-2">
+                    <span class="severity-badge {{ 'critical' if threat_score > 85 else 'high' if threat_score > 70 else 'medium' if threat_score > 50 else 'low' }}">
+                        {{ 'Critical' if threat_score > 85 else 'High' if threat_score > 70 else 'Medium' if threat_score > 50 else 'Low' }}
+                    </span>
+                </div>
             </div>
-        </div>
-        <div class="mt-2 text-sm flex items-center">
-            <span class="severity-badge {{ 'critical' if threat_score > 85 else 'high' if threat_score > 70 else 'medium' if threat_score > 50 else 'low' }}">
-                {{ 'Critical' if threat_score > 85 else 'High' if threat_score > 70 else 'Medium' if threat_score > 50 else 'Low' }}
-            </span>
         </div>
     </div>
 </div>
 
 {% if current_view == 'dashboard' or not current_view %}
 <!-- Main Dashboard View -->
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-    <!-- Threat Map -->
-    <div class="lg:col-span-2 panel">
-        <div class="panel-header">
-            <h3 class="panel-title">
-                <i class="fas fa-globe panel-icon"></i>
-                Threat Geographic Distribution
-            </h3>
-        </div>
-        <div class="p-0">
-            <div id="threatMap" class="h-96 relative">
-                <div class="absolute inset-0 flex items-center justify-center bg-gray-50">
-                    <div class="text-center">
-                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-accent mb-2"></div>
-                        <p class="text-gray-500">Loading threat map data...</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- AI Analysis Summary -->
-    <div class="lg:col-span-1">
-        <div class="panel mb-6">
+<div class="space-y-8 fade-in">
+    <!-- Analytics Overview Section -->
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <!-- Threat Map -->
+        <div class="xl:col-span-2 panel">
             <div class="panel-header">
                 <h3 class="panel-title">
-                    <i class="fas fa-brain text-purple-500 mr-2"></i>
-                    AI Analysis Summary
+                    <i class="fas fa-globe panel-icon"></i>
+                    Threat Geographic Distribution
                 </h3>
-                <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="text-sm text-accent hover:underline">
-                    View All
-                </a>
+                <div class="text-sm text-gray-500 dark:text-gray-400">
+                    Global threat activity
+                </div>
             </div>
-            <div class="p-4">
-                {% if ai_summary %}
-                <div class="space-y-3">
-                    <div class="flex items-start">
-                        <div class="rounded-lg bg-purple-100 p-2 mr-3">
-                            <i class="fas fa-shield-alt text-purple-600"></i>
-                        </div>
-                        <div>
-                            <h6 class="font-medium">Overall Risk Level</h6>
-                            <p class="text-sm text-gray-600">{{ ai_summary.risk_level|default('Medium') }}</p>
-                        </div>
-                    </div>
-                    <div class="flex items-start">
-                        <div class="rounded-lg bg-blue-100 p-2 mr-3">
-                            <i class="fas fa-chart-line text-blue-600"></i>
-                        </div>
-                        <div>
-                            <h6 class="font-medium">Trending Threats</h6>
-                            <p class="text-sm text-gray-600">{{ ai_summary.trending_threats|default('None detected') }}</p>
-                        </div>
-                    </div>
-                    <div class="flex items-start">
-                        <div class="rounded-lg bg-orange-100 p-2 mr-3">
-                            <i class="fas fa-exclamation-triangle text-orange-600"></i>
-                        </div>
-                        <div>
-                            <h6 class="font-medium">Critical Indicators</h6>
-                            <p class="text-sm text-gray-600">{{ ai_summary.critical_indicators|default(0) }} detected</p>
+            <div class="panel-body p-0">
+                <div id="threatMap" class="h-96 relative rounded-b-xl overflow-hidden">
+                    <div class="absolute inset-0 flex items-center justify-center bg-gray-50 dark:bg-gray-800">
+                        <div class="text-center">
+                            <div class="loading-spinner mb-4"></div>
+                            <p class="text-gray-500">Loading threat map data...</p>
                         </div>
                     </div>
                 </div>
-                {% else %}
-                <div class="text-center py-4">
-                    <i class="fas fa-brain text-gray-300 text-3xl mb-3"></i>
-                    <p class="text-gray-500">AI analysis in progress...</p>
-                </div>
-                {% endif %}
             </div>
         </div>
         
-        <!-- System Status -->
-        <div class="panel">
-            <div class="panel-header">
-                <h3 class="panel-title">
-                    <i class="fas fa-heartbeat text-green-500 mr-2"></i>
-                    System Status
-                </h3>
+        <!-- AI Analysis Summary -->
+        <div class="xl:col-span-1 space-y-6">
+            <div class="panel">
+                <div class="panel-header">
+                    <h3 class="panel-title">
+                        <i class="fas fa-brain text-purple-500 mr-2"></i>
+                        AI Analysis Summary
+                    </h3>
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" 
+                       class="text-sm text-accent hover:text-accent-dark flex items-center">
+                        View All <i class="fas fa-chevron-right ml-1"></i>
+                    </a>
+                </div>
+                <div class="panel-body">
+                    {% if ai_summary %}
+                    <div class="space-y-4">
+                        <div class="flex items-start p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+                            <div class="rounded-lg bg-purple-600 p-2 mr-3">
+                                <i class="fas fa-shield-alt text-white"></i>
+                            </div>
+                            <div>
+                                <h6 class="font-semibold">Overall Risk Level</h6>
+                                <p class="text-sm text-gray-600 dark:text-gray-400">{{ ai_summary.risk_level|default('Medium') }}</p>
+                                <p class="text-xs text-gray-500 mt-1">Based on batch analysis</p>
+                            </div>
+                        </div>
+                        
+                        <div class="flex items-start p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                            <div class="rounded-lg bg-blue-600 p-2 mr-3">
+                                <i class="fas fa-chart-line text-white"></i>
+                            </div>
+                            <div>
+                                <h6 class="font-semibold">Trending Threats</h6>
+                                <p class="text-sm text-gray-600 dark:text-gray-400">{{ ai_summary.trending_threats|default('None detected') }}</p>
+                            </div>
+                        </div>
+                        
+                        <div class="flex items-start p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+                            <div class="rounded-lg bg-orange-600 p-2 mr-3">
+                                <i class="fas fa-exclamation-triangle text-white"></i>
+                            </div>
+                            <div>
+                                <h6 class="font-semibold">Critical Indicators</h6>
+                                <p class="text-sm text-gray-600 dark:text-gray-400">{{ ai_summary.critical_indicators|default(0) }} detected</p>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-8">
+                        <i class="fas fa-brain text-gray-300 dark:text-gray-600 text-4xl mb-4"></i>
+                        <p class="text-gray-500 dark:text-gray-400">AI analysis in progress...</p>
+                        <p class="text-sm text-gray-400 dark:text-gray-500 mt-2">Using batch analysis to optimize performance</p>
+                    </div>
+                    {% endif %}
+                </div>
             </div>
-            <div class="p-4 space-y-2">
-                <div class="flex items-center justify-between">
-                    <span class="text-sm">Data Ingestion</span>
-                    <span class="text-xs px-2 py-1 rounded-full {% if service_status.services.ingestion == 'ready' %}bg-green-100 text-green-800{% else %}bg-yellow-100 text-yellow-800{% endif %}">
-                        {{ service_status.services.ingestion|title }}
-                    </span>
+            
+            <!-- System Status Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h3 class="panel-title">
+                        <i class="fas fa-heartbeat text-green-500 mr-2"></i>
+                        System Status
+                    </h3>
                 </div>
-                <div class="flex items-center justify-between">
-                    <span class="text-sm">AI Analysis</span>
-                    <span class="text-xs px-2 py-1 rounded-full {% if service_status.services.ai_models == 'ready' %}bg-green-100 text-green-800{% else %}bg-yellow-100 text-yellow-800{% endif %}">
-                        {{ service_status.services.ai_models|title }}
-                    </span>
-                </div>
-                <div class="flex items-center justify-between">
-                    <span class="text-sm">BigQuery</span>
-                    <span class="text-xs px-2 py-1 rounded-full {% if service_status.services.bigquery == 'ready' %}bg-green-100 text-green-800{% else %}bg-yellow-100 text-yellow-800{% endif %}">
-                        {{ service_status.services.bigquery|title }}
-                    </span>
-                </div>
-                <div class="flex items-center justify-between">
-                    <span class="text-sm">Last Update</span>
-                    <span class="text-xs text-gray-500">{{ stats.timestamp|datetime }}</span>
+                <div class="panel-body">
+                    <div class="space-y-3">
+                        {% if service_status and service_status.services %}
+                            <div class="grid grid-cols-1 gap-3">
+                                {% for service, status in service_status.services.items() %}
+                                    {% if service in ['ingestion', 'ai_models', 'bigquery', 'analysis'] %}
+                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                                        <div class="flex items-center">
+                                            <div class="w-3 h-3 rounded-full mr-3 {{ 'bg-green-500' if status == 'ready' else 'bg-yellow-500' if status == 'initializing' else 'bg-red-500' }}"></div>
+                                            <span class="font-medium capitalize">{{ service|replace('_', ' ') }}</span>
+                                        </div>
+                                        <span class="text-sm capitalize px-2 py-1 rounded-full {{ 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' if status == 'ready' else 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' if status == 'initializing' else 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' }}">
+                                            {{ status }}
+                                        </span>
+                                    </div>
+                                    {% endif %}
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                        
+                        <div class="pt-3 border-t border-gray-200 dark:border-gray-700">
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="text-gray-600 dark:text-gray-400">Last Update</span>
+                                <span class="text-gray-900 dark:text-gray-100">{{ stats.timestamp|datetime }}</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
-</div>
-
-<!-- Charts Section -->
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-    <!-- IOC Types Distribution Chart -->
-    <div class="panel">
-        <div class="panel-header">
-            <h3 class="panel-title">
-                <i class="fas fa-chart-pie panel-icon"></i>
-                IOC Types Distribution
-            </h3>
-            <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="text-sm text-accent hover:underline flex items-center">
-                <span>View All</span>
-                <i class="fas fa-arrow-right ml-1"></i>
-            </a>
-        </div>
-        <div class="p-4">
-            <div id="iocTypesChart" class="h-80"></div>
         </div>
     </div>
     
-    <!-- Intelligence Collection Trends Chart -->
+    <!-- Charts Section -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- IOC Types Distribution -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-chart-pie panel-icon"></i>
+                    IOC Types Distribution
+                </h3>
+                <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
+                   class="text-sm text-accent hover:text-accent-dark flex items-center">
+                    View All <i class="fas fa-chevron-right ml-1"></i>
+                </a>
+            </div>
+            <div class="panel-body">
+                <div id="iocTypesChart" class="h-80"></div>
+            </div>
+        </div>
+        
+        <!-- Intelligence Collection Trends -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3 class="panel-title">
+                    <i class="fas fa-chart-line panel-icon"></i>
+                    Intelligence Collection Trends
+                </h3>
+                <a href="{{ url_for('frontend.dashboard', view='feeds') }}" 
+                   class="text-sm text-accent hover:text-accent-dark flex items-center">
+                    View Feeds <i class="fas fa-chevron-right ml-1"></i>
+                </a>
+            </div>
+            <div class="panel-body">
+                <div id="activityChart" class="h-80"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Latest Threat Intelligence -->
     <div class="panel">
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-chart-line panel-icon"></i>
-                Intelligence Collection Trends
+                <i class="fas fa-exclamation-circle panel-icon"></i>
+                Latest Threat Intelligence
             </h3>
-            <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="text-sm text-accent hover:underline flex items-center">
-                <span>View Feeds</span>
-                <i class="fas fa-arrow-right ml-1"></i>
+            <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
+               class="text-sm text-accent hover:text-accent-dark flex items-center">
+                View All <i class="fas fa-chevron-right ml-1"></i>
             </a>
         </div>
-        <div class="p-4">
-            <div id="activityChart" class="h-80"></div>
+        <div class="panel-body p-0">
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="table-header">
+                        <tr>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th>Source</th>
+                            <th>Risk Score</th>
+                            <th>AI Analysis</th>
+                            <th>First Seen</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="table-body">
+                        {% if top_iocs %}
+                            {% for ioc in top_iocs[:10] %}
+                            <tr>
+                                <td>
+                                    <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">
+                                        {{ ioc.type|default('unknown') }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="truncate-text max-w-xs tooltip" data-tooltip="{{ ioc.value }}">
+                                        {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
+                                    </div>
+                                </td>
+                                <td>{{ ioc.source|default('Unknown') }}</td>
+                                <td>
+                                    <div class="flex items-center">
+                                        <div class="progress-bar w-16 h-2 mr-2">
+                                            <div class="progress-fill {% if ioc.risk_score > 75 %}bg-red-600{% elif ioc.risk_score > 50 %}bg-orange-500{% elif ioc.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" 
+                                                 style="width: {{ ioc.risk_score|default(50) }}%"></div>
+                                        </div>
+                                        <span class="text-sm font-medium">{{ ioc.risk_score|default(50) }}</span>
+                                    </div>
+                                </td>
+                                <td>
+                                    {% if ioc.ai_analyzed %}
+                                        <span class="text-sm text-purple-600 dark:text-purple-400 flex items-center">
+                                            <i class="fas fa-check-circle mr-1"></i> Analyzed
+                                        </span>
+                                    {% else %}
+                                        <span class="text-sm text-gray-400 flex items-center">
+                                            <i class="fas fa-clock mr-1"></i> Pending
+                                        </span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-sm text-gray-500 dark:text-gray-400">
+                                    {{ ioc.first_seen|default(ioc.created_at)|datetime }}
+                                </td>
+                                <td>
+                                    <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
+                                       class="text-accent hover:text-accent-dark">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center py-12">
+                                    <div class="flex flex-col items-center">
+                                        <i class="fas fa-fingerprint text-gray-300 dark:text-gray-600 text-4xl mb-4"></i>
+                                        <p class="text-gray-500 dark:text-gray-400">Data is being collected and processed...</p>
+                                        <p class="text-sm text-gray-400 dark:text-gray-500 mt-2">This may take a few minutes</p>
+                                    </div>
+                                </td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
         </div>
-    </div>
-</div>
-
-<!-- Latest Threat Intelligence -->
-<div class="panel">
-    <div class="panel-header">
-        <h3 class="panel-title">
-            <i class="fas fa-exclamation-circle panel-icon"></i>
-            Latest Threat Intelligence
-        </h3>
-        <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="text-sm text-accent hover:underline">View All</a>
-    </div>
-    <div class="overflow-x-auto">
-        <table class="data-table">
-            <thead class="table-header">
-                <tr>
-                    <th>Type</th>
-                    <th>Value</th>
-                    <th>Source</th>
-                    <th>Risk Score</th>
-                    <th>AI Analysis</th>
-                    <th>First Seen</th>
-                </tr>
-            </thead>
-            <tbody class="table-body">
-                {% if top_iocs %}
-                    {% for ioc in top_iocs[:10] %}
-                    <tr>
-                        <td>
-                            <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">{{ ioc.type|default('unknown') }}</span>
-                        </td>
-                        <td>
-                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-accent hover:underline">
-                                {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
-                            </a>
-                        </td>
-                        <td>{{ ioc.source|default('Unknown') }}</td>
-                        <td>
-                            <div class="flex items-center">
-                                <div class="w-16 bg-gray-200 rounded-full h-2 mr-2">
-                                    <div class="h-2 rounded-full {% if ioc.risk_score > 75 %}bg-red-600{% elif ioc.risk_score > 50 %}bg-orange-500{% elif ioc.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" style="width: {{ ioc.risk_score|default(50) }}%"></div>
-                                </div>
-                                <span class="text-sm">{{ ioc.risk_score|default(50) }}</span>
-                            </div>
-                        </td>
-                        <td>
-                            {% if ioc.ai_analyzed %}
-                                <span class="text-sm text-purple-600">
-                                    <i class="fas fa-check-circle"></i> Analyzed
-                                </span>
-                            {% else %}
-                                <span class="text-sm text-gray-400">
-                                    <i class="fas fa-clock"></i> Pending
-                                </span>
-                            {% endif %}
-                        </td>
-                        <td class="text-sm text-gray-500">{{ ioc.first_seen|default(ioc.created_at)|datetime }}</td>
-                    </tr>
-                    {% endfor %}
-                {% else %}
-                    <tr>
-                        <td colspan="6" class="text-center py-8 text-gray-500">
-                            <i class="fas fa-fingerprint text-3xl mb-3"></i>
-                            <p>Data is being collected and processed...</p>
-                        </td>
-                    </tr>
-                {% endif %}
-            </tbody>
-        </table>
     </div>
 </div>
 
 {% elif current_view == 'feeds' %}
 <!-- Feeds View -->
-<div class="panel mb-8">
-    <div class="panel-header">
-        <h3 class="panel-title">
-            <i class="fas fa-rss panel-icon"></i>
-            Threat Intelligence Feeds
-        </h3>
-        <div class="text-sm text-gray-500">
-            Auto-refreshed every 2 hours
-        </div>
-    </div>
-    <div class="p-0">
-        {% if feed_items %}
-        <div class="overflow-x-auto">
-            <table class="data-table">
-                <thead class="table-header">
-                    <tr>
-                        <th>Feed Name</th>
-                        <th>Description</th>
-                        <th>Records</th>
-                        <th>Last Updated</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody class="table-body">
-                    {% for feed in feed_items %}
-                    <tr>
-                        <td>
-                            <div class="flex items-center">
-                                <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 text-accent rounded-lg">
-                                    <i class="fas fa-rss"></i>
-                                </div>
-                                <div class="ml-4">
-                                    <div class="text-sm font-medium text-gray-900">{{ feed.name }}</div>
-                                    <div class="text-sm text-gray-500">{{ feed.id }}</div>
-                                </div>
-                            </div>
-                        </td>
-                        <td class="text-sm text-gray-600">
-                            {{ feed.description|default('Threat Intelligence Feed') }}
-                        </td>
-                        <td>
-                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-accent">
-                                {{ feed.record_count|default(0) }}
-                            </span>
-                        </td>
-                        <td class="text-sm text-gray-500">
-                            {{ feed.last_updated|default('Never')|datetime }}
-                        </td>
-                        <td>
-                            {% if feed.enabled %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                                    Active
-                                </span>
-                            {% else %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
-                                    Disabled
-                                </span>
-                            {% endif %}
-                        </td>
-                        <td class="text-right text-sm font-medium">
-                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}" class="text-accent hover:text-accent-dark">
-                                <i class="fas fa-eye mr-1"></i> View
-                            </a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% else %}
-        <div class="p-12 text-center">
-            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
-                <i class="fas fa-rss text-accent text-5xl"></i>
-            </div>
-            <h3 class="text-xl font-semibold text-gray-800 mb-2">Initializing Feeds</h3>
-            <p class="text-gray-600 mb-6">Threat intelligence feeds are being configured and will appear shortly.</p>
-        </div>
-        {% endif %}
-    </div>
-</div>
-
-{% elif current_view == 'iocs' %}
-<!-- IOCs View -->
-<div class="panel mb-8">
-    <div class="panel-header">
-        <h3 class="panel-title">
-            <i class="fas fa-fingerprint panel-icon"></i>
-            Indicators of Compromise
-        </h3>
-        <div class="flex items-center">
-            <div class="relative mr-4">
-                <input type="text" id="iocSearch" placeholder="Search IOCs..." class="form-control pr-10" style="width: 300px;">
-                <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-                    <i class="fas fa-search text-gray-400"></i>
+<div class="space-y-6 fade-in">
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-rss panel-icon"></i>
+                Threat Intelligence Feeds
+            </h3>
+            <div class="flex items-center space-x-4">
+                <div class="text-sm text-gray-500 dark:text-gray-400">
+                    <i class="fas fa-sync mr-1"></i>
+                    Auto-refreshed every 2 hours
                 </div>
-            </div>
-            <select id="iocTypeFilter" class="form-control mr-4" style="width: 150px;">
-                <option value="">All Types</option>
-                <option value="ip">IP Addresses</option>
-                <option value="domain">Domains</option>
-                <option value="url">URLs</option>
-                <option value="md5">MD5 Hashes</option>
-                <option value="sha256">SHA256 Hashes</option>
-                <option value="email">Email Addresses</option>
-            </select>
-            <button id="exportIocs" class="btn btn-light">
-                <i class="fas fa-download mr-1"></i> Export
-            </button>
-        </div>
-    </div>
-    <div class="p-0">
-        {% if ioc_items %}
-        <div class="overflow-x-auto">
-            <table class="data-table">
-                <thead class="table-header">
-                    <tr>
-                        <th>Type</th>
-                        <th>Value</th>
-                        <th>Source</th>
-                        <th>Risk Score</th>
-                        <th>Confidence</th>
-                        <th>AI Analysis</th>
-                        <th>First Seen</th>
-                    </tr>
-                </thead>
-                <tbody class="table-body" id="iocTable">
-                    {% for ioc in ioc_items %}
-                    <tr data-type="{{ ioc.type|default('unknown') }}">
-                        <td>
-                            <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">{{ ioc.type|default('unknown') }}</span>
-                        </td>
-                        <td>
-                            <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" class="text-accent hover:underline" title="{{ ioc.value }}">
-                                {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
-                            </a>
-                        </td>
-                        <td class="text-sm text-gray-500">
-                            {{ ioc.source|default('Unknown') }}
-                        </td>
-                        <td>
-                            <div class="flex items-center">
-                                <div class="w-16 bg-gray-200 rounded-full h-2 mr-2">
-                                    <div class="h-2 rounded-full {% if ioc.risk_score > 75 %}bg-red-600{% elif ioc.risk_score > 50 %}bg-orange-500{% elif ioc.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" style="width: {{ ioc.risk_score|default(50) }}%"></div>
-                                </div>
-                                <span class="text-sm">{{ ioc.risk_score|default(50) }}</span>
-                            </div>
-                        </td>
-                        <td>
-                            <div class="w-16 bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-accent h-1.5 rounded-full" style="width: {{ ioc.confidence|default(50) }}%"></div>
-                            </div>
-                            <span class="text-xs text-gray-500">{{ ioc.confidence|default(50) }}%</span>
-                        </td>
-                        <td>
-                            {% if ioc.ai_analyzed %}
-                                <span class="text-sm text-purple-600">
-                                    <i class="fas fa-check-circle"></i> Analyzed
-                                </span>
-                            {% else %}
-                                <span class="text-sm text-gray-400">
-                                    <i class="fas fa-clock"></i> Pending
-                                </span>
-                            {% endif %}
-                        </td>
-                        <td class="text-sm text-gray-500">
-                            {{ ioc.first_seen|default(ioc.created_at)|datetime }}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% else %}
-        <div class="p-12 text-center">
-            <div class="inline-block p-6 rounded-full bg-blue-50 mb-4">
-                <i class="fas fa-fingerprint text-accent text-5xl"></i>
-            </div>
-            <h3 class="text-xl font-semibold text-gray-800 mb-2">Collecting IOCs</h3>
-            <p class="text-gray-600 mb-6">Indicators of compromise are being collected from threat feeds.</p>
-        </div>
-        {% endif %}
-    </div>
-</div>
-
-{% elif current_view == 'ai-analysis' %}
-<!-- AI Analysis View -->
-<div class="panel mb-8">
-    <div class="panel-header">
-        <h3 class="panel-title">
-            <i class="fas fa-brain panel-icon text-purple-600"></i>
-            AI-Powered Threat Analysis
-        </h3>
-        <div class="flex items-center space-x-2">
-            <span class="text-sm text-gray-500">
-                Last run: {{ last_ai_analysis|default('In progress')|datetime }}
-            </span>
-        </div>
-    </div>
-    <div class="p-6">
-        {% if ai_analyses %}
-        <!-- AI Analysis Summary -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div class="bg-purple-50 rounded-lg p-4 border border-purple-100">
-                <h4 class="font-semibold text-purple-800 mb-2">Overall Threat Level</h4>
-                <div class="text-3xl font-bold text-purple-900">{{ ai_analyses.overall_threat_level|default('Medium') }}</div>
-                <p class="text-sm text-purple-600 mt-1">Analyzed from {{ ai_analyses.total_indicators|default(0) }} indicators</p>
-            </div>
-            <div class="bg-blue-50 rounded-lg p-4 border border-blue-100">
-                <h4 class="font-semibold text-blue-800 mb-2">Emerging Threats</h4>
-                <div class="text-3xl font-bold text-blue-900">{{ ai_analyses.emerging_threats_count|default(0) }}</div>
-                <p class="text-sm text-blue-600 mt-1">New patterns detected</p>
-            </div>
-            <div class="bg-orange-50 rounded-lg p-4 border border-orange-100">
-                <h4 class="font-semibold text-orange-800 mb-2">Critical Indicators</h4>
-                <div class="text-3xl font-bold text-orange-900">{{ ai_analyses.critical_indicators|default(0) }}</div>
-                <p class="text-sm text-orange-600 mt-1">Require immediate attention</p>
+                <button id="triggerIngestionBtn" class="btn btn-sm btn-primary">
+                    <i class="fas fa-play mr-1"></i>
+                    Trigger Ingestion
+                </button>
             </div>
         </div>
-
-        <!-- Threat Patterns Detected -->
-        <div class="mb-8">
-            <h4 class="text-lg font-semibold mb-4">Detected Threat Patterns</h4>
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {% for pattern in ai_analyses.threat_patterns|default([]) %}
-                <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                    <h5 class="font-medium text-gray-800 mb-2">{{ pattern.name }}</h5>
-                    <p class="text-sm text-gray-600 mb-3">{{ pattern.description }}</p>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-500">
-                            {{ pattern.indicators_count }} indicators
-                        </span>
-                        <span class="severity-badge {{ pattern.severity }}">
-                            {{ pattern.severity|title }}
-                        </span>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-
-        <!-- AI Recommendations -->
-        <div class="mb-8">
-            <h4 class="text-lg font-semibold mb-4">AI Recommendations</h4>
-            <div class="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-6 border border-purple-100">
-                {% if ai_analyses.recommendations %}
-                <ul class="space-y-3">
-                    {% for rec in ai_analyses.recommendations %}
-                    <li class="flex items-start">
-                        <div class="flex-shrink-0 w-6 h-6 bg-purple-600 text-white rounded-full flex items-center justify-center mr-3 mt-0.5">
-                            <i class="fas fa-chevron-right text-xs"></i>
-                        </div>
-                        <div>
-                            <p class="text-gray-800">{{ rec.text }}</p>
-                            <p class="text-sm text-gray-600 mt-1">Priority: {{ rec.priority }}</p>
-                        </div>
-                    </li>
-                    {% endfor %}
-                </ul>
-                {% else %}
-                <p class="text-gray-600">No specific recommendations available at this time.</p>
-                {% endif %}
-            </div>
-        </div>
-
-        <!-- Recent AI Analysis Results -->
-        <div>
-            <h4 class="text-lg font-semibold mb-4">Recent Analysis Results</h4>
+        <div class="panel-body p-0">
+            {% if feed_items %}
             <div class="overflow-x-auto">
                 <table class="data-table">
                     <thead class="table-header">
                         <tr>
-                            <th>Analysis ID</th>
-                            <th>Type</th>
-                            <th>Target</th>
-                            <th>Result</th>
-                            <th>Confidence</th>
-                            <th>Timestamp</th>
+                            <th>Feed Name</th>
+                            <th>Description</th>
+                            <th>Records</th>
+                            <th>Last Updated</th>
+                            <th>Status</th>
+                            <th>Format</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody class="table-body">
-                        {% for analysis in ai_analyses.recent_analyses|default([]) %}
+                        {% for feed in feed_items %}
                         <tr>
-                            <td class="text-sm font-mono">{{ analysis.id[:8] }}...</td>
-                            <td>
-                                <span class="text-sm bg-purple-100 text-purple-800 px-2 py-1 rounded">
-                                    {{ analysis.type }}
-                                </span>
-                            </td>
-                            <td class="text-sm">{{ analysis.target[:30] }}{{ '...' if analysis.target|length > 30 else '' }}</td>
-                            <td>
-                                <span class="severity-badge {{ analysis.result_severity }}">
-                                    {{ analysis.result }}
-                                </span>
-                            </td>
                             <td>
                                 <div class="flex items-center">
-                                    <div class="w-16 bg-gray-200 rounded-full h-1.5 mr-2">
-                                        <div class="bg-purple-600 h-1.5 rounded-full" style="width: {{ analysis.confidence }}%"></div>
+                                    <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 dark:bg-blue-900/30 text-accent rounded-lg">
+                                        <i class="fas fa-rss"></i>
                                     </div>
-                                    <span class="text-sm">{{ analysis.confidence }}%</span>
+                                    <div class="ml-4">
+                                        <div class="font-semibold text-gray-900 dark:text-gray-100">{{ feed.name }}</div>
+                                        <div class="text-sm text-gray-500 dark:text-gray-400">{{ feed.id }}</div>
+                                    </div>
                                 </div>
                             </td>
-                            <td class="text-sm text-gray-500">{{ analysis.timestamp|datetime }}</td>
+                            <td class="text-sm text-gray-600 dark:text-gray-400 max-w-xs truncate">
+                                {{ feed.description|default('Threat Intelligence Feed') }}
+                            </td>
                             <td>
-                                <a href="{{ url_for('frontend.dynamic_content_detail', content_type='analysis', identifier=analysis.id) }}" class="text-accent hover:text-accent-dark text-sm">
-                                    <i class="fas fa-eye"></i> View
-                                </a>
+                                <span class="px-3 py-1 text-xs font-semibold rounded-full bg-blue-100 dark:bg-blue-900/30 text-accent">
+                                    {{ feed.record_count|default(0) }}
+                                </span>
+                            </td>
+                            <td class="text-sm text-gray-500 dark:text-gray-400">
+                                {{ feed.last_updated|default('Never')|datetime }}
+                            </td>
+                            <td>
+                                {% if feed.enabled %}
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300">
+                                        Active
+                                    </span>
+                                {% else %}
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300">
+                                        Disabled
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <span class="text-xs font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded uppercase">
+                                    {{ feed.format|default('json') }}
+                                </span>
+                            </td>
+                            <td class="text-right">
+                                <div class="flex items-center space-x-2">
+                                    <a href="{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}" 
+                                       class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    <button class="text-blue-600 hover:text-blue-800 tooltip" data-tooltip="Analyze Feed" 
+                                            onclick="analyzeSpecificFeed('{{ feed.id }}')">
+                                        <i class="fas fa-search"></i>
+                                    </button>
+                                </div>
                             </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
-        </div>
-        {% else %}
-        <div class="text-center py-12">
-            <div class="inline-block p-6 rounded-full bg-purple-50 mb-4">
-                <i class="fas fa-brain text-purple-600 text-5xl"></i>
+            {% else %}
+            <div class="text-center py-12">
+                <div class="flex flex-col items-center">
+                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
+                        <i class="fas fa-rss text-accent text-5xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">Initializing Feeds</h3>
+                    <p class="text-gray-600 dark:text-gray-400 mb-6">Threat intelligence feeds are being configured and will appear shortly.</p>
+                    <button onclick="window.location.reload()" class="btn btn-primary">
+                        <i class="fas fa-sync mr-2"></i>
+                        Refresh
+                    </button>
+                </div>
             </div>
-            <h3 class="text-xl font-semibold text-gray-800 mb-2">AI Analysis in Progress</h3>
-            <p class="text-gray-600 mb-6">Machine learning models are analyzing threat intelligence data.</p>
-            <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-purple-600"></div>
+            {% endif %}
         </div>
-        {% endif %}
+    </div>
+</div>
+
+{% elif current_view == 'iocs' %}
+<!-- IOCs View -->
+<div class="space-y-6 fade-in">
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-fingerprint panel-icon"></i>
+                Indicators of Compromise
+            </h3>
+            <div class="flex items-center space-x-3">
+                <!-- Search Input -->
+                <div class="search-input">
+                    <input type="text" id="iocSearch" placeholder="Search IOCs..." 
+                           class="form-control w-64">
+                    <i class="fas fa-search"></i>
+                </div>
+                
+                <!-- Type Filter -->
+                <select id="iocTypeFilter" class="form-control w-40">
+                    <option value="">All Types</option>
+                    <option value="ip">IP Addresses</option>
+                    <option value="ip:port">IP:Port</option>
+                    <option value="domain">Domains</option>
+                    <option value="url">URLs</option>
+                    <option value="md5">MD5 Hashes</option>
+                    <option value="sha256">SHA256 Hashes</option>
+                    <option value="email">Email Addresses</option>
+                </select>
+                
+                <!-- Export Options -->
+                <div class="relative">
+                    <button id="exportIocsBtn" class="btn btn-light flex items-center space-x-2">
+                        <i class="fas fa-download"></i>
+                        <span>Export</span>
+                        <i class="fas fa-chevron-down text-xs"></i>
+                    </button>
+                    <div id="exportDropdown" class="hidden absolute right-0 mt-2 w-40 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-20">
+                        <div class="py-1">
+                            <button onclick="exportIOCs('json')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+                                <i class="fas fa-code mr-2"></i>JSON
+                            </button>
+                            <button onclick="exportIOCs('csv')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+                                <i class="fas fa-table mr-2"></i>CSV
+                            </button>
+                            <button onclick="exportIOCs('txt')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+                                <i class="fas fa-file-alt mr-2"></i>Text
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="panel-body p-0">
+            {% if ioc_items %}
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead class="table-header">
+                        <tr>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th>Source</th>
+                            <th>Risk Score</th>
+                            <th>Confidence</th>
+                            <th>Status</th>
+                            <th>First Seen</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="table-body" id="iocTable">
+                        {% for ioc in ioc_items %}
+                        <tr data-type="{{ ioc.type|default('unknown') }}" data-value="{{ ioc.value }}">
+                            <td>
+                                <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">
+                                    {{ ioc.type|default('unknown') }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="truncate-text max-w-xs tooltip" data-tooltip="{{ ioc.value }}">
+                                    {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
+                                </div>
+                            </td>
+                            <td class="text-sm text-gray-500 dark:text-gray-400">
+                                {{ ioc.source|default('Unknown') }}
+                            </td>
+                            <td>
+                                <div class="flex items-center">
+                                    <div class="progress-bar w-16 h-2 mr-2">
+                                        <div class="progress-fill {% if ioc.risk_score > 75 %}bg-red-600{% elif ioc.risk_score > 50 %}bg-orange-500{% elif ioc.risk_score > 25 %}bg-yellow-400{% else %}bg-green-500{% endif %}" 
+                                             style="width: {{ ioc.risk_score|default(50) }}%"></div>
+                                    </div>
+                                    <span class="text-sm font-medium">{{ ioc.risk_score|default(50) }}</span>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="progress-bar w-16 h-1.5">
+                                    <div class="bg-accent progress-fill" style="width: {{ ioc.confidence|default(50) }}%"></div>
+                                </div>
+                                <span class="text-xs text-gray-500 dark:text-gray-400">{{ ioc.confidence|default(50) }}%</span>
+                            </td>
+                            <td>
+                                {% if ioc.ai_analyzed %}
+                                    <span class="text-sm text-purple-600 dark:text-purple-400 flex items-center">
+                                        <i class="fas fa-check-circle mr-1"></i> Analyzed
+                                    </span>
+                                {% else %}
+                                    <span class="text-sm text-gray-400 flex items-center">
+                                        <i class="fas fa-clock mr-1"></i> Batch Pending
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td class="text-sm text-gray-500 dark:text-gray-400">
+                                {{ ioc.first_seen|default(ioc.created_at)|datetime }}
+                            </td>
+                            <td>
+                                <div class="flex items-center space-x-2">
+                                    <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
+                                       class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    <button class="text-blue-600 hover:text-blue-800 tooltip" data-tooltip="Copy Value" 
+                                            onclick="copyToClipboard('{{ ioc.value }}')">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Pagination -->
+            <div class="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                <div class="text-sm text-gray-500 dark:text-gray-400">
+                    Showing {{ ioc_items|length }} of {{ ioc_items|length }} results
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button class="btn btn-sm btn-light" disabled>
+                        <i class="fas fa-chevron-left"></i>
+                    </button>
+                    <span class="text-sm text-gray-700 dark:text-gray-300">1</span>
+                    <button class="btn btn-sm btn-light" disabled>
+                        <i class="fas fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+            {% else %}
+            <div class="text-center py-12">
+                <div class="flex flex-col items-center">
+                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
+                        <i class="fas fa-fingerprint text-accent text-5xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">Collecting IOCs</h3>
+                    <p class="text-gray-600 dark:text-gray-400 mb-6">Indicators of compromise are being collected from threat feeds.</p>
+                    <div class="loading-spinner"></div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{% elif current_view == 'ai-analysis' %}
+<!-- AI Batch Analysis View -->
+<div class="space-y-6 fade-in">
+    <div class="panel">
+        <div class="panel-header">
+            <h3 class="panel-title">
+                <i class="fas fa-brain panel-icon text-purple-600"></i>
+                AI Batch Analysis
+            </h3>
+            <div class="flex items-center space-x-4">
+                <div class="flex items-center text-sm text-gray-500 dark:text-gray-400">
+                    <i class="fas fa-info-circle mr-1"></i>
+                    <span>Analyzing feeds in batches to optimize performance</span>
+                </div>
+                <button id="triggerBatchAnalysis" class="btn btn-sm btn-primary">
+                    <i class="fas fa-play mr-1"></i>
+                    Trigger Analysis
+                </button>
+            </div>
+        </div>
+        <div class="panel-body">
+            {% if batch_analyses %}
+            <!-- Batch Analysis Summary -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-gradient-to-r from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
+                    <div class="flex items-center">
+                        <div class="rounded-lg bg-purple-600 p-3 mr-4">
+                            <i class="fas fa-shield-alt text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-purple-900 dark:text-purple-100 mb-1">Overall Threat Level</h4>
+                            <div class="text-3xl font-bold text-purple-900 dark:text-purple-100">{{ overall_threat_level }}</div>
+                            <p class="text-sm text-purple-700 dark:text-purple-300 mt-1">From {{ total_feeds_analyzed }} feeds analyzed</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-gradient-to-r from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-lg p-6 border border-blue-200 dark:border-blue-800">
+                    <div class="flex items-center">
+                        <div class="rounded-lg bg-blue-600 p-3 mr-4">
+                            <i class="fas fa-chart-bar text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-blue-900 dark:text-blue-100 mb-1">Feeds Analyzed</h4>
+                            <div class="text-3xl font-bold text-blue-900 dark:text-blue-100">{{ total_feeds_analyzed }}</div>
+                            <p class="text-sm text-blue-700 dark:text-blue-300 mt-1">Active intelligence sources</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-gradient-to-r from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-6 border border-green-200 dark:border-green-800">
+                    <div class="flex items-center">
+                        <div class="rounded-lg bg-green-600 p-3 mr-4">
+                            <i class="fas fa-cogs text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-green-900 dark:text-green-100 mb-1">Analysis Mode</h4>
+                            <div class="text-lg font-bold text-green-900 dark:text-green-100">Batch Processing</div>
+                            <p class="text-sm text-green-700 dark:text-green-300 mt-1">Cost-optimized analysis</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Threat Level Distribution Chart -->
+            {% if threat_distribution %}
+            <div class="mb-8">
+                <h4 class="text-lg font-semibold mb-4">Threat Level Distribution</h4>
+                <div class="bg-gray-50 dark:bg-gray-800 rounded-lg p-6">
+                    <div id="threatDistributionChart" class="h-64"></div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Feed Analysis Results -->
+            <div class="mb-8">
+                <h4 class="text-lg font-semibold mb-4">Feed Analysis Results</h4>
+                <div class="overflow-x-auto">
+                    <table class="data-table">
+                        <thead class="table-header">
+                            <tr>
+                                <th>Feed ID</th>
+                                <th>Analyses Count</th>
+                                <th>Avg Confidence</th>
+                                <th>Threat Levels</th>
+                                <th>Avg Sample Size</th>
+                                <th>Last Analysis</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="table-body">
+                            {% for feed in batch_analyses %}
+                            <tr>
+                                <td class="font-semibold">{{ feed.feed_id }}</td>
+                                <td>
+                                    <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full text-sm font-semibold">
+                                        {{ feed.analysis_count }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="flex items-center">
+                                        <div class="progress-bar w-20 h-2 mr-3">
+                                            <div class="bg-purple-600 progress-fill" style="width: {{ feed.avg_confidence }}%"></div>
+                                        </div>
+                                        <span class="text-sm font-medium">{{ feed.avg_confidence|round(1) }}%</span>
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="flex flex-wrap gap-1">
+                                        {% for level in feed.threat_levels %}
+                                        <span class="severity-badge {{ level }}">{{ level|title }}</span>
+                                        {% endfor %}
+                                    </div>
+                                </td>
+                                <td class="text-sm text-gray-600 dark:text-gray-400">{{ feed.avg_sample_size|int }}</td>
+                                <td class="text-sm text-gray-500 dark:text-gray-400">{{ feed.last_analysis|datetime }}</td>
+                                <td>
+                                    <a href="{{ url_for('frontend.feed_analysis_detail', feed_id=feed.feed_id) }}" 
+                                       class="text-accent hover:text-accent-dark text-sm flex items-center">
+                                        <i class="fas fa-chart-line mr-1"></i> View Details
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Benefits of Batch Analysis -->
+            <div class="bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/10 dark:to-blue-900/10 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
+                <h4 class="text-lg font-semibold mb-4">Batch Analysis Benefits</h4>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="flex items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center mr-3">
+                            <i class="fas fa-dollar-sign text-sm"></i>
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900 dark:text-gray-100">Cost Effective</p>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Reduces AI processing costs by analyzing samples instead of all indicators</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center mr-3">
+                            <i class="fas fa-bolt text-sm"></i>
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900 dark:text-gray-100">Better Performance</p>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Faster processing with batch operations</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center mr-3">
+                            <i class="fas fa-chart-line text-sm"></i>
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900 dark:text-gray-100">Better Insights</p>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Identifies patterns and trends across feed data</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-orange-600 text-white rounded-full flex items-center justify-center mr-3">
+                            <i class="fas fa-clock text-sm"></i>
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900 dark:text-gray-100">Automated</p>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Runs automatically after feed ingestion</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="text-center py-12">
+                <div class="flex flex-col items-center">
+                    <div class="inline-block p-6 rounded-full bg-purple-50 dark:bg-purple-900/20 mb-4">
+                        <i class="fas fa-brain text-purple-600 text-5xl"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">AI Batch Analysis Starting</h3>
+                    <p class="text-gray-600 dark:text-gray-400 mb-6">Batch analysis will begin after data ingestion completes.</p>
+                    <div class="flex items-center space-x-4">
+                        <div class="loading-spinner"></div>
+                        <span class="text-sm text-gray-500 dark:text-gray-400">Initializing AI models...</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
     </div>
 </div>
 {% endif %}
@@ -663,185 +872,444 @@
 
 {% block scripts %}
 <script>
-    // Time Range Dropdown Toggle
-    const timeRangeButton = document.getElementById('timeRangeButton');
-    const timeRangeDropdown = document.getElementById('timeRangeDropdown');
-    
-    if (timeRangeButton && timeRangeDropdown) {
-        timeRangeButton.addEventListener('click', () => {
-            timeRangeDropdown.classList.toggle('hidden');
-        });
+    document.addEventListener('DOMContentLoaded', function() {
+        // Initialize page-specific functionality based on current view
+        const currentView = '{{ current_view }}';
         
-        document.addEventListener('click', (event) => {
-            if (!timeRangeButton.contains(event.target)) {
-                timeRangeDropdown.classList.add('hidden');
-            }
-        });
-    }
-    
-    // IOC Types Chart
-    const iocTypesData = {
-        labels: {{ ioc_type_labels|default([])|tojson }},
-        values: {{ ioc_type_values|default([])|tojson }}
-    };
-    
-    if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0) {
-        Plotly.newPlot('iocTypesChart', [{
-            labels: iocTypesData.labels,
-            values: iocTypesData.values,
-            type: 'pie',
-            hole: 0.4,
-            textinfo: 'label+percent',
-            marker: {
-                colors: ['#fcd34d', '#10b981', '#3b82f6', '#ef4444', '#0f172a', '#9333ea', '#f97316']
-            }
-        }], {
-            margin: { t: 0, b: 30, l: 30, r: 30 },
-            showlegend: true,
-            legend: { orientation: 'h', y: -0.2 }
-        });
-    }
-    
-    // Activity Chart
-    const activityData = {
-        dates: {{ activity_dates|default([])|tojson }},
-        counts: {{ activity_counts|default([])|tojson }}
-    };
-    
-    if (document.getElementById('activityChart') && activityData.dates.length > 0) {
-        Plotly.newPlot('activityChart', [{
-            x: activityData.dates,
-            y: activityData.counts,
-            type: 'scatter',
-            mode: 'lines+markers',
-            line: { color: '#3b82f6', shape: 'spline', width: 3 },
-            marker: { color: '#3b82f6', size: 6 },
-            fill: 'tozeroy',
-            fillcolor: 'rgba(59, 130, 246, 0.1)'
-        }], {
-            margin: { t: 10, b: 30, l: 40, r: 10 },
-            xaxis: { title: '' },
-            yaxis: { title: 'Records' },
-            hovermode: 'closest'
-        });
-    }
-    
-    // Mini Trend Charts
-    const createSparkline = (elementId, trend = 1, color = '#3b82f6') => {
-        const element = document.getElementById(elementId);
-        if (!element) return;
+        // Time Range Dropdown Toggle
+        const timeRangeButton = document.getElementById('timeRangeButton');
+        const timeRangeDropdown = document.getElementById('timeRangeDropdown');
         
-        const y = [];
-        for (let i = 0; i < 10; i++) {
-            y.push(25 + (i * trend) + (Math.random() * 10));
-        }
-        
-        Plotly.newPlot(elementId, [{
-            y: y,
-            type: 'scatter',
-            mode: 'lines',
-            fill: 'tozeroy',
-            fillcolor: `${color}15`,
-            line: { color: color, width: 2, shape: 'spline' }
-        }], {
-            margin: { t: 0, r: 0, l: 0, b: 0 },
-            xaxis: { showticklabels: false, showgrid: false, zeroline: false },
-            yaxis: { showticklabels: false, showgrid: false, zeroline: false },
-            showlegend: false,
-            paper_bgcolor: 'rgba(0,0,0,0)',
-            plot_bgcolor: 'rgba(0,0,0,0)'
-        });
-    };
-    
-    createSparkline('feedTrendChart', {{ feed_trend|default(0) }}, '#3b82f6');
-    createSparkline('iocTrendChart', {{ ioc_trend|default(0) }}, '#ef4444');
-    createSparkline('analysisTrendChart', {{ analysis_trend|default(0) }}, '#9333ea');
-    createSparkline('threatScoreChart', -0.5, '#f97316');
-    
-    // Threat Map
-    if (document.getElementById('threatMap')) {
-        const geoData = {{ geo_stats|default([])|tojson }};
-        
-        if (geoData.length > 0) {
-            const locations = geoData.map(d => d.country);
-            const sizes = geoData.map(d => Math.max(10, d.count / 5));
-            const colors = geoData.map(d => {
-                if (d.risk_level === 'critical') return '#ef4444';
-                if (d.risk_level === 'high') return '#f97316';
-                return '#fbbf24';
+        if (timeRangeButton && timeRangeDropdown) {
+            timeRangeButton.addEventListener('click', function(e) {
+                e.stopPropagation();
+                timeRangeDropdown.classList.toggle('hidden');
             });
             
-            Plotly.newPlot('threatMap', [{
-                type: 'scattergeo',
-                mode: 'markers',
-                locations: locations,
-                marker: {
-                    size: sizes,
-                    color: colors,
-                    opacity: 0.7,
-                    line: { color: 'black', width: 1 }
-                },
-                text: geoData.map(d => `${d.country}: ${d.count} threats`),
-                hoverinfo: 'text'
-            }], {
-                geo: {
-                    scope: 'world',
-                    showland: true,
-                    landcolor: '#F5F5F5',
-                    countrycolor: '#D3D3D3',
-                    showcountries: true,
-                    projection: { type: 'natural earth' }
-                },
-                margin: { l: 0, r: 0, t: 0, b: 0 }
-            }, {responsive: true});
+            document.addEventListener('click', function(e) {
+                if (!timeRangeButton.contains(e.target)) {
+                    timeRangeDropdown.classList.add('hidden');
+                }
+            });
         }
         
-        // Remove loading indicator
-        const loadingDiv = document.querySelector('#threatMap > div:first-child');
-        if (loadingDiv) loadingDiv.style.display = 'none';
-    }
-    
-    // IOC Search and Filtering
-    if (document.getElementById('iocSearch')) {
-        const iocSearch = document.getElementById('iocSearch');
-        const iocTypeFilter = document.getElementById('iocTypeFilter');
-        const iocTable = document.getElementById('iocTable');
+        // Export dropdown for IOCs
+        const exportBtn = document.getElementById('exportIocsBtn');
+        const exportDropdown = document.getElementById('exportDropdown');
         
-        const filterTable = () => {
-            if (!iocTable) return;
+        if (exportBtn && exportDropdown) {
+            exportBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                exportDropdown.classList.toggle('hidden');
+            });
             
-            const searchTerm = iocSearch.value.toLowerCase();
-            const selectedType = iocTypeFilter.value;
-            const rows = iocTable.querySelectorAll('tr');
+            document.addEventListener('click', function(e) {
+                if (!exportBtn.contains(e.target)) {
+                    exportDropdown.classList.add('hidden');
+                }
+            });
+        }
+        
+        // Force Ingestion
+        const forceIngestionBtn = document.getElementById('forceIngestionBtn');
+        if (forceIngestionBtn) {
+            forceIngestionBtn.addEventListener('click', function() {
+                const icon = this.querySelector('i');
+                icon.classList.add('animate-spin');
+                
+                // Make API call to trigger ingestion
+                fetch('/api/admin/ingest', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': 'default-api-key'
+                    },
+                    body: JSON.stringify({ process_all: true })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        TIP.utils.showNotification('Ingestion triggered successfully', 'success');
+                        setTimeout(() => window.location.reload(), 2000);
+                    } else {
+                        TIP.utils.showNotification('Failed to trigger ingestion: ' + data.message, 'danger');
+                    }
+                })
+                .catch(error => {
+                    TIP.utils.showNotification('Error triggering ingestion', 'danger');
+                    console.error('Error:', error);
+                })
+                .finally(() => {
+                    icon.classList.remove('animate-spin');
+                });
+            });
+        }
+        
+        // Chart creation functions
+        function createMiniChart(elementId, data, color = '#3b82f6') {
+            const element = document.getElementById(elementId);
+            if (!element) return;
             
-            rows.forEach(row => {
-                const text = row.textContent.toLowerCase();
-                const rowType = row.getAttribute('data-type');
+            const trace = {
+                y: data,
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: color, width: 2 },
+                fill: 'tozeroy',
+                fillcolor: color + '20',
+                hoverinfo: 'none'
+            };
+            
+            const layout = {
+                margin: { t: 0, r: 0, l: 0, b: 0 },
+                showlegend: false,
+                xaxis: { visible: false },
+                yaxis: { visible: false },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)'
+            };
+            
+            Plotly.newPlot(elementId, [trace], layout, {
+                displayModeBar: false,
+                staticPlot: true
+            });
+        }
+        
+        // Create mini trend charts
+        const trendData = Array.from({length: 10}, (_, i) => 20 + Math.sin(i/2) * 10 + Math.random() * 5);
+        createMiniChart('feedTrendChart', trendData, '#3b82f6');
+        createMiniChart('iocTrendChart', trendData.map(x => x + 15), '#dc2626');
+        createMiniChart('analysisTrendChart', trendData.map(x => x + 5), '#9333ea');
+        createMiniChart('threatScoreChart', trendData.map(x => x + 25), '#ea580c');
+        
+        // IOC Types Chart
+        const iocTypesData = {
+            labels: {{ ioc_type_labels|default([])|tojson }},
+            values: {{ ioc_type_values|default([])|tojson }}
+        };
+        
+        if (document.getElementById('iocTypesChart') && iocTypesData.labels.length > 0) {
+            const trace = {
+                labels: iocTypesData.labels,
+                values: iocTypesData.values,
+                type: 'pie',
+                hole: 0.4,
+                textinfo: 'label+percent',
+                textposition: 'outside',
+                texttemplate: '<b>%{label}</b><br>%{percent}',
+                marker: {
+                    colors: ['#fde047', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#f97316', '#06b6d4'],
+                    line: { color: '#ffffff', width: 2 }
+                }
+            };
+            
+            const layout = {
+                margin: { t: 20, b: 20, l: 20, r: 20 },
+                showlegend: false,
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { size: 12 }
+            };
+            
+            Plotly.newPlot('iocTypesChart', [trace], layout, {
+                displayModeBar: false,
+                responsive: true
+            });
+        }
+        
+        // Activity Chart
+        const activityData = {
+            dates: {{ activity_dates|default([])|tojson }},
+            counts: {{ activity_counts|default([])|tojson }}
+        };
+        
+        if (document.getElementById('activityChart') && activityData.dates.length > 0) {
+            const trace = {
+                x: activityData.dates,
+                y: activityData.counts,
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#3b82f6', width: 3 },
+                marker: { color: '#3b82f6', size: 6 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(59, 130, 246, 0.1)'
+            };
+            
+            const layout = {
+                margin: { t: 20, b: 50, l: 60, r: 20 },
+                xaxis: { title: 'Date', gridcolor: '#f1f5f9' },
+                yaxis: { title: 'Records', gridcolor: '#f1f5f9' },
+                plot_bgcolor: '#fefefe',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                hovermode: 'x unified'
+            };
+            
+            Plotly.newPlot('activityChart', [trace], layout, {
+                displayModeBar: false,
+                responsive: true
+            });
+        }
+        
+        // Threat Map
+        if (document.getElementById('threatMap')) {
+            const geoData = {{ geo_stats|default([])|tojson }};
+            
+            if (geoData.length > 0) {
+                const trace = {
+                    type: 'scattergeo',
+                    mode: 'markers',
+                    locations: geoData.map(d => d.country),
+                    locationmode: 'ISO-3',
+                    marker: {
+                        size: geoData.map(d => Math.max(10, Math.sqrt(d.count) * 2)),
+                        color: geoData.map(d => d.risk_level === 'critical' ? '#dc2626' : 
+                                                d.risk_level === 'high' ? '#ea580c' : '#fbbf24'),
+                        opacity: 0.8,
+                        sizemode: 'diameter',
+                        line: { color: 'white', width: 1 }
+                    },
+                    text: geoData.map(d => `${d.country}: ${d.count} threats<br>Risk: ${d.risk_level}`),
+                    hovertemplate: '<b>%{text}</b><extra></extra>'
+                };
                 
-                const matchesSearch = text.includes(searchTerm);
-                const matchesType = !selectedType || rowType === selectedType;
+                const layout = {
+                    geo: {
+                        projection: { type: 'natural earth' },
+                        showland: true,
+                        landcolor: '#f8fafc',
+                        countrycolor: '#e2e8f0',
+                        coastlinecolor: '#cbd5e1',
+                        showlakes: true,
+                        lakecolor: '#e0f2fe',
+                        showocean: true,
+                        oceancolor: '#f0f9ff'
+                    },
+                    margin: { l: 0, r: 0, t: 0, b: 0 },
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    paper_bgcolor: 'rgba(0,0,0,0)'
+                };
                 
-                row.style.display = matchesSearch && matchesType ? '' : 'none';
+                Plotly.newPlot('threatMap', [trace], layout, {
+                    displayModeBar: false,
+                    responsive: true,
+                    scrollZoom: false
+                });
+            }
+            
+            // Remove loading indicator
+            const loadingDiv = document.querySelector('#threatMap > div:first-child');
+            if (loadingDiv) {
+                setTimeout(() => loadingDiv.style.display = 'none', 1000);
+            }
+        }
+        
+        // IOC Search and Filtering
+        if (currentView === 'iocs') {
+            const searchInput = document.getElementById('iocSearch');
+            const typeFilter = document.getElementById('iocTypeFilter');
+            const tableBody = document.getElementById('iocTable');
+            
+            if (searchInput && typeFilter && tableBody) {
+                const filterTable = TIP.utils.debounce(function() {
+                    const searchTerm = searchInput.value.toLowerCase();
+                    const selectedType = typeFilter.value;
+                    const rows = tableBody.querySelectorAll('tr');
+                    
+                    let visibleCount = 0;
+                    rows.forEach(row => {
+                        const text = row.textContent.toLowerCase();
+                        const rowType = row.getAttribute('data-type');
+                        const matchesSearch = !searchTerm || text.includes(searchTerm);
+                        const matchesType = !selectedType || rowType === selectedType;
+                        
+                        if (matchesSearch && matchesType) {
+                            row.style.display = '';
+                            visibleCount++;
+                        } else {
+                            row.style.display = 'none';
+                        }
+                    });
+                    
+                    // Update results count
+                    const resultsText = document.querySelector('.text-gray-500');
+                    if (resultsText) {
+                        resultsText.textContent = `Showing ${visibleCount} of ${rows.length} results`;
+                    }
+                }, 300);
+                
+                searchInput.addEventListener('keyup', filterTable);
+                typeFilter.addEventListener('change', filterTable);
+            }
+        }
+        
+        // Threat Distribution Chart (AI Analysis view)
+        {% if threat_distribution %}
+        if (document.getElementById('threatDistributionChart')) {
+            const threatData = {{ threat_distribution|tojson }};
+            
+            const trace = {
+                x: threatData.map(d => d.threat_level),
+                y: threatData.map(d => d.count),
+                type: 'bar',
+                marker: {
+                    color: threatData.map(d => ({
+                        'critical': '#dc2626',
+                        'high': '#ea580c',
+                        'medium': '#fbbf24',
+                        'low': '#10b981'
+                    })[d.threat_level] || '#6b7280')
+                }
+            };
+            
+            const layout = {
+                margin: { t: 20, b: 60, l: 50, r: 20 },
+                xaxis: { title: 'Threat Level' },
+                yaxis: { title: 'Count' },
+                plot_bgcolor: '#fefefe',
+                paper_bgcolor: 'rgba(0,0,0,0)'
+            };
+            
+            Plotly.newPlot('threatDistributionChart', [trace], layout, {
+                displayModeBar: false,
+                responsive: true
+            });
+        }
+        {% endif %}
+        
+        // Global function definitions
+        window.exportIOCs = function(format) {
+            const params = new URLSearchParams({
+                format: format,
+                days: {{ days }},
+                type: typeFilter ? typeFilter.value : ''
+            });
+            window.location.href = `{{ url_for('frontend.export_iocs') }}?${params}`;
+            document.getElementById('exportDropdown').classList.add('hidden');
+        };
+        
+        window.copyToClipboard = function(text) {
+            navigator.clipboard.writeText(text).then(function() {
+                TIP.utils.showNotification('Copied to clipboard', 'success', 1500);
+            }).catch(function() {
+                TIP.utils.showNotification('Failed to copy', 'danger', 1500);
             });
         };
         
-        iocSearch.addEventListener('keyup', filterTable);
-        iocTypeFilter.addEventListener('change', filterTable);
-    }
-    
-    // Export IOCs functionality
-    if (document.getElementById('exportIocs')) {
-        document.getElementById('exportIocs').addEventListener('click', () => {
-            window.location.href = '{{ url_for("frontend.export_iocs") }}';
-        });
-    }
-    
-    // Auto-refresh data every 5 minutes
-    setInterval(() => {
-        // Only refresh if the page is visible
-        if (!document.hidden) {
-            window.location.reload();
+        window.analyzeSpecificFeed = function(feedId) {
+            TIP.utils.showNotification('Triggering analysis for ' + feedId, 'info');
+            
+            fetch('/api/admin/analyze-batch', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'default-api-key'
+                },
+                body: JSON.stringify({ feed_id: feedId, force_analyze: true })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    TIP.utils.showNotification('Analysis failed: ' + data.error, 'danger');
+                } else {
+                    TIP.utils.showNotification('Analysis triggered successfully', 'success');
+                }
+            })
+            .catch(error => {
+                TIP.utils.showNotification('Error triggering analysis', 'danger');
+                console.error('Error:', error);
+            });
+        };
+        
+        // Trigger ingestion for feeds page
+        const triggerIngestionBtn = document.getElementById('triggerIngestionBtn');
+        if (triggerIngestionBtn) {
+            triggerIngestionBtn.addEventListener('click', function() {
+                const icon = this.querySelector('i');
+                icon.classList.add('animate-spin');
+                
+                fetch('/api/admin/ingest', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': 'default-api-key'
+                    },
+                    body: JSON.stringify({ process_all: true })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        TIP.utils.showNotification('Ingestion triggered successfully', 'success');
+                    } else {
+                        TIP.utils.showNotification('Failed to trigger ingestion', 'danger');
+                    }
+                })
+                .catch(error => {
+                    TIP.utils.showNotification('Error triggering ingestion', 'danger');
+                })
+                .finally(() => {
+                    icon.classList.remove('animate-spin');
+                });
+            });
         }
-    }, 300000);
+        
+        // Trigger batch analysis
+        const triggerBatchAnalysis = document.getElementById('triggerBatchAnalysis');
+        if (triggerBatchAnalysis) {
+            triggerBatchAnalysis.addEventListener('click', function() {
+                const icon = this.querySelector('i');
+                icon.classList.add('animate-spin');
+                
+                fetch('/api/admin/analyze-batch', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': 'default-api-key'
+                    },
+                    body: JSON.stringify({ force_analyze: true })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        TIP.utils.showNotification('Analysis failed: ' + data.error, 'danger');
+                    } else {
+                        TIP.utils.showNotification('Batch analysis triggered successfully', 'success');
+                        setTimeout(() => window.location.reload(), 2000);
+                    }
+                })
+                .catch(error => {
+                    TIP.utils.showNotification('Error triggering analysis', 'danger');
+                    console.error('Error:', error);
+                })
+                .finally(() => {
+                    icon.classList.remove('animate-spin');
+                });
+            });
+        }
+        
+        // Auto-refresh data every 5 minutes for dashboard
+        if (currentView === 'dashboard') {
+            setInterval(() => {
+                if (!document.hidden) {
+                    window.location.reload();
+                }
+            }, 300000);
+        }
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + E for export (IOCs view)
+            if ((e.ctrlKey || e.metaKey) && e.key === 'e' && currentView === 'iocs') {
+                e.preventDefault();
+                if (exportBtn) exportBtn.click();
+            }
+            
+            // Ctrl/Cmd + I for trigger ingestion
+            if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+                e.preventDefault();
+                if (forceIngestionBtn) forceIngestionBtn.click();
+                if (triggerIngestionBtn) triggerIngestionBtn.click();
+            }
+        });
+    });
 </script>
 {% endblock %}
