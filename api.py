@@ -1,6 +1,7 @@
 """
 Production-ready API module for threat intelligence platform.
 Provides RESTful endpoints for accessing threat intelligence data and analysis results.
+Public-facing endpoints only.
 """
 
 import os
@@ -35,7 +36,7 @@ api_blueprint = Blueprint('api', __name__)
 limiter = Limiter(
     key_func=get_remote_address,
     app=current_app,
-    default_limits=["1000 per day", "100 per hour"],
+    default_limits=["2000 per day", "200 per hour"],  # More generous for public
     storage_uri="memory://",
     swallow_errors=True
 )
@@ -44,8 +45,17 @@ limiter = Limiter(
 query_cache = TTLCache(maxsize=1000, ttl=300)  # 5-minute TTL
 cache_stats = {"hits": 0, "misses": 0, "size": 0}
 
-# Public read-only endpoints that don't require API key
-PUBLIC_ENDPOINTS = ['/health', '/stats', '/feeds', '/iocs', '/ai/analyses', '/ai/summary', '/threat_summary', '/iocs/geo']
+# Public read-only endpoints - no admin functionality
+PUBLIC_ENDPOINTS = [
+    '/health', 
+    '/stats', 
+    '/feeds', 
+    '/iocs', 
+    '/ai/analyses', 
+    '/ai/summary', 
+    '/threat_summary', 
+    '/iocs/geo'
+]
 
 # API Key Authentication decorator
 def require_api_key(f):
@@ -87,8 +97,8 @@ def require_api_key(f):
             if api_key in ['default-api-key', 'test-key']:
                 return f(*args, **kwargs)
         
-        # Validate API key for protected endpoints
-        if api_key != expected_key and expected_key:
+        # Validate API key for protected endpoints (none in this public API)
+        if api_key != expected_key and expected_key and not is_public_endpoint:
             logger.warning(f"Invalid API key attempt from {get_remote_address()}")
             return jsonify({'error': 'Invalid API key'}), 401
         
@@ -289,7 +299,7 @@ def api_health_check():
         return jsonify(health_data), 206  # Partial content
 
 @api_blueprint.route('/stats', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=600)  # 10-minute cache
 def get_stats():
@@ -397,7 +407,7 @@ def get_stats():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/feeds', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_feeds():
@@ -455,7 +465,7 @@ def get_feeds():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_iocs():
@@ -557,7 +567,7 @@ def get_iocs():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/analyses', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_ai_analyses():
@@ -631,7 +641,7 @@ def get_ai_analyses():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_threat_summary():
@@ -751,7 +761,7 @@ def get_threat_summary():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/summary', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_ai_summary():
@@ -840,7 +850,7 @@ def get_ai_summary():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
-@limiter.limit("30 per minute")
+@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=600)
 def get_iocs_geo():
