@@ -69,31 +69,11 @@ def register_event_handlers(state):
         app.event_bus.subscribe('analysis_completed', invalidate_cache_on_analysis)
         app.event_bus.subscribe('ingestion_completed', invalidate_cache_on_ingestion)
         
-        # Register template filter on app, not blueprint
-        register_template_filters(app)
-        
         # Update service status
         service_manager = Config.get_service_manager()
         service_manager.update_status('frontend', ServiceStatus.READY)
 
 # ====== Helper Functions ======
-
-def register_template_filters(app):
-    """Register template filters at the app level, not the blueprint."""
-    @app.template_filter('datetime')
-    def format_datetime(value):
-        """Format a datetime string for display."""
-        if not value:
-            return 'N/A'
-        try:
-            if isinstance(value, str):
-                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            else:
-                dt = value
-            return dt.strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            return str(value)
-    logger.info("Template filters registered successfully")
 
 def safe_report_exception(e=None):
     """Safely report exception using config module."""
@@ -286,16 +266,6 @@ if ENVIRONMENT == 'production' and os.environ.get('AUTO_ANALYZE', 'false').lower
 def index():
     """Root redirects to dashboard."""
     return redirect(url_for('frontend.dashboard'))
-
-@frontend_app.route('/feeds')
-def feeds():
-    """Redirect to dashboard feeds view."""
-    return redirect(url_for('frontend.dashboard', view='feeds'))
-
-@frontend_app.route('/iocs')
-def iocs():
-    """Redirect to dashboard IOCs view."""
-    return redirect(url_for('frontend.dashboard', view='iocs'))
 
 @frontend_app.route('/dashboard')
 @frontend_app.route('/dashboard/<view>')
@@ -661,14 +631,32 @@ def analyze_ioc(ioc_id):
 def page_not_found(e):
     """Handle 404 errors."""
     logger.info(f"Page not found: {request.path}")
-    return render_template('404.html', error_code=404, error_message="Page Not Found"), 404
+    return render_template('error.html', 
+                         error_code=404, 
+                         error_message="Page Not Found",
+                         error_description="The page you're looking for doesn't exist or has been moved.",
+                         error_icon="search-location"), 404
+
+@frontend_app.errorhandler(403)  
+def forbidden(e):
+    """Handle 403 errors."""
+    logger.warning(f"Forbidden access: {request.path}")
+    return render_template('error.html',
+                         error_code=403,
+                         error_message="Access Forbidden", 
+                         error_description="You don't have permission to access this resource.",
+                         error_icon="ban"), 403
 
 @frontend_app.errorhandler(500)
 def server_error(e):
     """Handle 500 errors."""
     logger.error(f"Server error: {str(e)}")
     safe_report_exception(e)
-    return render_template('500.html'), 500
+    return render_template('error.html',
+                         error_code=500,
+                         error_message="Internal Server Error",
+                         error_description="An unexpected error occurred. Our team has been notified.",
+                         error_icon="exclamation-triangle"), 500
 
 # Context processors
 @frontend_app.context_processor
