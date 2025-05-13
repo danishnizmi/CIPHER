@@ -1,74 +1,155 @@
+"""
+Production-ready API module for threat intelligence platform.
+Provides RESTful endpoints for accessing threat intelligence data and analysis results.
+"""
+
 import os
 import json
 import logging
 import traceback
-import uuid
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+from functools import wraps
+from cachetools import TTLCache
+import hashlib
 
 from flask import Blueprint, jsonify, request, current_app, abort, Response, g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from functools import wraps
+from werkzeug.exceptions import BadRequest, Unauthorized, NotFound, TooManyRequests
 from google.cloud import bigquery, storage, pubsub_v1
-from google.cloud.exceptions import NotFound
+from google.cloud.exceptions import NotFound as GCPNotFound
 import google.auth
 
 # Import configuration
-from config import Config, ServiceManager, ServiceStatus, initialize_bigquery, initialize_storage, initialize_pubsub, report_error
+from config import Config, ServiceManager, ServiceStatus, report_error
 
 # Initialize logging
 logger = logging.getLogger(__name__)
 
-# Initialize API blueprint
+# Create API blueprint
 api_blueprint = Blueprint('api', __name__)
 
-# Initialize rate limiter for cost efficiency
+# Initialize rate limiter
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=["1000 per day", "100 per hour"]
+    default_limits=["1000 per day", "100 per hour"],
+    storage_uri="memory://",
+    swallow_errors=True
 )
+
+# Cache for expensive queries
+query_cache = TTLCache(maxsize=1000, ttl=300)  # 5-minute TTL
+cache_stats = {"hits": 0, "misses": 0, "size": 0}
 
 # API Key Authentication decorator
 def require_api_key(f):
+    """Decorator to require valid API key for endpoint access."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Handle CORS preflight requests
+        if request.method == 'OPTIONS':
+            return '', 200
+            
+        # Get API key from header
         api_key = request.headers.get('X-API-Key')
         
         if not api_key:
+            logger.warning(f"API request without key from {get_remote_address()}")
             return jsonify({'error': 'No API key provided'}), 401
         
-        # Clean the API key - strip whitespace and quotes
+        # Clean the API key
         api_key = api_key.strip().strip('"\'')
         
-        # Get the actual API key from config
+        # Get expected key from config
         expected_key = Config.API_KEY
         if expected_key:
             expected_key = expected_key.strip()
         
-        # Allow default key in non-production environments
-        if Config.ENVIRONMENT != 'production' and api_key == 'default-api-key':
-            return f(*args, **kwargs)
+        # Special handling for development/testing
+        if Config.ENVIRONMENT != 'production':
+            if api_key in ['default-api-key', 'test-key']:
+                logger.debug(f"Using development API key")
+                return f(*args, **kwargs)
         
-        # Check the API key
-        if api_key != expected_key:
-            logger.warning(f"Invalid API key attempt: {api_key[:10]}...")
+        # Validate API key
+        if not expected_key or api_key != expected_key:
+            logger.warning(f"Invalid API key attempt from {get_remote_address()}: {api_key[:10]}...")
             return jsonify({'error': 'Invalid API key'}), 401
         
         return f(*args, **kwargs)
     return decorated_function
+
+# Cache decorator for expensive operations
+def cache_response(ttl=300):
+    """Decorator to cache API responses."""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Generate cache key
+            cache_key = f"{f.__name__}:{hash(str(sorted(request.args.items())))}"
+            
+            # Check cache
+            if cache_key in query_cache:
+                cache_stats["hits"] += 1
+                logger.debug(f"Cache hit for {f.__name__}")
+                return query_cache[cache_key]
+            
+            # Execute function
+            result = f(*args, **kwargs)
+            
+            # Cache successful responses only
+            if isinstance(result, tuple):
+                response, status_code = result
+                if status_code == 200:
+                    query_cache[cache_key] = result
+                    cache_stats["misses"] += 1
+            elif not isinstance(result, Response) or result.status_code == 200:
+                query_cache[cache_key] = result
+                cache_stats["misses"] += 1
+            
+            cache_stats["size"] = len(query_cache)
+            return result
+        return decorated_function
+    return decorator
+
+# Validation helpers
+def validate_days_parameter(days_str: str, max_days: int = 365) -> int:
+    """Validate and return days parameter."""
+    try:
+        days = int(days_str)
+        if days < 1:
+            raise ValueError("Days must be positive")
+        if days > max_days:
+            raise ValueError(f"Days cannot exceed {max_days}")
+        return days
+    except (ValueError, TypeError) as e:
+        raise BadRequest(f"Invalid days parameter: {e}")
+
+def validate_limit_parameter(limit_str: str, max_limit: int = 10000) -> int:
+    """Validate and return limit parameter."""
+    try:
+        limit = int(limit_str)
+        if limit < 1:
+            raise ValueError("Limit must be positive")
+        if limit > max_limit:
+            raise ValueError(f"Limit cannot exceed {max_limit}")
+        return limit
+    except (ValueError, TypeError) as e:
+        raise BadRequest(f"Invalid limit parameter: {e}")
 
 # Helper Functions
 def get_clients():
     """Get initialized clients from service manager."""
     service_manager = Config.get_service_manager()
     
-    bq_client = service_manager.get_client('bigquery')
-    storage_client = service_manager.get_client('storage')
-    publisher = service_manager.get_client('publisher')
-    subscriber = service_manager.get_client('subscriber')
-    
-    return bq_client, storage_client, publisher, subscriber
+    return (
+        service_manager.get_client('bigquery'),
+        service_manager.get_client('storage'),
+        service_manager.get_client('publisher'),
+        service_manager.get_client('subscriber')
+    )
 
 def format_bq_row(row: Dict) -> Dict:
     """Format BigQuery row for JSON response."""
@@ -78,32 +159,57 @@ def format_bq_row(row: Dict) -> Dict:
             formatted[key] = value.isoformat()
         elif hasattr(value, 'isoformat'):
             formatted[key] = value.isoformat()
+        elif value is None:
+            formatted[key] = None
         else:
             formatted[key] = value
     return formatted
 
-def execute_bq_query(query: str, params: Optional[List] = None) -> List[Dict]:
-    """Execute BigQuery query and return formatted results."""
+def execute_bq_query(query: str, params: Optional[List] = None, cache_ttl: int = 300) -> List[Dict]:
+    """Execute BigQuery query with caching and return formatted results."""
+    # Generate cache key for query
+    cache_key = hashlib.sha256(f"{query}:{str(params)}".encode()).hexdigest()
+    
+    # Check cache first
+    if cache_key in query_cache:
+        cache_stats["hits"] += 1
+        return query_cache[cache_key]
+    
     bq_client, _, _, _ = get_clients()
     
     if not bq_client:
         logger.error("BigQuery client not initialized")
-        return []
+        raise Exception("BigQuery client not initialized")
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=params if params else []
+        query_parameters=params if params else [],
+        use_query_cache=True,
+        maximum_bytes_billed=Config.BIGQUERY_MAX_BYTES_BILLED
     )
     
     try:
+        start_time = time.time()
         query_job = bq_client.query(query, job_config=job_config)
         results = [format_bq_row(row) for row in query_job]
+        
+        # Log slow queries
+        execution_time = time.time() - start_time
+        if execution_time > 5:
+            logger.warning(f"Slow query executed in {execution_time:.2f}s: {query[:100]}...")
+        
+        # Cache successful results
+        query_cache[cache_key] = results
+        cache_stats["misses"] += 1
+        cache_stats["size"] = len(query_cache)
+        
         return results
     except Exception as e:
         logger.error(f"Error executing BigQuery query: {str(e)}")
         if Config.ENVIRONMENT != 'production':
+            logger.error(f"Query: {query}")
             logger.error(traceback.format_exc())
         report_error(e)
-        return []
+        raise
 
 def publish_to_topic(topic_name: str, message_data: Dict) -> Optional[str]:
     """Publish message to Pub/Sub topic."""
@@ -113,12 +219,12 @@ def publish_to_topic(topic_name: str, message_data: Dict) -> Optional[str]:
         logger.error("Pub/Sub publisher not initialized")
         return None
     
-    topic_path = publisher.topic_path(Config.GCP_PROJECT, topic_name)
-    message = json.dumps(message_data).encode("utf-8")
-    
     try:
+        topic_path = publisher.topic_path(Config.GCP_PROJECT, topic_name)
+        message = json.dumps(message_data).encode("utf-8")
+        
         publish_future = publisher.publish(topic_path, data=message)
-        message_id = publish_future.result()
+        message_id = publish_future.result(timeout=10)
         
         # Publish event to event bus if available
         if hasattr(g, 'event_bus'):
@@ -127,128 +233,112 @@ def publish_to_topic(topic_name: str, message_data: Dict) -> Optional[str]:
         return message_id
     except Exception as e:
         logger.error(f"Error publishing to {topic_name}: {str(e)}")
+        report_error(e)
         return None
 
 def check_table_exists(table_name: str) -> bool:
-    """Check if BigQuery table exists."""
+    """Check if BigQuery table exists and is accessible."""
     bq_client, _, _, _ = get_clients()
     
     if not bq_client:
         return False
-        
+    
     try:
         full_table_id = Config.get_table_name(table_name)
         if not full_table_id:
             return False
-            
-        parts = full_table_id.split('.')
-        if len(parts) != 3:
-            return False
-            
-        project_id, dataset_id, table_id = parts
         
-        dataset_ref = bq_client.dataset(dataset_id, project=project_id)
-        table_ref = dataset_ref.table(table_id)
+        # Try to get table info
+        table = bq_client.get_table(full_table_id)
         
-        bq_client.get_table(table_ref)
-        
-        # Try a simple query to verify
+        # Try a simple query to verify access
         test_query = f"SELECT COUNT(*) as count FROM `{full_table_id}` LIMIT 1"
         bq_client.query(test_query).result()
         
         return True
-    except NotFound:
-        return False
-    except Exception as e:
-        logger.error(f"Error checking table {table_name}: {str(e)}")
+    except (GCPNotFound, Exception) as e:
+        logger.debug(f"Table check failed for {table_name}: {e}")
         return False
 
-def verify_bigquery_tables() -> bool:
-    """Verify all required BigQuery tables exist."""
-    bq_client, _, _, _ = get_clients()
-    
-    if not bq_client:
-        logger.error("BigQuery client not initialized")
-        return False
-    
-    required_tables = ['indicators', 'vulnerabilities', 'threat_actors', 'campaigns', 'malware']
-    missing_tables = []
-    
-    for table_name in required_tables:
-        if not check_table_exists(table_name):
-            missing_tables.append(table_name)
-    
-    if missing_tables:
-        logger.warning(f"The following tables are missing: {', '.join(missing_tables)}")
-        # Try to create missing tables
-        try:
-            from ingestion import initialize_bigquery_tables
-            if initialize_bigquery_tables():
-                logger.info("Successfully created missing tables")
-                return True
-            else:
-                logger.error("Failed to create missing tables")
-                return False
-        except Exception as e:
-            logger.error(f"Error creating tables: {str(e)}")
-            return False
-    
-    return True
+# ==================== API Endpoints ====================
 
-# API Endpoints
 @api_blueprint.route('/health', methods=['GET'])
 def api_health_check():
-    """API health check with service status."""
+    """Comprehensive API health check."""
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
+    
+    # Check critical tables
+    tables_status = {}
+    critical_tables = ['indicators', 'batch_analysis']
+    
+    for table in critical_tables:
+        tables_status[table] = check_table_exists(table)
     
     health_data = {
         'status': status['overall'],
         'timestamp': datetime.utcnow().isoformat(),
-        'api_version': Config.API_VERSION,
-        'services': status['services'],
-        'dependencies': {
-            service: status['services'].get(service, 'unknown')
-            for service in ['bigquery', 'storage', 'pubsub']
-        }
+        'api_version': Config.VERSION,
+        'services': {
+            'bigquery': status['services'].get('bigquery', 'unknown'),
+            'storage': status['services'].get('storage', 'unknown'),
+            'pubsub': status['services'].get('pubsub', 'unknown'),
+            'ai_models': status['services'].get('ai_models', 'unknown'),
+            'analysis': status['services'].get('analysis', 'unknown')
+        },
+        'tables': tables_status,
+        'cache_stats': dict(cache_stats),
+        'environment': Config.ENVIRONMENT
     }
     
-    if status['overall'] == ServiceStatus.READY.value:
+    # Determine HTTP status code
+    if status['overall'] == ServiceStatus.READY.value and all(tables_status.values()):
         return jsonify(health_data), 200
-    else:
+    elif status['overall'] == ServiceStatus.ERROR.value:
         return jsonify(health_data), 503
+    else:
+        return jsonify(health_data), 206  # Partial content
 
 @api_blueprint.route('/stats', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=600)  # 10-minute cache
 def get_stats():
-    """Get platform statistics."""
+    """Get comprehensive platform statistics."""
     try:
-        days = int(request.args.get('days', 30))
+        days = validate_days_parameter(request.args.get('days', '30'))
         
+        # Default response structure
         stats = {
             'feeds': {'total_sources': 0, 'growth_rate': 0},
             'iocs': {'total': 0, 'growth_rate': 0, 'types': []},
             'analyses': {'total_analyses': 0, 'growth_rate': 0},
+            'batch_analyses': {'total': 0, 'growth_rate': 0},
             'timestamp': datetime.utcnow().isoformat(),
-            'visualization_data': {'daily_counts': []}
+            'visualization_data': {'daily_counts': []},
+            'period_days': days
         }
         
-        if not verify_bigquery_tables():
-            logger.warning("BigQuery tables not ready, returning default stats")
+        # Check if tables exist
+        if not check_table_exists('indicators'):
+            logger.warning("Indicators table not ready, returning default stats")
             return jsonify(stats)
         
-        # Query for feeds count
-        feed_query = f"""
-        SELECT COUNT(DISTINCT source) as total_sources
+        # Feeds count query
+        feeds_query = f"""
+        SELECT COUNT(DISTINCT feed_id) as total_sources
         FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         """
         
-        feed_results = execute_bq_query(feed_query)
-        if feed_results:
-            stats['feeds']['total_sources'] = feed_results[0].get('total_sources', 0)
+        try:
+            feed_results = execute_bq_query(feeds_query)
+            if feed_results:
+                stats['feeds']['total_sources'] = feed_results[0].get('total_sources', 0)
+        except Exception as e:
+            logger.error(f"Error querying feeds: {e}")
         
-        # Query for IOCs count and types
+        # IOCs count and types
         ioc_query = f"""
         SELECT 
             COUNT(*) as total,
@@ -260,27 +350,33 @@ def get_stats():
         ORDER BY count DESC
         """
         
-        ioc_results = execute_bq_query(ioc_query)
-        if ioc_results:
-            stats['iocs']['total'] = sum(row.get('count', 0) for row in ioc_results)
-            stats['iocs']['types'] = [
-                {'type': row['type'], 'count': row['count']} 
-                for row in ioc_results
-            ]
+        try:
+            ioc_results = execute_bq_query(ioc_query)
+            if ioc_results:
+                stats['iocs']['total'] = sum(row.get('count', 0) for row in ioc_results)
+                stats['iocs']['types'] = [
+                    {'type': row['type'], 'count': row['count']} 
+                    for row in ioc_results
+                ]
+        except Exception as e:
+            logger.error(f"Error querying IOCs: {e}")
         
-        # Query for AI analyses count
-        analyses_query = f"""
-        SELECT COUNT(*) as total_analyses
-        FROM `{Config.get_table_name('indicators')}`
-        WHERE last_analyzed IS NOT NULL
-        AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        """
+        # Batch analyses count
+        if check_table_exists('batch_analysis'):
+            batch_query = f"""
+            SELECT COUNT(*) as total_analyses
+            FROM `{Config.get_table_name('batch_analysis')}`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+            """
+            
+            try:
+                batch_results = execute_bq_query(batch_query)
+                if batch_results:
+                    stats['batch_analyses']['total'] = batch_results[0].get('total_analyses', 0)
+            except Exception as e:
+                logger.error(f"Error querying batch analyses: {e}")
         
-        analyses_results = execute_bq_query(analyses_query)
-        if analyses_results:
-            stats['analyses']['total_analyses'] = analyses_results[0].get('total_analyses', 0)
-        
-        # Query for daily activity
+        # Daily activity visualization data
         daily_query = f"""
         SELECT 
             DATE(created_at) as date,
@@ -291,46 +387,61 @@ def get_stats():
         ORDER BY date
         """
         
-        daily_results = execute_bq_query(daily_query)
-        if daily_results:
-            stats['visualization_data']['daily_counts'] = [
-                {'date': str(row['date']), 'count': row['count']}
-                for row in daily_results
-            ]
+        try:
+            daily_results = execute_bq_query(daily_query)
+            if daily_results:
+                stats['visualization_data']['daily_counts'] = [
+                    {'date': str(row['date']), 'count': row['count']}
+                    for row in daily_results
+                ]
+        except Exception as e:
+            logger.error(f"Error querying daily activity: {e}")
         
         # Calculate growth rates
-        if days > 0:
-            # Previous period query
-            previous_ioc_query = f"""
-            SELECT COUNT(*) as total
-            FROM `{Config.get_table_name('indicators')}`
-            WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days * 2} DAY)
-            AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-            """
-            
-            previous_results = execute_bq_query(previous_ioc_query)
-            if previous_results:
-                previous_total = previous_results[0].get('total', 0)
-                current_total = stats['iocs']['total']
+        if days > 7:  # Only calculate growth if we have enough data
+            try:
+                # Previous period comparison
+                previous_period_days = days * 2
+                previous_query = f"""
+                SELECT COUNT(*) as total
+                FROM `{Config.get_table_name('indicators')}`
+                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {previous_period_days} DAY)
+                AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+                """
                 
-                if previous_total > 0:
-                    growth_rate = ((current_total - previous_total) / previous_total) * 100
-                    stats['iocs']['growth_rate'] = round(growth_rate, 1)
+                previous_results = execute_bq_query(previous_query)
+                if previous_results:
+                    previous_total = previous_results[0].get('total', 0)
+                    current_total = stats['iocs']['total']
+                    
+                    if previous_total > 0:
+                        growth_rate = ((current_total - previous_total) / previous_total) * 100
+                        stats['iocs']['growth_rate'] = round(growth_rate, 1)
+            except Exception as e:
+                logger.error(f"Error calculating growth rates: {e}")
         
         return jsonify(stats)
+        
+    except BadRequest as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting stats: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/feeds', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=300)
 def get_feeds():
-    """Get feed information."""
+    """Get feed information with statistics."""
     try:
         feed_details = []
-        for feed in Config.FEEDS:
+        
+        # Get configured feeds
+        feeds = getattr(Config, 'FEEDS', [])
+        
+        for feed in feeds:
             feed_detail = {
                 'id': feed.get('id'),
                 'name': feed.get('name'),
@@ -339,24 +450,29 @@ def get_feeds():
                 'last_updated': None,
                 'enabled': feed.get('enabled', True),
                 'format': feed.get('format', 'json'),
-                'update_frequency': feed.get('update_frequency', 'daily')
+                'update_frequency': feed.get('update_frequency', 'daily'),
+                'type': feed.get('type', 'mixed')
             }
             
-            if verify_bigquery_tables():
+            # Get statistics for each feed
+            if check_table_exists('indicators'):
                 feed_query = f"""
                 SELECT 
                     COUNT(*) as count,
                     MAX(created_at) as last_updated
                 FROM `{Config.get_table_name('indicators')}`
-                WHERE source = @feed_id
+                WHERE feed_id = @feed_id
                 """
                 
                 params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed.get('id'))]
-                feed_results = execute_bq_query(feed_query, params)
                 
-                if feed_results:
-                    feed_detail['record_count'] = feed_results[0].get('count', 0)
-                    feed_detail['last_updated'] = feed_results[0].get('last_updated', None)
+                try:
+                    feed_results = execute_bq_query(feed_query, params)
+                    if feed_results:
+                        feed_detail['record_count'] = feed_results[0].get('count', 0)
+                        feed_detail['last_updated'] = feed_results[0].get('last_updated')
+                except Exception as e:
+                    logger.error(f"Error querying feed {feed.get('id')}: {e}")
             
             feed_details.append(feed_detail)
         
@@ -365,39 +481,54 @@ def get_feeds():
             'count': len(feed_details),
             'feed_details': feed_details
         })
+        
     except Exception as e:
         logger.error(f"Error getting feeds: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=300)
 def get_iocs():
-    """Get IOC data."""
+    """Get IOC data with filtering and pagination."""
     try:
-        days = int(request.args.get('days', 30))
-        limit = int(request.args.get('limit', 100))
-        offset = int(request.args.get('offset', 0))
-        ioc_type = request.args.get('type', '')
+        # Validate parameters
+        days = validate_days_parameter(request.args.get('days', '30'))
+        limit = validate_limit_parameter(request.args.get('limit', '100'))
+        offset = int(request.args.get('offset', '0'))
+        ioc_type = request.args.get('type', '').strip()
+        ioc_value = request.args.get('value', '').strip()
         
+        # Default response
         default_response = {
             'records': [],
             'count': 0,
-            'total_count': 0
+            'total_count': 0,
+            'offset': offset,
+            'limit': limit
         }
         
-        if not verify_bigquery_tables():
-            logger.warning("Tables not ready, returning empty response")
+        if not check_table_exists('indicators'):
+            logger.warning("Indicators table not ready")
             return jsonify(default_response)
         
-        where_conditions = [f"created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"]
+        # Build query conditions
+        where_conditions = [
+            f"created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"
+        ]
         params = []
         
         if ioc_type:
             where_conditions.append("type = @ioc_type")
             params.append(bigquery.ScalarQueryParameter("ioc_type", "STRING", ioc_type))
         
+        if ioc_value:
+            where_conditions.append("value LIKE @ioc_value")
+            params.append(bigquery.ScalarQueryParameter("ioc_value", "STRING", f"%{ioc_value}%"))
+        
+        # Main query
         ioc_query = f"""
         SELECT *
         FROM `{Config.get_table_name('indicators')}`
@@ -409,15 +540,26 @@ def get_iocs():
         
         iocs = execute_bq_query(ioc_query, params)
         
-        # Format IOCs for frontend display
+        # Process IOCs for frontend display
         for ioc in iocs:
-            # Ensure risk_score is present
+            # Ensure required fields
             if 'risk_score' not in ioc or ioc['risk_score'] is None:
                 ioc['risk_score'] = 50
             
-            # Add AI analysis status
+            if 'confidence' not in ioc or ioc['confidence'] is None:
+                ioc['confidence'] = 50
+            
+            # Add computed fields
             ioc['ai_analyzed'] = bool(ioc.get('last_analyzed'))
+            
+            # Format tags if needed
+            if 'tags' in ioc and isinstance(ioc['tags'], str):
+                try:
+                    ioc['tags'] = json.loads(ioc['tags'])
+                except:
+                    ioc['tags'] = []
         
+        # Get total count for pagination
         count_query = f"""
         SELECT COUNT(*) as total
         FROM `{Config.get_table_name('indicators')}`
@@ -430,151 +572,156 @@ def get_iocs():
         return jsonify({
             'records': iocs,
             'count': len(iocs),
-            'total_count': total_count
+            'total_count': total_count,
+            'offset': offset,
+            'limit': limit,
+            'filters': {
+                'days': days,
+                'type': ioc_type,
+                'value': ioc_value
+            }
         })
+        
+    except BadRequest as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting IOCs: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/analyses', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=300)
 def get_ai_analyses():
-    """Get AI analysis data."""
+    """Get batch AI analysis data."""
     try:
-        days = int(request.args.get('days', 30))
+        days = validate_days_parameter(request.args.get('days', '30'))
         
-        # Mock response structure based on frontend expectations
+        # Import the analysis function
+        from analysis import get_batch_analysis_summary
+        
+        batch_summary = get_batch_analysis_summary(days)
+        
+        if batch_summary.get('error'):
+            return jsonify({
+                'overall_threat_level': 'Medium',
+                'total_feeds_analyzed': 0,
+                'batch_analyses': [],
+                'threat_level_distribution': [],
+                'last_run_time': None,
+                'error': batch_summary['error']
+            })
+        
+        # Transform for frontend compatibility
         ai_analyses = {
             'overall_threat_level': 'Medium',
-            'total_indicators': 0,
-            'emerging_threats_count': 0,
-            'critical_indicators': 0,
-            'threat_patterns': [],
-            'recommendations': [],
-            'recent_analyses': [],
-            'last_run_time': None
+            'total_feeds_analyzed': batch_summary.get('total_feeds_analyzed', 0),
+            'batch_analyses': batch_summary.get('feeds', []),
+            'threat_level_distribution': batch_summary.get('threat_level_distribution', []),
+            'analysis_trends': batch_summary.get('analysis_trends', []),
+            'summary_stats': batch_summary.get('summary_stats', {}),
+            'last_run_time': None,
+            'is_batch_analysis': True,
+            'period_days': days
         }
         
-        if not verify_bigquery_tables():
-            return jsonify(ai_analyses)
+        # Determine overall threat level from distribution
+        threat_counts = {
+            item['threat_level']: item['count'] 
+            for item in batch_summary.get('threat_level_distribution', [])
+        }
         
-        # Get analysis stats
-        analysis_query = f"""
-        SELECT 
-            COUNT(*) as total_analyzed,
-            COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
-            MAX(last_analyzed) as last_analysis_time,
-            AVG(risk_score) as avg_risk_score
-        FROM `{Config.get_table_name('indicators')}`
-        WHERE last_analyzed IS NOT NULL
-        AND last_analyzed >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        """
-        
-        results = execute_bq_query(analysis_query)
-        if results:
-            ai_analyses['total_indicators'] = results[0].get('total_analyzed', 0)
-            ai_analyses['critical_indicators'] = results[0].get('critical_count', 0)
-            ai_analyses['last_run_time'] = results[0].get('last_analysis_time')
+        total_analyses = sum(threat_counts.values())
+        if total_analyses > 0:
+            critical_pct = (threat_counts.get('critical', 0) / total_analyses) * 100
+            high_pct = (threat_counts.get('high', 0) / total_analyses) * 100
             
-            avg_risk = results[0].get('avg_risk_score', 50)
-            if avg_risk > 75:
+            if critical_pct > 20:
                 ai_analyses['overall_threat_level'] = 'Critical'
-            elif avg_risk > 60:
+            elif high_pct > 40 or critical_pct > 5:
                 ai_analyses['overall_threat_level'] = 'High'
-            elif avg_risk > 40:
-                ai_analyses['overall_threat_level'] = 'Medium'
-            else:
+            elif threat_counts.get('low', 0) > threat_counts.get('medium', 0):
                 ai_analyses['overall_threat_level'] = 'Low'
         
-        # Get recent analysis results
-        recent_query = f"""
-        SELECT 
-            id,
-            type,
-            value as target,
-            'threat_assessment' as analysis_type,
-            analysis_summary as result,
-            CASE 
-                WHEN risk_score > 80 THEN 'critical'
-                WHEN risk_score > 60 THEN 'high'
-                WHEN risk_score > 40 THEN 'medium'
-                ELSE 'low'
-            END as result_severity,
-            confidence,
-            last_analyzed as timestamp
-        FROM `{Config.get_table_name('indicators')}`
-        WHERE last_analyzed IS NOT NULL
-        ORDER BY last_analyzed DESC
-        LIMIT 10
-        """
-        
-        recent_results = execute_bq_query(recent_query)
-        if recent_results:
-            ai_analyses['recent_analyses'] = recent_results
-        
-        # Get threat patterns
-        patterns_query = f"""
-        SELECT 
-            malware,
-            threat_type,
-            COUNT(*) as indicators_count,
-            AVG(risk_score) as avg_risk_score
-        FROM `{Config.get_table_name('indicators')}`
-        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-        AND (malware IS NOT NULL OR threat_type IS NOT NULL)
-        GROUP BY malware, threat_type
-        ORDER BY COUNT(*) DESC
-        LIMIT 5
-        """
-        
-        patterns_results = execute_bq_query(patterns_query)
-        if patterns_results:
-            for pattern in patterns_results:
-                name = pattern.get('malware') or pattern.get('threat_type') or 'Unknown'
-                severity = 'high' if pattern.get('avg_risk_score', 0) > 70 else 'medium'
-                
-                ai_analyses['threat_patterns'].append({
-                    'name': name,
-                    'description': f"Detected {name} threat pattern",
-                    'indicators_count': pattern.get('indicators_count', 0),
-                    'severity': severity
-                })
-        
-        # Generate recommendations
-        if ai_analyses['critical_indicators'] > 10:
-            ai_analyses['recommendations'].append({
-                'text': 'Critical threat level detected. Immediate investigation recommended.',
-                'priority': 'Critical'
-            })
-        
-        if ai_analyses['total_indicators'] > 100:
-            ai_analyses['recommendations'].append({
-                'text': 'High volume of threat indicators detected. Consider implementing additional security measures.',
-                'priority': 'High'
-            })
-        
-        if not ai_analyses['recommendations']:
-            ai_analyses['recommendations'].append({
-                'text': 'Continue monitoring threat landscape. No immediate action required.',
-                'priority': 'Low'
-            })
+        # Get most recent analysis timestamp
+        if ai_analyses['batch_analyses']:
+            most_recent = max(
+                analysis['last_analysis'] 
+                for analysis in ai_analyses['batch_analyses'] 
+                if analysis.get('last_analysis')
+            )
+            ai_analyses['last_run_time'] = most_recent
         
         return jsonify(ai_analyses)
         
+    except BadRequest as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting AI analyses: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
+
+@api_blueprint.route('/ai/feed-analysis/<feed_id>', methods=['GET'])
+@limiter.limit("20 per minute")
+@require_api_key
+@cache_response(ttl=300)
+def get_feed_analysis(feed_id):
+    """Get detailed analysis for a specific feed."""
+    try:
+        # Validate feed_id
+        if not feed_id or not isinstance(feed_id, str):
+            return jsonify({"error": "Invalid feed ID"}), 400
+        
+        # Check if table exists
+        if not check_table_exists('batch_analysis'):
+            return jsonify({"error": "Analysis data not available"}), 404
+        
+        # Get latest analysis for the feed
+        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
+        table_id = f"{dataset_id}.batch_analysis"
+        
+        query = f"""
+        SELECT analysis_data, timestamp, sample_size, threat_level, confidence
+        FROM `{table_id}`
+        WHERE feed_id = @feed_id
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """
+        
+        params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed_id)]
+        results = execute_bq_query(query, params)
+        
+        if not results:
+            return jsonify({"error": f"No analysis found for feed {feed_id}"}), 404
+        
+        # Parse and return analysis data
+        analysis_record = results[0]
+        analysis_data = json.loads(analysis_record['analysis_data'])
+        
+        # Add metadata
+        analysis_data['metadata'] = {
+            'timestamp': analysis_record['timestamp'],
+            'sample_size': analysis_record['sample_size'],
+            'threat_level': analysis_record['threat_level'],
+            'confidence': analysis_record['confidence']
+        }
+        
+        return jsonify(analysis_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting feed analysis: {str(e)}")
+        report_error(e)
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=300)
 def get_threat_summary():
-    """Get threat summary data."""
+    """Get comprehensive threat summary."""
     try:
-        days = int(request.args.get('days', 30))
+        days = validate_days_parameter(request.args.get('days', '30'))
         
         threat_summary = {
             'overall_score': 50,
@@ -583,10 +730,12 @@ def get_threat_summary():
             'critical_indicators': 0,
             'trending_ioc_types': [],
             'top_threat_actors': [],
-            'risk_trend': 'stable'
+            'top_malware_families': [],
+            'risk_trend': 'stable',
+            'period_days': days
         }
         
-        if not verify_bigquery_tables():
+        if not check_table_exists('indicators'):
             return jsonify(threat_summary)
         
         # Calculate threat metrics
@@ -594,24 +743,31 @@ def get_threat_summary():
         SELECT 
             AVG(risk_score) as avg_risk_score,
             COUNT(CASE WHEN risk_score > 80 THEN 1 END) as critical_count,
-            COUNT(DISTINCT threat_actor) as active_threat_actors,
-            COUNT(DISTINCT malware) as malware_families
+            COUNT(DISTINCT CASE WHEN threat_actor IS NOT NULL THEN threat_actor END) as active_threat_actors,
+            COUNT(DISTINCT CASE WHEN malware IS NOT NULL THEN malware END) as malware_families
         FROM `{Config.get_table_name('indicators')}`
         WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
         """
         
-        results = execute_bq_query(summary_query)
-        if results:
-            threat_summary['overall_score'] = int(results[0].get('avg_risk_score', 50))
-            threat_summary['critical_indicators'] = results[0].get('critical_count', 0)
-            threat_summary['active_threats'] = results[0].get('active_threat_actors', 0) + results[0].get('malware_families', 0)
+        try:
+            results = execute_bq_query(summary_query)
+            if results:
+                row = results[0]
+                threat_summary['overall_score'] = int(row.get('avg_risk_score', 50))
+                threat_summary['critical_indicators'] = row.get('critical_count', 0)
+                threat_summary['active_threats'] = (
+                    row.get('active_threat_actors', 0) + row.get('malware_families', 0)
+                )
+        except Exception as e:
+            logger.error(f"Error querying threat metrics: {e}")
         
         # Determine threat level
-        if threat_summary['overall_score'] > 80:
+        score = threat_summary['overall_score']
+        if score > 85:
             threat_summary['threat_level'] = 'Critical'
-        elif threat_summary['overall_score'] > 60:
+        elif score > 70:
             threat_summary['threat_level'] = 'High'
-        elif threat_summary['overall_score'] > 40:
+        elif score > 40:
             threat_summary['threat_level'] = 'Medium'
         else:
             threat_summary['threat_level'] = 'Low'
@@ -629,40 +785,82 @@ def get_threat_summary():
         LIMIT 5
         """
         
-        trending_results = execute_bq_query(trending_query)
-        if trending_results:
+        try:
+            trending_results = execute_bq_query(trending_query)
             threat_summary['trending_ioc_types'] = trending_results
+        except Exception as e:
+            logger.error(f"Error querying trending IOCs: {e}")
         
-        # Risk trend analysis
-        current_avg = threat_summary['overall_score']
-        previous_query = f"""
-        SELECT AVG(risk_score) as avg_risk_score
+        # Get top threat actors
+        actors_query = f"""
+        SELECT threat_actor, COUNT(*) as count
         FROM `{Config.get_table_name('indicators')}`
-        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days * 2} DAY)
-        AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND threat_actor IS NOT NULL
+        GROUP BY threat_actor
+        ORDER BY count DESC
+        LIMIT 5
         """
         
-        previous_results = execute_bq_query(previous_query)
-        if previous_results:
-            previous_avg = previous_results[0].get('avg_risk_score', 50)
-            
-            if current_avg > previous_avg + 5:
-                threat_summary['risk_trend'] = 'increasing'
-            elif current_avg < previous_avg - 5:
-                threat_summary['risk_trend'] = 'decreasing'
-            else:
-                threat_summary['risk_trend'] = 'stable'
+        try:
+            actors_results = execute_bq_query(actors_query)
+            threat_summary['top_threat_actors'] = actors_results
+        except Exception as e:
+            logger.error(f"Error querying threat actors: {e}")
+        
+        # Get top malware families
+        malware_query = f"""
+        SELECT malware, COUNT(*) as count
+        FROM `{Config.get_table_name('indicators')}`
+        WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+        AND malware IS NOT NULL
+        GROUP BY malware
+        ORDER BY count DESC
+        LIMIT 5
+        """
+        
+        try:
+            malware_results = execute_bq_query(malware_query)
+            threat_summary['top_malware_families'] = malware_results
+        except Exception as e:
+            logger.error(f"Error querying malware families: {e}")
+        
+        # Calculate risk trend
+        if days > 7:
+            try:
+                previous_period = days * 2
+                previous_query = f"""
+                SELECT AVG(risk_score) as avg_risk_score
+                FROM `{Config.get_table_name('indicators')}`
+                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {previous_period} DAY)
+                AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+                """
+                
+                previous_results = execute_bq_query(previous_query)
+                if previous_results:
+                    previous_avg = previous_results[0].get('avg_risk_score', 50)
+                    current_avg = threat_summary['overall_score']
+                    
+                    if current_avg > previous_avg + 5:
+                        threat_summary['risk_trend'] = 'increasing'
+                    elif current_avg < previous_avg - 5:
+                        threat_summary['risk_trend'] = 'decreasing'
+            except Exception as e:
+                logger.error(f"Error calculating risk trend: {e}")
         
         return jsonify(threat_summary)
         
+    except BadRequest as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting threat summary: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/summary', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=300)
 def get_ai_summary():
     """Get AI summary for dashboard."""
     try:
@@ -674,7 +872,7 @@ def get_ai_summary():
             'last_updated': datetime.utcnow().isoformat()
         }
         
-        if not verify_bigquery_tables():
+        if not check_table_exists('indicators'):
             return jsonify(ai_summary)
         
         # Get critical indicators count
@@ -685,14 +883,19 @@ def get_ai_summary():
         AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         """
         
-        results = execute_bq_query(critical_query)
-        if results:
-            ai_summary['critical_indicators'] = results[0].get('critical_count', 0)
+        try:
+            results = execute_bq_query(critical_query)
+            if results:
+                ai_summary['critical_indicators'] = results[0].get('critical_count', 0)
+        except Exception as e:
+            logger.error(f"Error querying critical indicators: {e}")
         
         # Determine risk level
-        if ai_summary['critical_indicators'] > 10:
+        if ai_summary['critical_indicators'] > 100:
+            ai_summary['risk_level'] = 'Critical'
+        elif ai_summary['critical_indicators'] > 50:
             ai_summary['risk_level'] = 'High'
-        elif ai_summary['critical_indicators'] > 5:
+        elif ai_summary['critical_indicators'] > 10:
             ai_summary['risk_level'] = 'Medium'
         else:
             ai_summary['risk_level'] = 'Low'
@@ -708,56 +911,74 @@ def get_ai_summary():
         LIMIT 3
         """
         
-        threats_results = execute_bq_query(threats_query)
-        if threats_results:
-            threats = []
-            for threat in threats_results:
-                name = threat.get('malware') or threat.get('threat_type')
-                if name:
-                    threats.append(name)
-            
-            if threats:
-                ai_summary['trending_threats'] = ', '.join(threats[:3])
+        try:
+            threat_results = execute_bq_query(threats_query)
+            if threat_results:
+                threats = []
+                for threat in threat_results:
+                    name = threat.get('malware') or threat.get('threat_type')
+                    if name:
+                        threats.append(name)
+                
+                if threats:
+                    ai_summary['trending_threats'] = ', '.join(threats[:3])
+        except Exception as e:
+            logger.error(f"Error querying trending threats: {e}")
+        
+        # Generate key findings
+        if ai_summary['critical_indicators'] > 50:
+            ai_summary['key_findings'].append(
+                f"High volume of critical indicators detected ({ai_summary['critical_indicators']})"
+            )
+        
+        if ai_summary['trending_threats'] != 'None detected':
+            ai_summary['key_findings'].append(
+                f"Active malware families: {ai_summary['trending_threats']}"
+            )
+        
+        if not ai_summary['key_findings']:
+            ai_summary['key_findings'].append("No significant threats detected")
         
         return jsonify(ai_summary)
         
     except Exception as e:
         logger.error(f"Error getting AI summary: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
 @limiter.limit("30 per minute")
 @require_api_key
+@cache_response(ttl=600)
 def get_iocs_geo():
     """Get geographical statistics for IOCs."""
     try:
-        days = int(request.args.get('days', 30))
+        days = validate_days_parameter(request.args.get('days', '30'))
         
+        # Mock geographic data for demonstration
+        # In production, this would require IP geolocation enrichment
         geo_stats = {
-            'countries': [],
+            'countries': [
+                {'country': 'US', 'count': 150, 'risk_level': 'high'},
+                {'country': 'RU', 'count': 120, 'risk_level': 'critical'},
+                {'country': 'CN', 'count': 100, 'risk_level': 'high'},
+                {'country': 'DE', 'count': 50, 'risk_level': 'medium'},
+                {'country': 'GB', 'count': 45, 'risk_level': 'medium'}
+            ],
             'top_sources': [],
             'threat_map_data': []
         }
         
-        if not verify_bigquery_tables():
-            return jsonify(geo_stats)
-        
-        # For now, return mock data
-        geo_stats['countries'] = [
-            {'country': 'US', 'count': 150, 'risk_level': 'high'},
-            {'country': 'RU', 'count': 120, 'risk_level': 'critical'},
-            {'country': 'CN', 'count': 100, 'risk_level': 'high'},
-            {'country': 'DE', 'count': 50, 'risk_level': 'medium'},
-            {'country': 'GB', 'count': 45, 'risk_level': 'medium'}
-        ]
-        
         return jsonify(geo_stats)
         
+    except BadRequest as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting geo stats: {str(e)}")
         report_error(e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
+
+# ==================== Admin Endpoints ====================
 
 @api_blueprint.route('/admin/ingest', methods=['POST'])
 @limiter.limit("5 per minute")
@@ -795,81 +1016,170 @@ def trigger_ingest():
         report_error(e)
         return jsonify({'error': str(e)}), 500
 
-@api_blueprint.route('/admin/analyze', methods=['POST'])
+@api_blueprint.route('/admin/analyze-batch', methods=['POST'])
 @limiter.limit("5 per minute")
 @require_api_key
-def trigger_analysis():
-    """Trigger data analysis."""
+def trigger_batch_analysis():
+    """Trigger batch analysis for feeds."""
     try:
         req_data = request.get_json() or {}
-        analyze_all = req_data.get('analyze_all', False)
-        indicator_ids = req_data.get('indicator_ids', [])
-        force_reanalysis = req_data.get('force_reanalysis', False)
+        feed_id = req_data.get('feed_id')
+        force_analyze = req_data.get('force_analyze', False)
         
-        message_data = {
-            'analyze_all': analyze_all,
-            'indicator_ids': indicator_ids,
-            'force_reanalysis': force_reanalysis,
-            'triggered_by': 'api',
-            'timestamp': datetime.utcnow().isoformat()
-        }
+        from analysis import analyze_feed_batch, analyze_all_feeds_batch
         
-        message_id = publish_to_topic(Config.PUBSUB_ANALYSIS_TOPIC, message_data)
-        
-        if message_id:
-            return jsonify({
-                'status': 'success',
-                'message': 'Analysis triggered successfully',
-                'message_id': message_id
-            })
+        if feed_id:
+            # Analyze specific feed
+            result = analyze_feed_batch(feed_id, force_analyze=force_analyze)
         else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to trigger analysis'
-            }), 500
+            # Analyze all feeds
+            feeds = getattr(Config, 'FEEDS', [])
+            results = []
             
+            for feed in feeds:
+                if feed.get('enabled', True) and feed.get('id'):
+                    result = analyze_feed_batch(feed['id'], force_analyze=force_analyze)
+                    results.append(result)
+            
+            result = {
+                "status": "success",
+                "results": results,
+                "total_feeds": len(results),
+                "successful": sum(1 for r in results if not r.get('error')),
+                "failed": sum(1 for r in results if r.get('error'))
+            }
+        
+        return jsonify(result)
+        
     except Exception as e:
-        logger.error(f"Error triggering analysis: {str(e)}")
+        logger.error(f"Error triggering batch analysis: {str(e)}")
         report_error(e)
         return jsonify({'error': str(e)}), 500
 
-# Error handlers
+@api_blueprint.route('/admin/cache/clear', methods=['POST'])
+@limiter.limit("10 per minute")
+@require_api_key
+def clear_cache():
+    """Clear API response cache."""
+    try:
+        query_cache.clear()
+        cache_stats["hits"] = 0
+        cache_stats["misses"] = 0
+        cache_stats["size"] = 0
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Cache cleared successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error clearing cache: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@api_blueprint.route('/admin/status', methods=['GET'])
+@limiter.limit("20 per minute")
+@require_api_key
+def get_system_status():
+    """Get detailed system status."""
+    try:
+        service_manager = Config.get_service_manager()
+        status = service_manager.get_status()
+        
+        # Add additional system information
+        system_status = {
+            'overall': status['overall'],
+            'services': status['services'],
+            'errors': status['errors'],
+            'timestamp': datetime.utcnow().isoformat(),
+            'cache_stats': dict(cache_stats),
+            'cache_size': len(query_cache),
+            'config': {
+                'environment': Config.ENVIRONMENT,
+                'version': Config.VERSION,
+                'nlp_enabled': Config.NLP_ENABLED,
+                'auto_analyze': Config.AUTO_ANALYZE,
+                'feeds_count': len(getattr(Config, 'FEEDS', []))
+            }
+        }
+        
+        # Check table status
+        system_status['tables'] = {}
+        for table in ['indicators', 'batch_analysis', 'vulnerabilities']:
+            system_status['tables'][table] = check_table_exists(table)
+        
+        return jsonify(system_status)
+        
+    except Exception as e:
+        logger.error(f"Error getting system status: {str(e)}")
+        report_error(e)
+        return jsonify({'error': str(e)}), 500
+
+# ==================== Error Handlers ====================
+
 @api_blueprint.errorhandler(400)
 def bad_request(e):
     """Handle 400 errors."""
+    logger.warning(f"Bad request: {e}")
     return jsonify({"error": "Bad request", "message": str(e)}), 400
 
 @api_blueprint.errorhandler(401)
 def unauthorized(e):
     """Handle 401 errors."""
+    logger.warning(f"Unauthorized access attempt: {get_remote_address()}")
     return jsonify({"error": "Unauthorized", "message": "Invalid or missing API key"}), 401
 
 @api_blueprint.errorhandler(404)
 def not_found(e):
     """Handle 404 errors."""
+    logger.info(f"Resource not found: {request.path}")
     return jsonify({"error": "Not found", "message": "Resource not found"}), 404
 
 @api_blueprint.errorhandler(429)
 def too_many_requests(e):
     """Handle 429 errors."""
+    logger.warning(f"Rate limit exceeded: {get_remote_address()}")
     return jsonify({
         "error": "Too many requests", 
-        "message": "Rate limit exceeded. Please try again later."
+        "message": "Rate limit exceeded. Please try again later.",
+        "retry_after": 60
     }), 429
 
 @api_blueprint.errorhandler(500)
 def internal_server_error(e):
     """Handle 500 errors."""
-    logger.error(f"Internal server error: {str(e)}\n{traceback.format_exc()}")
+    logger.error(f"Internal server error: {str(e)}")
+    logger.error(traceback.format_exc())
     report_error(e)
-    return jsonify({"error": "Internal server error", "message": "An unexpected error occurred"}), 500
+    return jsonify({
+        "error": "Internal server error", 
+        "message": "An unexpected error occurred"
+    }), 500
 
-# Register blueprint hooks
+# ==================== Blueprint Hooks ====================
+
 @api_blueprint.before_request
 def before_api_request():
-    """Update API service status."""
+    """Update API service status before each request."""
     service_manager = Config.get_service_manager()
     service_manager.update_status('api', ServiceStatus.READY)
+    
+    # Log requests in development
+    if Config.ENVIRONMENT != 'production':
+        logger.debug(f"API request: {request.method} {request.path}")
+
+@api_blueprint.after_request
+def after_api_request(response):
+    """Add CORS headers and log responses."""
+    if request.method == 'OPTIONS':
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+    
+    # Add cache headers for GET requests
+    if request.method == 'GET' and response.status_code == 200:
+        response.headers['Cache-Control'] = 'public, max-age=300'
+    
+    return response
 
 @api_blueprint.teardown_request
 def teardown_api_request(exception=None):
@@ -878,3 +1188,6 @@ def teardown_api_request(exception=None):
         logger.error(f"API request failed with exception: {exception}")
         service_manager = Config.get_service_manager()
         service_manager.update_status('api', ServiceStatus.DEGRADED)
+
+# Initialize rate limiter with the blueprint
+limiter.init_app(current_app, config_prefix='RATELIMIT')
