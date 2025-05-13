@@ -5,24 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Threat Intelligence Platform{% endblock %}</title>
     
+    <!-- Meta tags for SEO and security -->
+    <meta name="description" content="Advanced Threat Intelligence Platform for security monitoring and analysis">
+    <meta name="robots" content="noindex, nofollow">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+    <meta http-equiv="X-XSS-Protection" content="1; mode=block">
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' *.tailwindcss.com *.cdnjs.cloudflare.com *.plotly.com cdn.plot.ly; style-src 'self' 'unsafe-inline' *.tailwindcss.com *.cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' *.tailwindcss.com *.cdnjs.cloudflare.com *.plotly.com cdn.plot.ly; img-src 'self' data: *.openstreetmap.org *.wikimedia.org">
+    
     <!-- Tailwind CSS and Font Awesome -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" integrity="sha512-Avb2QiuDEEvB4bZJYdft2mNjVShBftLdPG8FJ0V7irTLQ8Uo0qcPxh4Plq7G5tGm0rU+1SPhVotteLpBERwTkw==" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
+    
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000080'><path d='M12 1l3 6 6 3-6 3-3 6-3-6-6-3 6-3z'/></svg>">
     
     <script>
         tailwind.config = {
             theme: {
                 extend: {
                     colors: {
-                        primary: '#0d6efd',
-                        secondary: '#6c757d',
-                        success: '#198754',
-                        info: '#0dcaf0',
-                        warning: '#ffc107',
-                        danger: '#dc3545',
-                        light: '#f8f9fa',
-                        dark: '#212529',
+                        primary: '#1e40af',
+                        secondary: '#6b7280',
+                        success: '#059669',
+                        info: '#0891b2',
+                        warning: '#d97706',
+                        danger: '#dc2626',
+                        light: '#f8fafc',
+                        dark: '#111827',
                         accent: '#3b82f6',
                         'accent-dark': '#2563eb'
                     },
@@ -34,63 +46,82 @@
                         'card-hover': '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
                     }
                 }
-            }
+            },
+            darkMode: 'class'
         }
     </script>
     
     <style type="text/tailwindcss">
         @layer components {
-            .badge-ioc { @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block; }
-            .badge-ip { @apply bg-amber-300 text-gray-800; }
-            .badge-domain { @apply bg-emerald-400 text-gray-800; }
-            .badge-url { @apply bg-blue-500 text-white; }
-            .badge-md5, .badge-sha1, .badge-sha256, .badge-hash { @apply bg-pink-500 text-white; }
-            .badge-email { @apply bg-orange-500 text-gray-800; }
-            .badge-unknown { @apply bg-gray-300 text-gray-800; }
+            .badge-ioc { @apply text-xs px-2 py-1 rounded mr-1 mb-1 inline-block font-medium; }
+            .badge-ip { @apply bg-amber-100 text-amber-800 border border-amber-200; }
+            .badge-domain { @apply bg-emerald-100 text-emerald-800 border border-emerald-200; }
+            .badge-url { @apply bg-blue-100 text-blue-800 border border-blue-200; }
+            .badge-md5, .badge-sha1, .badge-sha256, .badge-hash { @apply bg-pink-100 text-pink-800 border border-pink-200; }
+            .badge-email { @apply bg-orange-100 text-orange-800 border border-orange-200; }
+            .badge-ip\:port { @apply bg-purple-100 text-purple-800 border border-purple-200; }
+            .badge-unknown { @apply bg-gray-100 text-gray-700 border border-gray-200; }
             
-            .severity-badge { @apply inline-block px-2 py-1 rounded text-xs font-bold uppercase; }
-            .severity-badge.critical { @apply bg-red-600 text-white; }
-            .severity-badge.high { @apply bg-orange-500 text-white; }
-            .severity-badge.medium { @apply bg-amber-400 text-gray-800; }
-            .severity-badge.low { @apply bg-teal-500 text-white; }
+            .severity-badge { @apply inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide; }
+            .severity-badge.critical { @apply bg-red-100 text-red-800 border border-red-200; }
+            .severity-badge.high { @apply bg-orange-100 text-orange-800 border border-orange-200; }
+            .severity-badge.medium { @apply bg-yellow-100 text-yellow-800 border border-yellow-200; }
+            .severity-badge.low { @apply bg-green-100 text-green-800 border border-green-200; }
             
-            .panel { @apply bg-white rounded-lg shadow-lg overflow-hidden mb-6 border border-gray-100; }
-            .panel-header { @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center; }
-            .panel-title { @apply font-semibold flex items-center; }
-            .panel-icon { @apply mr-2 text-accent; }
+            .panel { @apply bg-white rounded-xl shadow-card overflow-hidden mb-6 border border-gray-100 dark:bg-gray-800 dark:border-gray-700; }
+            .panel-header { @apply px-6 py-4 border-b border-gray-200 flex justify-between items-center dark:border-gray-700; }
+            .panel-title { @apply text-lg font-semibold text-gray-900 flex items-center dark:text-gray-100; }
+            .panel-icon { @apply mr-3 text-accent text-xl; }
+            .panel-body { @apply p-6; }
             
-            .stat-card { @apply bg-white rounded-lg shadow-lg p-6 transform transition-transform duration-300 border border-gray-100 hover:shadow-card-hover hover:-translate-y-1; }
+            .stat-card { @apply bg-white rounded-xl shadow-card p-6 border border-gray-100 transition-all duration-300 hover:shadow-card-hover hover:-translate-y-1 dark:bg-gray-800 dark:border-gray-700; }
             
-            .btn { @apply px-4 py-2 rounded-md font-medium transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2; }
-            .btn-primary { @apply bg-accent text-white hover:bg-accent-dark focus:ring-accent; }
-            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600 focus:ring-gray-500; }
-            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-600; }
-            .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-gray-400; }
-            .btn-sm { @apply px-3 py-1 text-sm; }
+            .btn { @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 inline-flex items-center justify-center; }
+            .btn-primary { @apply bg-accent text-white hover:bg-accent-dark focus:ring-accent shadow-sm; }
+            .btn-secondary { @apply bg-gray-500 text-white hover:bg-gray-600 focus:ring-gray-500 shadow-sm; }
+            .btn-danger { @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-600 shadow-sm; }
+            .btn-success { @apply bg-green-600 text-white hover:bg-green-700 focus:ring-green-600 shadow-sm; }
+            .btn-light { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-gray-400 shadow-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-600; }
+            .btn-sm { @apply px-3 py-1.5 text-sm; }
+            .btn-lg { @apply px-6 py-3 text-lg; }
             
-            .form-control { @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent text-gray-700; }
+            .form-control { @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent text-gray-900 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100; }
+            .form-label { @apply block text-sm font-medium text-gray-700 mb-2 dark:text-gray-300; }
             
-            .sidebar-item { @apply block px-4 py-2 rounded transition-colors duration-200 flex items-center; }
-            .sidebar-item.active { @apply bg-blue-50 text-accent border-l-4 border-accent font-medium; }
-            .sidebar-item:not(.active) { @apply hover:bg-gray-50 text-gray-700; }
-            .sidebar-item i { @apply mr-3; }
+            .sidebar-item { @apply block px-4 py-3 rounded-lg transition-all duration-200 flex items-center text-gray-700 dark:text-gray-300; }
+            .sidebar-item.active { @apply bg-blue-50 text-accent border-l-4 border-accent font-medium dark:bg-blue-900/20; }
+            .sidebar-item:not(.active) { @apply hover:bg-gray-50 hover:text-gray-900 dark:hover:bg-gray-700/50; }
+            .sidebar-item i { @apply mr-3 text-lg; }
             
-            .data-table { @apply min-w-full divide-y divide-gray-200; }
-            .table-header { @apply bg-gray-50; }
-            .table-header th { @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider; }
-            .table-body { @apply bg-white divide-y divide-gray-200; }
-            .table-body tr { @apply hover:bg-gray-50 transition-colors duration-100; }
-            .table-body td { @apply px-6 py-4 whitespace-nowrap; }
+            .data-table { @apply min-w-full divide-y divide-gray-200 dark:divide-gray-700; }
+            .table-header { @apply bg-gray-50 dark:bg-gray-800; }
+            .table-header th { @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider dark:text-gray-400; }
+            .table-body { @apply bg-white divide-y divide-gray-200 dark:bg-gray-800 dark:divide-gray-700; }
+            .table-body tr { @apply hover:bg-gray-50 transition-colors duration-100 dark:hover:bg-gray-700/50; }
+            .table-body td { @apply px-6 py-4 text-sm text-gray-900 dark:text-gray-300; }
             
             .search-input {
                 @apply relative;
             }
             .search-input input {
-                @apply pl-10;
+                @apply pl-12;
             }
             .search-input i {
-                @apply absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400;
+                @apply absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400;
             }
+            
+            .loading-spinner {
+                @apply inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-accent;
+            }
+            
+            .tooltip { @apply relative; }
+            .tooltip:hover::before { @apply content-[attr(data-tooltip)] absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white text-xs rounded px-2 py-1 whitespace-nowrap z-50; }
+            
+            .alert { @apply p-4 rounded-lg border shadow-sm; }
+            .alert-info { @apply bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-300; }
+            .alert-warning { @apply bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-900/20 dark:border-yellow-800 dark:text-yellow-300; }
+            .alert-success { @apply bg-green-50 border-green-200 text-green-800 dark:bg-green-900/20 dark:border-green-800 dark:text-green-300; }
+            .alert-danger { @apply bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300; }
             
             @keyframes fadeIn {
                 from { opacity: 0; transform: translateY(-10px); }
@@ -100,153 +131,470 @@
             .fade-in {
                 animation: fadeIn 0.3s ease-out;
             }
+            
+            .truncate-text {
+                @apply overflow-hidden text-ellipsis whitespace-nowrap;
+            }
+            
+            .progress-bar {
+                @apply overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700;
+            }
+            
+            .progress-fill {
+                @apply h-full transition-all duration-300 ease-out;
+            }
+        }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        
+        /* Dark mode scrollbar */
+        .dark ::-webkit-scrollbar-track {
+            background: #374151;
+        }
+        
+        .dark ::-webkit-scrollbar-thumb {
+            background: #6b7280;
+        }
+        
+        .dark ::-webkit-scrollbar-thumb:hover {
+            background: #9ca3af;
         }
     </style>
     
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-50 text-gray-800 min-h-screen flex flex-col">
+<body class="bg-gray-50 text-gray-900 min-h-screen flex flex-col dark:bg-gray-900 dark:text-gray-100">
+    <!-- Skip to content link for accessibility -->
+    <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 bg-accent text-white px-4 py-2 rounded-lg z-50">
+        Skip to main content
+    </a>
+    
     <!-- Navigation Bar -->
-    <nav class="bg-gray-900 text-white shadow-md sticky top-0 z-50 w-full">
-        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
-            <a href="/" class="flex items-center group">
-                <div class="bg-accent rounded-lg p-2 mr-2 group-hover:bg-accent-dark transition-colors">
-                    <i class="fas fa-shield-alt text-xl"></i>
+    <nav class="bg-gray-900 text-white shadow-lg sticky top-0 z-50">
+        <div class="container mx-auto px-4 py-3">
+            <div class="flex justify-between items-center">
+                <a href="{{ url_for('frontend.dashboard') }}" class="flex items-center group">
+                    <div class="bg-accent rounded-lg p-2 mr-3 group-hover:bg-accent-dark transition-colors duration-200">
+                        <i class="fas fa-shield-alt text-xl"></i>
+                    </div>
+                    <div>
+                        <span class="font-bold text-lg">Threat Intelligence Platform</span>
+                        <div class="text-xs text-gray-400">Global Intelligence Feed</div>
+                    </div>
+                </a>
+                
+                <div class="flex items-center space-x-4">
+                    <!-- System Status Indicator -->
+                    <div class="flex items-center bg-gray-800 px-3 py-1 rounded-lg">
+                        <div class="w-2 h-2 rounded-full mr-2 {% if service_status and service_status.overall == 'ready' %}bg-green-500{% elif service_status and service_status.overall == 'initializing' %}bg-yellow-500 animate-pulse{% else %}bg-red-500{% endif %}"></div>
+                        <span class="text-sm">
+                            {% if service_status %}
+                                {{ service_status.overall|title }}
+                            {% else %}
+                                Initializing
+                            {% endif %}
+                        </span>
+                    </div>
+                    
+                    <!-- Dark Mode Toggle -->
+                    <button id="darkModeToggle" class="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors duration-200" title="Toggle dark mode">
+                        <i class="fas fa-moon dark:hidden"></i>
+                        <i class="fas fa-sun hidden dark:inline-block"></i>
+                    </button>
+                    
+                    <!-- Refresh Button -->
+                    <button id="refreshBtn" class="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors duration-200" title="Refresh data">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
                 </div>
-                <span class="font-bold text-lg">Threat Intelligence Platform</span>
-            </a>
-            <div class="flex items-center space-x-4">
-                <span class="text-sm bg-gray-800 px-3 py-1 rounded flex items-center">
-                    <i class="fas fa-globe mr-2"></i>
-                    Global Intelligence Feed
-                </span>
             </div>
         </div>
     </nav>
     
-    <div class="container mx-auto px-4 flex mt-6 flex-grow">
+    <!-- Main Container -->
+    <div class="container mx-auto px-4 flex mt-6 flex-grow" id="main-content">
         <!-- Sidebar -->
-        <div class="w-64 flex-shrink-0 hidden md:block" id="sidebar">
-            <div class="bg-white rounded-lg shadow-lg p-4 border border-gray-100 sticky top-20">
+        <aside class="w-72 flex-shrink-0 hidden lg:block" id="sidebar">
+            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-card p-4 border border-gray-100 dark:border-gray-700 sticky top-24">
                 <!-- Navigation Menu -->
-                <div class="space-y-1">
-                    <a href="{{ url_for('frontend.dashboard') }}" class="sidebar-item {{ 'active' if current_view == 'dashboard' else '' }}">
-                        <i class="fas fa-tachometer-alt"></i> Dashboard
+                <nav class="space-y-2" role="navigation">
+                    <a href="{{ url_for('frontend.dashboard') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'dashboard' else '' }}"
+                       aria-current="{% if current_view == 'dashboard' %}page{% endif %}">
+                        <i class="fas fa-tachometer-alt"></i> 
+                        <span>Dashboard</span>
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="sidebar-item {{ 'active' if current_view == 'feeds' else '' }}">
-                        <i class="fas fa-rss"></i> Threat Feeds
+                    <a href="{{ url_for('frontend.dashboard', view='feeds') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'feeds' else '' }}"
+                       aria-current="{% if current_view == 'feeds' %}page{% endif %}">
+                        <i class="fas fa-rss"></i> 
+                        <span>Threat Feeds</span>
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="sidebar-item {{ 'active' if current_view == 'iocs' else '' }}">
-                        <i class="fas fa-fingerprint"></i> IOCs
+                    <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'iocs' else '' }}"
+                       aria-current="{% if current_view == 'iocs' %}page{% endif %}">
+                        <i class="fas fa-fingerprint"></i> 
+                        <span>IOCs</span>
                     </a>
-                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="sidebar-item {{ 'active' if current_view == 'ai-analysis' else '' }}">
-                        <i class="fas fa-brain"></i> AI Analysis
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'ai-analysis' else '' }}"
+                       aria-current="{% if current_view == 'ai-analysis' %}page{% endif %}">
+                        <i class="fas fa-brain"></i> 
+                        <span>AI Analysis</span>
                     </a>
-                </div>
+                </nav>
                 
-                <!-- System Status -->
-                <div class="mt-auto pt-4">
-                    <div class="bg-gray-50 rounded-lg p-3 mt-4 border border-gray-100">
-                        <h6 class="text-sm font-semibold mb-2 flex items-center">
-                            <i class="fas fa-shield-alt mr-2 text-accent"></i> System Status
-                        </h6>
-                        <div class="flex justify-between items-center mb-2 text-sm">
-                            <div class="flex items-center">
-                                <div class="w-2 h-2 rounded-full {% if service_status.overall == 'ready' %}bg-green-500{% elif service_status.overall == 'initializing' %}bg-yellow-500{% else %}bg-red-500{% endif %} mr-2"></div>
-                                <span>{{ service_status.overall|title }}</span>
-                            </div>
+                <!-- Quick Stats -->
+                <div class="mt-8 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">
+                        Quick Stats
+                    </h3>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">Active Feeds</span>
+                            <span class="font-medium">{{ stats.feeds.total_sources|default(0) }}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">Total IOCs</span>
+                            <span class="font-medium">{{ stats.iocs.total|default(0) }}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">AI Analyses</span>
+                            <span class="font-medium">{{ stats.analyses.total_analyses|default(0) }}</span>
                         </div>
                     </div>
                 </div>
+                
+                <!-- System Health -->
+                <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">
+                        System Health
+                    </h3>
+                    <div class="space-y-2">
+                        {% if service_status and service_status.services %}
+                            {% for service, status in service_status.services.items() %}
+                                {% if service in ['bigquery', 'storage', 'pubsub', 'analysis'] %}
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm text-gray-600 dark:text-gray-400 capitalize">{{ service|replace('_', ' ') }}</span>
+                                    <div class="flex items-center">
+                                        <div class="w-2 h-2 rounded-full mr-2 {% if status == 'ready' %}bg-green-500{% elif status == 'initializing' %}bg-yellow-500{% else %}bg-red-500{% endif %}"></div>
+                                        <span class="text-xs capitalize {{ 'text-green-600' if status == 'ready' else 'text-yellow-600' if status == 'initializing' else 'text-red-600' }}">
+                                            {{ status }}
+                                        </span>
+                                    </div>
+                                </div>
+                                {% endif %}
+                            {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
             </div>
-        </div>
+        </aside>
         
-        <!-- Mobile Navigation Toggle -->
-        <div class="md:hidden fixed bottom-4 right-4 z-10">
-            <button id="mobileNavToggle" class="btn btn-primary rounded-full w-12 h-12 flex items-center justify-center shadow-lg">
+        <!-- Mobile Sidebar Toggle -->
+        <div class="lg:hidden fixed bottom-4 right-4 z-40">
+            <button id="mobileSidebarToggle" class="btn btn-primary rounded-full w-12 h-12 shadow-lg">
                 <i class="fas fa-bars"></i>
             </button>
         </div>
         
-        <!-- Main Content -->
-        <div class="flex-grow p-4 ml-0 md:ml-6">
+        <!-- Mobile Sidebar Overlay -->
+        <div id="mobileSidebarOverlay" class="lg:hidden fixed inset-0 bg-black bg-opacity-50 z-30 hidden"></div>
+        
+        <!-- Mobile Sidebar -->
+        <aside id="mobileSidebar" class="lg:hidden fixed inset-y-0 left-0 z-40 w-72 bg-white dark:bg-gray-800 transform -translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto">
+            <div class="p-4">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-lg font-semibold">Navigation</h2>
+                    <button id="closeMobileSidebar" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <nav class="space-y-2">
+                    <a href="{{ url_for('frontend.dashboard') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'dashboard' else '' }}">
+                        <i class="fas fa-tachometer-alt"></i> 
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="{{ url_for('frontend.dashboard', view='feeds') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'feeds' else '' }}">
+                        <i class="fas fa-rss"></i> 
+                        <span>Threat Feeds</span>
+                    </a>
+                    <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'iocs' else '' }}">
+                        <i class="fas fa-fingerprint"></i> 
+                        <span>IOCs</span>
+                    </a>
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" 
+                       class="sidebar-item {{ 'active' if current_view == 'ai-analysis' else '' }}">
+                        <i class="fas fa-brain"></i> 
+                        <span>AI Analysis</span>
+                    </a>
+                </nav>
+            </div>
+        </aside>
+        
+        <!-- Main Content Area -->
+        <main class="flex-grow lg:ml-6" role="main">
             <!-- Flash Messages -->
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="mb-4 px-4 py-3 rounded-lg relative {% if category == 'danger' %}bg-red-100 text-red-700 border border-red-200{% elif category == 'success' %}bg-green-100 text-green-700 border border-green-200{% elif category == 'warning' %}bg-yellow-100 text-yellow-700 border border-yellow-200{% else %}bg-blue-100 text-blue-700 border border-blue-200{% endif %} alert-message shadow-sm">
-                            <span class="block sm:inline">{{ message }}</span>
-                            <button class="absolute top-0 bottom-0 right-0 px-4 py-3" onclick="this.parentElement.style.display='none'">
-                                <i class="fas fa-times"></i>
-                            </button>
-                        </div>
-                    {% endfor %}
+                    <div class="mb-6 space-y-3">
+                        {% for category, message in messages %}
+                            <div class="alert {{ 'alert-danger' if category == 'danger' else 'alert-success' if category == 'success' else 'alert-warning' if category == 'warning' else 'alert-info' }} fade-in"
+                                 role="alert">
+                                <div class="flex justify-between items-start">
+                                    <div class="flex items-start">
+                                        <div class="flex-shrink-0">
+                                            <i class="fas {{ 'fa-exclamation-circle' if category == 'danger' else 'fa-check-circle' if category == 'success' else 'fa-exclamation-triangle' if category == 'warning' else 'fa-info-circle' }} text-lg"></i>
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm font-medium">{{ message }}</p>
+                                        </div>
+                                    </div>
+                                    <button class="ml-auto pl-3 flex-shrink-0" onclick="this.closest('.alert').remove()">
+                                        <i class="fas fa-times text-sm"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
                 {% endif %}
             {% endwith %}
             
             <!-- Page Content -->
             {% block content %}{% endblock %}
-        </div>
+        </main>
     </div>
     
     <!-- Footer -->
-    <footer class="bg-white shadow-inner mt-8 py-4 border-t border-gray-200">
-        <div class="container mx-auto px-4 text-center text-gray-500 text-sm">
-            <p>&copy; {{ now.year if now else 2025 }} Threat Intelligence Platform</p>
-            <p class="mt-1">Environment: {{ environment|default('production') }} | Version: {{ version|default('1.0.3') }}</p>
+    <footer class="bg-white dark:bg-gray-800 shadow-inner mt-12 py-6 border-t border-gray-200 dark:border-gray-700">
+        <div class="container mx-auto px-4">
+            <div class="flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
+                <div class="text-center md:text-left">
+                    <p class="text-gray-600 dark:text-gray-400">&copy; {{ now.year if now else 2025 }} Threat Intelligence Platform</p>
+                    <p class="text-sm text-gray-500 dark:text-gray-500 mt-1">
+                        Building safer digital environments through intelligent threat analysis
+                    </p>
+                </div>
+                <div class="flex items-center space-x-4 text-sm text-gray-500 dark:text-gray-500">
+                    <span>Environment: <strong class="text-gray-700 dark:text-gray-300">{{ environment|default('production') }}</strong></span>
+                    <span>Version: <strong class="text-gray-700 dark:text-gray-300">{{ version|default('1.0.3') }}</strong></span>
+                    {% if project_id %}
+                    <span>Project: <strong class="text-gray-700 dark:text-gray-300">{{ project_id[:20] }}{{ '...' if project_id|length > 20 else '' }}</strong></span>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </footer>
     
-    <!-- Common Scripts -->
+    <!-- Global JavaScript -->
     <script>
+        // Global application object
+        window.TIP = {
+            config: {
+                debug: {{ 'true' if debug_mode else 'false' }},
+                environment: '{{ environment|default("production") }}',
+                version: '{{ version|default("1.0.3") }}'
+            },
+            utils: {},
+            charts: {},
+            data: {}
+        };
+        
         document.addEventListener('DOMContentLoaded', function() {
-            // Mobile navigation toggle
-            const mobileNavToggle = document.getElementById('mobileNavToggle');
-            const sidebar = document.getElementById('sidebar');
+            // Dark mode toggle
+            const darkModeToggle = document.getElementById('darkModeToggle');
+            const html = document.documentElement;
             
-            if (mobileNavToggle && sidebar) {
-                mobileNavToggle.addEventListener('click', function() {
-                    sidebar.classList.toggle('hidden');
-                    sidebar.classList.toggle('fixed');
-                    sidebar.classList.toggle('inset-0');
-                    sidebar.classList.toggle('z-50');
-                    sidebar.classList.toggle('bg-white');
-                    sidebar.classList.toggle('p-4');
-                    sidebar.classList.toggle('overflow-y-auto');
-                    
-                    // Toggle icon
-                    const icon = mobileNavToggle.querySelector('i');
-                    icon.classList.toggle('fa-bars');
-                    icon.classList.toggle('fa-times');
-                });
+            // Load saved theme
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                html.classList.add('dark');
             }
             
-            // Auto-hide flash messages after 5 seconds
-            const alertMessages = document.querySelectorAll('.alert-message');
+            darkModeToggle?.addEventListener('click', function() {
+                html.classList.toggle('dark');
+                localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+            });
+            
+            // Mobile sidebar functionality
+            const mobileSidebarToggle = document.getElementById('mobileSidebarToggle');
+            const mobileSidebar = document.getElementById('mobileSidebar');
+            const mobileSidebarOverlay = document.getElementById('mobileSidebarOverlay');
+            const closeMobileSidebar = document.getElementById('closeMobileSidebar');
+            
+            function openMobileSidebar() {
+                mobileSidebar.classList.remove('-translate-x-full');
+                mobileSidebarOverlay.classList.remove('hidden');
+                document.body.classList.add('overflow-hidden');
+            }
+            
+            function closeMobileSidebarFn() {
+                mobileSidebar.classList.add('-translate-x-full');
+                mobileSidebarOverlay.classList.add('hidden');
+                document.body.classList.remove('overflow-hidden');
+            }
+            
+            mobileSidebarToggle?.addEventListener('click', openMobileSidebar);
+            closeMobileSidebar?.addEventListener('click', closeMobileSidebarFn);
+            mobileSidebarOverlay?.addEventListener('click', closeMobileSidebarFn);
+            
+            // Refresh functionality
+            const refreshBtn = document.getElementById('refreshBtn');
+            refreshBtn?.addEventListener('click', function() {
+                const icon = this.querySelector('i');
+                icon.classList.add('animate-spin');
+                
+                // Simulate refresh with actual page reload
+                setTimeout(() => {
+                    window.location.reload();
+                }, 500);
+            });
+            
+            // Auto-hide flash messages
+            const alertMessages = document.querySelectorAll('.alert');
             alertMessages.forEach(alert => {
                 setTimeout(() => {
-                    alert.style.display = 'none';
+                    alert.style.opacity = '0';
+                    alert.style.transform = 'translateY(-20px)';
+                    setTimeout(() => alert.remove(), 300);
                 }, 5000);
             });
             
-            // Helper functions for formatting
-            window.formatNumber = function(num) {
-                return num ? num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0";
-            };
-            
-            window.formatDate = function(dateString) {
-                if (!dateString) return 'N/A';
-                try {
-                    const date = new Date(dateString);
-                    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-                } catch (e) {
-                    return dateString;
+            // Utility functions
+            TIP.utils = {
+                formatNumber: function(num) {
+                    if (!num && num !== 0) return "0";
+                    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+                },
+                
+                formatDate: function(dateString) {
+                    if (!dateString) return 'N/A';
+                    try {
+                        const date = new Date(dateString);
+                        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+                    } catch (e) {
+                        return dateString;
+                    }
+                },
+                
+                formatBytes: function(bytes, decimals = 2) {
+                    if (bytes === 0) return '0 Bytes';
+                    const k = 1024;
+                    const dm = decimals < 0 ? 0 : decimals;
+                    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+                },
+                
+                debounce: function(func, delay) {
+                    let timeoutId;
+                    return function(...args) {
+                        clearTimeout(timeoutId);
+                        timeoutId = setTimeout(() => func.apply(this, args), delay);
+                    };
+                },
+                
+                showNotification: function(message, type = 'info', duration = 3000) {
+                    const notification = document.createElement('div');
+                    notification.className = `alert alert-${type} fixed top-4 right-4 z-50 min-w-80 fade-in shadow-lg`;
+                    notification.innerHTML = `
+                        <div class="flex justify-between items-start">
+                            <div class="flex items-start">
+                                <div class="flex-shrink-0">
+                                    <i class="fas ${type === 'success' ? 'fa-check-circle' : type === 'danger' ? 'fa-exclamation-circle' : type === 'warning' ? 'fa-exclamation-triangle' : 'fa-info-circle'} text-lg"></i>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm font-medium">${message}</p>
+                                </div>
+                            </div>
+                            <button class="ml-auto pl-3 flex-shrink-0" onclick="this.closest('.alert').remove()">
+                                <i class="fas fa-times text-sm"></i>
+                            </button>
+                        </div>
+                    `;
+                    
+                    document.body.appendChild(notification);
+                    
+                    if (duration > 0) {
+                        setTimeout(() => {
+                            if (notification.parentNode) {
+                                notification.style.opacity = '0';
+                                notification.style.transform = 'translateX(100%)';
+                                setTimeout(() => notification.remove(), 300);
+                            }
+                        }, duration);
+                    }
                 }
             };
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                // Escape key to close modals/dropdowns
+                if (e.key === 'Escape') {
+                    closeMobileSidebarFn();
+                    // Close any open dropdowns
+                    document.querySelectorAll('.dropdown-menu:not(.hidden)')
+                            .forEach(menu => menu.classList.add('hidden'));
+                }
+                
+                // Ctrl/Cmd + R for refresh
+                if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+                    e.preventDefault();
+                    refreshBtn?.click();
+                }
+                
+                // Toggle dark mode with Ctrl/Cmd + D
+                if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+                    e.preventDefault();
+                    darkModeToggle?.click();
+                }
+            });
+            
+            // Performance monitoring
+            if (window.performance && TIP.config.debug) {
+                window.addEventListener('load', function() {
+                    const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
+                    console.log(`Page loaded in ${loadTime}ms`);
+                });
+            }
         });
+        
+        // Handle errors gracefully
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            if (TIP.config.debug) {
+                console.error('JavaScript Error:', { msg, url, lineNo, columnNo, error });
+            }
+            
+            // Don't show error notifications in production unless critical
+            if (TIP.config.environment !== 'production' || msg.includes('critical')) {
+                TIP.utils.showNotification('An error occurred. Please refresh the page if issues persist.', 'danger');
+            }
+            
+            return false; // Allow default error handling
+        };
     </script>
     
-    <!-- Page-specific scripts -->
     {% block scripts %}{% endblock %}
 </body>
 </html>
