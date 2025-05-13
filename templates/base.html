@@ -130,16 +130,16 @@
             <div class="bg-white rounded-lg shadow-lg p-4 border border-gray-100 sticky top-20">
                 <!-- Navigation Menu -->
                 <div class="space-y-1">
-                    <a href="/" class="sidebar-item">
+                    <a href="{{ url_for('frontend.dashboard') }}" class="sidebar-item {{ 'active' if current_view == 'dashboard' else '' }}">
                         <i class="fas fa-tachometer-alt"></i> Dashboard
                     </a>
-                    <a href="/" class="sidebar-item">
+                    <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="sidebar-item {{ 'active' if current_view == 'feeds' else '' }}">
                         <i class="fas fa-rss"></i> Threat Feeds
                     </a>
-                    <a href="/" class="sidebar-item">
+                    <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="sidebar-item {{ 'active' if current_view == 'iocs' else '' }}">
                         <i class="fas fa-fingerprint"></i> IOCs
                     </a>
-                    <a href="/" class="sidebar-item">
+                    <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="sidebar-item {{ 'active' if current_view == 'ai-analysis' else '' }}">
                         <i class="fas fa-brain"></i> AI Analysis
                     </a>
                 </div>
@@ -152,10 +152,9 @@
                         </h6>
                         <div class="flex justify-between items-center mb-2 text-sm">
                             <div class="flex items-center">
-                                <div class="w-2 h-2 rounded-full bg-yellow-500 mr-2"></div>
-                                <span>Initializing</span>
+                                <div class="w-2 h-2 rounded-full {% if service_status.overall == 'ready' %}bg-green-500{% elif service_status.overall == 'initializing' %}bg-yellow-500{% else %}bg-red-500{% endif %} mr-2"></div>
+                                <span>{{ service_status.overall|title }}</span>
                             </div>
-                            <span class="text-yellow-600">Starting...</span>
                         </div>
                     </div>
                 </div>
