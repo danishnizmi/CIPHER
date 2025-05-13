@@ -1,7 +1,7 @@
 """
 Production-ready frontend module for Threat Intelligence Platform.
 Handles web interface, dashboard views, and real-time data display.
-Public-facing interface without admin controls.
+Public-facing interface only - no admin controls.
 """
 
 import os
@@ -14,7 +14,7 @@ from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, abort, g, current_app, send_file, Response
+from flask import flash, abort, g, current_app, Response
 
 # Import config module for centralized configuration
 from config import Config, ServiceManager, ServiceStatus
@@ -52,12 +52,6 @@ def invalidate_cache_on_analysis(data):
     clear_api_cache('ai')
     clear_api_cache('threat_summary')
     clear_api_cache('analyses')
-    
-    # Invalidate specific IOC if provided
-    if data and 'indicator_id' in data:
-        cache_key = f"iocs_{data['indicator_id']}"
-        API_CACHE.pop(cache_key, None)
-        API_CACHE_TIMESTAMP.pop(cache_key, None)
 
 # Register event handlers when blueprint is recorded
 @frontend_app.record
@@ -219,6 +213,167 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         safe_report_exception(e)
         return {"error": f"API error: {str(e)}"}
 
+# ====== Data Processing Functions ======
+
+def prepare_dashboard_context(current_view: str, days: int) -> Dict[str, Any]:
+    """Prepare common dashboard context data."""
+    # Check service status
+    service_manager = Config.get_service_manager()
+    service_status = service_manager.get_status()
+    
+    # Initialize base context
+    context = {
+        'current_view': current_view,
+        'days': days,
+        'service_status': service_status,
+        'public_view': True,
+        'threat_score': 50,
+        'feed_trend': 0,
+        'ioc_trend': 0,
+        'analysis_trend': 0,
+        'activity_dates': [],
+        'activity_counts': [],
+        'ioc_type_labels': [],
+        'ioc_type_values': [],
+        'top_iocs': [],
+        'geo_stats': [],
+        'ai_summary': None,
+        'threat_summary': {'overall_score': 50},
+        'stats': {
+            'feeds': {'total_sources': 0},
+            'iocs': {'total': 0, 'types': []},
+            'analyses': {'total_analyses': 0},
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    }
+    
+    # Set page metadata
+    page_metadata = {
+        'feeds': {
+            'title': 'Threat Feeds',
+            'subtitle': 'Intelligence sources and data collection',
+            'icon': 'rss'
+        },
+        'iocs': {
+            'title': 'Indicators of Compromise',
+            'subtitle': 'Observed indicators and threat artifacts',
+            'icon': 'fingerprint'
+        },
+        'ai-analysis': {
+            'title': 'AI-Powered Analysis',
+            'subtitle': 'Machine learning threat intelligence analysis',
+            'icon': 'brain'
+        },
+        'dashboard': {
+            'title': 'Threat Intelligence Dashboard',
+            'subtitle': 'Platform overview and threat summary',
+            'icon': 'tachometer-alt'
+        }
+    }
+    
+    metadata = page_metadata.get(current_view, page_metadata['dashboard'])
+    context.update({
+        'page_title': metadata['title'],
+        'page_subtitle': metadata['subtitle'],
+        'page_icon': metadata['icon']
+    })
+    
+    return context
+
+def load_dashboard_stats(context: Dict[str, Any], days: int):
+    """Load statistics for dashboard."""
+    stats_response = api_request('stats', params={"days": days})
+    if not stats_response or 'error' in stats_response:
+        logger.warning(f"Failed to load stats: {stats_response}")
+        return
+    
+    context['stats'] = {
+        'feeds': stats_response.get('feeds', {'total_sources': 0}),
+        'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
+        'analyses': stats_response.get('analyses', {'total_analyses': 0}),
+        'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
+    }
+    
+    # Calculate trends
+    context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0) or 0
+    context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0) or 0
+    context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0) or 0
+    
+    # IOC type data
+    ioc_types = stats_response.get('iocs', {}).get('types', [])
+    context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
+    context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
+    
+    # Process visualization data
+    if 'visualization_data' in stats_response:
+        viz_data = stats_response['visualization_data']
+        if 'daily_counts' in viz_data:
+            # Create date range
+            today = datetime.now().date()
+            date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
+            context['activity_dates'] = date_range
+            
+            # Map counts to dates
+            daily_counts = viz_data['daily_counts']
+            counts = [0] * len(date_range)
+            date_to_index = {date: idx for idx, date in enumerate(date_range)}
+            
+            for entry in daily_counts:
+                if isinstance(entry, dict) and 'date' in entry and 'count' in entry:
+                    date_str = entry['date']
+                    if date_str in date_to_index:
+                        counts[date_to_index[date_str]] = entry['count']
+            
+            context['activity_counts'] = counts
+
+def load_view_specific_data(context: Dict[str, Any], current_view: str, days: int):
+    """Load view-specific data."""
+    if current_view == 'feeds':
+        feeds_response = api_request('feeds')
+        if not feeds_response or 'error' in feeds_response:
+            context['feed_items'] = []
+        else:
+            context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
+        
+    elif current_view == 'iocs':
+        iocs_response = api_request('iocs', params={"days": days, "limit": 100})
+        if not iocs_response or 'error' in iocs_response:
+            context['ioc_items'] = []
+        else:
+            context['ioc_items'] = iocs_response.get('records', [])
+        
+    elif current_view == 'ai-analysis':
+        ai_response = api_request('ai/analyses', params={"days": days})
+        if not ai_response or 'error' in ai_response:
+            context['ai_analyses'] = {}
+            context['last_ai_analysis'] = None
+        else:
+            context['ai_analyses'] = ai_response
+            context['last_ai_analysis'] = ai_response.get('last_run_time')
+        
+    else:
+        # Dashboard view - load additional data
+        # Get recent IOCs
+        iocs_response = api_request('iocs', params={"days": days, "limit": 10})
+        if iocs_response and 'error' not in iocs_response:
+            context['top_iocs'] = iocs_response.get('records', [])
+        
+        # Get threat summary
+        threat_summary = api_request('threat_summary', params={"days": days})
+        if threat_summary and 'error' not in threat_summary:
+            context['threat_summary'] = threat_summary
+            context['threat_score'] = threat_summary.get('overall_score', 50)
+        
+        # Get AI summary
+        ai_summary = api_request('ai/summary')
+        if ai_summary and 'error' not in ai_summary:
+            context['ai_summary'] = ai_summary
+        
+        # Get geo stats
+        geo_stats = api_request('iocs/geo', params={"days": days})
+        if geo_stats and 'error' not in geo_stats:
+            context['geo_stats'] = geo_stats.get('countries', [])
+
 # ====== Route Handlers ======
 
 @frontend_app.route('/')
@@ -231,161 +386,18 @@ def index():
 def dashboard(view=None):
     """Dashboard view with dynamic content loading."""
     try:
-        # Check service status
-        service_manager = Config.get_service_manager()
-        service_status = service_manager.get_status()
-        
         # Get view parameters
         current_view = view or request.args.get('view', 'dashboard')
         days = int(request.args.get('days', '30'))
         
-        # Initialize context
-        context = {
-            'current_view': current_view,
-            'days': days,
-            'threat_score': 50,
-            'feed_trend': 0,
-            'ioc_trend': 0,
-            'analysis_trend': 0,
-            'activity_dates': [],
-            'activity_counts': [],
-            'ioc_type_labels': [],
-            'ioc_type_values': [],
-            'top_iocs': [],
-            'geo_stats': [],
-            'ai_summary': None,
-            'threat_summary': {'overall_score': 50},
-            'stats': {
-                'feeds': {'total_sources': 0},
-                'iocs': {'total': 0, 'types': []},
-                'analyses': {'total_analyses': 0},
-                'timestamp': datetime.utcnow().isoformat()
-            },
-            'service_status': service_status,
-            'public_view': True  # Flag to indicate public view (no admin controls)
-        }
-        
-        # Set page metadata
-        page_metadata = {
-            'feeds': {
-                'title': 'Threat Feeds',
-                'subtitle': 'Intelligence sources and data collection',
-                'icon': 'rss'
-            },
-            'iocs': {
-                'title': 'Indicators of Compromise',
-                'subtitle': 'Observed indicators and threat artifacts',
-                'icon': 'fingerprint'
-            },
-            'ai-analysis': {
-                'title': 'AI-Powered Analysis',
-                'subtitle': 'Machine learning threat intelligence analysis',
-                'icon': 'brain'
-            },
-            'dashboard': {
-                'title': 'Threat Intelligence Dashboard',
-                'subtitle': 'Platform overview and threat summary',
-                'icon': 'tachometer-alt'
-            }
-        }
-        
-        metadata = page_metadata.get(current_view, page_metadata['dashboard'])
-        context.update({
-            'page_title': metadata['title'],
-            'page_subtitle': metadata['subtitle'],
-            'page_icon': metadata['icon']
-        })
+        # Prepare base context
+        context = prepare_dashboard_context(current_view, days)
         
         # Load statistics
-        stats_response = api_request('stats', params={"days": days})
-        if not stats_response or 'error' in stats_response:
-            logger.warning(f"Failed to load stats: {stats_response}")
-        else:
-            context['stats'] = {
-                'feeds': stats_response.get('feeds', {'total_sources': 0}),
-                'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
-                'analyses': stats_response.get('analyses', {'total_analyses': 0}),
-                'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
-            }
-            
-            # Calculate trends
-            context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0) or 0
-            context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0) or 0
-            context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0) or 0
-            
-            # IOC type data
-            ioc_types = stats_response.get('iocs', {}).get('types', [])
-            context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
-            context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
-            
-            # Process visualization data
-            if 'visualization_data' in stats_response:
-                viz_data = stats_response['visualization_data']
-                if 'daily_counts' in viz_data:
-                    # Create date range
-                    today = datetime.now().date()
-                    date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
-                    context['activity_dates'] = date_range
-                    
-                    # Map counts to dates
-                    daily_counts = viz_data['daily_counts']
-                    counts = [0] * len(date_range)
-                    date_to_index = {date: idx for idx, date in enumerate(date_range)}
-                    
-                    for entry in daily_counts:
-                        if isinstance(entry, dict) and 'date' in entry and 'count' in entry:
-                            date_str = entry['date']
-                            if date_str in date_to_index:
-                                counts[date_to_index[date_str]] = entry['count']
-                    
-                    context['activity_counts'] = counts
+        load_dashboard_stats(context, days)
         
         # Load view-specific data
-        if current_view == 'feeds':
-            feeds_response = api_request('feeds')
-            if not feeds_response or 'error' in feeds_response:
-                context['feed_items'] = []
-            else:
-                context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
-            
-        elif current_view == 'iocs':
-            iocs_response = api_request('iocs', params={"days": days, "limit": 100})
-            if not iocs_response or 'error' in iocs_response:
-                context['ioc_items'] = []
-            else:
-                context['ioc_items'] = iocs_response.get('records', [])
-            
-        elif current_view == 'ai-analysis':
-            ai_response = api_request('ai/analyses', params={"days": days})
-            if not ai_response or 'error' in ai_response:
-                context['ai_analyses'] = {}
-                context['last_ai_analysis'] = None
-            else:
-                context['ai_analyses'] = ai_response
-                context['last_ai_analysis'] = ai_response.get('last_run_time')
-            
-        else:
-            # Dashboard view - load additional data
-            # Get recent IOCs
-            iocs_response = api_request('iocs', params={"days": days, "limit": 10})
-            if iocs_response and 'error' not in iocs_response:
-                context['top_iocs'] = iocs_response.get('records', [])
-            
-            # Get threat summary
-            threat_summary = api_request('threat_summary', params={"days": days})
-            if threat_summary and 'error' not in threat_summary:
-                context['threat_summary'] = threat_summary
-                context['threat_score'] = threat_summary.get('overall_score', 50)
-            
-            # Get AI summary
-            ai_summary = api_request('ai/summary')
-            if ai_summary and 'error' not in ai_summary:
-                context['ai_summary'] = ai_summary
-            
-            # Get geo stats
-            geo_stats = api_request('iocs/geo', params={"days": days})
-            if geo_stats and 'error' not in geo_stats:
-                context['geo_stats'] = geo_stats.get('countries', [])
+        load_view_specific_data(context, current_view, days)
         
         return render_template('dashboard.html', **context, now=datetime.now())
     
@@ -394,79 +406,6 @@ def dashboard(view=None):
         safe_report_exception(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
-
-@frontend_app.route('/export/iocs')
-def export_iocs():
-    """Export IOCs in various formats."""
-    try:
-        format_type = request.args.get('format', 'json')
-        days = int(request.args.get('days', 30))
-        ioc_type = request.args.get('type', '')
-        
-        # Get IOC data
-        params = {"days": days, "limit": 10000}
-        if ioc_type:
-            params['type'] = ioc_type
-            
-        iocs_response = api_request('iocs', params=params)
-        
-        if iocs_response.get('error'):
-            flash(f'Error exporting IOCs: {iocs_response["error"]}', 'danger')
-            return redirect(url_for('frontend.dashboard', view='iocs'))
-        
-        iocs = iocs_response.get('records', [])
-        
-        # Format data based on requested format
-        if format_type == 'csv':
-            import csv
-            import io
-            
-            output = io.StringIO()
-            writer = csv.writer(output)
-            writer.writerow(['Type', 'Value', 'Risk Score', 'Confidence', 'Source', 'First Seen', 'Last Seen', 'Malware', 'Threat Type'])
-            
-            for ioc in iocs:
-                writer.writerow([
-                    ioc.get('type', ''),
-                    ioc.get('value', ''),
-                    ioc.get('risk_score', ''),
-                    ioc.get('confidence', ''),
-                    ioc.get('source', ''),
-                    ioc.get('first_seen', ioc.get('created_at', '')),
-                    ioc.get('last_seen', ''),
-                    ioc.get('malware', ''),
-                    ioc.get('threat_type', '')
-                ])
-            
-            output.seek(0)
-            return Response(
-                output.getvalue(),
-                mimetype='text/csv',
-                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.csv'}
-            )
-            
-        elif format_type == 'txt':
-            lines = []
-            for ioc in iocs:
-                lines.append(ioc.get('value', ''))
-            
-            return Response(
-                '\n'.join(lines),
-                mimetype='text/plain',
-                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.txt'}
-            )
-            
-        else:  # JSON format (default)
-            return Response(
-                json.dumps(iocs, indent=2),
-                mimetype='application/json',
-                headers={'Content-Disposition': f'attachment; filename=iocs_export_{datetime.now().strftime("%Y%m%d")}.json'}
-            )
-            
-    except Exception as e:
-        logger.error(f"Error exporting IOCs: {str(e)}")
-        flash('Error exporting IOCs', 'danger')
-        return redirect(url_for('frontend.dashboard', view='iocs'))
 
 @frontend_app.route('/<content_type>/<path:identifier>')
 def dynamic_content_detail(content_type, identifier):
