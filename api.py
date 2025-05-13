@@ -34,6 +34,7 @@ api_blueprint = Blueprint('api', __name__)
 # Initialize rate limiter
 limiter = Limiter(
     key_func=get_remote_address,
+    app=current_app,
     default_limits=["1000 per day", "100 per hour"],
     storage_uri="memory://",
     swallow_errors=True
@@ -42,6 +43,9 @@ limiter = Limiter(
 # Cache for expensive queries
 query_cache = TTLCache(maxsize=1000, ttl=300)  # 5-minute TTL
 cache_stats = {"hits": 0, "misses": 0, "size": 0}
+
+# Public read-only endpoints that don't require API key
+PUBLIC_ENDPOINTS = ['/health', '/stats', '/feeds', '/iocs', '/ai/analyses', '/ai/summary', '/threat_summary', '/iocs/geo']
 
 # API Key Authentication decorator
 def require_api_key(f):
@@ -52,9 +56,16 @@ def require_api_key(f):
         if request.method == 'OPTIONS':
             return '', 200
             
+        # Check if this is a public endpoint
+        is_public_endpoint = any(request.path.endswith(endpoint) for endpoint in PUBLIC_ENDPOINTS)
+        
         # Get API key from header
         api_key = request.headers.get('X-API-Key')
         
+        # For public endpoints, use default key if none provided
+        if not api_key and is_public_endpoint:
+            api_key = 'default-api-key'
+            
         if not api_key:
             logger.warning(f"API request without key from {get_remote_address()}")
             return jsonify({'error': 'No API key provided'}), 401
@@ -67,15 +78,18 @@ def require_api_key(f):
         if expected_key:
             expected_key = expected_key.strip()
         
+        # Allow default key for public endpoints
+        if is_public_endpoint and (api_key == 'default-api-key' or not expected_key):
+            return f(*args, **kwargs)
+        
         # Special handling for development/testing
         if Config.ENVIRONMENT != 'production':
             if api_key in ['default-api-key', 'test-key']:
-                logger.debug(f"Using development API key")
                 return f(*args, **kwargs)
         
-        # Validate API key
-        if not expected_key or api_key != expected_key:
-            logger.warning(f"Invalid API key attempt from {get_remote_address()}: {api_key[:10]}...")
+        # Validate API key for protected endpoints
+        if api_key != expected_key and expected_key:
+            logger.warning(f"Invalid API key attempt from {get_remote_address()}")
             return jsonify({'error': 'Invalid API key'}), 401
         
         return f(*args, **kwargs)
@@ -210,31 +224,6 @@ def execute_bq_query(query: str, params: Optional[List] = None, cache_ttl: int =
             logger.error(traceback.format_exc())
         report_error(e)
         raise
-
-def publish_to_topic(topic_name: str, message_data: Dict) -> Optional[str]:
-    """Publish message to Pub/Sub topic."""
-    _, _, publisher, _ = get_clients()
-    
-    if not publisher:
-        logger.error("Pub/Sub publisher not initialized")
-        return None
-    
-    try:
-        topic_path = publisher.topic_path(Config.GCP_PROJECT, topic_name)
-        message = json.dumps(message_data).encode("utf-8")
-        
-        publish_future = publisher.publish(topic_path, data=message)
-        message_id = publish_future.result(timeout=10)
-        
-        # Publish event to event bus if available
-        if hasattr(g, 'event_bus'):
-            g.event_bus.publish(f"{topic_name}_published", message_data)
-        
-        return message_id
-    except Exception as e:
-        logger.error(f"Error publishing to {topic_name}: {str(e)}")
-        report_error(e)
-        return None
 
 def check_table_exists(table_name: str) -> bool:
     """Check if BigQuery table exists and is accessible."""
@@ -373,6 +362,7 @@ def get_stats():
                 batch_results = execute_bq_query(batch_query)
                 if batch_results:
                     stats['batch_analyses']['total'] = batch_results[0].get('total_analyses', 0)
+                    stats['analyses']['total_analyses'] = batch_results[0].get('total_analyses', 0)
             except Exception as e:
                 logger.error(f"Error querying batch analyses: {e}")
         
@@ -396,29 +386,6 @@ def get_stats():
                 ]
         except Exception as e:
             logger.error(f"Error querying daily activity: {e}")
-        
-        # Calculate growth rates
-        if days > 7:  # Only calculate growth if we have enough data
-            try:
-                # Previous period comparison
-                previous_period_days = days * 2
-                previous_query = f"""
-                SELECT COUNT(*) as total
-                FROM `{Config.get_table_name('indicators')}`
-                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {previous_period_days} DAY)
-                AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-                """
-                
-                previous_results = execute_bq_query(previous_query)
-                if previous_results:
-                    previous_total = previous_results[0].get('total', 0)
-                    current_total = stats['iocs']['total']
-                    
-                    if previous_total > 0:
-                        growth_rate = ((current_total - previous_total) / previous_total) * 100
-                        stats['iocs']['growth_rate'] = round(growth_rate, 1)
-            except Exception as e:
-                logger.error(f"Error calculating growth rates: {e}")
         
         return jsonify(stats)
         
@@ -646,12 +613,13 @@ def get_ai_analyses():
         
         # Get most recent analysis timestamp
         if ai_analyses['batch_analyses']:
-            most_recent = max(
+            most_recent_list = [
                 analysis['last_analysis'] 
                 for analysis in ai_analyses['batch_analyses'] 
                 if analysis.get('last_analysis')
-            )
-            ai_analyses['last_run_time'] = most_recent
+            ]
+            if most_recent_list:
+                ai_analyses['last_run_time'] = max(most_recent_list)
         
         return jsonify(ai_analyses)
         
@@ -659,58 +627,6 @@ def get_ai_analyses():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error getting AI analyses: {str(e)}")
-        report_error(e)
-        return jsonify({"error": "Internal server error"}), 500
-
-@api_blueprint.route('/ai/feed-analysis/<feed_id>', methods=['GET'])
-@limiter.limit("20 per minute")
-@require_api_key
-@cache_response(ttl=300)
-def get_feed_analysis(feed_id):
-    """Get detailed analysis for a specific feed."""
-    try:
-        # Validate feed_id
-        if not feed_id or not isinstance(feed_id, str):
-            return jsonify({"error": "Invalid feed ID"}), 400
-        
-        # Check if table exists
-        if not check_table_exists('batch_analysis'):
-            return jsonify({"error": "Analysis data not available"}), 404
-        
-        # Get latest analysis for the feed
-        dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
-        table_id = f"{dataset_id}.batch_analysis"
-        
-        query = f"""
-        SELECT analysis_data, timestamp, sample_size, threat_level, confidence
-        FROM `{table_id}`
-        WHERE feed_id = @feed_id
-        ORDER BY timestamp DESC
-        LIMIT 1
-        """
-        
-        params = [bigquery.ScalarQueryParameter("feed_id", "STRING", feed_id)]
-        results = execute_bq_query(query, params)
-        
-        if not results:
-            return jsonify({"error": f"No analysis found for feed {feed_id}"}), 404
-        
-        # Parse and return analysis data
-        analysis_record = results[0]
-        analysis_data = json.loads(analysis_record['analysis_data'])
-        
-        # Add metadata
-        analysis_data['metadata'] = {
-            'timestamp': analysis_record['timestamp'],
-            'sample_size': analysis_record['sample_size'],
-            'threat_level': analysis_record['threat_level'],
-            'confidence': analysis_record['confidence']
-        }
-        
-        return jsonify(analysis_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting feed analysis: {str(e)}")
         report_error(e)
         return jsonify({"error": "Internal server error"}), 500
 
@@ -824,29 +740,6 @@ def get_threat_summary():
             threat_summary['top_malware_families'] = malware_results
         except Exception as e:
             logger.error(f"Error querying malware families: {e}")
-        
-        # Calculate risk trend
-        if days > 7:
-            try:
-                previous_period = days * 2
-                previous_query = f"""
-                SELECT AVG(risk_score) as avg_risk_score
-                FROM `{Config.get_table_name('indicators')}`
-                WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {previous_period} DAY)
-                AND created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-                """
-                
-                previous_results = execute_bq_query(previous_query)
-                if previous_results:
-                    previous_avg = previous_results[0].get('avg_risk_score', 50)
-                    current_avg = threat_summary['overall_score']
-                    
-                    if current_avg > previous_avg + 5:
-                        threat_summary['risk_trend'] = 'increasing'
-                    elif current_avg < previous_avg - 5:
-                        threat_summary['risk_trend'] = 'decreasing'
-            except Exception as e:
-                logger.error(f"Error calculating risk trend: {e}")
         
         return jsonify(threat_summary)
         
@@ -978,142 +871,6 @@ def get_iocs_geo():
         report_error(e)
         return jsonify({"error": "Internal server error"}), 500
 
-# ==================== Admin Endpoints ====================
-
-@api_blueprint.route('/admin/ingest', methods=['POST'])
-@limiter.limit("5 per minute")
-@require_api_key
-def trigger_ingest():
-    """Trigger data ingestion."""
-    try:
-        req_data = request.get_json() or {}
-        process_all = req_data.get('process_all', True)
-        force_tables = req_data.get('force_tables', False)
-        
-        message_data = {
-            'process_all': process_all,
-            'force_tables': force_tables,
-            'triggered_by': 'api',
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        
-        message_id = publish_to_topic(Config.PUBSUB_TOPIC, message_data)
-        
-        if message_id:
-            return jsonify({
-                'status': 'success',
-                'message': 'Ingestion triggered successfully',
-                'message_id': message_id
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to trigger ingestion'
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Error triggering ingestion: {str(e)}")
-        report_error(e)
-        return jsonify({'error': str(e)}), 500
-
-@api_blueprint.route('/admin/analyze-batch', methods=['POST'])
-@limiter.limit("5 per minute")
-@require_api_key
-def trigger_batch_analysis():
-    """Trigger batch analysis for feeds."""
-    try:
-        req_data = request.get_json() or {}
-        feed_id = req_data.get('feed_id')
-        force_analyze = req_data.get('force_analyze', False)
-        
-        from analysis import analyze_feed_batch, analyze_all_feeds_batch
-        
-        if feed_id:
-            # Analyze specific feed
-            result = analyze_feed_batch(feed_id, force_analyze=force_analyze)
-        else:
-            # Analyze all feeds
-            feeds = getattr(Config, 'FEEDS', [])
-            results = []
-            
-            for feed in feeds:
-                if feed.get('enabled', True) and feed.get('id'):
-                    result = analyze_feed_batch(feed['id'], force_analyze=force_analyze)
-                    results.append(result)
-            
-            result = {
-                "status": "success",
-                "results": results,
-                "total_feeds": len(results),
-                "successful": sum(1 for r in results if not r.get('error')),
-                "failed": sum(1 for r in results if r.get('error'))
-            }
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error triggering batch analysis: {str(e)}")
-        report_error(e)
-        return jsonify({'error': str(e)}), 500
-
-@api_blueprint.route('/admin/cache/clear', methods=['POST'])
-@limiter.limit("10 per minute")
-@require_api_key
-def clear_cache():
-    """Clear API response cache."""
-    try:
-        query_cache.clear()
-        cache_stats["hits"] = 0
-        cache_stats["misses"] = 0
-        cache_stats["size"] = 0
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Cache cleared successfully'
-        })
-        
-    except Exception as e:
-        logger.error(f"Error clearing cache: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@api_blueprint.route('/admin/status', methods=['GET'])
-@limiter.limit("20 per minute")
-@require_api_key
-def get_system_status():
-    """Get detailed system status."""
-    try:
-        service_manager = Config.get_service_manager()
-        status = service_manager.get_status()
-        
-        # Add additional system information
-        system_status = {
-            'overall': status['overall'],
-            'services': status['services'],
-            'errors': status['errors'],
-            'timestamp': datetime.utcnow().isoformat(),
-            'cache_stats': dict(cache_stats),
-            'cache_size': len(query_cache),
-            'config': {
-                'environment': Config.ENVIRONMENT,
-                'version': Config.VERSION,
-                'nlp_enabled': Config.NLP_ENABLED,
-                'auto_analyze': Config.AUTO_ANALYZE,
-                'feeds_count': len(getattr(Config, 'FEEDS', []))
-            }
-        }
-        
-        # Check table status
-        system_status['tables'] = {}
-        for table in ['indicators', 'batch_analysis', 'vulnerabilities']:
-            system_status['tables'][table] = check_table_exists(table)
-        
-        return jsonify(system_status)
-        
-    except Exception as e:
-        logger.error(f"Error getting system status: {str(e)}")
-        report_error(e)
-        return jsonify({'error': str(e)}), 500
-
 # ==================== Error Handlers ====================
 
 @api_blueprint.errorhandler(400)
@@ -1190,4 +947,4 @@ def teardown_api_request(exception=None):
         service_manager.update_status('api', ServiceStatus.DEGRADED)
 
 # Initialize rate limiter with the blueprint
-limiter.init_app(current_app, config_prefix='RATELIMIT')
+limiter.init_app(current_app)
