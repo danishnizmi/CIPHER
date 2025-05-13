@@ -93,8 +93,8 @@
                     <div class="flex">
                         <dt class="font-medium text-gray-600 w-32">Severity:</dt>
                         <dd>
-                            <span class="severity-badge {{ data.severity|default('medium') }}">
-                                {{ data.severity|default('Medium')|title }}
+                            <span class="severity-badge {{ 'critical' if data.risk_score > 85 else 'high' if data.risk_score > 70 else 'medium' if data.risk_score > 50 else 'low' }}">
+                                {{ 'Critical' if data.risk_score > 85 else 'High' if data.risk_score > 70 else 'Medium' if data.risk_score > 50 else 'Low' }}
                             </span>
                         </dd>
                     </div>
