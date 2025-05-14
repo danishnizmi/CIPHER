@@ -14,7 +14,7 @@ from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
-from flask import flash, abort, g, current_app, Response
+from flask import flash, abort, g, current_app, Response, make_response
 
 # Import config module for centralized configuration
 from config import Config, ServiceManager, ServiceStatus
@@ -148,30 +148,48 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
     try:
         import requests
         
+        # Get the current app's URL for internal requests
+        # Use request context if available, otherwise construct from config
+        try:
+            if request:
+                base_url = request.url_root.rstrip('/')
+            else:
+                # Fallback to constructing URL from environment
+                scheme = 'https' if os.environ.get('HTTPS', '').lower() == 'true' else 'http'
+                host = os.environ.get('HOST', '0.0.0.0')
+                port = os.environ.get('PORT', '8080')
+                
+                # For Cloud Run, use the service URL if available
+                cloud_run_url = os.environ.get('CLOUD_RUN_URL')
+                if cloud_run_url:
+                    base_url = cloud_run_url.rstrip('/')
+                else:
+                    base_url = f"{scheme}://{host}:{port}"
+        except RuntimeError:
+            # Outside of request context
+            base_url = f"http://localhost:{os.environ.get('PORT', '8080')}"
+        
         # Construct URL
-        base_url = request.url_root.rstrip('/')
         url = f"{base_url}/api/{endpoint.lstrip('/')}"
         
         # Prepare headers
         headers = {"Content-Type": "application/json"}
         api_key = get_api_key()
-        
-        # Always include API key for consistent behavior
         headers["X-API-Key"] = api_key
         
-        logger.debug(f"API request to {endpoint}")
+        logger.debug(f"Making API request to {endpoint}")
         
-        # Make request with retries
-        max_retries = 3
+        # Make request with retries but shorter timeout
+        max_retries = 2
         start_time = time.time()
         response = None
         
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
-                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                    response = requests.get(url, headers=headers, params=params, timeout=5)
                 else:
-                    response = requests.post(url, headers=headers, json=data, timeout=10)
+                    response = requests.post(url, headers=headers, json=data, timeout=5)
                 
                 # Break on success or non-retriable failure
                 if response.status_code < 500 or response.status_code == 401:
@@ -179,9 +197,9 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
                 
-            # Exponential backoff
+            # Shorter backoff for internal requests
             if attempt < max_retries - 1:
-                time.sleep(0.5 * (2 ** attempt))
+                time.sleep(0.2 * (2 ** attempt))
         
         # Report slow requests
         request_time = time.time() - start_time
@@ -348,8 +366,14 @@ def load_view_specific_data(context: Dict[str, Any], current_view: str, days: in
             context['ai_analyses'] = {}
             context['last_ai_analysis'] = None
         else:
-            context['ai_analyses'] = ai_response
-            context['last_ai_analysis'] = ai_response.get('last_run_time')
+            # Transform the response for the template
+            if isinstance(ai_response, dict):
+                context['ai_analyses'] = ai_response
+                context['overall_threat_level'] = ai_response.get('overall_threat_level', 'Medium')
+                context['total_feeds_analyzed'] = ai_response.get('total_feeds_analyzed', 0)
+                context['batch_analyses'] = ai_response.get('batch_analyses', [])
+                context['threat_distribution'] = ai_response.get('threat_level_distribution', [])
+                context['last_ai_analysis'] = ai_response.get('last_run_time')
         
     else:
         # Dashboard view - load additional data
@@ -399,10 +423,20 @@ def dashboard(view=None):
         # Load view-specific data
         load_view_specific_data(context, current_view, days)
         
-        return render_template('dashboard.html', **context, now=datetime.now())
+        # Render the template
+        response = make_response(render_template('dashboard.html', **context, now=datetime.now()))
+        
+        # Add cache headers
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        
+        return response
     
     except Exception as e:
         logger.error(f"Dashboard error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         safe_report_exception(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
@@ -477,7 +511,7 @@ def dynamic_content_detail(content_type, identifier):
         return render_template('detail.html', **context)
         
     except Exception as e:
-        logger.error(f"Error in dynamic_content_detail: {str(e)}")
+        logger.error(f"Error in dynamic_content_detail: {str(e)}", exc_info=True)
         flash('Error loading content details', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
@@ -507,6 +541,8 @@ def forbidden(e):
 def server_error(e):
     """Handle 500 errors."""
     logger.error(f"Server error: {str(e)}")
+    import traceback
+    logger.error(traceback.format_exc())
     safe_report_exception(e)
     return render_template('error.html',
                          error_code=500,
