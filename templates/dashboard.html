@@ -2,7 +2,7 @@
 
 {% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
 
-{% block content %}
+{% block content -->
 <!-- Page Header -->
 <div class="page-header mb-8 fade-in">
     <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0">
@@ -35,22 +35,6 @@
                     </div>
                 </div>
             </div>
-            
-            <!-- Export Button -->
-            {% if current_view == 'iocs' %}
-            <button id="exportIocs" class="btn btn-secondary flex items-center space-x-2">
-                <i class="fas fa-download"></i>
-                <span>Export</span>
-            </button>
-            {% endif %}
-            
-            <!-- Force Ingestion Button (Admin) -->
-            {% if current_view == 'dashboard' %}
-            <button id="forceIngestionBtn" class="btn btn-success flex items-center space-x-2" title="Force data ingestion">
-                <i class="fas fa-sync"></i>
-                <span class="hidden sm:inline">Ingest</span>
-            </button>
-            {% endif %}
         </div>
     </div>
 </div>
@@ -59,73 +43,79 @@
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 fade-in">
     <!-- Active Feeds Card -->
     <div class="stat-card">
-        <div class="flex items-center justify-between">
-            <div>
-                <div class="text-4xl text-blue-600 mb-4">
-                    <i class="fas fa-rss"></i>
+        <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="block h-full">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-4xl text-blue-600 mb-4">
+                        <i class="fas fa-rss"></i>
+                    </div>
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                        {{ stats.feeds.total_sources|default(0)|int }}
+                    </div>
+                    <div class="text-gray-500 dark:text-gray-400">Active Feeds</div>
                 </div>
-                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
-                    {{ stats.feeds.total_sources|default(0)|int }}
+                <div class="text-right">
+                    <div id="feedTrendChart" class="w-24 h-12"></div>
+                    <div class="mt-2 text-sm {% if feed_trend > 0 %}text-green-600{% elif feed_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                        <i class="fas fa-{% if feed_trend > 0 %}arrow-up{% elif feed_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                        {% if feed_trend != 0 %}{{ feed_trend|abs }}%{% else %}Stable{% endif %}
+                    </div>
                 </div>
-                <div class="text-gray-500 dark:text-gray-400">Active Feeds</div>
             </div>
-            <div class="text-right">
-                <div id="feedTrendChart" class="w-24 h-12"></div>
-                <div class="mt-2 text-sm {% if feed_trend > 0 %}text-green-600{% elif feed_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
-                    <i class="fas fa-{% if feed_trend > 0 %}arrow-up{% elif feed_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-                    {% if feed_trend != 0 %}{{ feed_trend|abs }}%{% else %}Stable{% endif %}
-                </div>
-            </div>
-        </div>
+        </a>
     </div>
     
     <!-- IOCs Card -->
     <div class="stat-card">
-        <div class="flex items-center justify-between">
-            <div>
-                <div class="text-4xl text-red-600 mb-4">
-                    <i class="fas fa-fingerprint"></i>
+        <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="block h-full">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-4xl text-red-600 mb-4">
+                        <i class="fas fa-fingerprint"></i>
+                    </div>
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                        {{ stats.iocs.total|default(0)|int }}
+                    </div>
+                    <div class="text-gray-500 dark:text-gray-400">Indicators</div>
                 </div>
-                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
-                    {{ stats.iocs.total|default(0)|int }}
+                <div class="text-right">
+                    <div id="iocTrendChart" class="w-24 h-12"></div>
+                    <div class="mt-2 text-sm {% if ioc_trend > 0 %}text-green-600{% elif ioc_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                        <i class="fas fa-{% if ioc_trend > 0 %}arrow-up{% elif ioc_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                        {% if ioc_trend != 0 %}{{ ioc_trend|abs }}%{% else %}Stable{% endif %}
+                    </div>
                 </div>
-                <div class="text-gray-500 dark:text-gray-400">Indicators</div>
             </div>
-            <div class="text-right">
-                <div id="iocTrendChart" class="w-24 h-12"></div>
-                <div class="mt-2 text-sm {% if ioc_trend > 0 %}text-green-600{% elif ioc_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
-                    <i class="fas fa-{% if ioc_trend > 0 %}arrow-up{% elif ioc_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-                    {% if ioc_trend != 0 %}{{ ioc_trend|abs }}%{% else %}Stable{% endif %}
-                </div>
-            </div>
-        </div>
+        </a>
     </div>
     
     <!-- AI Analyses Card -->
     <div class="stat-card">
-        <div class="flex items-center justify-between">
-            <div>
-                <div class="text-4xl text-purple-600 mb-4">
-                    <i class="fas fa-brain"></i>
+        <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="block h-full">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-4xl text-purple-600 mb-4">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                        {{ stats.analyses.total_analyses|default(0)|int }}
+                    </div>
+                    <div class="text-gray-500 dark:text-gray-400">AI Analyses</div>
                 </div>
-                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
-                    {{ stats.analyses.total_analyses|default(0)|int }}
+                <div class="text-right">
+                    <div id="analysisTrendChart" class="w-24 h-12"></div>
+                    <div class="mt-2 text-sm {% if analysis_trend > 0 %}text-green-600{% elif analysis_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
+                        <i class="fas fa-{% if analysis_trend > 0 %}arrow-up{% elif analysis_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
+                        {% if analysis_trend != 0 %}{{ analysis_trend|abs }}%{% else %}Stable{% endif %}
+                    </div>
                 </div>
-                <div class="text-gray-500 dark:text-gray-400">AI Analyses</div>
+                <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                    <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full">
+                        Batch Analysis Mode
+                    </span>
+                </div>
             </div>
-            <div class="text-right">
-                <div id="analysisTrendChart" class="w-24 h-12"></div>
-                <div class="mt-2 text-sm {% if analysis_trend > 0 %}text-green-600{% elif analysis_trend < 0 %}text-red-600{% else %}text-gray-500{% endif %}">
-                    <i class="fas fa-{% if analysis_trend > 0 %}arrow-up{% elif analysis_trend < 0 %}arrow-down{% else %}minus{% endif %} mr-1"></i>
-                    {% if analysis_trend != 0 %}{{ analysis_trend|abs }}%{% else %}Stable{% endif %}
-                </div>
-            </div>
-        </div>
-        <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full">
-                Batch Analysis Mode
-            </span>
-        </div>
+        </a>
     </div>
     
     <!-- Threat Score Card -->
@@ -343,7 +333,7 @@
                     <tbody class="table-body">
                         {% if top_iocs %}
                             {% for ioc in top_iocs[:10] %}
-                            <tr>
+                            <tr onclick="window.location='{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}'" class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
                                 <td>
                                     <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">
                                         {{ ioc.type|default('unknown') }}
@@ -378,7 +368,7 @@
                                 <td class="text-sm text-gray-500 dark:text-gray-400">
                                     {{ ioc.first_seen|default(ioc.created_at)|datetime }}
                                 </td>
-                                <td>
+                                <td onclick="event.stopPropagation()">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
                                        class="text-accent hover:text-accent-dark">
                                         <i class="fas fa-eye"></i>
@@ -418,10 +408,6 @@
                     <i class="fas fa-sync mr-1"></i>
                     Auto-refreshed every 2 hours
                 </div>
-                <button id="triggerIngestionBtn" class="btn btn-sm btn-primary">
-                    <i class="fas fa-play mr-1"></i>
-                    Trigger Ingestion
-                </button>
             </div>
         </div>
         <div class="panel-body p-0">
@@ -441,7 +427,7 @@
                     </thead>
                     <tbody class="table-body">
                         {% for feed in feed_items %}
-                        <tr>
+                        <tr onclick="window.location='{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}'" class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
                             <td>
                                 <div class="flex items-center">
                                     <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 dark:bg-blue-900/30 text-accent rounded-lg">
@@ -480,16 +466,12 @@
                                     {{ feed.format|default('json') }}
                                 </span>
                             </td>
-                            <td class="text-right">
+                            <td onclick="event.stopPropagation()">
                                 <div class="flex items-center space-x-2">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}" 
                                        class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
                                         <i class="fas fa-eye"></i>
                                     </a>
-                                    <button class="text-blue-600 hover:text-blue-800 tooltip" data-tooltip="Analyze Feed" 
-                                            onclick="analyzeSpecificFeed('{{ feed.id }}')">
-                                        <i class="fas fa-search"></i>
-                                    </button>
                                 </div>
                             </td>
                         </tr>
@@ -544,28 +526,6 @@
                     <option value="sha256">SHA256 Hashes</option>
                     <option value="email">Email Addresses</option>
                 </select>
-                
-                <!-- Export Options -->
-                <div class="relative">
-                    <button id="exportIocsBtn" class="btn btn-light flex items-center space-x-2">
-                        <i class="fas fa-download"></i>
-                        <span>Export</span>
-                        <i class="fas fa-chevron-down text-xs"></i>
-                    </button>
-                    <div id="exportDropdown" class="hidden absolute right-0 mt-2 w-40 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-20">
-                        <div class="py-1">
-                            <button onclick="exportIOCs('json')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                                <i class="fas fa-code mr-2"></i>JSON
-                            </button>
-                            <button onclick="exportIOCs('csv')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                                <i class="fas fa-table mr-2"></i>CSV
-                            </button>
-                            <button onclick="exportIOCs('txt')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                                <i class="fas fa-file-alt mr-2"></i>Text
-                            </button>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
         <div class="panel-body p-0">
@@ -586,7 +546,9 @@
                     </thead>
                     <tbody class="table-body" id="iocTable">
                         {% for ioc in ioc_items %}
-                        <tr data-type="{{ ioc.type|default('unknown') }}" data-value="{{ ioc.value }}">
+                        <tr data-type="{{ ioc.type|default('unknown') }}" data-value="{{ ioc.value }}" 
+                            onclick="window.location='{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}'" 
+                            class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
                             <td>
                                 <span class="badge-ioc badge-{{ ioc.type|default('unknown') }}">
                                     {{ ioc.type|default('unknown') }}
@@ -629,7 +591,7 @@
                             <td class="text-sm text-gray-500 dark:text-gray-400">
                                 {{ ioc.first_seen|default(ioc.created_at)|datetime }}
                             </td>
-                            <td>
+                            <td onclick="event.stopPropagation()">
                                 <div class="flex items-center space-x-2">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
                                        class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
@@ -653,13 +615,7 @@
                     Showing {{ ioc_items|length }} of {{ ioc_items|length }} results
                 </div>
                 <div class="flex items-center space-x-2">
-                    <button class="btn btn-sm btn-light" disabled>
-                        <i class="fas fa-chevron-left"></i>
-                    </button>
-                    <span class="text-sm text-gray-700 dark:text-gray-300">1</span>
-                    <button class="btn btn-sm btn-light" disabled>
-                        <i class="fas fa-chevron-right"></i>
-                    </button>
+                    <!-- Pagination controls would go here -->
                 </div>
             </div>
             {% else %}
@@ -692,10 +648,6 @@
                     <i class="fas fa-info-circle mr-1"></i>
                     <span>Analyzing feeds in batches to optimize performance</span>
                 </div>
-                <button id="triggerBatchAnalysis" class="btn btn-sm btn-primary">
-                    <i class="fas fa-play mr-1"></i>
-                    Trigger Analysis
-                </button>
             </div>
         </div>
         <div class="panel-body">
@@ -795,10 +747,9 @@
                                 <td class="text-sm text-gray-600 dark:text-gray-400">{{ feed.avg_sample_size|int }}</td>
                                 <td class="text-sm text-gray-500 dark:text-gray-400">{{ feed.last_analysis|datetime }}</td>
                                 <td>
-                                    <a href="{{ url_for('frontend.feed_analysis_detail', feed_id=feed.feed_id) }}" 
-                                       class="text-accent hover:text-accent-dark text-sm flex items-center">
-                                        <i class="fas fa-chart-line mr-1"></i> View Details
-                                    </a>
+                                    <span class="text-gray-500 text-sm flex items-center">
+                                        <i class="fas fa-chart-line mr-1"></i> Details
+                                    </span>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -890,58 +841,6 @@
                 if (!timeRangeButton.contains(e.target)) {
                     timeRangeDropdown.classList.add('hidden');
                 }
-            });
-        }
-        
-        // Export dropdown for IOCs
-        const exportBtn = document.getElementById('exportIocsBtn');
-        const exportDropdown = document.getElementById('exportDropdown');
-        
-        if (exportBtn && exportDropdown) {
-            exportBtn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                exportDropdown.classList.toggle('hidden');
-            });
-            
-            document.addEventListener('click', function(e) {
-                if (!exportBtn.contains(e.target)) {
-                    exportDropdown.classList.add('hidden');
-                }
-            });
-        }
-        
-        // Force Ingestion
-        const forceIngestionBtn = document.getElementById('forceIngestionBtn');
-        if (forceIngestionBtn) {
-            forceIngestionBtn.addEventListener('click', function() {
-                const icon = this.querySelector('i');
-                icon.classList.add('animate-spin');
-                
-                // Make API call to trigger ingestion
-                fetch('/api/admin/ingest', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': 'default-api-key'
-                    },
-                    body: JSON.stringify({ process_all: true })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        TIP.utils.showNotification('Ingestion triggered successfully', 'success');
-                        setTimeout(() => window.location.reload(), 2000);
-                    } else {
-                        TIP.utils.showNotification('Failed to trigger ingestion: ' + data.message, 'danger');
-                    }
-                })
-                .catch(error => {
-                    TIP.utils.showNotification('Error triggering ingestion', 'danger');
-                    console.error('Error:', error);
-                })
-                .finally(() => {
-                    icon.classList.remove('animate-spin');
-                });
             });
         }
         
@@ -1177,16 +1076,6 @@
         {% endif %}
         
         // Global function definitions
-        window.exportIOCs = function(format) {
-            const params = new URLSearchParams({
-                format: format,
-                days: {{ days }},
-                type: typeFilter ? typeFilter.value : ''
-            });
-            window.location.href = `{{ url_for('frontend.export_iocs') }}?${params}`;
-            document.getElementById('exportDropdown').classList.add('hidden');
-        };
-        
         window.copyToClipboard = function(text) {
             navigator.clipboard.writeText(text).then(function() {
                 TIP.utils.showNotification('Copied to clipboard', 'success', 1500);
@@ -1194,97 +1083,6 @@
                 TIP.utils.showNotification('Failed to copy', 'danger', 1500);
             });
         };
-        
-        window.analyzeSpecificFeed = function(feedId) {
-            TIP.utils.showNotification('Triggering analysis for ' + feedId, 'info');
-            
-            fetch('/api/admin/analyze-batch', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-API-Key': 'default-api-key'
-                },
-                body: JSON.stringify({ feed_id: feedId, force_analyze: true })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    TIP.utils.showNotification('Analysis failed: ' + data.error, 'danger');
-                } else {
-                    TIP.utils.showNotification('Analysis triggered successfully', 'success');
-                }
-            })
-            .catch(error => {
-                TIP.utils.showNotification('Error triggering analysis', 'danger');
-                console.error('Error:', error);
-            });
-        };
-        
-        // Trigger ingestion for feeds page
-        const triggerIngestionBtn = document.getElementById('triggerIngestionBtn');
-        if (triggerIngestionBtn) {
-            triggerIngestionBtn.addEventListener('click', function() {
-                const icon = this.querySelector('i');
-                icon.classList.add('animate-spin');
-                
-                fetch('/api/admin/ingest', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': 'default-api-key'
-                    },
-                    body: JSON.stringify({ process_all: true })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        TIP.utils.showNotification('Ingestion triggered successfully', 'success');
-                    } else {
-                        TIP.utils.showNotification('Failed to trigger ingestion', 'danger');
-                    }
-                })
-                .catch(error => {
-                    TIP.utils.showNotification('Error triggering ingestion', 'danger');
-                })
-                .finally(() => {
-                    icon.classList.remove('animate-spin');
-                });
-            });
-        }
-        
-        // Trigger batch analysis
-        const triggerBatchAnalysis = document.getElementById('triggerBatchAnalysis');
-        if (triggerBatchAnalysis) {
-            triggerBatchAnalysis.addEventListener('click', function() {
-                const icon = this.querySelector('i');
-                icon.classList.add('animate-spin');
-                
-                fetch('/api/admin/analyze-batch', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': 'default-api-key'
-                    },
-                    body: JSON.stringify({ force_analyze: true })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) {
-                        TIP.utils.showNotification('Analysis failed: ' + data.error, 'danger');
-                    } else {
-                        TIP.utils.showNotification('Batch analysis triggered successfully', 'success');
-                        setTimeout(() => window.location.reload(), 2000);
-                    }
-                })
-                .catch(error => {
-                    TIP.utils.showNotification('Error triggering analysis', 'danger');
-                    console.error('Error:', error);
-                })
-                .finally(() => {
-                    icon.classList.remove('animate-spin');
-                });
-            });
-        }
         
         // Auto-refresh data every 5 minutes for dashboard
         if (currentView === 'dashboard') {
@@ -1297,17 +1095,9 @@
         
         // Keyboard shortcuts
         document.addEventListener('keydown', function(e) {
-            // Ctrl/Cmd + E for export (IOCs view)
-            if ((e.ctrlKey || e.metaKey) && e.key === 'e' && currentView === 'iocs') {
-                e.preventDefault();
-                if (exportBtn) exportBtn.click();
-            }
-            
-            // Ctrl/Cmd + I for trigger ingestion
-            if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
-                e.preventDefault();
-                if (forceIngestionBtn) forceIngestionBtn.click();
-                if (triggerIngestionBtn) triggerIngestionBtn.click();
+            // F5 for refresh
+            if (e.key === 'F5') {
+                window.location.reload();
             }
         });
     });
