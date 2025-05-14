@@ -232,85 +232,63 @@ def initialize_platform():
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints with robust error handling
+        # 4. Register blueprints with comprehensive error handling
         try:
-            # Register API blueprint first
+            # Register API blueprint first with app context
             logger.info("Registering API blueprint...")
-            from api import api_blueprint
-            
-            # Clear existing if present
-            if 'api' in app.blueprints:
-                logger.info("Removing existing API blueprint")
-                del app.blueprints['api']
-            
-            # Register with explicit error handling
-            app.register_blueprint(api_blueprint, url_prefix='/api')
-            csrf.exempt(api_blueprint)
-            logger.info(f"API blueprint registered with routes: {[r.rule for r in api_blueprint.url_map.iter_rules()]}")
+            with app.app_context():
+                from api import api_blueprint
+                
+                # Clear existing if present
+                if 'api' in app.blueprints:
+                    logger.info("Removing existing API blueprint")
+                    del app.blueprints['api']
+                
+                # Register with explicit error handling
+                app.register_blueprint(api_blueprint, url_prefix='/api')
+                csrf.exempt(api_blueprint)
+                
+                # Verify API routes were registered
+                api_routes = [rule.rule for rule in api_blueprint.url_map.iter_rules()]
+                logger.info(f"API blueprint registered with {len(api_routes)} routes")
+                service_manager.update_status('api', ServiceStatus.READY)
             
             # Register frontend blueprint
             logger.info("Registering frontend blueprint...")
-            from frontend import frontend_app
-            
-            # Clear existing if present
-            if 'frontend' in app.blueprints:
-                logger.info("Removing existing frontend blueprint")
-                del app.blueprints['frontend']
-            
-            # Register frontend blueprint
-            app.register_blueprint(frontend_app)
-            logger.info(f"Frontend blueprint registered with routes: {[r.rule for r in frontend_app.url_map.iter_rules()]}")
-            
-            # Force URL map rebuild
-            app.url_map._rules.clear()
-            app.url_map._rules_by_endpoint.clear()
-            
-            # Manually add all routes from blueprints
-            for blueprint_name, blueprint in app.blueprints.items():
-                for rule in blueprint.url_map.iter_rules():
-                    if blueprint_name == 'api':
-                        full_rule = f"/api{rule.rule}"
-                    else:
-                        full_rule = rule.rule
-                    app.url_map.add(full_rule, rule.endpoint, rule.methods, rule.strict_slashes)
-            
-            logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
-            logger.info(f"Available endpoints: {list(app.view_functions.keys())}")
+            with app.app_context():
+                from frontend import frontend_app
+                
+                # Clear existing if present
+                if 'frontend' in app.blueprints:
+                    logger.info("Removing existing frontend blueprint")
+                    del app.blueprints['frontend']
+                
+                # Register frontend blueprint
+                app.register_blueprint(frontend_app)
+                
+                # Verify frontend routes were registered
+                frontend_routes = [rule.rule for rule in frontend_app.url_map.iter_rules()]
+                logger.info(f"Frontend blueprint registered with {len(frontend_routes)} routes")
+                service_manager.update_status('frontend', ServiceStatus.READY)
             
             # Verify critical routes exist
-            critical_routes = ['frontend.dashboard', 'api.get_stats', 'api.get_iocs']
-            missing_routes = [route for route in critical_routes if route not in app.view_functions]
-            
-            if missing_routes:
-                logger.error(f"Critical routes missing: {missing_routes}")
-                raise Exception(f"Critical routes not registered: {missing_routes}")
-            else:
-                logger.info("All critical routes verified successfully")
-                service_manager.update_status('frontend', ServiceStatus.READY)
-                service_manager.update_status('api', ServiceStatus.READY)
+            with app.app_context():
+                critical_routes = ['frontend.dashboard', 'api.get_stats', 'api.get_iocs']
+                missing_routes = [route for route in critical_routes if route not in app.view_functions]
+                
+                if missing_routes:
+                    logger.error(f"Critical routes missing: {missing_routes}")
+                    raise Exception(f"Critical routes not registered: {missing_routes}")
+                else:
+                    logger.info("All critical routes verified successfully")
+                    logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
             
         except Exception as e:
             logger.error(f"Failed to register blueprints: {str(e)}")
             logger.error(traceback.format_exc())
             service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
             service_manager.update_status('api', ServiceStatus.ERROR, str(e))
-            # Attempt fallback registration
-            try:
-                logger.info("Attempting fallback blueprint registration...")
-                # Re-import and try again
-                import importlib
-                import api
-                import frontend
-                importlib.reload(api)
-                importlib.reload(frontend)
-                from api import api_blueprint
-                from frontend import frontend_app
-                
-                app.register_blueprint(api_blueprint, url_prefix='/api')
-                app.register_blueprint(frontend_app)
-                logger.info("Fallback registration successful")
-            except Exception as fallback_error:
-                logger.error(f"Fallback registration failed: {fallback_error}")
+            # Don't raise - let the app continue with what we have
         
         # 5. Update service status to ready
         service_manager.update_status('app', ServiceStatus.READY)
@@ -318,43 +296,43 @@ def initialize_platform():
         
         # 6. Start background processes (non-blocking)
         try:
-            # Start service monitoring
+            # Start service monitoring with proper app context
             def monitor_services():
-                service_manager = Config.get_service_manager()
                 while True:
                     try:
-                        status = service_manager.get_status()
-                        
-                        # Check and recover missing routes
-                        if 'frontend.dashboard' not in app.view_functions:
-                            logger.warning("Frontend routes missing, attempting recovery")
-                            try:
-                                from frontend import frontend_app
-                                if 'frontend' in app.blueprints:
-                                    del app.blueprints['frontend']
-                                app.register_blueprint(frontend_app)
-                                logger.info("Frontend blueprint re-registered")
-                                service_manager.update_status('frontend', ServiceStatus.READY)
-                            except Exception as e:
-                                logger.error(f"Failed to recover frontend: {e}")
-                        
-                        if 'api.get_stats' not in app.view_functions:
-                            logger.warning("API routes missing, attempting recovery")
-                            try:
-                                from api import api_blueprint
-                                if 'api' in app.blueprints:
-                                    del app.blueprints['api']
-                                app.register_blueprint(api_blueprint, url_prefix='/api')
-                                logger.info("API blueprint re-registered")
-                                service_manager.update_status('api', ServiceStatus.READY)
-                            except Exception as e:
-                                logger.error(f"Failed to recover API: {e}")
-                        
-                        # Log current status
-                        overall = status['overall']
-                        if overall != ServiceStatus.READY.value:
-                            logger.info(f"System status: {overall}")
+                        with app.app_context():
+                            service_manager = Config.get_service_manager()
+                            status = service_manager.get_status()
                             
+                            # Check and recover missing routes
+                            if 'frontend.dashboard' not in app.view_functions:
+                                logger.warning("Frontend routes missing, attempting recovery")
+                                try:
+                                    from frontend import frontend_app
+                                    if 'frontend' in app.blueprints:
+                                        del app.blueprints['frontend']
+                                    app.register_blueprint(frontend_app)
+                                    logger.info("Frontend blueprint re-registered")
+                                    service_manager.update_status('frontend', ServiceStatus.READY)
+                                except Exception as e:
+                                    logger.error(f"Failed to recover frontend: {e}")
+                            
+                            if 'api.get_stats' not in app.view_functions:
+                                logger.warning("API routes missing, attempting recovery")
+                                try:
+                                    from api import api_blueprint
+                                    if 'api' in app.blueprints:
+                                        del app.blueprints['api']
+                                    app.register_blueprint(api_blueprint, url_prefix='/api')
+                                    logger.info("API blueprint re-registered")
+                                    service_manager.update_status('api', ServiceStatus.READY)
+                                except Exception as e:
+                                    logger.error(f"Failed to recover API: {e}")
+                            
+                            # Log current status periodically
+                            if status['overall'] != ServiceStatus.READY.value:
+                                logger.info(f"System status: {status['overall']}")
+                                
                     except Exception as e:
                         logger.error(f"Error in service monitor: {e}")
                     
@@ -505,15 +483,16 @@ def index():
         if 'frontend.dashboard' in app.view_functions:
             return redirect(url_for('frontend.dashboard'))
         else:
-            # Attempt to recover frontend
+            # Attempt to recover frontend with proper context
             logger.warning("Frontend routes missing, attempting recovery")
             try:
-                from frontend import frontend_app
-                if 'frontend' in app.blueprints:
-                    del app.blueprints['frontend']
-                app.register_blueprint(frontend_app)
-                if 'frontend.dashboard' in app.view_functions:
-                    return redirect(url_for('frontend.dashboard'))
+                with app.app_context():
+                    from frontend import frontend_app
+                    if 'frontend' in app.blueprints:
+                        del app.blueprints['frontend']
+                    app.register_blueprint(frontend_app)
+                    if 'frontend.dashboard' in app.view_functions:
+                        return redirect(url_for('frontend.dashboard'))
             except Exception as e:
                 logger.error(f"Error recovering frontend: {e}")
             
