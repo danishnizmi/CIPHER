@@ -211,7 +211,6 @@ def initialize_platform():
             logger.info("GCP clients initialized")
         except Exception as e:
             logger.warning(f"Some GCP clients failed to initialize: {e}")
-            # Continue anyway
         
         # 3. Ensure BigQuery tables exist (blocking for critical tables)
         try:
@@ -228,15 +227,15 @@ def initialize_platform():
                     logger.warning(f"Failed to initialize GCS bucket {bucket_name}")
             else:
                 logger.error("Failed to initialize BigQuery tables")
-                # Continue anyway, tables might be created later
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints with comprehensive error handling
-        try:
-            # Register API blueprint first with app context
-            logger.info("Registering API blueprint...")
-            with app.app_context():
+        # 4. Register blueprints properly within app context
+        with app.app_context():
+            # Import blueprints within context to avoid issues
+            try:
+                # Register API blueprint first
+                logger.info("Registering API blueprint...")
                 from api import api_blueprint
                 
                 # Clear existing if present
@@ -249,13 +248,17 @@ def initialize_platform():
                 csrf.exempt(api_blueprint)
                 
                 # Verify API routes were registered
-                api_routes = [rule.rule for rule in api_blueprint.url_map.iter_rules()]
+                api_routes = [rule.rule for rule in app.url_map.iter_rules() if rule.rule.startswith('/api')]
                 logger.info(f"API blueprint registered with {len(api_routes)} routes")
                 service_manager.update_status('api', ServiceStatus.READY)
+            except Exception as e:
+                logger.error(f"Failed to register API blueprint: {str(e)}")
+                logger.error(traceback.format_exc())
+                service_manager.update_status('api', ServiceStatus.ERROR, str(e))
             
             # Register frontend blueprint
-            logger.info("Registering frontend blueprint...")
-            with app.app_context():
+            try:
+                logger.info("Registering frontend blueprint...")
                 from frontend import frontend_app
                 
                 # Clear existing if present
@@ -267,28 +270,32 @@ def initialize_platform():
                 app.register_blueprint(frontend_app)
                 
                 # Verify frontend routes were registered
-                frontend_routes = [rule.rule for rule in frontend_app.url_map.iter_rules()]
+                frontend_routes = [rule.rule for rule in app.url_map.iter_rules() if not rule.rule.startswith('/api')]
                 logger.info(f"Frontend blueprint registered with {len(frontend_routes)} routes")
                 service_manager.update_status('frontend', ServiceStatus.READY)
+            except Exception as e:
+                logger.error(f"Failed to register frontend blueprint: {str(e)}")
+                logger.error(traceback.format_exc())
+                service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
             
             # Verify critical routes exist
-            with app.app_context():
-                critical_routes = ['frontend.dashboard', 'api.get_stats', 'api.get_iocs']
-                missing_routes = [route for route in critical_routes if route not in app.view_functions]
-                
-                if missing_routes:
-                    logger.error(f"Critical routes missing: {missing_routes}")
-                    raise Exception(f"Critical routes not registered: {missing_routes}")
-                else:
-                    logger.info("All critical routes verified successfully")
-                    logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
+            critical_routes = [
+                ('frontend.dashboard', 'GET'),
+                ('api.get_stats', 'GET'),
+                ('api.get_iocs', 'GET'),
+                ('api.get_threat_summary', 'GET')
+            ]
             
-        except Exception as e:
-            logger.error(f"Failed to register blueprints: {str(e)}")
-            logger.error(traceback.format_exc())
-            service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
-            service_manager.update_status('api', ServiceStatus.ERROR, str(e))
-            # Don't raise - let the app continue with what we have
+            missing_routes = []
+            for route_name, method in critical_routes:
+                if route_name not in app.view_functions:
+                    missing_routes.append(route_name)
+            
+            if missing_routes:
+                logger.error(f"Critical routes missing: {missing_routes}")
+            else:
+                logger.info("All critical routes verified successfully")
+                logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
         
         # 5. Update service status to ready
         service_manager.update_status('app', ServiceStatus.READY)
@@ -304,7 +311,7 @@ def initialize_platform():
                             service_manager = Config.get_service_manager()
                             status = service_manager.get_status()
                             
-                            # Check and recover missing routes
+                            # Check and recover missing routes periodically
                             if 'frontend.dashboard' not in app.view_functions:
                                 logger.warning("Frontend routes missing, attempting recovery")
                                 try:
@@ -343,7 +350,7 @@ def initialize_platform():
             logger.info("Service monitor started")
             
             # If enabled, trigger data ingestion immediately
-            if Config.AUTO_ANALYZE:
+            if Config.AUTO_ANALYZE and service_manager.get_status()['overall'] == ServiceStatus.READY.value:
                 from ingestion import ingest_all_feeds
                 try:
                     logger.info("Triggering initial data ingestion...")
@@ -483,7 +490,7 @@ def index():
         if 'frontend.dashboard' in app.view_functions:
             return redirect(url_for('frontend.dashboard'))
         else:
-            # Attempt to recover frontend with proper context
+            # Attempt to recover frontend
             logger.warning("Frontend routes missing, attempting recovery")
             try:
                 with app.app_context():
