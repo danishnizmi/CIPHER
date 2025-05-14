@@ -1,5 +1,5 @@
 """
-Production-ready frontend module for Threat Intelligence Platform.
+Production-ready frontend module for threat intelligence platform.
 Handles web interface, dashboard views, and real-time data display.
 Public-facing interface only - no admin controls.
 """
@@ -135,7 +135,7 @@ def get_api_key() -> str:
 
 @api_cache(timeout=CACHE_TIMEOUT)
 def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
-    """Make internal API request with service status check."""
+    """Make internal API request with proper context handling."""
     
     # Check service status first
     service_manager = Config.get_service_manager()
@@ -146,10 +146,29 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         return {"error": "Services unavailable", "status": "error"}
     
     try:
+        # Import at function level to avoid circular imports
+        from api import api_blueprint
         import requests
         
+        # For internal requests, use the proper Flask approach
+        try:
+            with current_app.test_request_context():
+                # Try to call the API function directly if possible
+                endpoint_func = current_app.view_functions.get(f'api.{endpoint.split("/")[-1].replace("-", "_")}')
+                if endpoint_func and method == 'GET':
+                    # Direct function call for GET requests
+                    logger.debug(f"Making direct internal call to {endpoint}")
+                    if params:
+                        # Simulate request args
+                        with current_app.test_request_context(query_string=params):
+                            return endpoint_func()
+                    else:
+                        return endpoint_func()
+        except Exception as e:
+            logger.debug(f"Direct call failed: {e}, falling back to HTTP request")
+        
+        # Fallback to HTTP request
         # Get the current app's URL for internal requests
-        # Use request context if available, otherwise construct from config
         try:
             if request:
                 base_url = request.url_root.rstrip('/')
@@ -441,6 +460,70 @@ def dashboard(view=None):
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
 
+# Add missing export_iocs route
+@frontend_app.route('/export/iocs')
+def export_iocs():
+    """Export IOCs in various formats."""
+    try:
+        format_type = request.args.get('format', 'json').lower()
+        days = int(request.args.get('days', '30'))
+        ioc_type = request.args.get('type', '')
+        
+        # Get IOCs data
+        params = {'days': days, 'limit': 10000}
+        if ioc_type:
+            params['type'] = ioc_type
+        
+        iocs_response = api_request('iocs', params=params)
+        
+        if not iocs_response or 'error' in iocs_response:
+            flash('Error retrieving IOCs for export', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        records = iocs_response.get('records', [])
+        
+        # Generate filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"threat_iocs_{timestamp}.{format_type}"
+        
+        if format_type == 'json':
+            response = make_response(json.dumps(records, indent=2))
+            response.headers['Content-Type'] = 'application/json'
+        elif format_type == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            if records:
+                writer = csv.DictWriter(output, fieldnames=records[0].keys())
+                writer.writeheader()
+                writer.writerows(records)
+            
+            response = make_response(output.getvalue())
+            response.headers['Content-Type'] = 'text/csv'
+        elif format_type == 'txt':
+            # Simple text format
+            lines = []
+            for record in records:
+                line = f"{record.get('type', 'unknown')}: {record.get('value', '')}"
+                if record.get('source'):
+                    line += f" (source: {record['source']})"
+                lines.append(line)
+            
+            response = make_response('\n'.join(lines))
+            response.headers['Content-Type'] = 'text/plain'
+        else:
+            flash('Invalid export format', 'danger')
+            return redirect(url_for('frontend.dashboard', view='iocs'))
+        
+        response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+        return response
+        
+    except Exception as e:
+        logger.error(f"Export error: {str(e)}")
+        flash('Error during export', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
 @frontend_app.route('/<content_type>/<path:identifier>')
 def dynamic_content_detail(content_type, identifier):
     """Display detailed view for any content type."""
@@ -500,13 +583,9 @@ def dynamic_content_detail(content_type, identifier):
                     return redirect(url_for('frontend.dashboard', view='feeds'))
                     
         elif content_type == 'analysis':
-            # Get analysis data by ID
-            analysis_response = api_request(f'analysis/{identifier}')
-            if analysis_response and 'error' not in analysis_response:
-                context['data'] = analysis_response
-            else:
-                flash('Analysis not found', 'warning')
-                return redirect(url_for('frontend.dashboard', view='ai-analysis'))
+            # Get analysis data by ID - for now just return to AI analysis view
+            flash('Analysis details coming soon', 'info')
+            return redirect(url_for('frontend.dashboard', view='ai-analysis'))
         
         return render_template('detail.html', **context)
         
