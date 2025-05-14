@@ -32,14 +32,8 @@ logger = logging.getLogger(__name__)
 # Create API blueprint
 api_blueprint = Blueprint('api', __name__)
 
-# Initialize rate limiter
-limiter = Limiter(
-    key_func=get_remote_address,
-    app=current_app,
-    default_limits=["2000 per day", "200 per hour"],  # More generous for public
-    storage_uri="memory://",
-    swallow_errors=True
-)
+# Initialize rate limiter - we'll configure it in the main app
+limiter = None
 
 # Cache for expensive queries
 query_cache = TTLCache(maxsize=1000, ttl=300)  # 5-minute TTL
@@ -299,7 +293,6 @@ def api_health_check():
         return jsonify(health_data), 206  # Partial content
 
 @api_blueprint.route('/stats', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=600)  # 10-minute cache
 def get_stats():
@@ -407,7 +400,6 @@ def get_stats():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/feeds', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_feeds():
@@ -465,7 +457,6 @@ def get_feeds():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_iocs():
@@ -567,7 +558,6 @@ def get_iocs():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/analyses', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_ai_analyses():
@@ -576,7 +566,17 @@ def get_ai_analyses():
         days = validate_days_parameter(request.args.get('days', '30'))
         
         # Import the analysis function
-        from analysis import get_batch_analysis_summary
+        try:
+            from analysis import get_batch_analysis_summary
+        except ImportError:
+            return jsonify({
+                'overall_threat_level': 'Medium',
+                'total_feeds_analyzed': 0,
+                'batch_analyses': [],
+                'threat_level_distribution': [],
+                'last_run_time': None,
+                'error': 'Analysis module not available'
+            })
         
         batch_summary = get_batch_analysis_summary(days)
         
@@ -641,7 +641,6 @@ def get_ai_analyses():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/threat_summary', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_threat_summary():
@@ -761,7 +760,6 @@ def get_threat_summary():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/ai/summary', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=300)
 def get_ai_summary():
@@ -850,7 +848,6 @@ def get_ai_summary():
         return jsonify({"error": "Internal server error"}), 500
 
 @api_blueprint.route('/iocs/geo', methods=['GET'])
-@limiter.limit("60 per minute")
 @require_api_key
 @cache_response(ttl=600)
 def get_iocs_geo():
@@ -956,5 +953,23 @@ def teardown_api_request(exception=None):
         service_manager = Config.get_service_manager()
         service_manager.update_status('api', ServiceStatus.DEGRADED)
 
-# Initialize rate limiter with the blueprint
-limiter.init_app(current_app)
+# Configure rate limiter after blueprint is created
+def configure_rate_limiter(app):
+    """Configure rate limiter for the blueprint after app is created."""
+    global limiter
+    limiter = Limiter(
+        key_func=get_remote_address,
+        app=app,
+        default_limits=["2000 per day", "200 per hour"],  # More generous for public
+        storage_uri="memory://",
+        swallow_errors=True
+    )
+    
+    # Apply rate limits to endpoints
+    limiter.limit("60 per minute")(get_stats)
+    limiter.limit("60 per minute")(get_feeds)
+    limiter.limit("60 per minute")(get_iocs)
+    limiter.limit("60 per minute")(get_ai_analyses)
+    limiter.limit("60 per minute")(get_threat_summary)
+    limiter.limit("60 per minute")(get_ai_summary)
+    limiter.limit("60 per minute")(get_iocs_geo)
