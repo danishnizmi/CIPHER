@@ -232,65 +232,85 @@ def initialize_platform():
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints with proper validation - CRITICAL FIX
+        # 4. Register blueprints with robust error handling
         try:
-            # Import modules first to catch any import errors
+            # Register API blueprint first
+            logger.info("Registering API blueprint...")
             from api import api_blueprint
-            from frontend import frontend_app
             
-            # Register API blueprint with CSRF exemption
+            # Clear existing if present
+            if 'api' in app.blueprints:
+                logger.info("Removing existing API blueprint")
+                del app.blueprints['api']
+            
+            # Register with explicit error handling
             app.register_blueprint(api_blueprint, url_prefix='/api')
             csrf.exempt(api_blueprint)
-            logger.info("API blueprint registered successfully")
+            logger.info(f"API blueprint registered with routes: {[r.rule for r in api_blueprint.url_map.iter_rules()]}")
             
-            # CRITICAL: Force registration of frontend blueprint
-            # Clear any existing blueprints of the same name first
+            # Register frontend blueprint
+            logger.info("Registering frontend blueprint...")
+            from frontend import frontend_app
+            
+            # Clear existing if present
             if 'frontend' in app.blueprints:
                 logger.info("Removing existing frontend blueprint")
                 del app.blueprints['frontend']
             
-            # Register frontend blueprint WITHOUT url_prefix
+            # Register frontend blueprint
             app.register_blueprint(frontend_app)
-            logger.info("Frontend blueprint registered successfully")
+            logger.info(f"Frontend blueprint registered with routes: {[r.rule for r in frontend_app.url_map.iter_rules()]}")
             
-            # Force Flask to rebuild URL map
+            # Force URL map rebuild
             app.url_map._rules.clear()
             app.url_map._rules_by_endpoint.clear()
-            app.url_map.add_view_function('/', frontend_app.dashboard)
-            app.url_map.add_view_function('/dashboard', frontend_app.dashboard)
-            app.url_map.add_view_function('/dashboard/<view>', frontend_app.dashboard)
             
-            # Verify that the frontend blueprint was registered correctly
-            frontend_routes = ['frontend.dashboard', 'frontend.index']
-            registered_routes = list(app.view_functions.keys())
+            # Manually add all routes from blueprints
+            for blueprint_name, blueprint in app.blueprints.items():
+                for rule in blueprint.url_map.iter_rules():
+                    if blueprint_name == 'api':
+                        full_rule = f"/api{rule.rule}"
+                    else:
+                        full_rule = rule.rule
+                    app.url_map.add(full_rule, rule.endpoint, rule.methods, rule.strict_slashes)
             
-            logger.info(f"Registered routes: {registered_routes}")
+            logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
+            logger.info(f"Available endpoints: {list(app.view_functions.keys())}")
             
-            frontend_registered = any(route in registered_routes for route in frontend_routes)
-            if frontend_registered:
-                logger.info("Frontend blueprint routes verified successfully")
-                service_manager.update_status('frontend', ServiceStatus.READY)
+            # Verify critical routes exist
+            critical_routes = ['frontend.dashboard', 'api.get_stats', 'api.get_iocs']
+            missing_routes = [route for route in critical_routes if route not in app.view_functions]
+            
+            if missing_routes:
+                logger.error(f"Critical routes missing: {missing_routes}")
+                raise Exception(f"Critical routes not registered: {missing_routes}")
             else:
-                logger.error("Frontend blueprint routes verification failed!")
-                logger.error(f"Expected routes: {frontend_routes}")
-                logger.error(f"Actual routes: {registered_routes}")
-                # Force registration one more time
-                try:
-                    logger.info("Attempting force re-registration of frontend")
-                    # Create a new blueprint instance
-                    exec(open('frontend.py').read(), {'__name__': 'frontend'})
-                    from frontend import frontend_app
-                    app.register_blueprint(frontend_app, name='frontend_retry')
-                    service_manager.update_status('frontend', ServiceStatus.READY)
-                except Exception as e:
-                    logger.error(f"Force re-registration failed: {e}")
-                    service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
+                logger.info("All critical routes verified successfully")
+                service_manager.update_status('frontend', ServiceStatus.READY)
+                service_manager.update_status('api', ServiceStatus.READY)
             
         except Exception as e:
             logger.error(f"Failed to register blueprints: {str(e)}")
             logger.error(traceback.format_exc())
             service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
-            # Still continue to show error pages
+            service_manager.update_status('api', ServiceStatus.ERROR, str(e))
+            # Attempt fallback registration
+            try:
+                logger.info("Attempting fallback blueprint registration...")
+                # Re-import and try again
+                import importlib
+                import api
+                import frontend
+                importlib.reload(api)
+                importlib.reload(frontend)
+                from api import api_blueprint
+                from frontend import frontend_app
+                
+                app.register_blueprint(api_blueprint, url_prefix='/api')
+                app.register_blueprint(frontend_app)
+                logger.info("Fallback registration successful")
+            except Exception as fallback_error:
+                logger.error(f"Fallback registration failed: {fallback_error}")
         
         # 5. Update service status to ready
         service_manager.update_status('app', ServiceStatus.READY)
@@ -304,37 +324,37 @@ def initialize_platform():
                 while True:
                     try:
                         status = service_manager.get_status()
-                        overall = status['overall']
                         
-                        # Check if frontend needs recovery
-                        frontend_status = status['services'].get('frontend')
-                        if frontend_status != ServiceStatus.READY.value:
-                            logger.info("Attempting to recover frontend...")
+                        # Check and recover missing routes
+                        if 'frontend.dashboard' not in app.view_functions:
+                            logger.warning("Frontend routes missing, attempting recovery")
                             try:
-                                # Check if routes exist
-                                if 'frontend.dashboard' not in app.view_functions:
-                                    logger.warning("Frontend routes missing, attempting recovery")
-                                    # Try to re-register frontend blueprint
-                                    from frontend import frontend_app
-                                    if 'frontend' in app.blueprints:
-                                        del app.blueprints['frontend']
-                                    app.register_blueprint(frontend_app)
-                                    logger.info("Frontend blueprint re-registered")
-                                    service_manager.update_status('frontend', ServiceStatus.READY)
-                                else:
-                                    logger.info("Frontend routes found, updating status")
-                                    service_manager.update_status('frontend', ServiceStatus.READY)
+                                from frontend import frontend_app
+                                if 'frontend' in app.blueprints:
+                                    del app.blueprints['frontend']
+                                app.register_blueprint(frontend_app)
+                                logger.info("Frontend blueprint re-registered")
+                                service_manager.update_status('frontend', ServiceStatus.READY)
                             except Exception as e:
                                 logger.error(f"Failed to recover frontend: {e}")
                         
-                        # Gradually mark services as ready
-                        for service in ['api', 'ingestion', 'analysis']:
-                            current_status = status['services'].get(service)
-                            if current_status == ServiceStatus.INITIALIZING.value:
-                                service_manager.update_status(service, ServiceStatus.READY)
+                        if 'api.get_stats' not in app.view_functions:
+                            logger.warning("API routes missing, attempting recovery")
+                            try:
+                                from api import api_blueprint
+                                if 'api' in app.blueprints:
+                                    del app.blueprints['api']
+                                app.register_blueprint(api_blueprint, url_prefix='/api')
+                                logger.info("API blueprint re-registered")
+                                service_manager.update_status('api', ServiceStatus.READY)
+                            except Exception as e:
+                                logger.error(f"Failed to recover API: {e}")
                         
-                        if overall == ServiceStatus.ERROR.value:
-                            logger.warning("System in error state, checking services...")
+                        # Log current status
+                        overall = status['overall']
+                        if overall != ServiceStatus.READY.value:
+                            logger.info(f"System status: {overall}")
+                            
                     except Exception as e:
                         logger.error(f"Error in service monitor: {e}")
                     
@@ -342,10 +362,10 @@ def initialize_platform():
             
             monitor_thread = threading.Thread(target=monitor_services, daemon=True)
             monitor_thread.start()
+            logger.info("Service monitor started")
             
             # If enabled, trigger data ingestion immediately
             if Config.AUTO_ANALYZE:
-                # Direct import and call to avoid threading issues
                 from ingestion import ingest_all_feeds
                 try:
                     logger.info("Triggering initial data ingestion...")
@@ -364,9 +384,9 @@ def initialize_platform():
         logger.error(f"Failed to initialize platform: {str(e)}")
         logger.error(traceback.format_exc())
         service_manager.update_status('app', ServiceStatus.ERROR, str(e))
-        return False  # Still return True to allow the app to start and show error pages
+        return False
 
-# Error handlers
+# Error handlers with robust fallbacks
 @app.errorhandler(400)
 def handle_bad_request(e):
     """Handle 400 errors including CSRF errors."""
@@ -401,19 +421,30 @@ def handle_forbidden(e):
 def page_not_found(e):
     """Handle 404 errors."""
     logger.warning(f"Page not found: {request.url}")
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Not found', 'message': str(e)}), 404
     
-    # CRITICAL FIX: Check if frontend routes exist before rendering template
-    if 'frontend.dashboard' not in app.view_functions:
-        # Fallback to simple JSON response if frontend routes are not available
+    # Always return JSON for API endpoints
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Not found', 'message': 'Endpoint not found'}), 404
+    
+    # For frontend routes, check if they exist before trying to render template
+    try:
+        if 'frontend.dashboard' not in app.view_functions:
+            # Return JSON if frontend is not ready
+            return jsonify({
+                'error': 'Service initializing',
+                'message': 'The service is still starting up. Please try again in a moment.',
+                'code': 404
+            }), 404
+        else:
+            # Render 404 template if frontend is ready
+            return render_template('404.html'), 404
+    except Exception as template_error:
+        logger.error(f"Error rendering 404 template: {template_error}")
         return jsonify({
-            'error': 'Service initializing',
-            'message': 'The service is still starting up. Please try again in a moment.',
+            'error': 'Not found',
+            'message': 'Page not found and template rendering failed',
             'code': 404
         }), 404
-    
-    return render_template('404.html'), 404
 
 @app.errorhandler(429)
 def handle_rate_limit(e):
@@ -436,21 +467,30 @@ def internal_server_error(e):
     """Handle 500 errors."""
     logger.error(f"Internal server error: {request.url}")
     logger.error(traceback.format_exc())
+    
+    # Always return JSON for API endpoints
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
     
-    # CRITICAL FIX: Check if frontend routes exist before rendering template
-    if 'frontend.dashboard' not in app.view_functions:
-        # Fallback to simple JSON response if frontend routes are not available
+    # For frontend, check if template rendering is possible
+    try:
+        if 'frontend.dashboard' not in app.view_functions:
+            return jsonify({
+                'error': 'Service error',
+                'message': 'An error occurred. The service may be initializing.',
+                'code': 500
+            }), 500
+        else:
+            return render_template('500.html'), 500
+    except Exception as template_error:
+        logger.error(f"Error rendering 500 template: {template_error}")
         return jsonify({
-            'error': 'Service error',
-            'message': 'An error occurred. The service may be initializing.',
+            'error': 'Internal server error',
+            'message': 'An error occurred and template rendering failed',
             'code': 500
         }), 500
-    
-    return render_template('500.html'), 500
 
-# Root route handler - CRITICAL FIX
+# Root route handler
 @app.route('/')
 def index():
     """Root route handler."""
@@ -461,26 +501,23 @@ def index():
         status = service_manager.get_status()
         logger.info(f"Service status: {status}")
         
-        # Check if frontend blueprint is registered by checking for specific routes
+        # Check if frontend blueprint is registered
         if 'frontend.dashboard' in app.view_functions:
-            # Redirect to dashboard
             return redirect(url_for('frontend.dashboard'))
         else:
-            # If frontend routes aren't registered but we think frontend is ready, try to re-register
-            if status['services'].get('frontend') == ServiceStatus.READY.value:
-                try:
-                    logger.warning("Frontend routes missing but service marked ready, attempting recovery")
-                    from frontend import frontend_app
-                    if 'frontend' in app.blueprints:
-                        del app.blueprints['frontend']
-                    app.register_blueprint(frontend_app)
-                    # Now check if registration worked
-                    if 'frontend.dashboard' in app.view_functions:
-                        return redirect(url_for('frontend.dashboard'))
-                except Exception as e:
-                    logger.error(f"Error recovering frontend: {e}")
+            # Attempt to recover frontend
+            logger.warning("Frontend routes missing, attempting recovery")
+            try:
+                from frontend import frontend_app
+                if 'frontend' in app.blueprints:
+                    del app.blueprints['frontend']
+                app.register_blueprint(frontend_app)
+                if 'frontend.dashboard' in app.view_functions:
+                    return redirect(url_for('frontend.dashboard'))
+            except Exception as e:
+                logger.error(f"Error recovering frontend: {e}")
             
-            # Show initialization message with fallback
+            # Return initialization message
             return jsonify({
                 'status': 'initializing',
                 'message': 'Service is initializing. Please wait a moment and refresh.',
@@ -522,6 +559,13 @@ def status_check():
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
+    # Add route information for debugging
+    route_info = {
+        'total_routes': len(list(app.url_map.iter_rules())),
+        'blueprints': list(app.blueprints.keys()),
+        'endpoints': list(app.view_functions.keys())[:20]  # Limit to first 20
+    }
+    
     return jsonify({
         'status': status['overall'],
         'timestamp': datetime.utcnow().isoformat(),
@@ -529,6 +573,7 @@ def status_check():
         'environment': Config.ENVIRONMENT,
         'services': status['services'],
         'errors': status['errors'],
+        'routes': route_info,
         'config': {
             'gcp_project': Config.GCP_PROJECT,
             'bigquery_dataset': Config.BIGQUERY_DATASET,
@@ -550,7 +595,6 @@ if __name__ != '__main__':
     success = initialize_platform()
     if not success:
         logger.error("Platform initialization failed - application may not work correctly")
-        # Continue anyway to show error page
     else:
         logger.info("Platform initialized successfully")
 
@@ -562,7 +606,6 @@ if __name__ == '__main__':
         
         if not success:
             logger.error("Platform initialization failed, starting in degraded mode")
-            # Continue to start the app so we can show error pages
         
         port = int(os.environ.get('PORT', 8080))
         logger.info(f"Starting server on port {port}")
