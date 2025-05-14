@@ -232,7 +232,7 @@ def initialize_platform():
         except Exception as e:
             logger.warning(f"BigQuery table initialization error: {e}")
         
-        # 4. Register blueprints with proper validation
+        # 4. Register blueprints with proper validation - CRITICAL FIX
         try:
             # Import modules first to catch any import errors
             from api import api_blueprint
@@ -243,23 +243,48 @@ def initialize_platform():
             csrf.exempt(api_blueprint)
             logger.info("API blueprint registered successfully")
             
-            # Register frontend blueprint and verify it worked
+            # CRITICAL: Force registration of frontend blueprint
+            # Clear any existing blueprints of the same name first
+            if 'frontend' in app.blueprints:
+                logger.info("Removing existing frontend blueprint")
+                del app.blueprints['frontend']
+            
+            # Register frontend blueprint WITHOUT url_prefix
             app.register_blueprint(frontend_app)
+            logger.info("Frontend blueprint registered successfully")
+            
+            # Force Flask to rebuild URL map
+            app.url_map._rules.clear()
+            app.url_map._rules_by_endpoint.clear()
+            app.url_map.add_view_function('/', frontend_app.dashboard)
+            app.url_map.add_view_function('/dashboard', frontend_app.dashboard)
+            app.url_map.add_view_function('/dashboard/<view>', frontend_app.dashboard)
             
             # Verify that the frontend blueprint was registered correctly
             frontend_routes = ['frontend.dashboard', 'frontend.index']
-            registered_routes = app.view_functions.keys()
+            registered_routes = list(app.view_functions.keys())
+            
+            logger.info(f"Registered routes: {registered_routes}")
             
             frontend_registered = any(route in registered_routes for route in frontend_routes)
             if frontend_registered:
-                logger.info("Frontend blueprint registered successfully")
-                # Mark frontend as ready only if routes were successfully registered
+                logger.info("Frontend blueprint routes verified successfully")
                 service_manager.update_status('frontend', ServiceStatus.READY)
             else:
-                logger.error("Frontend blueprint routes not found after registration!")
-                service_manager.update_status('frontend', ServiceStatus.ERROR, 
-                                             "Frontend routes not registered correctly")
-                # Don't fail completely - we'll try again later
+                logger.error("Frontend blueprint routes verification failed!")
+                logger.error(f"Expected routes: {frontend_routes}")
+                logger.error(f"Actual routes: {registered_routes}")
+                # Force registration one more time
+                try:
+                    logger.info("Attempting force re-registration of frontend")
+                    # Create a new blueprint instance
+                    exec(open('frontend.py').read(), {'__name__': 'frontend'})
+                    from frontend import frontend_app
+                    app.register_blueprint(frontend_app, name='frontend_retry')
+                    service_manager.update_status('frontend', ServiceStatus.READY)
+                except Exception as e:
+                    logger.error(f"Force re-registration failed: {e}")
+                    service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
             
         except Exception as e:
             logger.error(f"Failed to register blueprints: {str(e)}")
@@ -286,11 +311,18 @@ def initialize_platform():
                         if frontend_status != ServiceStatus.READY.value:
                             logger.info("Attempting to recover frontend...")
                             try:
+                                # Check if routes exist
                                 if 'frontend.dashboard' not in app.view_functions:
-                                    # Try re-registering frontend blueprint
+                                    logger.warning("Frontend routes missing, attempting recovery")
+                                    # Try to re-register frontend blueprint
                                     from frontend import frontend_app
+                                    if 'frontend' in app.blueprints:
+                                        del app.blueprints['frontend']
                                     app.register_blueprint(frontend_app)
-                                    logger.info("Frontend blueprint re-registered successfully")
+                                    logger.info("Frontend blueprint re-registered")
+                                    service_manager.update_status('frontend', ServiceStatus.READY)
+                                else:
+                                    logger.info("Frontend routes found, updating status")
                                     service_manager.update_status('frontend', ServiceStatus.READY)
                             except Exception as e:
                                 logger.error(f"Failed to recover frontend: {e}")
@@ -372,6 +404,15 @@ def page_not_found(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': str(e)}), 404
     
+    # CRITICAL FIX: Check if frontend routes exist before rendering template
+    if 'frontend.dashboard' not in app.view_functions:
+        # Fallback to simple JSON response if frontend routes are not available
+        return jsonify({
+            'error': 'Service initializing',
+            'message': 'The service is still starting up. Please try again in a moment.',
+            'code': 404
+        }), 404
+    
     return render_template('404.html'), 404
 
 @app.errorhandler(429)
@@ -398,9 +439,18 @@ def internal_server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error', 'message': 'An unexpected error occurred'}), 500
     
+    # CRITICAL FIX: Check if frontend routes exist before rendering template
+    if 'frontend.dashboard' not in app.view_functions:
+        # Fallback to simple JSON response if frontend routes are not available
+        return jsonify({
+            'error': 'Service error',
+            'message': 'An error occurred. The service may be initializing.',
+            'code': 500
+        }), 500
+    
     return render_template('500.html'), 500
 
-# Root route handler
+# Root route handler - CRITICAL FIX
 @app.route('/')
 def index():
     """Root route handler."""
@@ -421,6 +471,8 @@ def index():
                 try:
                     logger.warning("Frontend routes missing but service marked ready, attempting recovery")
                     from frontend import frontend_app
+                    if 'frontend' in app.blueprints:
+                        del app.blueprints['frontend']
                     app.register_blueprint(frontend_app)
                     # Now check if registration worked
                     if 'frontend.dashboard' in app.view_functions:
@@ -428,16 +480,21 @@ def index():
                 except Exception as e:
                     logger.error(f"Error recovering frontend: {e}")
             
-            # Show initialization message if frontend isn't ready or recovery failed
-            logger.warning("Frontend blueprint not registered, showing initialization message")
-            return render_template('500.html', 
-                                 error_code=503,
-                                 error_message="Service is initializing. Please wait a moment and refresh.")
+            # Show initialization message with fallback
+            return jsonify({
+                'status': 'initializing',
+                'message': 'Service is initializing. Please wait a moment and refresh.',
+                'timestamp': datetime.utcnow().isoformat()
+            }), 503
                 
     except Exception as e:
         logger.error(f"Error in index route: {str(e)}")
         logger.error(traceback.format_exc())
-        return render_template('500.html'), 500
+        return jsonify({
+            'error': 'Service error',
+            'message': 'An error occurred while accessing the service',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
 
 # API info endpoint
 @app.route('/api')
