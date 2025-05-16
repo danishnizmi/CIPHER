@@ -5,28 +5,43 @@ metadata:
   annotations:
     run.googleapis.com/ingress: all
     run.googleapis.com/execution-environment: gen2
+    # Enable CPU boost for faster startup
+    run.googleapis.com/startup-cpu-boost: "true"
+    # Allow unauthenticated access since this is a public platform
+    run.googleapis.com/invoker: "allUsers"
+    # Set description
+    run.googleapis.com/description: "Threat Intelligence Platform - Production Deployment"
   labels:
     app: threat-intelligence-platform
     environment: production
     managed-by: cloudbuild
+    version: 1.0.3
 spec:
   template:
     metadata:
       annotations:
+        # Scaling configuration
         autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "10"
+        autoscaling.knative.dev/maxScale: "15"
+        # Enable CPU boost for better performance during startup
         run.googleapis.com/startup-cpu-boost: "true"
+        # Prevent CPU throttling during analysis
         run.googleapis.com/cpu-throttling: "false"
+        # Set session affinity for better cache utilization
+        run.googleapis.com/sessionAffinity: "true"
+        # Custom timeout for long-running operations
+        run.googleapis.com/timeout: "900s"
       labels:
         app: threat-intelligence-platform
         environment: production
         managed-by: cloudbuild
+        version: 1.0.3
     spec:
-      containerConcurrency: 80
-      timeoutSeconds: 900
+      containerConcurrency: 100
+      timeoutSeconds: 900  # 15 minutes for long-running operations
       serviceAccountName: cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
       containers:
-      - name: threat-intelligence-platform-1
+      - name: threat-intelligence-platform-container
         image: gcr.io/${PROJECT_ID}/threat-intelligence-platform:latest
         # Explicitly use init-app.sh as the entrypoint
         command: ["/app/init-app.sh"]
@@ -34,59 +49,92 @@ spec:
         - name: http1
           containerPort: 8080
         env:
+        # Core application settings
         - name: ENVIRONMENT
           value: production
         - name: GCP_PROJECT
           value: ${PROJECT_ID}
         - name: GCP_REGION
           value: us-central1
+        - name: VERSION
+          value: 1.0.3
+        - name: PORT
+          value: "8080"
+        
+        # Google Cloud settings
         - name: BIGQUERY_DATASET
           value: threat_intelligence
+        - name: BIGQUERY_LOCATION
+          value: US
+        - name: BIGQUERY_MAX_BYTES_BILLED
+          value: "209715200"  # 200MB limit
         - name: GCS_BUCKET
           value: ${PROJECT_ID}-threat-data
         - name: PUBSUB_TOPIC
           value: threat-data-ingestion
         - name: PUBSUB_ANALYSIS_TOPIC
           value: threat-analysis-events
-        - name: VERSION
-          value: 1.0.3
-        - name: DEBUG
-          value: 'false'
+        
+        # Python optimization settings
         - name: PYTHONPATH
           value: /app
         - name: PYTHONDONTWRITEBYTECODE
           value: '1'
         - name: PYTHONUNBUFFERED
           value: '1'
+        - name: PYTHONOPTIMIZE
+          value: '1'
+        
+        # Logging configuration
         - name: LOG_LEVEL
           value: INFO
         - name: LOG_TO_CLOUD
           value: 'true'
         - name: ENABLE_ERROR_REPORTING
           value: 'true'
-        # Critical for data ingestion and processing
+        
+        # Feature flags
         - name: AUTO_ANALYZE
           value: 'true'
         - name: NLP_ENABLED
           value: 'true'
         - name: ANALYSIS_ENABLED
           value: 'true'
-        - name: BIGQUERY_MAX_BYTES_BILLED
-          value: '104857600'
-        - name: FEED_CONFIG
-          value: '{"feeds":[{"id":"threatfox","name":"ThreatFox IOCs","url":"https://threatfox.abuse.ch/export/json/recent/","description":"Recent indicators from ThreatFox","format":"json","type":"mixed","update_frequency":"daily","enabled":true},{"id":"urlhaus","name":"URLhaus Malware","url":"https://urlhaus.abuse.ch/downloads/csv_recent/","description":"Recent malware URLs from URLhaus","format":"csv","type":"url","update_frequency":"daily","enabled":true}]}'
+        
+        # Performance tuning
+        - name: FEED_UPDATE_INTERVAL
+          value: "4"  # Hours
+        - name: GUNICORN_TIMEOUT
+          value: '180'
+        - name: STARTUP_TIMEOUT
+          value: '300'  # 5 minutes to match our service timeout
+        
+        # Vertex AI settings
+        - name: VERTEXAI_LOCATION
+          value: us-central1
+        - name: VERTEXAI_MODEL
+          value: text-bison@latest
+        
+        # Security settings
         - name: API_KEY
           valueFrom:
             secretKeyRef:
               key: latest
               name: api-keys
+        
+        # Feed configuration from Secret Manager
+        - name: FEED_CONFIG_SECRET
+          value: feed-config
+        
         resources:
           limits:
-            cpu: '2'
-            memory: 2Gi
+            cpu: '4'      # Increased for better performance
+            memory: 4Gi   # Increased for AI analysis
           requests:
-            cpu: '1'
-            memory: 1Gi
+            cpu: '2'      # Always allocate minimum CPU
+            memory: 2Gi   # Always allocate minimum memory
+        
+        # Volume mounts for performance and storage
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -94,55 +142,198 @@ spec:
           mountPath: /app/data
         - name: app-cache
           mountPath: /app/cache
+        - name: app-logs
+          mountPath: /app/logs
         - name: api-keys-volume
           mountPath: /app/secrets/api-keys
           readOnly: true
         - name: feed-config-volume
           mountPath: /app/secrets/feed-config
           readOnly: true
-        # Increased timeouts for probes to allow for initialization
+        
+        # Health checks with proper timeouts for our circuit breaker system
         startupProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 15
-          timeoutSeconds: 10
-          failureThreshold: 10
+          initialDelaySeconds: 30     # Give app time to start
+          periodSeconds: 15           # Check every 15 seconds
+          timeoutSeconds: 10          # Wait up to 10 seconds for response
+          failureThreshold: 20        # Allow 20 failures (5 minutes total)
+          successThreshold: 1         # Only need 1 success
+        
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
-          periodSeconds: 30
-          timeoutSeconds: 10
-          failureThreshold: 3
+          periodSeconds: 60           # Check every minute after startup
+          timeoutSeconds: 15          # Longer timeout for liveness
+          failureThreshold: 3         # Allow 3 failures before restart
+          successThreshold: 1
+          # Start checking after startup probe succeeds
+          initialDelaySeconds: 0      
+        
         readinessProbe:
           httpGet:
             path: /ready
             port: 8080
-          periodSeconds: 10
-          timeoutSeconds: 10
+          periodSeconds: 10           # Check readiness frequently
+          timeoutSeconds: 15          # Longer timeout
           successThreshold: 1
           failureThreshold: 3
+          initialDelaySeconds: 0      # Start immediately
+      
       volumes:
+      # Temporary storage for processing
       - name: tmp
         emptyDir:
           medium: Memory
-          sizeLimit: 512Mi
+          sizeLimit: 1Gi
+      
+      # Application data storage
       - name: app-data
         emptyDir:
           medium: Memory
-          sizeLimit: 1Gi
+          sizeLimit: 2Gi
+      
+      # Cache storage for better performance
       - name: app-cache
         emptyDir:
           medium: Memory
-          sizeLimit: 512Mi
+          sizeLimit: 1Gi
+      
+      # Log storage
+      - name: app-logs
+        emptyDir:
+          sizeLimit: 500Mi
+      
+      # Secret volumes
       - name: api-keys-volume
         secret:
           secretName: api-keys
+          optional: false
+          defaultMode: 0444
+      
       - name: feed-config-volume
         secret:
           secretName: feed-config
+          optional: false
+          defaultMode: 0444
+  
+  # Traffic allocation
   traffic:
   - percent: 100
     latestRevision: true
+  
+---
+# Service Account IAM policy (if not created by Cloud Build)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: threat-intelligence-iam-policy
+data:
+  bindings.yaml: |
+    bindings:
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/bigquery.dataEditor
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/storage.objectAdmin
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/pubsub.editor
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/secretmanager.secretAccessor
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/aiplatform.user
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/logging.logWriter
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/errorreporting.writer
+    - members:
+      - serviceAccount:cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com
+      role: roles/monitoring.metricWriter
+
+---
+# Horizontal Pod Autoscaler configuration
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: threat-intelligence-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: serving.knative.dev/v1
+    kind: Service
+    name: threat-intelligence-platform
+  minReplicas: 1
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+
+---
+# Network Policy for security (optional)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: threat-intelligence-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: threat-intelligence-platform
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from: []  # Allow all ingress (since this is a public service)
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - {}  # Allow all egress (needed for accessing Google Cloud services)
+  
+---
+# ServiceMonitor for Prometheus (if using monitoring)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: threat-intelligence-monitor
+  labels:
+    app: threat-intelligence-platform
+spec:
+  selector:
+    matchLabels:
+      app: threat-intelligence-platform
+  endpoints:
+  - port: http1
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
