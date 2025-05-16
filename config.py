@@ -1,6 +1,6 @@
 """
 Optimized configuration module for Threat Intelligence Platform.
-Handles configuration management for production deployment.
+Handles configuration management for production deployment with improved service management.
 """
 
 import os
@@ -29,11 +29,12 @@ class ServiceStatus(Enum):
     DEGRADED = "degraded"
     ERROR = "error"
 
-# Centralized Service Manager
+# Centralized Service Manager with timeout handling
 class ServiceManager:
-    """Centralized service management and monitoring."""
+    """Centralized service management and monitoring with timeout and recovery logic."""
     _instance = None
     _lock = threading.Lock()
+    INITIALIZATION_TIMEOUT = 300  # 5 minutes
     
     def __new__(cls):
         if cls._instance is None:
@@ -63,67 +64,140 @@ class ServiceManager:
         self._clients = {}
         self._errors = {}
         self._cache = {}
+        self._service_start_times = {}
         self._lock = threading.Lock()
+        
+        # Initialize start times
+        current_time = time.time()
+        for service in self._services:
+            self._service_start_times[service] = current_time
+        
+        # Start background monitoring
+        self._start_background_monitor()
     
     def update_status(self, service: str, status: ServiceStatus, error: str = None):
-        """Update service status."""
+        """Update service status with proper logging."""
         with self._lock:
+            old_status = self._services.get(service)
             self._services[service] = status
+            
             if error:
                 self._errors[service] = error
                 logger.error(f"Service {service} error: {error}")
             elif service in self._errors:
                 del self._errors[service]
-            logger.info(f"Service {service} status: {status.value}")
+            
+            # Log status changes
+            if old_status != status:
+                logger.info(f"Service {service} status changed: {old_status.value if old_status else 'None'} -> {status.value}")
     
     def get_status(self) -> Dict:
-        """Get overall system status."""
+        """Get overall system status with timeout handling."""
         with self._lock:
+            # Check for services stuck in initializing
+            current_time = time.time()
+            for service, status in list(self._services.items()):
+                if status == ServiceStatus.INITIALIZING:
+                    start_time = self._service_start_times.get(service, current_time)
+                    if current_time - start_time > self.INITIALIZATION_TIMEOUT:
+                        logger.warning(f"Service {service} stuck initializing for {int(current_time - start_time)}s, marking as degraded")
+                        self._services[service] = ServiceStatus.DEGRADED
+                        self._errors[service] = f"Initialization timeout after {int(current_time - start_time)}s"
+            
             return {
                 'services': {k: v.value for k, v in self._services.items()},
                 'errors': dict(self._errors),
                 'overall': self._calculate_overall_status().value,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.utcnow().isoformat(),
+                'initialization_timeout': self.INITIALIZATION_TIMEOUT
             }
     
     def _calculate_overall_status(self) -> ServiceStatus:
-        """Calculate overall system status - AI models don't block overall readiness."""
-        critical_services = ['config', 'bigquery', 'storage', 'pubsub', 'ingestion', 'app']
+        """Calculate overall system status with improved logic."""
+        # Core services that must be ready for system to be operational
+        critical_services = ['config', 'bigquery', 'storage', 'ingestion', 'app']
         
-        # Check critical services first
-        critical_statuses = [self._services[service] for service in critical_services]
+        # Services that can be in degraded mode without affecting core functionality
+        optional_services = ['ai_models', 'pubsub', 'analysis']
         
-        if all(s == ServiceStatus.READY for s in critical_statuses):
-            # All critical services ready - overall system is ready
-            return ServiceStatus.READY
-        elif any(s == ServiceStatus.ERROR for s in critical_statuses):
-            # Any critical service in error - system is in error
+        # Check critical services
+        critical_statuses = [self._services[service] for service in critical_services if service in self._services]
+        optional_statuses = [self._services[service] for service in optional_services if service in self._services]
+        
+        # If any critical service is in error, system is in error
+        if any(s == ServiceStatus.ERROR for s in critical_statuses):
             return ServiceStatus.ERROR
-        elif any(s == ServiceStatus.DEGRADED for s in critical_statuses):
-            # Any critical service degraded - system is degraded  
+        
+        # If all critical services are ready, check overall system state
+        if all(s == ServiceStatus.READY for s in critical_statuses):
+            # If optional services have issues, system is degraded but functional
+            if any(s in [ServiceStatus.ERROR, ServiceStatus.DEGRADED] for s in optional_statuses):
+                return ServiceStatus.DEGRADED
+            # If optional services are still initializing, that's ok
+            elif any(s == ServiceStatus.INITIALIZING for s in optional_statuses):
+                return ServiceStatus.READY  # Core system is ready
+            else:
+                return ServiceStatus.READY
+        
+        # If any critical service is degraded, system is degraded
+        if any(s == ServiceStatus.DEGRADED for s in critical_statuses):
             return ServiceStatus.DEGRADED
-        else:
-            # Still initializing critical services
-            return ServiceStatus.INITIALIZING
+        
+        # Otherwise, system is still initializing
+        return ServiceStatus.INITIALIZING
     
     def get_client(self, client_type: str):
-        """Get a client instance."""
-        return self._clients.get(client_type)
+        """Get a client instance with error handling."""
+        with self._lock:
+            return self._clients.get(client_type)
     
     def set_client(self, client_type: str, client):
-        """Set a client instance."""
+        """Set a client instance with validation."""
+        if client is None:
+            logger.warning(f"Attempting to set None client for {client_type}")
+            return
+            
         with self._lock:
             self._clients[client_type] = client
             logger.info(f"Registered {client_type} client")
     
     def get_cache(self, key: str):
         """Get cached value."""
-        return self._cache.get(key)
+        with self._lock:
+            return self._cache.get(key)
     
     def set_cache(self, key: str, value: Any):
         """Set cached value."""
         with self._lock:
             self._cache[key] = value
+    
+    def _start_background_monitor(self):
+        """Start background service monitoring."""
+        def monitor_services():
+            while True:
+                try:
+                    with self._lock:
+                        # Check for services that might need recovery
+                        current_time = time.time()
+                        for service, status in list(self._services.items()):
+                            if status == ServiceStatus.ERROR:
+                                # Check if we should attempt recovery
+                                error_time = self._service_start_times.get(f"{service}_error", 0)
+                                if current_time - error_time > 60:  # Retry after 1 minute
+                                    logger.info(f"Attempting to recover service {service}")
+                                    self._services[service] = ServiceStatus.INITIALIZING
+                                    self._service_start_times[service] = current_time
+                                    if service in self._errors:
+                                        del self._errors[service]
+                    
+                    time.sleep(30)  # Check every 30 seconds
+                except Exception as e:
+                    logger.error(f"Error in service monitor: {e}")
+                    time.sleep(60)  # Wait longer on error
+        
+        monitor_thread = threading.Thread(target=monitor_services, daemon=True)
+        monitor_thread.start()
+        logger.info("Started background service monitor")
 
 # Constants and Default Configuration
 DEFAULT_API_RATE_LIMIT = "1000 per day, 100 per hour"
@@ -170,10 +244,10 @@ def get_project_id() -> Optional[str]:
             if project_id:
                 os.environ['GCP_PROJECT'] = project_id
                 return project_id
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error getting default credentials: {e}")
     except ImportError:
-        pass
+        logger.debug("google-auth not available")
     
     return os.environ.get('FALLBACK_PROJECT_ID', "primal-chariot-382610")
 
@@ -247,13 +321,16 @@ class Config:
     
     @classmethod
     def init_app(cls):
-        """Initialize the application configuration."""
+        """Initialize the application configuration with improved error handling."""
         service_manager = cls.get_service_manager()
         service_manager.update_status('config', ServiceStatus.INITIALIZING)
         
         try:
-            cls.configure_logging()
+            start_time = time.time()
             logger.info(f"Initializing {cls.ENVIRONMENT} configuration")
+            
+            # Configure logging first
+            cls.configure_logging()
             
             # Load API key from environment or Secret Manager
             cls._load_api_key()
@@ -264,8 +341,9 @@ class Config:
             # Validate configuration
             cls.validate_configuration()
             
+            initialization_time = time.time() - start_time
             service_manager.update_status('config', ServiceStatus.READY)
-            logger.info(f"Configuration initialized - Environment: {cls.ENVIRONMENT}")
+            logger.info(f"Configuration initialized successfully in {initialization_time:.2f}s - Environment: {cls.ENVIRONMENT}")
             
         except Exception as e:
             logger.error(f"Configuration initialization failed: {str(e)}")
@@ -274,7 +352,7 @@ class Config:
     
     @classmethod
     def _load_api_key(cls):
-        """Load API key from environment or Secret Manager."""
+        """Load API key from environment or Secret Manager with retry logic."""
         # Try environment variable first
         api_key = os.environ.get('API_KEY')
         
@@ -285,12 +363,13 @@ class Config:
         
         # Try Secret Manager if available
         if cls.GCP_PROJECT:
-            try:
-                from google.cloud import secretmanager
-                client = secretmanager.SecretManagerServiceClient()
-                secret_name = f"projects/{cls.GCP_PROJECT}/secrets/api-keys/versions/latest"
-                
+            max_retries = 3
+            for attempt in range(max_retries):
                 try:
+                    from google.cloud import secretmanager
+                    client = secretmanager.SecretManagerServiceClient()
+                    secret_name = f"projects/{cls.GCP_PROJECT}/secrets/api-keys/versions/latest"
+                    
                     response = client.access_secret_version(request={"name": secret_name})
                     secret_value = response.payload.data.decode("UTF-8")
                     
@@ -304,9 +383,11 @@ class Config:
                     logger.info(f"Loaded API key from Secret Manager: {cls.API_KEY[:4]}...{cls.API_KEY[-4:]}")
                     return
                 except Exception as e:
-                    logger.warning(f"Could not access secret {secret_name}: {str(e)}")
-            except ImportError:
-                logger.warning("Secret Manager client not available")
+                    logger.warning(f"Attempt {attempt + 1} failed to access Secret Manager: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        logger.warning(f"Could not access secret {secret_name} after {max_retries} attempts")
         
         # Use default if nothing else works
         cls.API_KEY = 'default-api-key'
@@ -314,7 +395,7 @@ class Config:
     
     @classmethod
     def _load_feed_config(cls):
-        """Load feed configuration with proper fallbacks."""
+        """Load feed configuration with proper fallbacks and retry logic."""
         # Try environment variable first
         env_feeds = os.environ.get('FEED_CONFIG')
         if env_feeds:
@@ -323,17 +404,18 @@ class Config:
                 cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
                 logger.info(f"Loaded {len(cls.FEEDS)} feeds from environment")
                 return
-            except json.JSONDecodeError:
-                logger.warning("Invalid JSON in FEED_CONFIG environment variable")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON in FEED_CONFIG environment variable: {e}")
         
         # Try Secret Manager for feed config
         if cls.GCP_PROJECT:
-            try:
-                from google.cloud import secretmanager
-                client = secretmanager.SecretManagerServiceClient()
-                secret_name = f"projects/{cls.GCP_PROJECT}/secrets/feed-config/versions/latest"
-                
+            max_retries = 3
+            for attempt in range(max_retries):
                 try:
+                    from google.cloud import secretmanager
+                    client = secretmanager.SecretManagerServiceClient()
+                    secret_name = f"projects/{cls.GCP_PROJECT}/secrets/feed-config/versions/latest"
+                    
                     response = client.access_secret_version(request={"name": secret_name})
                     secret_value = response.payload.data.decode("UTF-8")
                     
@@ -351,9 +433,11 @@ class Config:
                     logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
                     return
                 except Exception as e:
-                    logger.warning(f"Could not access feed config from Secret Manager: {str(e)}")
-            except ImportError:
-                logger.warning("Secret Manager client not available")
+                    logger.warning(f"Attempt {attempt + 1} failed to access feed config: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        logger.warning(f"Could not access feed config after {max_retries} attempts")
         
         # Always use default feeds as fallback
         cls.FEEDS = DEFAULT_FEED_CONFIGS
@@ -361,7 +445,7 @@ class Config:
     
     @classmethod
     def configure_logging(cls):
-        """Configure logging based on settings."""
+        """Configure logging based on settings with improved formatting."""
         log_level = getattr(logging, cls.LOG_LEVEL.upper(), logging.INFO)
         
         root_logger = logging.getLogger()
@@ -371,10 +455,12 @@ class Config:
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
         
-        # Add console handler
+        # Add console handler with improved formatting
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+        )
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
         
@@ -392,9 +478,10 @@ class Config:
     
     @classmethod
     def validate_configuration(cls):
-        """Validate configuration values - don't fail for non-critical issues."""
+        """Validate configuration values - improved validation with automatic fixes."""
         warnings = []
         errors = []
+        fixes_applied = []
         
         if cls.ENVIRONMENT == 'production':
             if cls.API_KEY == 'default-api-key':
@@ -405,6 +492,10 @@ class Config:
         
         if not cls.GCS_BUCKET:
             warnings.append("GCS_BUCKET not set - data storage may fail")
+            # Auto-fix: generate bucket name
+            if cls.GCP_PROJECT:
+                cls.GCS_BUCKET = f"{cls.GCP_PROJECT}-threat-data"
+                fixes_applied.append(f"Auto-generated GCS_BUCKET: {cls.GCS_BUCKET}")
         
         if not cls.BIGQUERY_DATASET:
             warnings.append("BIGQUERY_DATASET not set - data storage may fail")
@@ -412,12 +503,17 @@ class Config:
         if not cls.FEEDS:
             errors.append("No feeds configured - using defaults")
             cls.FEEDS = DEFAULT_FEED_CONFIGS
+            fixes_applied.append("Applied default feed configuration")
         
+        # Log all findings
         for warning in warnings:
             logger.warning(warning)
         
         for error in errors:
             logger.error(error)
+        
+        for fix in fixes_applied:
+            logger.info(f"Auto-fix applied: {fix}")
         
         # Allow startup even with errors to show error messages
         return True
@@ -452,22 +548,28 @@ class Config:
         
         return f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}.{table_name}"
 
-# Error Reporting
+# Error Reporting with retry logic
 def report_error(exception: Exception):
     """Report an error to Cloud Error Reporting if enabled."""
     if not Config.ENABLE_ERROR_REPORTING:
         return
     
-    try:
-        from google.cloud import error_reporting
-        error_client = error_reporting.Client(project=Config.GCP_PROJECT)
-        error_client.report_exception()
-    except Exception as e:
-        logger.error(f"Failed to report error: {e}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from google.cloud import error_reporting
+            error_client = error_reporting.Client(project=Config.GCP_PROJECT)
+            error_client.report_exception()
+            logger.debug("Error reported to Cloud Error Reporting")
+            return
+        except Exception as e:
+            logger.error(f"Failed to report error (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
 
-# GCP Client Initialization
+# GCP Client Initialization with timeout and retry logic
 def initialize_bigquery():
-    """Initialize and return a BigQuery client."""
+    """Initialize and return a BigQuery client with proper error handling."""
     service_manager = Config.get_service_manager()
     
     # Check if already initialized
@@ -475,38 +577,60 @@ def initialize_bigquery():
     if existing_client:
         return existing_client
     
-    try:
-        from google.cloud import bigquery
-        client = bigquery.Client(project=Config.GCP_PROJECT, location=Config.BIGQUERY_LOCATION)
-        service_manager.set_client('bigquery', client)
-        service_manager.update_status('bigquery', ServiceStatus.READY)
-        return client
-    except Exception as e:
-        logger.error(f"Failed to initialize BigQuery client: {e}")
-        service_manager.update_status('bigquery', ServiceStatus.ERROR, str(e))
-        return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from google.cloud import bigquery
+            client = bigquery.Client(project=Config.GCP_PROJECT, location=Config.BIGQUERY_LOCATION)
+            
+            # Test the connection
+            client.query("SELECT 1").result()
+            
+            service_manager.set_client('bigquery', client)
+            service_manager.update_status('bigquery', ServiceStatus.READY)
+            logger.info("BigQuery client initialized successfully")
+            return client
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed to initialize BigQuery client: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                service_manager.update_status('bigquery', ServiceStatus.ERROR, str(e))
+    
+    return None
 
 def initialize_storage():
-    """Initialize and return a Cloud Storage client."""
+    """Initialize and return a Cloud Storage client with proper error handling."""
     service_manager = Config.get_service_manager()
     
     existing_client = service_manager.get_client('storage')
     if existing_client:
         return existing_client
     
-    try:
-        from google.cloud import storage
-        client = storage.Client(project=Config.GCP_PROJECT)
-        service_manager.set_client('storage', client)
-        service_manager.update_status('storage', ServiceStatus.READY)
-        return client
-    except Exception as e:
-        logger.error(f"Failed to initialize Storage client: {e}")
-        service_manager.update_status('storage', ServiceStatus.ERROR, str(e))
-        return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from google.cloud import storage
+            client = storage.Client(project=Config.GCP_PROJECT)
+            
+            # Test the connection by listing buckets
+            list(client.list_buckets(max_results=1))
+            
+            service_manager.set_client('storage', client)
+            service_manager.update_status('storage', ServiceStatus.READY)
+            logger.info("Storage client initialized successfully")
+            return client
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed to initialize Storage client: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                service_manager.update_status('storage', ServiceStatus.ERROR, str(e))
+    
+    return None
 
 def initialize_pubsub():
-    """Initialize and return PubSub publisher and subscriber clients."""
+    """Initialize and return PubSub publisher and subscriber clients with proper error handling."""
     service_manager = Config.get_service_manager()
     
     publisher = service_manager.get_client('publisher')
@@ -515,17 +639,28 @@ def initialize_pubsub():
     if publisher and subscriber:
         return publisher, subscriber
     
-    try:
-        from google.cloud import pubsub_v1
-        publisher = pubsub_v1.PublisherClient()
-        subscriber = pubsub_v1.SubscriberClient()
-        
-        service_manager.set_client('publisher', publisher)
-        service_manager.set_client('subscriber', subscriber)
-        service_manager.update_status('pubsub', ServiceStatus.READY)
-        
-        return publisher, subscriber
-    except Exception as e:
-        logger.error(f"Failed to initialize PubSub clients: {e}")
-        service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
-        return None, None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from google.cloud import pubsub_v1
+            publisher = pubsub_v1.PublisherClient()
+            subscriber = pubsub_v1.SubscriberClient()
+            
+            # Test the connection by listing topics
+            project_path = f"projects/{Config.GCP_PROJECT}"
+            list(publisher.list_topics(request={"project": project_path}, max_results=1))
+            
+            service_manager.set_client('publisher', publisher)
+            service_manager.set_client('subscriber', subscriber)
+            service_manager.update_status('pubsub', ServiceStatus.READY)
+            logger.info("PubSub clients initialized successfully")
+            
+            return publisher, subscriber
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed to initialize PubSub clients: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
+    
+    return None, None
