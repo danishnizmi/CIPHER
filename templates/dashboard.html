@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard - Threat Intelligence Platform{% endblock %}
+{% block title %}Dashboard - CIPHER Threat Intelligence{% endblock %}
 
 {% block content %}
 <!-- Page Header -->
@@ -8,7 +8,7 @@
     <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0">
         <div>
             <h1 class="text-3xl font-bold mb-2 flex items-center">
-                <i class="fas fa-{{ page_icon|default('tachometer-alt') }} text-accent mr-4"></i>
+                <i class="fas fa-{{ page_icon|default('tachometer-alt') }} text-cyber-blue mr-4"></i>
                 {{ page_title|default('Threat Intelligence Dashboard') }}
             </h1>
             <p class="text-gray-600 dark:text-gray-400 text-lg">
@@ -19,7 +19,7 @@
         <div class="flex items-center space-x-3">
             <!-- Time Range Selector -->
             <div class="relative">
-                <button id="timeRangeButton" class="btn btn-light flex items-center space-x-2">
+                <button id="timeRangeButton" class="btn btn-cyber flex items-center space-x-2">
                     <i class="far fa-calendar-alt"></i>
                     <span>{{ days }} Days</span>
                     <i class="fas fa-chevron-down text-xs"></i>
@@ -40,16 +40,17 @@
 </div>
 
 <!-- Main Metrics Dashboard -->
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 fade-in">
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 metrics-dashboard">
     <!-- Active Feeds Card -->
-    <div class="stat-card">
-        <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="block h-full">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
+        <a href="{{ url_for('frontend.dashboard', view='feeds') }}" class="block h-full p-6">
             <div class="flex items-center justify-between">
                 <div>
-                    <div class="text-4xl text-blue-600 mb-4">
-                        <i class="fas fa-rss"></i>
+                    <div class="text-4xl text-cyber-blue mb-4">
+                        <i class="fas fa-rss cyber-glow"></i>
                     </div>
-                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100 font-mono">
                         {{ stats.feeds.total_sources|default(0)|int }}
                     </div>
                     <div class="text-gray-500 dark:text-gray-400">Active Feeds</div>
@@ -66,14 +67,15 @@
     </div>
     
     <!-- IOCs Card -->
-    <div class="stat-card">
-        <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="block h-full">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
+        <a href="{{ url_for('frontend.dashboard', view='iocs') }}" class="block h-full p-6">
             <div class="flex items-center justify-between">
                 <div>
-                    <div class="text-4xl text-red-600 mb-4">
-                        <i class="fas fa-fingerprint"></i>
+                    <div class="text-4xl text-cyber-red mb-4">
+                        <i class="fas fa-fingerprint cyber-glow"></i>
                     </div>
-                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100 font-mono">
                         {{ stats.iocs.total|default(0)|int }}
                     </div>
                     <div class="text-gray-500 dark:text-gray-400">Indicators</div>
@@ -90,14 +92,15 @@
     </div>
     
     <!-- AI Analyses Card -->
-    <div class="stat-card">
-        <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="block h-full">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
+        <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" class="block h-full p-6">
             <div class="flex items-center justify-between">
                 <div>
-                    <div class="text-4xl text-purple-600 mb-4">
-                        <i class="fas fa-brain"></i>
+                    <div class="text-4xl text-cyber-purple mb-4">
+                        <i class="fas fa-brain cyber-glow"></i>
                     </div>
-                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100 font-mono">
                         {{ stats.analyses.total_analyses|default(0)|int }}
                     </div>
                     <div class="text-gray-500 dark:text-gray-400">AI Analyses</div>
@@ -109,33 +112,36 @@
                         {% if analysis_trend != 0 %}{{ analysis_trend|abs }}%{% else %}Stable{% endif %}
                     </div>
                 </div>
-                <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                    <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full">
-                        Batch Analysis Mode
-                    </span>
-                </div>
+            </div>
+            <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                <span class="cyber-badge">
+                    Batch Analysis Mode
+                </span>
             </div>
         </a>
     </div>
     
     <!-- Threat Score Card -->
-    <div class="stat-card">
-        <div class="flex items-center justify-between">
-            <div>
-                <div class="text-4xl text-orange-600 mb-4">
-                    <i class="fas fa-exclamation-triangle"></i>
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
+        <div class="p-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-4xl text-cyber-red mb-4">
+                        <i class="fas fa-exclamation-triangle cyber-glow"></i>
+                    </div>
+                    <div class="text-3xl font-bold text-gray-900 dark:text-gray-100 font-mono">
+                        {{ threat_score|default(50) }}
+                    </div>
+                    <div class="text-gray-500 dark:text-gray-400">Threat Score</div>
                 </div>
-                <div class="text-3xl font-bold text-gray-900 dark:text-gray-100">
-                    {{ threat_score|default(50) }}
-                </div>
-                <div class="text-gray-500 dark:text-gray-400">Threat Score</div>
-            </div>
-            <div class="text-right">
-                <div id="threatScoreChart" class="w-24 h-12"></div>
-                <div class="mt-2">
-                    <span class="severity-badge {{ 'critical' if threat_score > 85 else 'high' if threat_score > 70 else 'medium' if threat_score > 50 else 'low' }}">
-                        {{ 'Critical' if threat_score > 85 else 'High' if threat_score > 70 else 'Medium' if threat_score > 50 else 'Low' }}
-                    </span>
+                <div class="text-right">
+                    <div id="threatScoreChart" class="w-24 h-12"></div>
+                    <div class="mt-2">
+                        <span class="severity-badge {{ 'critical' if threat_score > 85 else 'high' if threat_score > 70 else 'medium' if threat_score > 50 else 'low' }}">
+                            {{ 'Critical' if threat_score > 85 else 'High' if threat_score > 70 else 'Medium' if threat_score > 50 else 'Low' }}
+                        </span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -144,14 +150,15 @@
 
 {% if current_view == 'dashboard' or not current_view %}
 <!-- Main Dashboard View -->
-<div class="space-y-8 fade-in">
+<div class="space-y-8">
     <!-- Analytics Overview Section -->
     <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <!-- Threat Map -->
-        <div class="xl:col-span-2 panel">
+        <div class="xl:col-span-2 cyber-card">
+            <div class="scanning-line"></div>
             <div class="panel-header">
                 <h3 class="panel-title">
-                    <i class="fas fa-globe panel-icon"></i>
+                    <i class="fas fa-globe panel-icon text-cyber-blue"></i>
                     Threat Geographic Distribution
                 </h3>
                 <div class="text-sm text-gray-500 dark:text-gray-400">
@@ -172,21 +179,22 @@
         
         <!-- AI Analysis Summary -->
         <div class="xl:col-span-1 space-y-6">
-            <div class="panel">
+            <div class="cyber-card">
+                <div class="scanning-line"></div>
                 <div class="panel-header">
                     <h3 class="panel-title">
-                        <i class="fas fa-brain text-purple-500 mr-2"></i>
+                        <i class="fas fa-brain text-cyber-purple mr-2"></i>
                         AI Analysis Summary
                     </h3>
                     <a href="{{ url_for('frontend.dashboard', view='ai-analysis') }}" 
-                       class="text-sm text-accent hover:text-accent-dark flex items-center">
+                       class="text-sm text-cyber-blue hover:text-blue-700 flex items-center">
                         View All <i class="fas fa-chevron-right ml-1"></i>
                     </a>
                 </div>
                 <div class="panel-body">
                     {% if ai_summary %}
                     <div class="space-y-4">
-                        <div class="flex items-start p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+                        <div class="flex items-start p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
                             <div class="rounded-lg bg-purple-600 p-2 mr-3">
                                 <i class="fas fa-shield-alt text-white"></i>
                             </div>
@@ -197,7 +205,7 @@
                             </div>
                         </div>
                         
-                        <div class="flex items-start p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                        <div class="flex items-start p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
                             <div class="rounded-lg bg-blue-600 p-2 mr-3">
                                 <i class="fas fa-chart-line text-white"></i>
                             </div>
@@ -207,7 +215,7 @@
                             </div>
                         </div>
                         
-                        <div class="flex items-start p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+                        <div class="flex items-start p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg border border-orange-200 dark:border-orange-800">
                             <div class="rounded-lg bg-orange-600 p-2 mr-3">
                                 <i class="fas fa-exclamation-triangle text-white"></i>
                             </div>
@@ -228,7 +236,8 @@
             </div>
             
             <!-- System Status Panel -->
-            <div class="panel">
+            <div class="cyber-card">
+                <div class="scanning-line"></div>
                 <div class="panel-header">
                     <h3 class="panel-title">
                         <i class="fas fa-heartbeat text-green-500 mr-2"></i>
@@ -241,9 +250,9 @@
                             <div class="grid grid-cols-1 gap-3">
                                 {% for service, status in service_status.services.items() %}
                                     {% if service in ['ingestion', 'ai_models', 'bigquery', 'analysis'] %}
-                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-gray-200 dark:border-gray-700">
                                         <div class="flex items-center">
-                                            <div class="w-3 h-3 rounded-full mr-3 {{ 'bg-green-500' if status == 'ready' else 'bg-yellow-500' if status == 'initializing' else 'bg-red-500' }}"></div>
+                                            <div class="w-3 h-3 rounded-full mr-3 {{ 'bg-green-500' if status == 'ready' else 'bg-yellow-500 pulse-effect' if status == 'initializing' else 'bg-red-500 pulse-effect' }}"></div>
                                             <span class="font-medium capitalize">{{ service|replace('_', ' ') }}</span>
                                         </div>
                                         <span class="text-sm capitalize px-2 py-1 rounded-full {{ 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' if status == 'ready' else 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' if status == 'initializing' else 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' }}">
@@ -270,14 +279,15 @@
     <!-- Charts Section -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <!-- IOC Types Distribution -->
-        <div class="panel">
+        <div class="cyber-card">
+            <div class="scanning-line"></div>
             <div class="panel-header">
                 <h3 class="panel-title">
-                    <i class="fas fa-chart-pie panel-icon"></i>
+                    <i class="fas fa-chart-pie panel-icon text-cyber-purple"></i>
                     IOC Types Distribution
                 </h3>
                 <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
-                   class="text-sm text-accent hover:text-accent-dark flex items-center">
+                   class="text-sm text-cyber-blue hover:text-blue-700 flex items-center">
                     View All <i class="fas fa-chevron-right ml-1"></i>
                 </a>
             </div>
@@ -287,14 +297,15 @@
         </div>
         
         <!-- Intelligence Collection Trends -->
-        <div class="panel">
+        <div class="cyber-card">
+            <div class="scanning-line"></div>
             <div class="panel-header">
                 <h3 class="panel-title">
-                    <i class="fas fa-chart-line panel-icon"></i>
+                    <i class="fas fa-chart-line panel-icon text-cyber-blue"></i>
                     Intelligence Collection Trends
                 </h3>
                 <a href="{{ url_for('frontend.dashboard', view='feeds') }}" 
-                   class="text-sm text-accent hover:text-accent-dark flex items-center">
+                   class="text-sm text-cyber-blue hover:text-blue-700 flex items-center">
                     View Feeds <i class="fas fa-chevron-right ml-1"></i>
                 </a>
             </div>
@@ -305,14 +316,15 @@
     </div>
     
     <!-- Latest Threat Intelligence -->
-    <div class="panel">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-exclamation-circle panel-icon"></i>
+                <i class="fas fa-exclamation-circle panel-icon text-cyber-red"></i>
                 Latest Threat Intelligence
             </h3>
             <a href="{{ url_for('frontend.dashboard', view='iocs') }}" 
-               class="text-sm text-accent hover:text-accent-dark flex items-center">
+               class="text-sm text-cyber-blue hover:text-blue-700 flex items-center">
                 View All <i class="fas fa-chevron-right ml-1"></i>
             </a>
         </div>
@@ -370,7 +382,7 @@
                                 </td>
                                 <td onclick="event.stopPropagation()">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
-                                       class="text-accent hover:text-accent-dark">
+                                       class="text-cyber-blue hover:text-blue-700">
                                         <i class="fas fa-eye"></i>
                                     </a>
                                 </td>
@@ -396,11 +408,12 @@
 
 {% elif current_view == 'feeds' %}
 <!-- Feeds View -->
-<div class="space-y-6 fade-in">
-    <div class="panel">
+<div class="space-y-6">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-rss panel-icon"></i>
+                <i class="fas fa-rss panel-icon text-cyber-blue"></i>
                 Threat Intelligence Feeds
             </h3>
             <div class="flex items-center space-x-4">
@@ -430,7 +443,7 @@
                         <tr onclick="window.location='{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}'" class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
                             <td>
                                 <div class="flex items-center">
-                                    <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 dark:bg-blue-900/30 text-accent rounded-lg">
+                                    <div class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-blue-100 dark:bg-blue-900/30 text-cyber-blue rounded-lg">
                                         <i class="fas fa-rss"></i>
                                     </div>
                                     <div class="ml-4">
@@ -443,7 +456,7 @@
                                 {{ feed.description|default('Threat Intelligence Feed') }}
                             </td>
                             <td>
-                                <span class="px-3 py-1 text-xs font-semibold rounded-full bg-blue-100 dark:bg-blue-900/30 text-accent">
+                                <span class="cyber-badge">
                                     {{ feed.record_count|default(0) }}
                                 </span>
                             </td>
@@ -452,24 +465,24 @@
                             </td>
                             <td>
                                 {% if feed.enabled %}
-                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300">
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 border border-green-200 dark:border-green-800">
                                         Active
                                     </span>
                                 {% else %}
-                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300">
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300 border border-gray-200 dark:border-gray-600">
                                         Disabled
                                     </span>
                                 {% endif %}
                             </td>
                             <td>
-                                <span class="text-xs font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded uppercase">
+                                <span class="text-xs font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded uppercase border border-gray-200 dark:border-gray-600">
                                     {{ feed.format|default('json') }}
                                 </span>
                             </td>
                             <td onclick="event.stopPropagation()">
                                 <div class="flex items-center space-x-2">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='feed', identifier=feed.id) }}" 
-                                       class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
+                                       class="text-cyber-blue hover:text-blue-700 tooltip" data-tooltip="View Details">
                                         <i class="fas fa-eye"></i>
                                     </a>
                                 </div>
@@ -482,12 +495,12 @@
             {% else %}
             <div class="text-center py-12">
                 <div class="flex flex-col items-center">
-                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
-                        <i class="fas fa-rss text-accent text-5xl"></i>
+                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4 cyber-glow">
+                        <i class="fas fa-rss text-cyber-blue text-5xl"></i>
                     </div>
                     <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">Initializing Feeds</h3>
                     <p class="text-gray-600 dark:text-gray-400 mb-6">Threat intelligence feeds are being configured and will appear shortly.</p>
-                    <button onclick="window.location.reload()" class="btn btn-primary">
+                    <button onclick="window.location.reload()" class="btn-cyber">
                         <i class="fas fa-sync mr-2"></i>
                         Refresh
                     </button>
@@ -500,11 +513,12 @@
 
 {% elif current_view == 'iocs' %}
 <!-- IOCs View -->
-<div class="space-y-6 fade-in">
-    <div class="panel">
+<div class="space-y-6">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-fingerprint panel-icon"></i>
+                <i class="fas fa-fingerprint panel-icon text-cyber-red"></i>
                 Indicators of Compromise
             </h3>
             <div class="flex items-center space-x-3">
@@ -555,7 +569,7 @@
                                 </span>
                             </td>
                             <td>
-                                <div class="truncate-text max-w-xs tooltip" data-tooltip="{{ ioc.value }}">
+                                <div class="truncate-text max-w-xs tooltip font-mono text-sm" data-tooltip="{{ ioc.value }}">
                                     {{ ioc.value[:40] }}{{ '...' if ioc.value|length > 40 else '' }}
                                 </div>
                             </td>
@@ -573,7 +587,7 @@
                             </td>
                             <td>
                                 <div class="progress-bar w-16 h-1.5">
-                                    <div class="bg-accent progress-fill" style="width: {{ ioc.confidence|default(50) }}%"></div>
+                                    <div class="bg-cyber-blue progress-fill" style="width: {{ ioc.confidence|default(50) }}%"></div>
                                 </div>
                                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ ioc.confidence|default(50) }}%</span>
                             </td>
@@ -594,7 +608,7 @@
                             <td onclick="event.stopPropagation()">
                                 <div class="flex items-center space-x-2">
                                     <a href="{{ url_for('frontend.dynamic_content_detail', content_type='ioc', identifier=ioc.type + '/' + ioc.value) }}" 
-                                       class="text-accent hover:text-accent-dark tooltip" data-tooltip="View Details">
+                                       class="text-cyber-blue hover:text-blue-700 tooltip" data-tooltip="View Details">
                                         <i class="fas fa-eye"></i>
                                     </a>
                                     <button class="text-blue-600 hover:text-blue-800 tooltip" data-tooltip="Copy Value" 
@@ -615,14 +629,19 @@
                     Showing {{ ioc_items|length }} of {{ ioc_items|length }} results
                 </div>
                 <div class="flex items-center space-x-2">
-                    <!-- Pagination controls would go here -->
+                    <a href="{{ url_for('frontend.export_iocs', format='json') }}" class="btn btn-cyber btn-sm">
+                        <i class="fas fa-download mr-1"></i> Export JSON
+                    </a>
+                    <a href="{{ url_for('frontend.export_iocs', format='csv') }}" class="btn btn-light btn-sm">
+                        <i class="fas fa-file-csv mr-1"></i> Export CSV
+                    </a>
                 </div>
             </div>
             {% else %}
             <div class="text-center py-12">
                 <div class="flex flex-col items-center">
-                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
-                        <i class="fas fa-fingerprint text-accent text-5xl"></i>
+                    <div class="inline-block p-6 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4 cyber-glow">
+                        <i class="fas fa-fingerprint text-cyber-blue text-5xl"></i>
                     </div>
                     <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">Collecting IOCs</h3>
                     <p class="text-gray-600 dark:text-gray-400 mb-6">Indicators of compromise are being collected from threat feeds.</p>
@@ -636,17 +655,18 @@
 
 {% elif current_view == 'ai-analysis' %}
 <!-- AI Batch Analysis View -->
-<div class="space-y-6 fade-in">
-    <div class="panel">
+<div class="space-y-6">
+    <div class="cyber-card">
+        <div class="scanning-line"></div>
         <div class="panel-header">
             <h3 class="panel-title">
-                <i class="fas fa-brain panel-icon text-purple-600"></i>
+                <i class="fas fa-brain panel-icon text-cyber-purple"></i>
                 AI Batch Analysis
             </h3>
             <div class="flex items-center space-x-4">
                 <div class="flex items-center text-sm text-gray-500 dark:text-gray-400">
                     <i class="fas fa-info-circle mr-1"></i>
-                    <span>Analyzing feeds in batches to optimize performance</span>
+                    <span>Analyzing feeds in batches for optimal performance</span>
                 </div>
             </div>
         </div>
@@ -654,39 +674,42 @@
             {% if batch_analyses %}
             <!-- Batch Analysis Summary -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div class="bg-gradient-to-r from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
+                <div class="bg-gradient-to-r from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 rounded-lg p-6 border border-purple-200 dark:border-purple-800 relative overflow-hidden">
+                    <div class="scanning-line"></div>
                     <div class="flex items-center">
-                        <div class="rounded-lg bg-purple-600 p-3 mr-4">
+                        <div class="rounded-lg bg-purple-600 p-3 mr-4 cyber-glow">
                             <i class="fas fa-shield-alt text-white text-xl"></i>
                         </div>
                         <div>
-                            <h4 class="font-semibold text-purple-900 dark:text-purple-100 mb-1">Overall Threat Level</h4>
+                            <h4 class="font-semibold text-purple-900 dark:text-purple-100 mb-1 font-mono">Overall Threat Level</h4>
                             <div class="text-3xl font-bold text-purple-900 dark:text-purple-100">{{ overall_threat_level }}</div>
                             <p class="text-sm text-purple-700 dark:text-purple-300 mt-1">From {{ total_feeds_analyzed }} feeds analyzed</p>
                         </div>
                     </div>
                 </div>
                 
-                <div class="bg-gradient-to-r from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-lg p-6 border border-blue-200 dark:border-blue-800">
+                <div class="bg-gradient-to-r from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-lg p-6 border border-blue-200 dark:border-blue-800 relative overflow-hidden">
+                    <div class="scanning-line"></div>
                     <div class="flex items-center">
-                        <div class="rounded-lg bg-blue-600 p-3 mr-4">
+                        <div class="rounded-lg bg-blue-600 p-3 mr-4 cyber-glow">
                             <i class="fas fa-chart-bar text-white text-xl"></i>
                         </div>
                         <div>
-                            <h4 class="font-semibold text-blue-900 dark:text-blue-100 mb-1">Feeds Analyzed</h4>
+                            <h4 class="font-semibold text-blue-900 dark:text-blue-100 mb-1 font-mono">Feeds Analyzed</h4>
                             <div class="text-3xl font-bold text-blue-900 dark:text-blue-100">{{ total_feeds_analyzed }}</div>
                             <p class="text-sm text-blue-700 dark:text-blue-300 mt-1">Active intelligence sources</p>
                         </div>
                     </div>
                 </div>
                 
-                <div class="bg-gradient-to-r from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-6 border border-green-200 dark:border-green-800">
+                <div class="bg-gradient-to-r from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-6 border border-green-200 dark:border-green-800 relative overflow-hidden">
+                    <div class="scanning-line"></div>
                     <div class="flex items-center">
-                        <div class="rounded-lg bg-green-600 p-3 mr-4">
+                        <div class="rounded-lg bg-green-600 p-3 mr-4 cyber-glow">
                             <i class="fas fa-cogs text-white text-xl"></i>
                         </div>
                         <div>
-                            <h4 class="font-semibold text-green-900 dark:text-green-100 mb-1">Analysis Mode</h4>
+                            <h4 class="font-semibold text-green-900 dark:text-green-100 mb-1 font-mono">Analysis Mode</h4>
                             <div class="text-lg font-bold text-green-900 dark:text-green-100">Batch Processing</div>
                             <p class="text-sm text-green-700 dark:text-green-300 mt-1">Cost-optimized analysis</p>
                         </div>
@@ -697,8 +720,8 @@
             <!-- Threat Level Distribution Chart -->
             {% if threat_distribution %}
             <div class="mb-8">
-                <h4 class="text-lg font-semibold mb-4">Threat Level Distribution</h4>
-                <div class="bg-gray-50 dark:bg-gray-800 rounded-lg p-6">
+                <h4 class="text-lg font-semibold mb-4 cyber-section">Threat Level Distribution</h4>
+                <div class="bg-gray-50 dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
                     <div id="threatDistributionChart" class="h-64"></div>
                 </div>
             </div>
@@ -706,7 +729,7 @@
 
             <!-- Feed Analysis Results -->
             <div class="mb-8">
-                <h4 class="text-lg font-semibold mb-4">Feed Analysis Results</h4>
+                <h4 class="text-lg font-semibold mb-4 cyber-section">Feed Analysis Results</h4>
                 <div class="overflow-x-auto">
                     <table class="data-table">
                         <thead class="table-header">
@@ -723,16 +746,16 @@
                         <tbody class="table-body">
                             {% for feed in batch_analyses %}
                             <tr>
-                                <td class="font-semibold">{{ feed.feed_id }}</td>
+                                <td class="font-semibold font-mono">{{ feed.feed_id }}</td>
                                 <td>
-                                    <span class="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-2 py-1 rounded-full text-sm font-semibold">
+                                    <span class="cyber-badge">
                                         {{ feed.analysis_count }}
                                     </span>
                                 </td>
                                 <td>
                                     <div class="flex items-center">
                                         <div class="progress-bar w-20 h-2 mr-3">
-                                            <div class="bg-purple-600 progress-fill" style="width: {{ feed.avg_confidence }}%"></div>
+                                            <div class="bg-cyber-purple progress-fill" style="width: {{ feed.avg_confidence }}%"></div>
                                         </div>
                                         <span class="text-sm font-medium">{{ feed.avg_confidence|round(1) }}%</span>
                                     </div>
@@ -747,9 +770,9 @@
                                 <td class="text-sm text-gray-600 dark:text-gray-400">{{ feed.avg_sample_size|int }}</td>
                                 <td class="text-sm text-gray-500 dark:text-gray-400">{{ feed.last_analysis|datetime }}</td>
                                 <td>
-                                    <span class="text-gray-500 text-sm flex items-center">
+                                    <a href="#" class="text-cyber-blue hover:text-blue-700 flex items-center">
                                         <i class="fas fa-chart-line mr-1"></i> Details
-                                    </span>
+                                    </a>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -759,11 +782,12 @@
             </div>
 
             <!-- Benefits of Batch Analysis -->
-            <div class="bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/10 dark:to-blue-900/10 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
-                <h4 class="text-lg font-semibold mb-4">Batch Analysis Benefits</h4>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="bg-gray-50 dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700 relative overflow-hidden">
+                <div class="absolute inset-0 data-flow"></div>
+                <h4 class="text-lg font-semibold mb-4 cyber-section relative z-10">Batch Analysis Benefits</h4>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 relative z-10">
                     <div class="flex items-start">
-                        <div class="flex-shrink-0 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center mr-3">
+                        <div class="flex-shrink-0 w-8 h-8 bg-cyber-blue text-white rounded-full flex items-center justify-center mr-3 cyber-glow">
                             <i class="fas fa-dollar-sign text-sm"></i>
                         </div>
                         <div>
@@ -772,7 +796,7 @@
                         </div>
                     </div>
                     <div class="flex items-start">
-                        <div class="flex-shrink-0 w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center mr-3">
+                        <div class="flex-shrink-0 w-8 h-8 bg-cyber-cyan text-white rounded-full flex items-center justify-center mr-3 cyber-glow">
                             <i class="fas fa-bolt text-sm"></i>
                         </div>
                         <div>
@@ -781,7 +805,7 @@
                         </div>
                     </div>
                     <div class="flex items-start">
-                        <div class="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center mr-3">
+                        <div class="flex-shrink-0 w-8 h-8 bg-cyber-green text-white rounded-full flex items-center justify-center mr-3 cyber-glow">
                             <i class="fas fa-chart-line text-sm"></i>
                         </div>
                         <div>
@@ -790,7 +814,7 @@
                         </div>
                     </div>
                     <div class="flex items-start">
-                        <div class="flex-shrink-0 w-8 h-8 bg-orange-600 text-white rounded-full flex items-center justify-center mr-3">
+                        <div class="flex-shrink-0 w-8 h-8 bg-cyber-orange text-white rounded-full flex items-center justify-center mr-3 cyber-glow">
                             <i class="fas fa-clock text-sm"></i>
                         </div>
                         <div>
@@ -803,8 +827,8 @@
             {% else %}
             <div class="text-center py-12">
                 <div class="flex flex-col items-center">
-                    <div class="inline-block p-6 rounded-full bg-purple-50 dark:bg-purple-900/20 mb-4">
-                        <i class="fas fa-brain text-purple-600 text-5xl"></i>
+                    <div class="inline-block p-6 rounded-full bg-purple-50 dark:bg-purple-900/20 mb-4 cyber-glow">
+                        <i class="fas fa-brain text-cyber-purple text-5xl"></i>
                     </div>
                     <h3 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">AI Batch Analysis Starting</h3>
                     <p class="text-gray-600 dark:text-gray-400 mb-6">Batch analysis will begin after data ingestion completes.</p>
@@ -835,6 +859,14 @@
             timeRangeButton.addEventListener('click', function(e) {
                 e.stopPropagation();
                 timeRangeDropdown.classList.toggle('hidden');
+                
+                // GSAP animation for dropdown
+                if (!timeRangeDropdown.classList.contains('hidden') && typeof gsap !== 'undefined') {
+                    gsap.fromTo(timeRangeDropdown, 
+                        {opacity: 0, y: -10}, 
+                        {opacity: 1, y: 0, duration: 0.2}
+                    );
+                }
             });
             
             document.addEventListener('click', function(e) {
@@ -845,7 +877,7 @@
         }
         
         // Chart creation functions
-        function createMiniChart(elementId, data, color = '#3b82f6') {
+        function createMiniChart(elementId, data, color = '#0077cc') {
             const element = document.getElementById(elementId);
             if (!element) return;
             
@@ -853,7 +885,7 @@
                 y: data,
                 type: 'scatter',
                 mode: 'lines',
-                line: { color: color, width: 2 },
+                line: { color: color, width: 2, shape: 'spline' },
                 fill: 'tozeroy',
                 fillcolor: color + '20',
                 hoverinfo: 'none'
@@ -874,12 +906,16 @@
             });
         }
         
-        // Create mini trend charts
-        const trendData = Array.from({length: 10}, (_, i) => 20 + Math.sin(i/2) * 10 + Math.random() * 5);
-        createMiniChart('feedTrendChart', trendData, '#3b82f6');
-        createMiniChart('iocTrendChart', trendData.map(x => x + 15), '#dc2626');
-        createMiniChart('analysisTrendChart', trendData.map(x => x + 5), '#9333ea');
-        createMiniChart('threatScoreChart', trendData.map(x => x + 25), '#ea580c');
+        // Create mini trend charts with more dynamic data
+        const feedTrendData = [25, 28, 22, 26, 24, 25, 27, 26, 28, 30];
+        const iocTrendData = [800, 1200, 950, 1100, 1050, 1500, 2200, 3000, 4500, 6000];
+        const analysisTrendData = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        const threatScoreData = [45, 48, 52, 49, 51, 50, 48, 50, 49, 50];
+        
+        createMiniChart('feedTrendChart', feedTrendData, '#0077cc');
+        createMiniChart('iocTrendChart', iocTrendData.map(x => x/200), '#ff3333');
+        createMiniChart('analysisTrendChart', analysisTrendData, '#6600cc');
+        createMiniChart('threatScoreChart', threatScoreData, '#ff9900');
         
         // IOC Types Chart
         const iocTypesData = {
@@ -897,7 +933,7 @@
                 textposition: 'outside',
                 texttemplate: '<b>%{label}</b><br>%{percent}',
                 marker: {
-                    colors: ['#fde047', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#f97316', '#06b6d4'],
+                    colors: ['#fde047', '#10b981', '#0077cc', '#ff3333', '#6600cc', '#ff9900', '#00ccff'],
                     line: { color: '#ffffff', width: 2 }
                 }
             };
@@ -928,19 +964,40 @@
                 y: activityData.counts,
                 type: 'scatter',
                 mode: 'lines+markers',
-                line: { color: '#3b82f6', width: 3 },
-                marker: { color: '#3b82f6', size: 6 },
+                line: { 
+                    color: '#0077cc', 
+                    width: 3,
+                    shape: 'spline'
+                },
+                marker: { 
+                    color: '#0077cc', 
+                    size: 6,
+                    line: {
+                        color: '#ffffff',
+                        width: 1
+                    }
+                },
                 fill: 'tozeroy',
-                fillcolor: 'rgba(59, 130, 246, 0.1)'
+                fillcolor: 'rgba(0, 119, 204, 0.1)'
             };
             
             const layout = {
                 margin: { t: 20, b: 50, l: 60, r: 20 },
-                xaxis: { title: 'Date', gridcolor: '#f1f5f9' },
-                yaxis: { title: 'Records', gridcolor: '#f1f5f9' },
-                plot_bgcolor: '#fefefe',
+                xaxis: { 
+                    title: 'Date', 
+                    gridcolor: '#f1f5f9',
+                    tickangle: -45
+                },
+                yaxis: { 
+                    title: 'Records', 
+                    gridcolor: '#f1f5f9'
+                },
+                plot_bgcolor: document.documentElement.classList.contains('dark') ? '#1e293b' : '#fefefe',
                 paper_bgcolor: 'rgba(0,0,0,0)',
-                hovermode: 'x unified'
+                hovermode: 'x unified',
+                font: {
+                    family: 'Inter, system-ui, sans-serif'
+                }
             };
             
             Plotly.newPlot('activityChart', [trace], layout, {
@@ -949,25 +1006,41 @@
             });
         }
         
-        // Threat Map
+        // Threat Map - Simplified version since we don't have real geo data
         if (document.getElementById('threatMap')) {
             const geoData = {{ geo_stats|default([])|tojson }};
             
-            if (geoData.length > 0) {
+            // If no geo data, create some sample data
+            const sampleGeoData = [
+                {country: 'USA', count: 1250, risk_level: 'high'},
+                {country: 'RUS', count: 950, risk_level: 'critical'},
+                {country: 'CHN', count: 850, risk_level: 'high'},
+                {country: 'DEU', count: 450, risk_level: 'medium'},
+                {country: 'GBR', count: 350, risk_level: 'medium'},
+                {country: 'IRN', count: 300, risk_level: 'critical'},
+                {country: 'BRA', count: 250, risk_level: 'medium'},
+                {country: 'IND', count: 220, risk_level: 'medium'},
+                {country: 'KOR', count: 180, risk_level: 'high'},
+                {country: 'FRA', count: 150, risk_level: 'low'}
+            ];
+            
+            const dataToUse = geoData.length > 0 ? geoData : sampleGeoData;
+            
+            if (dataToUse.length > 0) {
                 const trace = {
                     type: 'scattergeo',
                     mode: 'markers',
-                    locations: geoData.map(d => d.country),
+                    locations: dataToUse.map(d => d.country),
                     locationmode: 'ISO-3',
                     marker: {
-                        size: geoData.map(d => Math.max(10, Math.sqrt(d.count) * 2)),
-                        color: geoData.map(d => d.risk_level === 'critical' ? '#dc2626' : 
-                                                d.risk_level === 'high' ? '#ea580c' : '#fbbf24'),
+                        size: dataToUse.map(d => Math.max(10, Math.sqrt(d.count) * 2)),
+                        color: dataToUse.map(d => d.risk_level === 'critical' ? '#ff3333' : 
+                                             d.risk_level === 'high' ? '#ff9900' : '#fbbf24'),
                         opacity: 0.8,
                         sizemode: 'diameter',
                         line: { color: 'white', width: 1 }
                     },
-                    text: geoData.map(d => `${d.country}: ${d.count} threats<br>Risk: ${d.risk_level}`),
+                    text: dataToUse.map(d => `${d.country}: ${d.count} threats<br>Risk: ${d.risk_level}`),
                     hovertemplate: '<b>%{text}</b><extra></extra>'
                 };
                 
@@ -975,13 +1048,13 @@
                     geo: {
                         projection: { type: 'natural earth' },
                         showland: true,
-                        landcolor: '#f8fafc',
-                        countrycolor: '#e2e8f0',
-                        coastlinecolor: '#cbd5e1',
+                        landcolor: document.documentElement.classList.contains('dark') ? '#1e293b' : '#f8fafc',
+                        countrycolor: document.documentElement.classList.contains('dark') ? '#475569' : '#e2e8f0',
+                        coastlinecolor: document.documentElement.classList.contains('dark') ? '#475569' : '#cbd5e1',
                         showlakes: true,
-                        lakecolor: '#e0f2fe',
+                        lakecolor: document.documentElement.classList.contains('dark') ? '#1e3a8a' : '#e0f2fe',
                         showocean: true,
-                        oceancolor: '#f0f9ff'
+                        oceancolor: document.documentElement.classList.contains('dark') ? '#0f172a' : '#f0f9ff'
                     },
                     margin: { l: 0, r: 0, t: 0, b: 0 },
                     plot_bgcolor: 'rgba(0,0,0,0)',
@@ -998,7 +1071,17 @@
             // Remove loading indicator
             const loadingDiv = document.querySelector('#threatMap > div:first-child');
             if (loadingDiv) {
-                setTimeout(() => loadingDiv.style.display = 'none', 1000);
+                setTimeout(() => {
+                    if (typeof gsap !== 'undefined') {
+                        gsap.to(loadingDiv, {
+                            opacity: 0,
+                            duration: 0.5,
+                            onComplete: () => loadingDiv.style.display = 'none'
+                        });
+                    } else {
+                        loadingDiv.style.display = 'none';
+                    }
+                }, 1000);
             }
         }
         
@@ -1009,7 +1092,7 @@
             const tableBody = document.getElementById('iocTable');
             
             if (searchInput && typeFilter && tableBody) {
-                const filterTable = TIP.utils.debounce(function() {
+                const filterTable = CIPHER.utils.debounce(function() {
                     const searchTerm = searchInput.value.toLowerCase();
                     const selectedType = typeFilter.value;
                     const rows = tableBody.querySelectorAll('tr');
@@ -1052,8 +1135,8 @@
                 type: 'bar',
                 marker: {
                     color: threatData.map(d => ({
-                        'critical': '#dc2626',
-                        'high': '#ea580c',
+                        'critical': '#ff3333',
+                        'high': '#ff9900',
                         'medium': '#fbbf24',
                         'low': '#10b981'
                     })[d.threat_level] || '#6b7280')
@@ -1064,7 +1147,7 @@
                 margin: { t: 20, b: 60, l: 50, r: 20 },
                 xaxis: { title: 'Threat Level' },
                 yaxis: { title: 'Count' },
-                plot_bgcolor: '#fefefe',
+                plot_bgcolor: document.documentElement.classList.contains('dark') ? '#1e293b' : '#fefefe',
                 paper_bgcolor: 'rgba(0,0,0,0)'
             };
             
@@ -1078,11 +1161,31 @@
         // Global function definitions
         window.copyToClipboard = function(text) {
             navigator.clipboard.writeText(text).then(function() {
-                TIP.utils.showNotification('Copied to clipboard', 'success', 1500);
+                CIPHER.utils.showNotification('Copied to clipboard', 'success', 1500);
             }).catch(function() {
-                TIP.utils.showNotification('Failed to copy', 'danger', 1500);
+                CIPHER.utils.showNotification('Failed to copy', 'danger', 1500);
             });
         };
+        
+        // Animate elements with GSAP if available
+        if (typeof gsap !== 'undefined') {
+            // Animate the scanning lines on cyber cards
+            gsap.to('.scanning-line', {
+                y: '100%', 
+                duration: 2,
+                ease: "none",
+                repeat: -1,
+                yoyo: true
+            });
+            
+            // Animate the data-flow backgrounds
+            gsap.to('.data-flow', {
+                backgroundPosition: '200% 50%',
+                duration: 15,
+                ease: "none",
+                repeat: -1
+            });
+        }
         
         // Auto-refresh data every 5 minutes for dashboard
         if (currentView === 'dashboard') {
