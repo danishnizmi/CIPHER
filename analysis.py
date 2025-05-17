@@ -7,10 +7,7 @@ Implements domain analysis, infrastructure clustering, and strategic AI usage.
 import os
 import json
 import logging
-import hashlib
 import re
-import ipaddress
-import socket
 import time
 import threading
 import uuid
@@ -26,8 +23,11 @@ from urllib.parse import urlparse
 import dns.resolver
 import tldextract
 
-# Import configuration
-from config import Config, ServiceManager, ServiceStatus, report_error
+# Import centralized configuration and utilities
+from config import (
+    Config, ServiceManager, ServiceStatus, report_error,
+    Utils, CircuitBreaker, CacheManager, shared_cache
+)
 
 # Initialize logging
 logger = logging.getLogger(__name__)
@@ -55,10 +55,8 @@ generative_model = None
 _ai_models_initialized = False
 _ai_models_lock = threading.Lock()
 
-# TTL Cache for reputation data
-_reputation_cache = {}
-_reputation_cache_expiry = {}
-REPUTATION_TTL = 86400  # 24 hours
+# Create circuit breakers for external API calls
+reputation_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
 
 # ==================== Constants and Configuration ====================
 
@@ -111,7 +109,7 @@ TOP_DOMAINS = [
     "americanexpress.com", "discover.com", "icloud.com", "salesforce.com", "slack.com"
 ]
 
-# Reputation services configuration
+# Reputation services configuration - retained as is due to specific structure
 REPUTATION_SERVICES = {
     'domain': [
         {
@@ -209,41 +207,6 @@ def validate_feed_id(feed_id: str) -> bool:
         return False
     # Allow alphanumeric, hyphens, and underscores
     return re.match(r'^[a-zA-Z0-9_-]+$', feed_id) is not None
-
-def is_valid_domain(domain: str) -> bool:
-    """Validate domain format."""
-    if not domain or not isinstance(domain, str):
-        return False
-    
-    # Simple domain validation
-    domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
-    return bool(re.match(domain_pattern, domain))
-
-def is_valid_ip(ip: str) -> bool:
-    """Validate IP address format."""
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
-
-def is_valid_url(url: str) -> bool:
-    """Validate URL format."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except:
-        return False
-
-def extract_domain_from_url(url: str) -> Optional[str]:
-    """Extract domain from URL."""
-    try:
-        parsed = urlparse(url)
-        if parsed.netloc:
-            return parsed.netloc
-        return None
-    except:
-        return None
 
 def calculate_domain_similarity(domain1: str, domain2: str) -> float:
     """Calculate similarity between two domains using sequence matcher."""
@@ -356,19 +319,19 @@ def rate_limit_reputation_request(service_name: str, limit_per_minute: int) -> b
     Returns True if request is allowed, False if it should be skipped.
     """
     cache_key = f"rate_limit_{service_name}"
-    cache = _reputation_cache.get(cache_key, [])
+    timestamps = shared_cache.get(cache_key, [])
     
     # Remove timestamps older than 1 minute
     now = time.time()
-    cache = [ts for ts in cache if now - ts < 60]
+    timestamps = [ts for ts in timestamps if now - ts < 60]
     
     # Check if we've hit the limit
-    if len(cache) >= limit_per_minute:
+    if len(timestamps) >= limit_per_minute:
         return False
     
     # Add current timestamp and update cache
-    cache.append(now)
-    _reputation_cache[cache_key] = cache
+    timestamps.append(now)
+    shared_cache.set(cache_key, timestamps, ttl=60)
     return True
 
 def get_reputation_score(ioc_type: str, ioc_value: str) -> Tuple[int, str, Dict]:
@@ -377,17 +340,11 @@ def get_reputation_score(ioc_type: str, ioc_value: str) -> Tuple[int, str, Dict]
     Returns tuple of (score, source, details).
     Uses caching to avoid repeated queries.
     """
-    global _reputation_cache, _reputation_cache_expiry
-    
     # Check cache first
-    cache_key = f"{ioc_type}:{ioc_value}"
-    if cache_key in _reputation_cache:
-        if _reputation_cache_expiry.get(cache_key, 0) > time.time():
-            return _reputation_cache[cache_key]
-        else:
-            # Expired cache entry
-            _reputation_cache.pop(cache_key, None)
-            _reputation_cache_expiry.pop(cache_key, None)
+    cache_key = f"reputation:{ioc_type}:{ioc_value}"
+    cached_result = shared_cache.get(cache_key)
+    if cached_result:
+        return cached_result
     
     # Default response
     result = (0, "none", {})
@@ -402,58 +359,77 @@ def get_reputation_score(ioc_type: str, ioc_value: str) -> Tuple[int, str, Dict]
             continue
         
         try:
-            # Prepare request parameters
-            kwargs = {}
+            # Execute request with circuit breaker protection
+            result = reputation_circuit_breaker.call(
+                _execute_reputation_request,
+                service,
+                ioc_value
+            )
             
-            if 'url_format' in service:
-                url = service['url_format'](ioc_value)
-            else:
-                url = service['url']
-                
-            if 'params' in service:
-                kwargs['params'] = service['params'](ioc_value)
-                
-            if 'data' in service:
-                kwargs['data'] = service['data'](ioc_value)
-                
-            if 'json' in service:
-                kwargs['json'] = service['json'](ioc_value)
-                
-            if 'headers' in service:
-                kwargs['headers'] = service['headers']()
-            
-            # Make the request
-            response = requests.post(url, **kwargs) if 'data' in service or 'json' in service else requests.get(url, **kwargs)
-            
-            if response.status_code == 200:
-                resp_data = response.json()
-                score = service['extract_score'](resp_data)
-                
-                # If we got a positive score, return it
-                if score > 0:
-                    result = (score, service['name'], resp_data)
-                    break
-            else:
-                logger.warning(f"Reputation service {service['name']} returned status {response.status_code}")
+            # If we got a positive score, return it
+            if result[0] > 0:
+                shared_cache.set(cache_key, result, ttl=86400)  # Cache for 24 hours
+                return result
                 
         except Exception as e:
             logger.warning(f"Error querying reputation service {service['name']}: {str(e)}")
             continue
     
-    # Cache the result
-    _reputation_cache[cache_key] = result
-    _reputation_cache_expiry[cache_key] = time.time() + REPUTATION_TTL
+    # Cache the result (even if no positive scores found)
+    shared_cache.set(cache_key, result, ttl=3600)  # Cache for 1 hour
     
     return result
 
+def _execute_reputation_request(service: Dict, ioc_value: str) -> Tuple[int, str, Dict]:
+    """Execute request to reputation service (used with circuit breaker)."""
+    # Prepare request parameters
+    kwargs = {}
+    
+    if 'url_format' in service:
+        url = service['url_format'](ioc_value)
+    else:
+        url = service['url']
+        
+    if 'params' in service:
+        kwargs['params'] = service['params'](ioc_value)
+        
+    if 'data' in service:
+        kwargs['data'] = service['data'](ioc_value)
+        
+    if 'json' in service:
+        kwargs['json'] = service['json'](ioc_value)
+        
+    if 'headers' in service:
+        kwargs['headers'] = service['headers']()
+    
+    # Make the request
+    response = requests.post(url, **kwargs) if 'data' in service or 'json' in service else requests.get(url, **kwargs)
+    
+    if response.status_code == 200:
+        resp_data = response.json()
+        score = service['extract_score'](resp_data)
+        
+        # If we got a positive score, return it
+        if score > 0:
+            return (score, service['name'], resp_data)
+    else:
+        logger.warning(f"Reputation service {service['name']} returned status {response.status_code}")
+    
+    return (0, "none", {})
+
 def get_ip_geo_info(ip: str) -> Dict[str, Any]:
     """Get geolocation information for an IP address using a free service."""
+    cache_key = f"ip_geo:{ip}"
+    cached_result = shared_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+    
     try:
         # Use ipinfo.io free tier (50,000 requests/month)
         response = requests.get(f"https://ipinfo.io/{ip}/json")
         if response.status_code == 200:
             data = response.json()
-            return {
+            result = {
                 'country': data.get('country'),
                 'region': data.get('region'),
                 'city': data.get('city'),
@@ -463,16 +439,21 @@ def get_ip_geo_info(ip: str) -> Dict[str, Any]:
                 'loc': data.get('loc'),
                 'asn': data.get('asn')
             }
+            shared_cache.set(cache_key, result, ttl=86400)  # Cache for 24 hours
+            return result
     except Exception as e:
         logger.debug(f"Error getting IP geolocation: {str(e)}")
     
     # Fallback to minimal info
-    return {
+    result = {
         'country': None,
         'region': None,
         'city': None,
         'org': None
     }
+    
+    shared_cache.set(cache_key, result, ttl=3600)  # Cache for 1 hour
+    return result
 
 def add_domain_insights(domain: str) -> Dict[str, Any]:
     """Add insights for a domain."""
@@ -581,7 +562,7 @@ def add_ip_insights(ip: str) -> Dict[str, Any]:
 def add_url_insights(url: str) -> Dict[str, Any]:
     """Add insights for a URL."""
     insights = {
-        'domain': extract_domain_from_url(url),
+        'domain': Utils.extract_domain_from_url(url),
         'reputation_score': 0,
         'reputation_source': None,
         'path_length': 0,
@@ -926,6 +907,8 @@ def analyze_high_value_indicators(limit: int = 1000) -> Dict[str, Any]:
         return {"error": "Indicators table not configured"}
     
     try:
+        from google.cloud import bigquery
+        
         query = f"""
         SELECT *
         FROM `{table_id}`
@@ -995,7 +978,7 @@ def analyze_high_value_indicators(limit: int = 1000) -> Dict[str, Any]:
         logger.info(f"Analyzing {len(domains)} domains")
         for domain in domains:
             domain_value = domain.get('value')
-            if not is_valid_domain(domain_value):
+            if not Utils.is_valid_domain(domain_value):
                 continue
                 
             # Add domain-specific insights
@@ -1064,7 +1047,7 @@ def analyze_high_value_indicators(limit: int = 1000) -> Dict[str, Any]:
         logger.info(f"Analyzing {len(urls)} URLs")
         for url in urls:
             url_value = url.get('value')
-            if not is_valid_url(url_value):
+            if not Utils.is_valid_url(url_value):
                 continue
                 
             # Add URL-specific insights
@@ -1154,7 +1137,7 @@ def analyze_high_value_indicators(limit: int = 1000) -> Dict[str, Any]:
             analysis_result['ai_analysis'] = ai_result
         
         # Update database with new risk scores and insights
-        update_success = update_ioc_analysis_results(iocs)
+        update_ioc_analysis_results(iocs)
         
         # Calculate execution time
         analysis_result['execution_time'] = time.time() - start_time
@@ -1217,6 +1200,8 @@ def update_ioc_analysis_results(iocs: List[Dict]) -> bool:
         
         # Execute batch update
         try:
+            from google.cloud import bigquery
+            
             # Create temporary table for updates
             temp_table_id = f"{table_id}_updates_{int(time.time())}"
             
@@ -1285,6 +1270,8 @@ def store_analysis_results(analysis_result: Dict[str, Any]) -> bool:
         return False
     
     try:
+        from google.cloud import bigquery
+        
         # Define analysis results table if it doesn't exist
         dataset_id = f"{Config.GCP_PROJECT}.{Config.BIGQUERY_DATASET}"
         table_id = f"{dataset_id}.analysis_results"
