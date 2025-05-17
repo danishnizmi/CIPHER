@@ -10,25 +10,19 @@ import logging
 import time
 import threading
 from datetime import datetime, timedelta
-from functools import wraps, lru_cache
 from typing import Dict, List, Any, Optional
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
 from flask import flash, abort, g, current_app, Response, make_response
+import requests
 
 # Import config module for centralized configuration
-from config import Config, ServiceManager, ServiceStatus
+from config import Config, ServiceStatus, Utils, CacheManager, shared_cache, report_error
 
 # Environment settings
 VERSION = os.environ.get("VERSION", "1.0.3")
 DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'production')
-
-# Cache settings
-CACHE_TIMEOUT = 300  # 5 minutes
-LONG_CACHE_TIMEOUT = 1800  # 30 minutes
-API_CACHE = {}
-API_CACHE_TIMESTAMP = {}
 
 # Configure logging
 logger = logging.getLogger('frontend')
@@ -41,17 +35,17 @@ frontend_app = Blueprint('frontend', __name__, template_folder='templates', stat
 def invalidate_cache_on_ingestion(data):
     """Invalidate cache when new data is ingested."""
     logger.info("Invalidating cache due to data ingestion")
-    clear_api_cache('feeds')
-    clear_api_cache('iocs')
-    clear_api_cache('stats')
-    clear_api_cache('threat_summary')
+    shared_cache.clear('feeds')
+    shared_cache.clear('iocs')
+    shared_cache.clear('stats')
+    shared_cache.clear('threat_summary')
 
 def invalidate_cache_on_analysis(data):
     """Invalidate cache when analysis completes."""
     logger.info("Invalidating cache due to analysis completion")
-    clear_api_cache('ai')
-    clear_api_cache('threat_summary')
-    clear_api_cache('analyses')
+    shared_cache.clear('ai')
+    shared_cache.clear('threat_summary')
+    shared_cache.clear('analyses')
 
 # Register event handlers when blueprint is recorded
 @frontend_app.record
@@ -68,59 +62,6 @@ def register_event_handlers(state):
         service_manager = Config.get_service_manager()
         service_manager.update_status('frontend', ServiceStatus.READY)
 
-# ====== Helper Functions ======
-
-def safe_report_exception(e=None):
-    """Safely report exception using config module."""
-    try:
-        from config import report_error
-        report_error(e or Exception("Frontend error"))
-    except Exception as err:
-        logger.warning(f"Failed to report exception: {err}")
-
-def cache_key(func_name: str, **params) -> str:
-    """Generate cache key excluding sensitive parameters."""
-    param_str = "&".join(f"{k}={str(v)}" for k, v in sorted(params.items()) 
-                        if k not in ['api_key', 'token', 'password'] and v is not None)
-    return f"{func_name}:{param_str}"
-
-def cache_valid(key: str, timeout: int = CACHE_TIMEOUT) -> bool:
-    """Check if cached value is still valid."""
-    return (key in API_CACHE and key in API_CACHE_TIMESTAMP and 
-            (time.time() - API_CACHE_TIMESTAMP[key]) < timeout)
-
-def api_cache(timeout: int = CACHE_TIMEOUT):
-    """Cache decorator for API results."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            key = cache_key(func.__name__, **kwargs)
-            if cache_valid(key, timeout):
-                return API_CACHE[key]
-            
-            result = func(*args, **kwargs)
-            if result and 'error' not in result:  # Only cache successful responses
-                API_CACHE[key] = result
-                API_CACHE_TIMESTAMP[key] = time.time()
-            return result
-        return wrapper
-    return decorator
-
-def clear_api_cache(prefix: str = None):
-    """Clear API cache entries with optional prefix filter."""
-    global API_CACHE, API_CACHE_TIMESTAMP
-    
-    if prefix:
-        keys = [k for k in API_CACHE if k.startswith(prefix)]
-        for k in keys:
-            API_CACHE.pop(k, None)
-            API_CACHE_TIMESTAMP.pop(k, None)
-        logger.debug(f"Cleared {len(keys)} cache entries with prefix '{prefix}'")
-    else:
-        API_CACHE = {}
-        API_CACHE_TIMESTAMP = {}
-        logger.debug("Cleared all API cache entries")
-
 # ====== API Interaction Functions ======
 
 def get_api_key() -> str:
@@ -133,7 +74,6 @@ def get_api_key() -> str:
     # Use default key for public view
     return 'default-api-key'
 
-@api_cache(timeout=CACHE_TIMEOUT)
 def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: Dict = None) -> Dict:
     """Make internal API request with proper context handling."""
     
@@ -145,29 +85,14 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
     if status['overall'] == ServiceStatus.ERROR.value:
         return {"error": "Services unavailable", "status": "error"}
     
+    # Create cache key for caching
+    cache_key = f"api:{endpoint}:{method}:{json.dumps(params or {})}:{json.dumps(data or {})}"
+    cached_result = shared_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+    
     try:
-        # Import at function level to avoid circular imports
-        from api import api_blueprint
-        import requests
-        
-        # For internal requests, use the proper Flask approach
-        try:
-            with current_app.test_request_context():
-                # Try to call the API function directly if possible
-                endpoint_func = current_app.view_functions.get(f'api.{endpoint.split("/")[-1].replace("-", "_")}')
-                if endpoint_func and method == 'GET':
-                    # Direct function call for GET requests
-                    logger.debug(f"Making direct internal call to {endpoint}")
-                    if params:
-                        # Simulate request args
-                        with current_app.test_request_context(query_string=params):
-                            return endpoint_func()
-                    else:
-                        return endpoint_func()
-        except Exception as e:
-            logger.debug(f"Direct call failed: {e}, falling back to HTTP request")
-        
-        # Fallback to HTTP request
+        # For internal requests, we'll use the HTTP approach for consistency
         # Get the current app's URL for internal requests
         try:
             if request:
@@ -240,14 +165,18 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         
         # Parse JSON response
         try:
-            return response.json() if response.text else {}
+            result = response.json() if response.text else {}
+            # Cache successful responses
+            if 'error' not in result:
+                shared_cache.set(cache_key, result, ttl=300)
+            return result
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON response from {endpoint}")
             return {"error": "Invalid JSON response"}
     
     except Exception as e:
         logger.error(f"API request error ({endpoint}): {str(e)}")
-        safe_report_exception(e)
+        report_error(e)
         return {"error": f"API error: {str(e)}"}
 
 # ====== Data Processing Functions ======
@@ -456,11 +385,10 @@ def dashboard(view=None):
         logger.error(f"Dashboard error: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        safe_report_exception(e)
+        report_error(e)
         flash('An error occurred while loading the dashboard', 'danger')
         return redirect(url_for('frontend.index'))
 
-# Add missing export_iocs route
 @frontend_app.route('/export/iocs')
 def export_iocs():
     """Export IOCs in various formats."""
@@ -622,7 +550,7 @@ def server_error(e):
     logger.error(f"Server error: {str(e)}")
     import traceback
     logger.error(traceback.format_exc())
-    safe_report_exception(e)
+    report_error(e)
     return render_template('error.html',
                          error_code=500,
                          error_message="Internal Server Error",
@@ -642,33 +570,5 @@ def inject_global_data():
         'debug_mode': DEBUG_MODE,
     }
 
-# ====== Cache Management ======
-
-def periodic_cache_cleanup():
-    """Periodically clean up expired cache entries."""
-    while True:
-        try:
-            current_time = time.time()
-            expired_keys = []
-            
-            for key, timestamp in API_CACHE_TIMESTAMP.items():
-                if current_time - timestamp > LONG_CACHE_TIMEOUT:
-                    expired_keys.append(key)
-            
-            for key in expired_keys:
-                API_CACHE.pop(key, None)
-                API_CACHE_TIMESTAMP.pop(key, None)
-            
-            if expired_keys:
-                logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
-            
-            time.sleep(600)  # Sleep for 10 minutes
-        except Exception as e:
-            logger.error(f"Error in cache cleanup: {str(e)}")
-            time.sleep(60)
-
-# Start cache cleanup thread
-if __name__ != "__main__":
-    cleanup_thread = threading.Thread(target=periodic_cache_cleanup, daemon=True)
-    cleanup_thread.start()
-    logger.info("Frontend module initialized successfully")
+# Initialize module
+logger.info("Frontend module initialized successfully")
