@@ -7,7 +7,7 @@ import threading
 import queue
 import time
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional
 from flask import Flask, jsonify, render_template, redirect, url_for, session, g, current_app, Response, make_response
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import config to ensure ServiceManager is available
-from config import Config, ServiceManager, ServiceStatus
+from config import Config, ServiceManager, ServiceStatus, report_error, CacheManager, shared_cache
 
 # Event Bus for cross-module communication
 class EventBus:
@@ -71,7 +71,8 @@ class EventBus:
     def shutdown(self):
         """Shutdown the event bus."""
         self._running = False
-        self._worker_thread.join(timeout=5)
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=5)
 
 # Create Flask app with proper template configuration
 app = Flask(__name__, 
@@ -180,51 +181,83 @@ def readiness_check():
         'timestamp': datetime.utcnow().isoformat()
     }), 200
 
-def initialize_service(service_name, init_func, *args, timeout=15, is_critical=False):
-    """Initialize a service with proper timeout and error handling."""
+def initialize_service(service_name, init_func, *args, timeout=15, is_critical=False, max_retries=3):
+    """Initialize a service with proper timeout, retries and error handling."""
     logger.info(f"Initializing {service_name} service...")
     service_manager = Config.get_service_manager()
     service_manager.update_status(service_name, ServiceStatus.INITIALIZING)
     
-    def init_worker():
+    retry_count = 0
+    success = False
+    last_error = None
+    
+    while retry_count < max_retries and not success:
+        if retry_count > 0:
+            logger.info(f"Retry {retry_count} for {service_name} initialization")
+            # Exponential backoff
+            backoff_time = min(30, 2 ** retry_count)
+            time.sleep(backoff_time)
+            
         try:
-            result = init_func(*args)
-            if result:
-                service_manager.update_status(service_name, ServiceStatus.READY)
-                logger.info(f"{service_name} service initialized successfully")
-            else:
-                service_manager.update_status(service_name, ServiceStatus.DEGRADED, f"{service_name} initialization returned False")
-                logger.warning(f"{service_name} service initialization incomplete")
+            def init_worker():
+                try:
+                    result = init_func(*args)
+                    if result:
+                        service_manager.update_status(service_name, ServiceStatus.READY)
+                        nonlocal success
+                        success = True
+                        logger.info(f"{service_name} service initialized successfully")
+                    else:
+                        service_manager.update_status(service_name, ServiceStatus.DEGRADED, f"{service_name} initialization returned False")
+                        logger.warning(f"{service_name} service initialization incomplete")
+                except Exception as e:
+                    nonlocal last_error
+                    last_error = e
+                    error_msg = f"Error initializing {service_name} service: {str(e)}"
+                    logger.error(error_msg)
+                    if Config.ENVIRONMENT != 'production':
+                        logger.error(traceback.format_exc())
+                    # Set degraded instead of error for non-critical services
+                    service_manager.update_status(
+                        service_name, 
+                        ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
+                        error_msg
+                    )
+            
+            # Start initialization in a separate thread with timeout
+            init_thread = threading.Thread(target=init_worker)
+            init_thread.daemon = True
+            init_thread.start()
+            init_thread.join(timeout=timeout)
+            
+            if init_thread.is_alive():
+                logger.warning(f"{service_name} service initialization timed out after {timeout}s")
+                service_manager.update_status(
+                    service_name, 
+                    ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
+                    f"Initialization timed out after {timeout}s"
+                )
+            elif success:
+                break
+                
         except Exception as e:
-            error_msg = f"Error initializing {service_name} service: {str(e)}"
-            logger.error(error_msg)
+            last_error = e
+            logger.error(f"Exception during {service_name} initialization thread: {e}")
             if Config.ENVIRONMENT != 'production':
                 logger.error(traceback.format_exc())
-            # Set degraded instead of error for non-critical services
-            service_manager.update_status(
-                service_name, 
-                ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
-                error_msg
-            )
-    
-    # Start initialization in a separate thread with timeout
-    init_thread = threading.Thread(target=init_worker)
-    init_thread.daemon = True
-    init_thread.start()
-    init_thread.join(timeout=timeout)
-    
-    if init_thread.is_alive():
-        logger.warning(f"{service_name} service initialization timed out after {timeout}s")
-        service_manager.update_status(
-            service_name, 
-            ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
-            f"Initialization timed out after {timeout}s"
-        )
-        return False
+                
+        retry_count += 1
     
     # Check final status
     status = service_manager.get_status()
     service_status = status['services'].get(service_name)
+    
+    if not success and retry_count >= max_retries:
+        logger.error(f"Failed to initialize {service_name} after {max_retries} attempts: {last_error}")
+        # Report critical failures but continue app startup
+        if is_critical:
+            report_error(last_error or Exception(f"{service_name} initialization failed"))
+    
     return service_status == ServiceStatus.READY.value
 
 def initialize_platform():
@@ -238,13 +271,13 @@ def initialize_platform():
         Config.init_app()
         service_manager.update_status('app', ServiceStatus.INITIALIZING)
         
-        # 2. Initialize GCP clients with reduced timeout and criticality
+        # 2. Initialize GCP clients with retries and proper timeout
         from config import initialize_bigquery, initialize_storage, initialize_pubsub
         
-        # Make all clients non-critical to allow the app to start even if GCP services are unavailable
-        initialize_service('bigquery', initialize_bigquery, timeout=10, is_critical=False)
-        initialize_service('storage', initialize_storage, timeout=10, is_critical=False)
-        initialize_service('pubsub', initialize_pubsub, timeout=10, is_critical=False)
+        # Extend timeout for initial deployment but mark as non-critical
+        initialize_service('bigquery', initialize_bigquery, timeout=20, is_critical=False, max_retries=3)
+        initialize_service('storage', initialize_storage, timeout=15, is_critical=False, max_retries=3)
+        initialize_service('pubsub', initialize_pubsub, timeout=15, is_critical=False, max_retries=2)
         
         # 3. Register blueprints properly within app context
         with app.app_context():
@@ -299,33 +332,32 @@ def initialize_platform():
         service_manager.update_status('app', ServiceStatus.READY)
         logger.info("Platform initialization complete - core services ready")
         
-        # 5. Start background processes (non-blocking, delayed to avoid impact on startup)
-        def start_delayed_processes():
-            logger.info("Starting delayed background processes...")
-            time.sleep(15)  # Wait for app to stabilize
+        # 5. Ensure database tables and cloud resources exist
+        logger.info("Ensuring cloud resources exist...")
+        try:
+            from ingestion import ensure_bucket_exists, initialize_bigquery_tables, ensure_default_feeds
             
-            # Start AI model initialization if enabled
-            try:
-                if Config.NLP_ENABLED:
-                    from analysis import initialize_ai_models_background
-                    logger.info("Starting AI model initialization in background")
-                    initialize_ai_models_background()
-            except Exception as e:
-                logger.warning(f"Failed to initialize AI models: {e}")
-            
-            # Start ingestion if enabled
-            try:
-                if Config.AUTO_ANALYZE:
-                    from ingestion import ingest_all_feeds
-                    logger.info("Starting initial data ingestion in background")
-                    threading.Thread(target=ingest_all_feeds, daemon=True).start()
-            except Exception as e:
-                logger.warning(f"Failed to start ingestion: {e}")
-            
-            logger.info("Background processes started")
-            
-        # Start delayed processes in background
-        threading.Thread(target=start_delayed_processes, daemon=True).start()
+            # Run resource setup in foreground to ensure it completes
+            if os.environ.get('ENSURE_GCP_RESOURCES', 'false').lower() == 'true':
+                # Initialize BigQuery tables
+                bq_success = initialize_bigquery_tables()
+                logger.info(f"BigQuery tables initialization: {'Success' if bq_success else 'Degraded'}")
+                
+                # Ensure bucket exists
+                bucket_name = Config.GCS_BUCKET
+                bucket_success = ensure_bucket_exists(bucket_name)
+                logger.info(f"GCS bucket {bucket_name} initialization: {'Success' if bucket_success else 'Degraded'}")
+                
+                # Load default feeds
+                ensure_default_feeds()
+                logger.info("Default feeds configuration loaded")
+        except Exception as e:
+            logger.error(f"Error ensuring cloud resources: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Continue even if resource check fails
+        
+        # 6. Start background processes with robust scheduling
+        start_background_processes()
         
         return True
         
@@ -334,6 +366,126 @@ def initialize_platform():
         logger.error(traceback.format_exc())
         service_manager.update_status('app', ServiceStatus.ERROR, str(e))
         return False
+
+def start_background_processes():
+    """Start background processes with improved reliability and monitoring."""
+    def background_process_monitor():
+        logger.info("Starting background process monitor")
+        service_manager = Config.get_service_manager()
+        
+        # Start AI model initialization first
+        try:
+            if Config.NLP_ENABLED:
+                logger.info("Initializing AI models...")
+                service_manager.update_status('ai_models', ServiceStatus.INITIALIZING)
+                
+                try:
+                    # Import here to avoid circular imports
+                    from analysis import initialize_ai_models_background
+                    initialize_ai_models_background()
+                    logger.info("AI model initialization started")
+                except Exception as e:
+                    logger.error(f"Error starting AI model initialization: {e}")
+                    service_manager.update_status('ai_models', ServiceStatus.DEGRADED, str(e))
+        except Exception as e:
+            logger.error(f"Error in AI model initialization: {e}")
+            
+        # Delay ingestion to allow other services to initialize
+        time.sleep(10)
+            
+        # Start ingestion service
+        try:
+            # Check for auto ingestion flag
+            if Config.AUTO_ANALYZE:
+                logger.info("Starting data ingestion process...")
+                service_manager.update_status('ingestion', ServiceStatus.INITIALIZING)
+                
+                try:
+                    # Import and run ingestion with error handling
+                    from ingestion import ingest_all_feeds, trigger_ingestion_in_background
+                    
+                    # First check if we need to trigger in background thread
+                    trigger_thread = trigger_ingestion_in_background()
+                    logger.info("Ingestion background thread started successfully")
+                    
+                    # Trigger immediate ingestion for testing - done on a separate thread to avoid blocking
+                    def run_immediate_ingestion():
+                        try:
+                            time.sleep(5)  # Small delay to let other processes initialize
+                            logger.info("Running immediate test ingestion...")
+                            results = ingest_all_feeds()
+                            logger.info(f"Initial ingestion completed with {len(results)} feeds processed")
+                        except Exception as e:
+                            logger.error(f"Error in immediate ingestion: {e}")
+                    
+                    immediate_thread = threading.Thread(target=run_immediate_ingestion, daemon=True)
+                    immediate_thread.start()
+                    
+                except Exception as e:
+                    logger.error(f"Failed to start ingestion: {e}")
+                    service_manager.update_status('ingestion', ServiceStatus.DEGRADED, str(e))
+        except Exception as e:
+            logger.error(f"Error in ingestion setup: {e}")
+            
+        # Delayed start for analysis service
+        time.sleep(5)
+        
+        # Start analysis background service
+        try:
+            if Config.ANALYSIS_ENABLED:
+                logger.info("Starting analysis background service...")
+                service_manager.update_status('analysis', ServiceStatus.INITIALIZING)
+                
+                try:
+                    # Import and start analysis background service
+                    from analysis import start_background_analysis
+                    analysis_thread = start_background_analysis(interval_hours=4)
+                    logger.info("Analysis background thread started successfully")
+                except Exception as e:
+                    logger.error(f"Failed to start analysis: {e}")
+                    service_manager.update_status('analysis', ServiceStatus.DEGRADED, str(e))
+        except Exception as e:
+            logger.error(f"Error in analysis setup: {e}")
+            
+        # Schedule service health checks every 5 minutes
+        while True:
+            try:
+                # Sleep for 5 minutes
+                time.sleep(300)
+                
+                # Check services and attempt recovery if needed
+                services_to_check = ['ingestion', 'analysis', 'ai_models']
+                status = service_manager.get_status()
+                
+                for service in services_to_check:
+                    service_status = status['services'].get(service)
+                    if service_status == ServiceStatus.ERROR.value:
+                        logger.info(f"Attempting to recover {service} service...")
+                        if service == 'ingestion':
+                            try:
+                                from ingestion import trigger_ingestion_in_background
+                                trigger_ingestion_in_background()
+                                logger.info(f"{service} recovery triggered")
+                            except Exception as e:
+                                logger.error(f"Failed to recover {service}: {e}")
+                        elif service == 'analysis':
+                            try:
+                                from analysis import start_background_analysis
+                                start_background_analysis(interval_hours=4)
+                                logger.info(f"{service} recovery triggered")
+                            except Exception as e:
+                                logger.error(f"Failed to recover {service}: {e}")
+                                
+                # Clear caches occasionally to prevent memory bloat
+                shared_cache.clear()
+                
+            except Exception as e:
+                logger.error(f"Error in background process monitor: {e}")
+    
+    # Start monitor thread
+    monitor_thread = threading.Thread(target=background_process_monitor, daemon=True)
+    monitor_thread.start()
+    logger.info("Background process monitor started")
 
 # Error handlers with robust fallbacks
 @app.errorhandler(400)
@@ -510,7 +662,10 @@ def status_check():
             'gcp_project': Config.GCP_PROJECT,
             'bigquery_dataset': Config.BIGQUERY_DATASET,
             'gcs_bucket': Config.GCS_BUCKET,
-            'feeds_configured': len(getattr(Config, 'FEEDS', []))
+            'feeds_configured': len(getattr(Config, 'FEEDS', [])),
+            'auto_analyze': Config.AUTO_ANALYZE,
+            'analysis_enabled': Config.ANALYSIS_ENABLED,
+            'nlp_enabled': Config.NLP_ENABLED
         }
     })
 
@@ -522,7 +677,7 @@ def manual_init_service(service_name):
     service_manager = Config.get_service_manager()
     
     # Only allow in development environment or with admin key
-    if Config.ENVIRONMENT != 'production':
+    if Config.ENVIRONMENT != 'production' or os.environ.get('ALLOW_MANUAL_INIT', '').lower() == 'true':
         try:
             if service_name == 'all':
                 # Reinitialize everything
@@ -544,9 +699,12 @@ def manual_init_service(service_name):
                 
             elif service_name == 'ai':
                 # Initialize AI models
-                from analysis import initialize_ai_models_background
-                initialize_ai_models_background()
-                return jsonify({"status": "success", "message": "AI model initialization triggered"}), 200
+                try:
+                    from analysis import initialize_ai_models_background
+                    initialize_ai_models_background()
+                    return jsonify({"status": "success", "message": "AI model initialization triggered"}), 200
+                except Exception as e:
+                    return jsonify({"status": "error", "message": f"AI initialization error: {str(e)}"}), 500
                 
             elif service_name == 'pubsub':
                 # Re-initialize PubSub
@@ -556,18 +714,56 @@ def manual_init_service(service_name):
                 
             elif service_name == 'ingestion':
                 # Trigger ingestion
-                from ingestion import ingest_all_feeds
-                
-                def run_ingestion():
-                    try:
-                        service_manager.update_status('ingestion', ServiceStatus.INITIALIZING)
-                        ingest_all_feeds()
-                        service_manager.update_status('ingestion', ServiceStatus.READY)
-                    except Exception as e:
-                        service_manager.update_status('ingestion', ServiceStatus.ERROR, str(e))
-                
-                threading.Thread(target=run_ingestion, daemon=True).start()
-                return jsonify({"status": "success", "message": "Ingestion triggered"}), 200
+                try:
+                    from ingestion import ingest_all_feeds
+                    
+                    def run_ingestion():
+                        try:
+                            service_manager.update_status('ingestion', ServiceStatus.INITIALIZING)
+                            results = ingest_all_feeds()
+                            success_count = sum(1 for r in results if r.get('status') == 'success')
+                            
+                            if success_count > 0:
+                                service_manager.update_status('ingestion', ServiceStatus.READY)
+                                logger.info(f"Manual ingestion completed: {success_count}/{len(results)} feeds successful")
+                            else:
+                                service_manager.update_status('ingestion', ServiceStatus.DEGRADED, "No feeds processed successfully")
+                                logger.warning("Manual ingestion completed with no successful feeds")
+                        except Exception as e:
+                            service_manager.update_status('ingestion', ServiceStatus.ERROR, str(e))
+                            logger.error(f"Error in manual ingestion: {e}")
+                    
+                    # Run in background thread to avoid blocking response
+                    threading.Thread(target=run_ingestion, daemon=True).start()
+                    return jsonify({"status": "success", "message": "Ingestion triggered"}), 200
+                except Exception as e:
+                    return jsonify({"status": "error", "message": f"Ingestion error: {str(e)}"}), 500
+            
+            elif service_name == 'analysis':
+                # Trigger analysis
+                try:
+                    from analysis import analyze_high_value_indicators
+                    
+                    def run_analysis():
+                        try:
+                            service_manager.update_status('analysis', ServiceStatus.INITIALIZING)
+                            result = analyze_high_value_indicators(limit=2000)
+                            
+                            if 'error' not in result:
+                                service_manager.update_status('analysis', ServiceStatus.READY)
+                                logger.info(f"Manual analysis completed: analyzed {result.get('iocs_analyzed', 0)} IOCs")
+                            else:
+                                service_manager.update_status('analysis', ServiceStatus.DEGRADED, result.get('error'))
+                                logger.warning(f"Manual analysis completed with error: {result.get('error')}")
+                        except Exception as e:
+                            service_manager.update_status('analysis', ServiceStatus.ERROR, str(e))
+                            logger.error(f"Error in manual analysis: {e}")
+                    
+                    # Run in background thread to avoid blocking response
+                    threading.Thread(target=run_analysis, daemon=True).start()
+                    return jsonify({"status": "success", "message": "Analysis triggered"}), 200
+                except Exception as e:
+                    return jsonify({"status": "error", "message": f"Analysis error: {str(e)}"}), 500
                 
             else:
                 return jsonify({"status": "error", "message": f"Unknown service: {service_name}"}), 400
@@ -608,7 +804,7 @@ if __name__ == '__main__':
         app.run(
             host='0.0.0.0', 
             port=port, 
-            debug=False,
+            debug=False,  # Set to False for production-like environment
             use_reloader=False,
             threaded=True
         )
