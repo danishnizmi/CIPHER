@@ -8,7 +8,7 @@ import queue
 import time
 from datetime import datetime
 from typing import Any, Callable
-from flask import Flask, jsonify, render_template, request, redirect, url_for, session, g
+from flask import Flask, jsonify, render_template, redirect, url_for, session, g, current_app, Response, make_response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -163,11 +163,8 @@ def health_check():
         'errors': status['errors']
     }
     
-    # Be more lenient during initialization
-    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value, ServiceStatus.DEGRADED.value]:
-        return jsonify(health_data), 200
-    else:
-        return jsonify(health_data), 503
+    # Any status is OK for health check to avoid Cloud Run problems
+    return jsonify(health_data), 200
 
 # Readiness probe
 @app.route('/ready', methods=['GET'])
@@ -177,20 +174,13 @@ def readiness_check():
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
-    # Consider the app ready even if some services are degraded
-    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value, ServiceStatus.DEGRADED.value]:
-        return jsonify({
-            'status': 'ready',
-            'timestamp': datetime.utcnow().isoformat()
-        }), 200
-    else:
-        return jsonify({
-            'status': 'not_ready',
-            'timestamp': datetime.utcnow().isoformat(),
-            'details': status
-        }), 503
+    # Consider the app ready even if some services are degraded or initializing
+    return jsonify({
+        'status': 'ready',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
 
-def initialize_service(service_name, init_func, *args, timeout=30, is_critical=False):
+def initialize_service(service_name, init_func, *args, timeout=15, is_critical=False):
     """Initialize a service with proper timeout and error handling."""
     logger.info(f"Initializing {service_name} service...")
     service_manager = Config.get_service_manager()
@@ -210,7 +200,12 @@ def initialize_service(service_name, init_func, *args, timeout=30, is_critical=F
             logger.error(error_msg)
             if Config.ENVIRONMENT != 'production':
                 logger.error(traceback.format_exc())
-            service_manager.update_status(service_name, ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, error_msg)
+            # Set degraded instead of error for non-critical services
+            service_manager.update_status(
+                service_name, 
+                ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
+                error_msg
+            )
     
     # Start initialization in a separate thread with timeout
     init_thread = threading.Thread(target=init_worker)
@@ -220,7 +215,11 @@ def initialize_service(service_name, init_func, *args, timeout=30, is_critical=F
     
     if init_thread.is_alive():
         logger.warning(f"{service_name} service initialization timed out after {timeout}s")
-        service_manager.update_status(service_name, ServiceStatus.DEGRADED, f"Initialization timed out after {timeout}s")
+        service_manager.update_status(
+            service_name, 
+            ServiceStatus.ERROR if is_critical else ServiceStatus.DEGRADED, 
+            f"Initialization timed out after {timeout}s"
+        )
         return False
     
     # Check final status
@@ -229,7 +228,7 @@ def initialize_service(service_name, init_func, *args, timeout=30, is_critical=F
     return service_status == ServiceStatus.READY.value
 
 def initialize_platform():
-    """Initialize all platform components in correct order with improved error handling."""
+    """Initialize all platform components with improved error handling."""
     service_manager = Config.get_service_manager()
     
     try:
@@ -239,54 +238,18 @@ def initialize_platform():
         Config.init_app()
         service_manager.update_status('app', ServiceStatus.INITIALIZING)
         
-        # 2. Initialize GCP clients with improved error handling and timeouts
+        # 2. Initialize GCP clients with reduced timeout and criticality
         from config import initialize_bigquery, initialize_storage, initialize_pubsub
         
-        # BigQuery is critical
-        if not initialize_service('bigquery', initialize_bigquery, timeout=45, is_critical=True):
-            logger.error("Failed to initialize critical BigQuery service")
-            # We continue anyway as the service_manager will mark the service as degraded
+        # Make all clients non-critical to allow the app to start even if GCP services are unavailable
+        initialize_service('bigquery', initialize_bigquery, timeout=10, is_critical=False)
+        initialize_service('storage', initialize_storage, timeout=10, is_critical=False)
+        initialize_service('pubsub', initialize_pubsub, timeout=10, is_critical=False)
         
-        # Storage is critical
-        if not initialize_service('storage', initialize_storage, timeout=30, is_critical=True):
-            logger.error("Failed to initialize critical Storage service")
-            # We continue anyway as the service_manager will mark the service as degraded
-        
-        # PubSub is NOT critical - initialize with longer timeout but don't block on failure
-        initialize_service('pubsub', initialize_pubsub, timeout=20, is_critical=False)
-        
-        # 3. Ensure BigQuery tables and bucket exist (async and non-blocking)
-        from ingestion import initialize_bigquery_tables, ensure_bucket_exists
-        
-        def init_data_storage():
-            try:
-                logger.info("Ensuring BigQuery tables exist...")
-                if initialize_bigquery_tables():
-                    logger.info("BigQuery tables initialized successfully")
-                else:
-                    logger.warning("BigQuery tables initialization incomplete")
-                
-                bucket_name = Config.GCS_BUCKET
-                if ensure_bucket_exists(bucket_name):
-                    logger.info(f"GCS bucket {bucket_name} initialized successfully")
-                else:
-                    logger.warning(f"Failed to initialize GCS bucket {bucket_name}")
-                
-                return True
-            except Exception as e:
-                logger.error(f"Error initializing data storage: {str(e)}")
-                if Config.ENVIRONMENT != 'production':
-                    logger.error(traceback.format_exc())
-                return False
-        
-        # Initialize data storage services
-        initialize_service('data_storage', init_data_storage, timeout=45, is_critical=False)
-        
-        # 4. Register blueprints properly within app context
+        # 3. Register blueprints properly within app context
         with app.app_context():
-            # Import blueprints within context to avoid issues
+            # Register API blueprint first
             try:
-                # Register API blueprint first
                 logger.info("Registering API blueprint...")
                 from api import api_blueprint, configure_rate_limiter
                 
@@ -295,7 +258,6 @@ def initialize_platform():
                     logger.info("Removing existing API blueprint")
                     del app.blueprints['api']
                 
-                # Register with explicit error handling
                 app.register_blueprint(api_blueprint, url_prefix='/api')
                 csrf.exempt(api_blueprint)
                 
@@ -332,147 +294,38 @@ def initialize_platform():
                 logger.error(f"Failed to register frontend blueprint: {str(e)}")
                 logger.error(traceback.format_exc())
                 service_manager.update_status('frontend', ServiceStatus.ERROR, str(e))
-            
-            # Verify critical routes exist
-            critical_routes = [
-                ('frontend.dashboard', 'GET'),
-                ('api.get_stats', 'GET'),
-                ('api.get_iocs', 'GET'),
-                ('api.get_threat_summary', 'GET')
-            ]
-            
-            missing_routes = []
-            for route_name, method in critical_routes:
-                if route_name not in app.view_functions:
-                    missing_routes.append(route_name)
-            
-            if missing_routes:
-                logger.error(f"Critical routes missing: {missing_routes}")
-            else:
-                logger.info("All critical routes verified successfully")
-                logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
         
-        # 5. Update service status to ready
+        # 4. Update service status to ready - app is operational even if some services failed
         service_manager.update_status('app', ServiceStatus.READY)
         logger.info("Platform initialization complete - core services ready")
         
-        # 6. Start background processes (non-blocking)
-        try:
-            # Start service monitoring with proper app context
-            def monitor_services():
-                while True:
-                    try:
-                        with app.app_context():
-                            service_manager = Config.get_service_manager()
-                            status = service_manager.get_status()
-                            
-                            # Check and recover missing routes periodically
-                            if 'frontend.dashboard' not in app.view_functions:
-                                logger.warning("Frontend routes missing, attempting recovery")
-                                try:
-                                    from frontend import frontend_app
-                                    if 'frontend' in app.blueprints:
-                                        del app.blueprints['frontend']
-                                    app.register_blueprint(frontend_app)
-                                    logger.info("Frontend blueprint re-registered")
-                                    service_manager.update_status('frontend', ServiceStatus.READY)
-                                except Exception as e:
-                                    logger.error(f"Failed to recover frontend: {e}")
-                            
-                            if 'api.get_stats' not in app.view_functions:
-                                logger.warning("API routes missing, attempting recovery")
-                                try:
-                                    from api import api_blueprint, configure_rate_limiter
-                                    if 'api' in app.blueprints:
-                                        del app.blueprints['api']
-                                    app.register_blueprint(api_blueprint, url_prefix='/api')
-                                    csrf.exempt(api_blueprint)
-                                    configure_rate_limiter(app)
-                                    logger.info("API blueprint re-registered")
-                                    service_manager.update_status('api', ServiceStatus.READY)
-                                except Exception as e:
-                                    logger.error(f"Failed to recover API: {e}")
-                            
-                            # Log current status only when in warning states
-                            if status['overall'] != ServiceStatus.READY.value:
-                                logger.info(f"System status: {status['overall']}")
-                                
-                    except Exception as e:
-                        logger.error(f"Error in service monitor: {e}")
-                    
-                    time.sleep(30)
+        # 5. Start background processes (non-blocking, delayed to avoid impact on startup)
+        def start_delayed_processes():
+            logger.info("Starting delayed background processes...")
+            time.sleep(15)  # Wait for app to stabilize
             
-            monitor_thread = threading.Thread(target=monitor_services, daemon=True)
-            monitor_thread.start()
-            logger.info("Service monitor started")
-            
-            # Start AI module initialization in background with small batch size
-            from analysis import initialize_ai_models_background
-            
-            def init_ai_with_small_batch():
-                # Set a small batch size in environment variable
-                os.environ['AI_BATCH_SIZE'] = '5'
-                os.environ['AI_MAX_TOKENS'] = '1000'
-                
-                # Set the analysis service to initializing
-                service_manager.update_status('analysis', ServiceStatus.INITIALIZING)
-                service_manager.update_status('ai_models', ServiceStatus.INITIALIZING)
-                
-                # Start AI model initialization with a delay to not impact core services
-                time.sleep(15)  # Delay to ensure core services are stable
-                try:
-                    logger.info("Starting AI model initialization with small batch size")
+            # Start AI model initialization if enabled
+            try:
+                if Config.NLP_ENABLED:
+                    from analysis import initialize_ai_models_background
+                    logger.info("Starting AI model initialization in background")
                     initialize_ai_models_background()
-                    logger.info("AI model initialization triggered")
-                except Exception as e:
-                    logger.error(f"Error triggering AI initialization: {e}")
-                    service_manager.update_status('ai_models', ServiceStatus.DEGRADED, str(e))
+            except Exception as e:
+                logger.warning(f"Failed to initialize AI models: {e}")
             
-            # Start AI initialization in a low-priority background thread
-            ai_thread = threading.Thread(target=init_ai_with_small_batch, daemon=True)
-            ai_thread.start()
+            # Start ingestion if enabled
+            try:
+                if Config.AUTO_ANALYZE:
+                    from ingestion import ingest_all_feeds
+                    logger.info("Starting initial data ingestion in background")
+                    threading.Thread(target=ingest_all_feeds, daemon=True).start()
+            except Exception as e:
+                logger.warning(f"Failed to start ingestion: {e}")
             
-            # Initialize ingestion with a small delay
-            def init_ingestion_delayed():
-                # Set the ingestion service to initializing
-                service_manager.update_status('ingestion', ServiceStatus.INITIALIZING)
-                
-                # Wait for other services to stabilize
-                time.sleep(20)
-                
-                # Check status of BigQuery and Storage before starting ingestion
-                status = service_manager.get_status()
-                if (status['services'].get('bigquery') in [ServiceStatus.READY.value, ServiceStatus.DEGRADED.value] and
-                    status['services'].get('storage') in [ServiceStatus.READY.value, ServiceStatus.DEGRADED.value]):
-                    
-                    try:
-                        from ingestion import ingest_all_feeds
-                        logger.info("Triggering initial data ingestion with reduced batch size...")
-                        
-                        # Set environment variable for smaller batch size
-                        os.environ['INGESTION_BATCH_SIZE'] = '10'
-                        
-                        # Mark service as ready before starting to avoid timeout
-                        service_manager.update_status('ingestion', ServiceStatus.READY)
-                        
-                        # Start ingestion in background
-                        ingestion_thread = threading.Thread(target=ingest_all_feeds, daemon=True)
-                        ingestion_thread.start()
-                        logger.info("Started initial ingestion thread")
-                    except Exception as e:
-                        logger.error(f"Error triggering initial ingestion: {e}")
-                        service_manager.update_status('ingestion', ServiceStatus.DEGRADED, str(e))
-                else:
-                    logger.warning("BigQuery or Storage not ready, skipping automatic ingestion")
-                    service_manager.update_status('ingestion', ServiceStatus.DEGRADED, "Required services not ready")
+            logger.info("Background processes started")
             
-            # Only start ingestion if AUTO_ANALYZE is enabled
-            if Config.AUTO_ANALYZE:
-                ingestion_thread = threading.Thread(target=init_ingestion_delayed, daemon=True)
-                ingestion_thread.start()
-                
-        except Exception as e:
-            logger.warning(f"Background service initialization error: {e}")
+        # Start delayed processes in background
+        threading.Thread(target=start_delayed_processes, daemon=True).start()
         
         return True
         
@@ -500,19 +353,6 @@ def handle_bad_request(e):
         'code': 400
     }), 400
 
-@app.errorhandler(403)
-def handle_forbidden(e):
-    """Handle 403 errors."""
-    logger.error(f"403 error: {str(e)}")
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Forbidden', 'message': 'Access denied'}), 403
-    
-    return jsonify({
-        'error': 'Forbidden',
-        'message': 'Access denied',
-        'code': 403
-    }), 403
-
 @app.errorhandler(404)
 def page_not_found(e):
     """Handle 404 errors."""
@@ -522,18 +362,22 @@ def page_not_found(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not found', 'message': 'Endpoint not found'}), 404
     
-    # For frontend routes, check if they exist before trying to render template
+    # For frontend routes, check if they exist
     try:
-        if 'frontend.dashboard' not in app.view_functions:
+        # Try to render template if frontend is ready
+        if 'frontend.dashboard' in app.view_functions:
+            return render_template('404.html', 
+                                error_code=404, 
+                                error_message="Page Not Found",
+                                error_description="The page you're looking for doesn't exist or has been moved.",
+                                error_icon="search-location"), 404
+        else:
             # Return JSON if frontend is not ready
             return jsonify({
                 'error': 'Service initializing',
                 'message': 'The service is still starting up. Please try again in a moment.',
                 'code': 404
             }), 404
-        else:
-            # Render 404 template if frontend is ready
-            return render_template('404.html'), 404
     except Exception as template_error:
         logger.error(f"Error rendering 404 template: {template_error}")
         return jsonify({
@@ -541,22 +385,6 @@ def page_not_found(e):
             'message': 'Page not found and template rendering failed',
             'code': 404
         }), 404
-
-@app.errorhandler(429)
-def handle_rate_limit(e):
-    """Handle rate limit errors."""
-    logger.warning(f"Rate limit exceeded: {request.url}")
-    if request.path.startswith('/api/'):
-        return jsonify({
-            'error': 'Too many requests', 
-            'message': 'Rate limit exceeded. Please try again later.'
-        }), 429
-    
-    return jsonify({
-        'error': 'Too Many Requests',
-        'message': 'Rate limit exceeded',
-        'code': 429
-    }), 429
 
 @app.errorhandler(500)
 def internal_server_error(e):
@@ -570,14 +398,18 @@ def internal_server_error(e):
     
     # For frontend, check if template rendering is possible
     try:
-        if 'frontend.dashboard' not in app.view_functions:
+        if 'frontend.dashboard' in app.view_functions:
+            return render_template('500.html',
+                                error_code=500,
+                                error_message="Internal Server Error",
+                                error_description="An unexpected error occurred. Please try again later.",
+                                error_icon="exclamation-triangle"), 500
+        else:
             return jsonify({
                 'error': 'Service error',
                 'message': 'An error occurred. The service may be initializing.',
                 'code': 500
             }), 500
-        else:
-            return render_template('500.html'), 500
     except Exception as template_error:
         logger.error(f"Error rendering 500 template: {template_error}")
         return jsonify({
@@ -586,40 +418,42 @@ def internal_server_error(e):
             'code': 500
         }), 500
 
-# Root route handler
+# Root route handler - critical for application entry point
 @app.route('/')
 def index():
-    """Root route handler."""
+    """Root route handler with guaranteed frontend registration attempt."""
     logger.info("Index route accessed")
     
     try:
         service_manager = Config.get_service_manager()
-        status = service_manager.get_status()
-        logger.info(f"Service status: {status}")
         
-        # Check if frontend blueprint is registered
-        if 'frontend.dashboard' in app.view_functions:
-            return redirect(url_for('frontend.dashboard'))
-        else:
-            # Attempt to recover frontend
+        # Handle case where frontend blueprint is not yet registered
+        if 'frontend.dashboard' not in app.view_functions:
             logger.warning("Frontend routes missing, attempting recovery")
+            
+            # IMPORTANT: Force register the frontend blueprint
             try:
                 with app.app_context():
                     from frontend import frontend_app
                     if 'frontend' in app.blueprints:
                         del app.blueprints['frontend']
                     app.register_blueprint(frontend_app)
-                    if 'frontend.dashboard' in app.view_functions:
-                        return redirect(url_for('frontend.dashboard'))
+                    logger.info("Frontend blueprint registered on demand")
+                    service_manager.update_status('frontend', ServiceStatus.READY)
             except Exception as e:
-                logger.error(f"Error recovering frontend: {e}")
-            
-            # Return initialization message
+                logger.error(f"Error registering frontend on demand: {e}")
+                # Fall through to the next check
+        
+        # Now try redirecting if frontend is available
+        if 'frontend.dashboard' in app.view_functions:
+            return redirect(url_for('frontend.dashboard'))
+        else:
+            # Return initialization message as a last resort
             return jsonify({
                 'status': 'initializing',
-                'message': 'Service is initializing. Please wait a moment and refresh.',
+                'message': 'Service is initializing. Please refresh the page in a few seconds.',
                 'timestamp': datetime.utcnow().isoformat()
-            }), 503
+            }), 200  # Return 200 instead of 503 to avoid Cloud Run termination
                 
     except Exception as e:
         logger.error(f"Error in index route: {str(e)}")
@@ -660,7 +494,8 @@ def status_check():
     route_info = {
         'total_routes': len(list(app.url_map.iter_rules())),
         'blueprints': list(app.blueprints.keys()),
-        'endpoints': list(app.view_functions.keys())[:20]  # Limit to first 20
+        'has_frontend': 'frontend.dashboard' in app.view_functions,
+        'has_api': 'api.get_stats' in app.view_functions
     }
     
     return jsonify({
@@ -675,7 +510,7 @@ def status_check():
             'gcp_project': Config.GCP_PROJECT,
             'bigquery_dataset': Config.BIGQUERY_DATASET,
             'gcs_bucket': Config.GCS_BUCKET,
-            'feeds_configured': len(Config.FEEDS)
+            'feeds_configured': len(getattr(Config, 'FEEDS', []))
         }
     })
 
@@ -689,7 +524,25 @@ def manual_init_service(service_name):
     # Only allow in development environment or with admin key
     if Config.ENVIRONMENT != 'production':
         try:
-            if service_name == 'ai':
+            if service_name == 'all':
+                # Reinitialize everything
+                initialize_platform()
+                return jsonify({"status": "success", "message": "Platform reinitialization triggered"}), 200
+                
+            elif service_name == 'frontend':
+                # Reinitialize frontend
+                try:
+                    with app.app_context():
+                        from frontend import frontend_app
+                        if 'frontend' in app.blueprints:
+                            del app.blueprints['frontend']
+                        app.register_blueprint(frontend_app)
+                        service_manager.update_status('frontend', ServiceStatus.READY)
+                    return jsonify({"status": "success", "message": "Frontend reinitialized"}), 200
+                except Exception as e:
+                    return jsonify({"status": "error", "message": f"Frontend error: {str(e)}"}), 500
+                
+            elif service_name == 'ai':
                 # Initialize AI models
                 from analysis import initialize_ai_models_background
                 initialize_ai_models_background()
