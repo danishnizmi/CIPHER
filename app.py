@@ -236,7 +236,7 @@ def initialize_platform():
             try:
                 # Register API blueprint first
                 logger.info("Registering API blueprint...")
-                from api import api_blueprint
+                from api import api_blueprint, configure_rate_limiter
                 
                 # Clear existing if present
                 if 'api' in app.blueprints:
@@ -246,6 +246,9 @@ def initialize_platform():
                 # Register with explicit error handling
                 app.register_blueprint(api_blueprint, url_prefix='/api')
                 csrf.exempt(api_blueprint)
+                
+                # Configure rate limiter for API
+                configure_rate_limiter(app)
                 
                 # Verify API routes were registered
                 api_routes = [rule.rule for rule in app.url_map.iter_rules() if rule.rule.startswith('/api')]
@@ -327,10 +330,12 @@ def initialize_platform():
                             if 'api.get_stats' not in app.view_functions:
                                 logger.warning("API routes missing, attempting recovery")
                                 try:
-                                    from api import api_blueprint
+                                    from api import api_blueprint, configure_rate_limiter
                                     if 'api' in app.blueprints:
                                         del app.blueprints['api']
                                     app.register_blueprint(api_blueprint, url_prefix='/api')
+                                    csrf.exempt(api_blueprint)
+                                    configure_rate_limiter(app)
                                     logger.info("API blueprint re-registered")
                                     service_manager.update_status('api', ServiceStatus.READY)
                                 except Exception as e:
