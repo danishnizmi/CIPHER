@@ -12,9 +12,6 @@ import datetime
 import logging
 import tempfile
 import traceback
-import hashlib
-import re
-import socket
 import time
 import threading
 import uuid
@@ -23,9 +20,13 @@ from functools import lru_cache
 from google.cloud import storage, bigquery, pubsub_v1
 from google.api_core.exceptions import NotFound, GoogleAPIError
 from google.cloud.exceptions import Conflict
+import tldextract
 
-# Import configuration
-from config import Config, ServiceManager, ServiceStatus, report_error
+# Import optimized configuration and utilities
+from config import (
+    Config, ServiceManager, ServiceStatus, report_error,
+    Utils, CircuitBreaker, CacheManager, shared_cache
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -43,71 +44,7 @@ ingestion_status = {
 # Lock for thread-safe operations
 _ingestion_lock = threading.Lock()
 
-# Default feed configs for testing
-DEFAULT_FEEDS = [
-    {
-        "id": "threatfox",
-        "name": "ThreatFox IOCs",
-        "url": "https://threatfox.abuse.ch/export/json/recent/",
-        "description": "Recent indicators from ThreatFox",
-        "format": "json",
-        "type": "mixed",
-        "update_frequency": "daily",
-        "enabled": True
-    },
-    {
-        "id": "urlhaus",
-        "name": "URLhaus Malware",
-        "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
-        "description": "Recent malware URLs from URLhaus",
-        "format": "csv",
-        "type": "url",
-        "update_frequency": "daily",
-        "enabled": True
-    }
-]
-
-# Circuit Breaker Pattern Implementation
-class CircuitBreaker:
-    """Circuit breaker pattern to handle failing services gracefully."""
-    def __init__(self, failure_threshold=3, recovery_timeout=60, expected_exception=Exception):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.expected_exception = expected_exception
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
-        self._lock = threading.Lock()
-    
-    def call(self, func, *args, **kwargs):
-        with self._lock:
-            if self.state == 'OPEN':
-                if self.last_failure_time and time.time() - self.last_failure_time >= self.recovery_timeout:
-                    self.state = 'HALF_OPEN'
-                    logger.info(f"Circuit breaker transitioning to HALF_OPEN state")
-                else:
-                    raise self.expected_exception(f"Circuit breaker is OPEN. Next retry in {self.recovery_timeout - (time.time() - self.last_failure_time):.1f}s")
-            
-            try:
-                result = func(*args, **kwargs)
-                if self.state == 'HALF_OPEN':
-                    self.state = 'CLOSED'
-                    self.failure_count = 0
-                    logger.info("Circuit breaker transitioned to CLOSED state - service recovered")
-                return result
-            except self.expected_exception as e:
-                self.failure_count += 1
-                self.last_failure_time = time.time()
-                
-                if self.failure_count >= self.failure_threshold:
-                    self.state = 'OPEN'
-                    logger.warning(f"Circuit breaker OPENED after {self.failure_count} failures")
-                
-                raise e
-
-# Global circuit breakers for different services
-bigquery_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
-storage_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+# Per-feed circuit breakers
 feed_circuit_breakers = {}  # Per-feed circuit breakers
 
 # -------------------- Helper Functions --------------------
@@ -137,117 +74,15 @@ def ensure_default_feeds():
     """Ensure default feeds exist if none configured."""
     if not hasattr(Config, 'FEEDS') or not Config.FEEDS:
         logger.warning("No feeds configured, using defaults")
-        Config.FEEDS = DEFAULT_FEEDS
-        
-        # Try to save to environment for future loads
-        os.environ['FEED_CONFIG'] = json.dumps({"feeds": DEFAULT_FEEDS})
-        
-        # Also save to a local file
-        try:
-            with open('/tmp/feed_config.json', 'w') as f:
-                json.dump({"feeds": DEFAULT_FEEDS}, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Could not save feed config to disk: {e}")
+        # Get DEFAULT_FEED_CONFIGS from Config if available
+        if hasattr(Config, 'DEFAULT_FEED_CONFIGS'):
+            Config.FEEDS = Config.DEFAULT_FEED_CONFIGS
+        else:
+            # Fallback to load from config directly
+            from config import DEFAULT_FEED_CONFIGS
+            Config.FEEDS = DEFAULT_FEED_CONFIGS
     
     return Config.FEEDS
-
-# -------------------- Data Processing --------------------
-
-class DataProcessor:
-    """Handles data cleaning, sanitization, and validation with improved performance."""
-    
-    @staticmethod
-    @lru_cache(maxsize=1000)
-    def sanitize_string(value: str) -> str:
-        """Sanitize string values to prevent XSS and injection attacks."""
-        if not value or not isinstance(value, str):
-            return value
-        # Remove control characters
-        value = re.sub(r'[\x00-\x1F\x7F]', '', value)
-        # Truncate if too long
-        return value[:32768] if len(value) > 32768 else value
-        
-    @staticmethod
-    @lru_cache(maxsize=1000)
-    def sanitize_ioc(ioc_type: str, value: str) -> Optional[str]:
-        """Sanitize IOC values based on their type."""
-        if not value:
-            return value
-            
-        value = DataProcessor.sanitize_string(value)
-        
-        patterns = {
-            'ip': r'^(\d{1,3}\.){3}\d{1,3}$',
-            'domain': r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$',
-            'url': r'^(https?|ftp)://.+$',
-            'md5': r'^[a-f0-9]{32}$',
-            'sha1': r'^[a-f0-9]{40}$',
-            'sha256': r'^[a-f0-9]{64}$',
-            'email': r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
-            'ip:port': r'^(\d{1,3}\.){3}\d{1,3}:\d+$'
-        }
-        
-        if ioc_type in patterns and not re.match(patterns[ioc_type], value.lower()):
-            if ioc_type == 'url' and re.match(r'^www\.', value.lower()):
-                return "http://" + value
-            logger.debug(f"Suspicious {ioc_type} format: {value}")
-                
-        return value
-        
-    @staticmethod
-    def sanitize_record(record: Dict, record_type: str = None) -> Dict:
-        """Sanitize an entire record."""
-        if not record:
-            return {}
-            
-        sanitized = {}
-        
-        for key, value in record.items():
-            if isinstance(value, dict):
-                sanitized[key] = DataProcessor.sanitize_record(value)
-            elif isinstance(value, list):
-                if value and all(isinstance(item, dict) for item in value):
-                    sanitized[key] = [DataProcessor.sanitize_record(item) for item in value]
-                else:
-                    sanitized[key] = value
-            elif isinstance(value, str):
-                if record_type == 'ioc' and key == 'value' and 'type' in record:
-                    sanitized[key] = DataProcessor.sanitize_ioc(record['type'], value)
-                else:
-                    sanitized[key] = DataProcessor.sanitize_string(value)
-            else:
-                sanitized[key] = value
-                
-        return sanitized
-
-    @staticmethod
-    @lru_cache(maxsize=10000)
-    def determine_ioc_type(value: str) -> str:
-        """Determine the IOC type based on value format."""
-        if not value or not isinstance(value, str):
-            return 'unknown'
-            
-        value = value.strip().lower()
-        
-        # Handle ip:port format specially (for ThreatFox)
-        if re.match(r'^(\d{1,3}\.){3}\d{1,3}:\d+$', value):
-            return 'ip:port'
-        
-        patterns = {
-            'ip': r'^(\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$',
-            'domain': r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$',
-            'url': r'^(https?|ftp)://.+$',
-            'md5': r'^[a-f0-9]{32}$',
-            'sha1': r'^[a-f0-9]{40}$',
-            'sha256': r'^[a-f0-9]{64}$',
-            'email': r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        }
-        
-        for ioc_type, pattern in patterns.items():
-            if re.match(pattern, value):
-                return ioc_type
-                
-        return 'unknown'
 
 # -------------------- Storage Operations --------------------
 
@@ -259,8 +94,12 @@ def ensure_bucket_exists(bucket_name: str) -> bool:
         logger.error("Storage client not initialized")
         return False
     
+    # Get or create circuit breaker for this operation
+    if 'storage_bucket' not in feed_circuit_breakers:
+        feed_circuit_breakers['storage_bucket'] = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+    
     try:
-        return storage_circuit_breaker.call(_ensure_bucket_exists_impl, storage_client, bucket_name)
+        return feed_circuit_breakers['storage_bucket'].call(_ensure_bucket_exists_impl, storage_client, bucket_name)
     except Exception as e:
         logger.error(f"Circuit breaker: {e}")
         return False
@@ -314,8 +153,12 @@ def initialize_bigquery_tables() -> bool:
     
     service_manager = Config.get_service_manager()
     
+    # Get or create circuit breaker for this operation
+    if 'bigquery_tables' not in feed_circuit_breakers:
+        feed_circuit_breakers['bigquery_tables'] = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+    
     try:
-        return bigquery_circuit_breaker.call(_initialize_bigquery_tables_impl, bq_client, service_manager)
+        return feed_circuit_breakers['bigquery_tables'].call(_initialize_bigquery_tables_impl, bq_client, service_manager)
     except Exception as e:
         logger.error(f"Circuit breaker: {e}")
         return False
@@ -473,8 +316,12 @@ def upload_to_gcs(bucket_name: str, blob_name: str, data: Union[str, bytes], con
         logger.error("Storage client not initialized")
         return None
     
+    # Get or create circuit breaker for this operation
+    if 'storage_upload' not in feed_circuit_breakers:
+        feed_circuit_breakers['storage_upload'] = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+    
     try:
-        return storage_circuit_breaker.call(_upload_to_gcs_impl, storage_client, bucket_name, blob_name, data, content_type)
+        return feed_circuit_breakers['storage_upload'].call(_upload_to_gcs_impl, storage_client, bucket_name, blob_name, data, content_type)
     except Exception as e:
         logger.error(f"Circuit breaker: {e}")
         return None
@@ -518,8 +365,12 @@ def upload_to_bigquery(table_id: str, records: List[Dict]) -> Optional[str]:
     if not bq_client or not records:
         return None
     
+    # Get or create circuit breaker for this operation
+    if 'bigquery_upload' not in feed_circuit_breakers:
+        feed_circuit_breakers['bigquery_upload'] = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+    
     try:
-        return bigquery_circuit_breaker.call(_upload_to_bigquery_impl, bq_client, table_id, records)
+        return feed_circuit_breakers['bigquery_upload'].call(_upload_to_bigquery_impl, bq_client, table_id, records)
     except Exception as e:
         logger.error(f"Circuit breaker: {e}")
         return None
@@ -589,7 +440,7 @@ def _upload_to_bigquery_impl(bq_client, table_id: str, records: List[Dict]) -> s
                 
                 # Ensure required fields
                 if 'id' not in processed_record:
-                    processed_record['id'] = hashlib.md5(str(record).encode()).hexdigest()
+                    processed_record['id'] = Utils.generate_id("record", str(uuid.uuid4()))
                 
                 if 'value' not in processed_record:
                     if 'ioc' in processed_record:
@@ -1051,7 +902,7 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                 
                 # Create indicator
                 indicator = {
-                    "id": hashlib.md5(f"{feed_name}:{value}:{ioc_type}".encode()).hexdigest(),
+                    "id": Utils.generate_id(f"{feed_name}:{value}:{ioc_type}", ""),
                     "value": value,
                     "type": ioc_type,
                     "source": feed_name,
@@ -1095,7 +946,7 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                     tags = []
                 
                 indicator = {
-                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "id": Utils.generate_id(f"{feed_name}:{value}", ""),
                     "value": value,
                     "type": 'url',
                     "source": feed_name,
@@ -1118,11 +969,20 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
                 value = record.get('value') or record.get('indicator') or record.get('ioc') or record.get('url') or ''
                 if not value:
                     continue
+                
+                # Determine IOC type if not specified
+                ioc_type = record.get('type')
+                if not ioc_type:
+                    from config import Utils
+                    ioc_type = Utils.is_valid_url(value) and 'url' or \
+                               Utils.is_valid_ip(value) and 'ip' or \
+                               Utils.is_valid_domain(value) and 'domain' or \
+                               'unknown'
                     
                 indicator = {
-                    "id": hashlib.md5(f"{feed_name}:{value}".encode()).hexdigest(),
+                    "id": Utils.generate_id(f"{feed_name}:{value}", ""),
                     "value": value,
-                    "type": record.get('type') or DataProcessor.determine_ioc_type(value),
+                    "type": ioc_type,
                     "source": feed_name,
                     "feed_id": feed_name,
                     "created_at": current_time.isoformat(),
@@ -1144,7 +1004,7 @@ def normalize_indicators(records: List[Dict], feed_name: str) -> List[Dict]:
             indicator['risk_score'] = risk_score
             
             # Sanitize the record
-            indicator = DataProcessor.sanitize_record(indicator, record_type='ioc')
+            indicator = Utils.sanitize_record(indicator, record_type='ioc')
                 
             normalized.append(indicator)
             
@@ -1248,10 +1108,12 @@ def process_feed(feed_config: Dict) -> Dict:
         
         if status['services'].get('bigquery') != 'ready':
             logger.info("Initializing BigQuery client")
+            from config import initialize_bigquery
             initialize_bigquery()
         
         if status['services'].get('storage') != 'ready':
             logger.info("Initializing Storage client")
+            from config import initialize_storage
             initialize_storage()
         
         # Refresh clients after initialization
