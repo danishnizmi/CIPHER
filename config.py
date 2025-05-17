@@ -1,6 +1,6 @@
 """
 Optimized configuration module for Threat Intelligence Platform.
-Handles configuration management for production deployment with improved service management.
+Handles configuration management, service coordination, and shared utilities.
 """
 
 import os
@@ -9,10 +9,16 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union
-from functools import wraps, lru_cache
+import re
+import socket
+import hashlib
+import uuid
 from enum import Enum
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Union, Tuple, Callable
+from functools import wraps, lru_cache
+from urllib.parse import urlparse
+import ipaddress
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +35,253 @@ class ServiceStatus(Enum):
     DEGRADED = "degraded"
     ERROR = "error"
 
-# Centralized Service Manager with timeout handling
+# Centralized Utility Class for common functions
+class Utils:
+    """Shared utility functions used across modules"""
+    
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def is_valid_domain(domain: str) -> bool:
+        """Validate domain format."""
+        if not domain or not isinstance(domain, str):
+            return False
+        
+        # Simple domain validation
+        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+        return bool(re.match(domain_pattern, domain))
+
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def is_valid_ip(ip: str) -> bool:
+        """Validate IP address format."""
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def is_valid_url(url: str) -> bool:
+        """Validate URL format."""
+        try:
+            result = urlparse(url)
+            return all([result.scheme, result.netloc])
+        except:
+            return False
+    
+    @staticmethod
+    def extract_domain_from_url(url: str) -> Optional[str]:
+        """Extract domain from URL."""
+        try:
+            parsed = urlparse(url)
+            if parsed.netloc:
+                return parsed.netloc
+            return None
+        except:
+            return None
+    
+    @staticmethod
+    def sanitize_string(value: str) -> str:
+        """Sanitize string values to prevent XSS and injection attacks."""
+        if not value or not isinstance(value, str):
+            return value
+        # Remove control characters
+        value = re.sub(r'[\x00-\x1F\x7F]', '', value)
+        # Truncate if too long
+        return value[:32768] if len(value) > 32768 else value
+    
+    @staticmethod
+    def sanitize_record(record: Dict, record_type: str = None) -> Dict:
+        """Sanitize an entire record."""
+        if not record:
+            return {}
+            
+        sanitized = {}
+        
+        for key, value in record.items():
+            if isinstance(value, dict):
+                sanitized[key] = Utils.sanitize_record(value)
+            elif isinstance(value, list):
+                if value and all(isinstance(item, dict) for item in value):
+                    sanitized[key] = [Utils.sanitize_record(item) for item in value]
+                else:
+                    sanitized[key] = value
+            elif isinstance(value, str):
+                sanitized[key] = Utils.sanitize_string(value)
+            else:
+                sanitized[key] = value
+                
+        return sanitized
+    
+    @staticmethod
+    def format_datetime(value):
+        """Format a datetime string for display."""
+        if not value:
+            return 'N/A'
+        try:
+            if isinstance(value, str):
+                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            else:
+                dt = value
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            return str(value)
+    
+    @staticmethod
+    def generate_id(prefix: str, value: str) -> str:
+        """Generate a consistent ID hash."""
+        return hashlib.md5(f"{prefix}:{value}".encode()).hexdigest()
+    
+    @staticmethod
+    def debounce(func, delay):
+        """Debounce function for UI responsiveness."""
+        timer = None
+        def debounced(*args, **kwargs):
+            nonlocal timer
+            if timer:
+                timer.cancel()
+            timer = threading.Timer(delay, lambda: func(*args, **kwargs))
+            timer.start()
+        return debounced
+    
+    @staticmethod
+    def throttle(func, limit):
+        """Throttle function to limit calls per second."""
+        last_called = 0
+        def throttled(*args, **kwargs):
+            nonlocal last_called
+            current_time = time.time()
+            if current_time - last_called >= limit:
+                last_called = current_time
+                return func(*args, **kwargs)
+        return throttled
+    
+    @staticmethod
+    def format_number(num):
+        """Format number with commas."""
+        if not num and num != 0:
+            return "0"
+        return "{:,}".format(num)
+    
+    @staticmethod
+    def format_bytes(bytes, decimals=2):
+        """Format bytes to human readable format."""
+        if bytes == 0:
+            return '0 Bytes'
+        sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB']
+        i = int(min(4, bytes and bytes > 0 and (bytes.bit_length() - 1) // 10 or 0))
+        return f"{round(bytes / (1024 ** i), decimals)} {sizes[i]}"
+    
+# Circuit Breaker Pattern
+class CircuitBreaker:
+    """Circuit breaker pattern to handle failing services gracefully."""
+    def __init__(self, failure_threshold=3, recovery_timeout=60, expected_exception=Exception):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.expected_exception = expected_exception
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+        self._lock = threading.Lock()
+    
+    def call(self, func, *args, **kwargs):
+        with self._lock:
+            if self.state == 'OPEN':
+                if self.last_failure_time and time.time() - self.last_failure_time >= self.recovery_timeout:
+                    self.state = 'HALF_OPEN'
+                    logger.info(f"Circuit breaker transitioning to HALF_OPEN state")
+                else:
+                    raise self.expected_exception(f"Circuit breaker is OPEN. Next retry in {self.recovery_timeout - (time.time() - self.last_failure_time):.1f}s")
+            
+            try:
+                result = func(*args, **kwargs)
+                if self.state == 'HALF_OPEN':
+                    self.state = 'CLOSED'
+                    self.failure_count = 0
+                    logger.info("Circuit breaker transitioned to CLOSED state - service recovered")
+                return result
+            except self.expected_exception as e:
+                self.failure_count += 1
+                self.last_failure_time = time.time()
+                
+                if self.failure_count >= self.failure_threshold:
+                    self.state = 'OPEN'
+                    logger.warning(f"Circuit breaker OPENED after {self.failure_count} failures")
+                
+                raise e
+
+# Unified Caching System
+class CacheManager:
+    """Unified caching system for API responses and data."""
+    def __init__(self, default_ttl=300):
+        self._cache = {}
+        self._timestamps = {}
+        self._default_ttl = default_ttl
+        self._lock = threading.Lock()
+        self._stats = {"hits": 0, "misses": 0, "size": 0}
+    
+    def get(self, key, default=None):
+        """Get cached value if not expired."""
+        with self._lock:
+            if key in self._cache and key in self._timestamps:
+                if time.time() - self._timestamps[key] < self._default_ttl:
+                    self._stats["hits"] += 1
+                    return self._cache[key]
+                else:
+                    # Expired
+                    self._cache.pop(key, None)
+                    self._timestamps.pop(key, None)
+                    
+            self._stats["misses"] += 1
+            return default
+    
+    def set(self, key, value, ttl=None):
+        """Set cache value with TTL."""
+        if ttl is None:
+            ttl = self._default_ttl
+            
+        with self._lock:
+            self._cache[key] = value
+            self._timestamps[key] = time.time()
+            self._stats["size"] = len(self._cache)
+    
+    def clear(self, prefix=None):
+        """Clear cache entries with optional prefix filter."""
+        with self._lock:
+            if prefix:
+                keys = [k for k in self._cache if k.startswith(prefix)]
+                for k in keys:
+                    self._cache.pop(k, None)
+                    self._timestamps.pop(k, None)
+            else:
+                self._cache = {}
+                self._timestamps = {}
+            
+            self._stats["size"] = len(self._cache)
+    
+    def get_stats(self):
+        """Get cache statistics."""
+        with self._lock:
+            return dict(self._stats)
+    
+    def cleanup_expired(self):
+        """Remove expired cache entries."""
+        with self._lock:
+            current_time = time.time()
+            expired_keys = [
+                k for k, ts in self._timestamps.items() 
+                if current_time - ts > self._default_ttl
+            ]
+            
+            for k in expired_keys:
+                self._cache.pop(k, None)
+                self._timestamps.pop(k, None)
+            
+            self._stats["size"] = len(self._cache)
+            return len(expired_keys)
+
+# Centralized Service Manager
 class ServiceManager:
     """Centralized service management and monitoring with timeout and recovery logic."""
     _instance = None
@@ -65,7 +317,6 @@ class ServiceManager:
         self._errors = {}
         self._cache = {}
         self._service_start_times = {}
-        self._lock = threading.Lock()
         
         # Initialize start times
         current_time = time.time()
@@ -256,6 +507,25 @@ def get_env_bool(var_name: str, default: bool = False) -> bool:
     val = os.environ.get(var_name, str(default)).lower()
     return val in ('true', 't', 'yes', 'y', '1')
 
+# Error Reporting with retry logic
+def report_error(exception: Exception):
+    """Report an error to Cloud Error Reporting if enabled."""
+    if not Config.ENABLE_ERROR_REPORTING:
+        return
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from google.cloud import error_reporting
+            error_client = error_reporting.Client(project=Config.GCP_PROJECT)
+            error_client.report_exception()
+            logger.debug("Error reported to Cloud Error Reporting")
+            return
+        except Exception as e:
+            logger.error(f"Failed to report error (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
 # Main Configuration Class
 class Config:
     """Base configuration class for production deployment."""
@@ -318,6 +588,10 @@ class Config:
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
     LOG_TO_CLOUD = get_env_bool('LOG_TO_CLOUD', False)
     ENABLE_ERROR_REPORTING = get_env_bool('ENABLE_ERROR_REPORTING', False)
+    
+    # Singleton instance for shared resources
+    _service_manager = None
+    _cache_manager = None
     
     @classmethod
     def init_app(cls):
@@ -521,7 +795,16 @@ class Config:
     @classmethod
     def get_service_manager(cls) -> ServiceManager:
         """Get the service manager instance."""
-        return ServiceManager()
+        if not cls._service_manager:
+            cls._service_manager = ServiceManager()
+        return cls._service_manager
+    
+    @classmethod
+    def get_cache_manager(cls) -> CacheManager:
+        """Get the cache manager instance."""
+        if not cls._cache_manager:
+            cls._cache_manager = CacheManager()
+        return cls._cache_manager
     
     @classmethod
     def get_feed_by_id(cls, feed_id):
@@ -547,25 +830,6 @@ class Config:
             return None
         
         return f"{cls.GCP_PROJECT}.{cls.BIGQUERY_DATASET}.{table_name}"
-
-# Error Reporting with retry logic
-def report_error(exception: Exception):
-    """Report an error to Cloud Error Reporting if enabled."""
-    if not Config.ENABLE_ERROR_REPORTING:
-        return
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            from google.cloud import error_reporting
-            error_client = error_reporting.Client(project=Config.GCP_PROJECT)
-            error_client.report_exception()
-            logger.debug("Error reported to Cloud Error Reporting")
-            return
-        except Exception as e:
-            logger.error(f"Failed to report error (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
 
 # GCP Client Initialization with timeout and retry logic
 def initialize_bigquery():
@@ -664,3 +928,6 @@ def initialize_pubsub():
                 service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
     
     return None, None
+
+# Create shared instances for use across application
+shared_cache = CacheManager()
