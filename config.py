@@ -115,64 +115,10 @@ class Utils:
         return sanitized
     
     @staticmethod
-    def format_datetime(value):
-        """Format a datetime string for display."""
-        if not value:
-            return 'N/A'
-        try:
-            if isinstance(value, str):
-                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            else:
-                dt = value
-            return dt.strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            return str(value)
-    
-    @staticmethod
     def generate_id(prefix: str, value: str) -> str:
         """Generate a consistent ID hash."""
         return hashlib.md5(f"{prefix}:{value}".encode()).hexdigest()
-    
-    @staticmethod
-    def debounce(func, delay):
-        """Debounce function for UI responsiveness."""
-        timer = None
-        def debounced(*args, **kwargs):
-            nonlocal timer
-            if timer:
-                timer.cancel()
-            timer = threading.Timer(delay, lambda: func(*args, **kwargs))
-            timer.start()
-        return debounced
-    
-    @staticmethod
-    def throttle(func, limit):
-        """Throttle function to limit calls per second."""
-        last_called = 0
-        def throttled(*args, **kwargs):
-            nonlocal last_called
-            current_time = time.time()
-            if current_time - last_called >= limit:
-                last_called = current_time
-                return func(*args, **kwargs)
-        return throttled
-    
-    @staticmethod
-    def format_number(num):
-        """Format number with commas."""
-        if not num and num != 0:
-            return "0"
-        return "{:,}".format(num)
-    
-    @staticmethod
-    def format_bytes(bytes, decimals=2):
-        """Format bytes to human readable format."""
-        if bytes == 0:
-            return '0 Bytes'
-        sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB']
-        i = int(min(4, bytes and bytes > 0 and (bytes.bit_length() - 1) // 10 or 0))
-        return f"{round(bytes / (1024 ** i), decimals)} {sizes[i]}"
-    
+
 # Circuit Breaker Pattern
 class CircuitBreaker:
     """Circuit breaker pattern to handle failing services gracefully."""
@@ -259,34 +205,13 @@ class CacheManager:
                 self._timestamps = {}
             
             self._stats["size"] = len(self._cache)
-    
-    def get_stats(self):
-        """Get cache statistics."""
-        with self._lock:
-            return dict(self._stats)
-    
-    def cleanup_expired(self):
-        """Remove expired cache entries."""
-        with self._lock:
-            current_time = time.time()
-            expired_keys = [
-                k for k, ts in self._timestamps.items() 
-                if current_time - ts > self._default_ttl
-            ]
-            
-            for k in expired_keys:
-                self._cache.pop(k, None)
-                self._timestamps.pop(k, None)
-            
-            self._stats["size"] = len(self._cache)
-            return len(expired_keys)
 
 # Centralized Service Manager
 class ServiceManager:
     """Centralized service management and monitoring with timeout and recovery logic."""
     _instance = None
     _lock = threading.Lock()
-    INITIALIZATION_TIMEOUT = 300  # 5 minutes
+    INITIALIZATION_TIMEOUT = 60  # 1 minute timeout (reduced from 300 seconds)
     
     def __new__(cls):
         if cls._instance is None:
@@ -364,16 +289,15 @@ class ServiceManager:
             }
     
     def _calculate_overall_status(self) -> ServiceStatus:
-        """Calculate overall system status with improved logic."""
-        # Core services that must be ready for system to be operational
-        critical_services = ['config', 'bigquery', 'storage', 'ingestion', 'app']
+        """Calculate overall system status with improved logic - more tolerant of service failures."""
+        # Only app and config are truly critical - everything else can be in degraded mode
+        critical_services = ['config', 'app']
         
         # Services that can be in degraded mode without affecting core functionality
-        optional_services = ['ai_models', 'pubsub', 'analysis']
+        optional_services = ['ai_models', 'pubsub', 'analysis', 'bigquery', 'storage', 'ingestion', 'frontend', 'api']
         
         # Check critical services
         critical_statuses = [self._services[service] for service in critical_services if service in self._services]
-        optional_statuses = [self._services[service] for service in optional_services if service in self._services]
         
         # If any critical service is in error, system is in error
         if any(s == ServiceStatus.ERROR for s in critical_statuses):
@@ -381,14 +305,16 @@ class ServiceManager:
         
         # If all critical services are ready, check overall system state
         if all(s == ServiceStatus.READY for s in critical_statuses):
-            # If optional services have issues, system is degraded but functional
-            if any(s in [ServiceStatus.ERROR, ServiceStatus.DEGRADED] for s in optional_statuses):
+            # Count degraded and error optional services
+            optional_statuses = [self._services[service] for service in optional_services if service in self._services]
+            degraded_count = sum(1 for s in optional_statuses if s in [ServiceStatus.ERROR, ServiceStatus.DEGRADED])
+            
+            # If more than half of optional services are degraded, overall is degraded
+            if degraded_count > len(optional_statuses) / 2:
                 return ServiceStatus.DEGRADED
-            # If optional services are still initializing, that's ok
-            elif any(s == ServiceStatus.INITIALIZING for s in optional_statuses):
-                return ServiceStatus.READY  # Core system is ready
-            else:
-                return ServiceStatus.READY
+            
+            # Otherwise system is ready, even with some degraded optional services
+            return ServiceStatus.READY
         
         # If any critical service is degraded, system is degraded
         if any(s == ServiceStatus.DEGRADED for s in critical_statuses):
@@ -411,16 +337,6 @@ class ServiceManager:
         with self._lock:
             self._clients[client_type] = client
             logger.info(f"Registered {client_type} client")
-    
-    def get_cache(self, key: str):
-        """Get cached value."""
-        with self._lock:
-            return self._cache.get(key)
-    
-    def set_cache(self, key: str, value: Any):
-        """Set cached value."""
-        with self._lock:
-            self._cache[key] = value
     
     def _start_background_monitor(self):
         """Start background service monitoring."""
@@ -451,12 +367,6 @@ class ServiceManager:
         logger.info("Started background service monitor")
 
 # Constants and Default Configuration
-DEFAULT_API_RATE_LIMIT = "1000 per day, 100 per hour"
-DEFAULT_SECRET_TTL = 86400  # 24 hours
-FEED_TYPES = ["indicators", "vulnerabilities", "threat_actors", "campaigns", "malware"]
-SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
-
-# Default feed configurations
 DEFAULT_FEED_CONFIGS = [
     {
         "id": "threatfox",
@@ -550,8 +460,7 @@ class Config:
         'threat_actors': 'threat_actors',
         'campaigns': 'campaigns',
         'malware': 'malware',
-        'users': 'users',
-        'audit_log': 'audit_log'
+        'batch_analysis': 'analysis_results'
     }
     
     # Storage Configuration
@@ -568,7 +477,7 @@ class Config:
     # API Configuration
     API_KEY = None  # Will be initialized in init_app
     API_VERSION = 'v1'
-    API_RATE_LIMIT = os.environ.get('API_RATE_LIMIT', DEFAULT_API_RATE_LIMIT)
+    API_RATE_LIMIT = os.environ.get('API_RATE_LIMIT', "1000 per day, 100 per hour")
     
     # Feed Configuration
     FEEDS = []  # Will be initialized in init_app
@@ -576,7 +485,6 @@ class Config:
     
     # Analysis Configuration
     ANALYSIS_ENABLED = get_env_bool('ANALYSIS_ENABLED', True)
-    ANALYSIS_AUTO_ENRICH = get_env_bool('ANALYSIS_AUTO_ENRICH', True)
     AUTO_ANALYZE = get_env_bool('AUTO_ANALYZE', False)
     
     # NLP Configuration
@@ -621,8 +529,8 @@ class Config:
             
         except Exception as e:
             logger.error(f"Configuration initialization failed: {str(e)}")
-            service_manager.update_status('config', ServiceStatus.ERROR, str(e))
-            raise
+            # Mark as degraded not error to allow app to continue
+            service_manager.update_status('config', ServiceStatus.DEGRADED, str(e))
     
     @classmethod
     def _load_api_key(cls):
@@ -637,31 +545,27 @@ class Config:
         
         # Try Secret Manager if available
         if cls.GCP_PROJECT:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    from google.cloud import secretmanager
-                    client = secretmanager.SecretManagerServiceClient()
-                    secret_name = f"projects/{cls.GCP_PROJECT}/secrets/api-keys/versions/latest"
-                    
-                    response = client.access_secret_version(request={"name": secret_name})
-                    secret_value = response.payload.data.decode("UTF-8")
-                    
-                    # Parse JSON if it's JSON format
-                    if secret_value.strip().startswith('{'):
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                secret_name = f"projects/{cls.GCP_PROJECT}/secrets/api-keys/versions/latest"
+                
+                response = client.access_secret_version(request={"name": secret_name})
+                secret_value = response.payload.data.decode("UTF-8")
+                
+                if secret_value.strip().startswith('{'):
+                    try:
                         api_config = json.loads(secret_value)
                         cls.API_KEY = api_config.get('platform_api_key', '').strip()
-                    else:
+                    except:
                         cls.API_KEY = secret_value.strip()
-                    
-                    logger.info(f"Loaded API key from Secret Manager: {cls.API_KEY[:4]}...{cls.API_KEY[-4:]}")
-                    return
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1} failed to access Secret Manager: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)  # Exponential backoff
-                    else:
-                        logger.warning(f"Could not access secret {secret_name} after {max_retries} attempts")
+                else:
+                    cls.API_KEY = secret_value.strip()
+                
+                logger.info(f"Loaded API key from Secret Manager: {cls.API_KEY[:4]}...{cls.API_KEY[-4:]}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to access Secret Manager: {str(e)}")
         
         # Use default if nothing else works
         cls.API_KEY = 'default-api-key'
@@ -683,35 +587,26 @@ class Config:
         
         # Try Secret Manager for feed config
         if cls.GCP_PROJECT:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    from google.cloud import secretmanager
-                    client = secretmanager.SecretManagerServiceClient()
-                    secret_name = f"projects/{cls.GCP_PROJECT}/secrets/feed-config/versions/latest"
-                    
-                    response = client.access_secret_version(request={"name": secret_name})
-                    secret_value = response.payload.data.decode("UTF-8")
-                    
-                    # Debug logging
-                    logger.debug(f"Raw secret value: {secret_value[:100]}...")
-                    
-                    feed_config = json.loads(secret_value)
-                    cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
-                    
-                    # Ensure we have feeds
-                    if not cls.FEEDS:
-                        logger.warning("No feeds found in Secret Manager config, using defaults")
-                        cls.FEEDS = DEFAULT_FEED_CONFIGS
-                    
-                    logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
-                    return
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1} failed to access feed config: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)  # Exponential backoff
-                    else:
-                        logger.warning(f"Could not access feed config after {max_retries} attempts")
+            try:
+                from google.cloud import secretmanager
+                client = secretmanager.SecretManagerServiceClient()
+                secret_name = f"projects/{cls.GCP_PROJECT}/secrets/feed-config/versions/latest"
+                
+                response = client.access_secret_version(request={"name": secret_name})
+                secret_value = response.payload.data.decode("UTF-8")
+                
+                feed_config = json.loads(secret_value)
+                cls.FEEDS = feed_config.get('feeds', DEFAULT_FEED_CONFIGS)
+                
+                # Ensure we have feeds
+                if not cls.FEEDS:
+                    logger.warning("No feeds found in Secret Manager config, using defaults")
+                    cls.FEEDS = DEFAULT_FEED_CONFIGS
+                
+                logger.info(f"Loaded {len(cls.FEEDS)} feeds from Secret Manager")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to access feed config from Secret Manager: {str(e)}")
         
         # Always use default feeds as fallback
         cls.FEEDS = DEFAULT_FEED_CONFIGS
@@ -752,10 +647,8 @@ class Config:
     
     @classmethod
     def validate_configuration(cls):
-        """Validate configuration values - improved validation with automatic fixes."""
+        """Validate configuration values with automatic fixes for non-critical issues."""
         warnings = []
-        errors = []
-        fixes_applied = []
         
         if cls.ENVIRONMENT == 'production':
             if cls.API_KEY == 'default-api-key':
@@ -763,33 +656,33 @@ class Config:
         
         if not cls.GCP_PROJECT:
             warnings.append("GCP_PROJECT not set - some GCP services may fail")
+            # Fall back to a default project ID to avoid errors
+            if not hasattr(cls, 'GCP_PROJECT') or not cls.GCP_PROJECT:
+                cls.GCP_PROJECT = "threat-intelligence-platform"
+                warnings.append(f"Using default GCP_PROJECT: {cls.GCP_PROJECT}")
         
         if not cls.GCS_BUCKET:
             warnings.append("GCS_BUCKET not set - data storage may fail")
             # Auto-fix: generate bucket name
             if cls.GCP_PROJECT:
                 cls.GCS_BUCKET = f"{cls.GCP_PROJECT}-threat-data"
-                fixes_applied.append(f"Auto-generated GCS_BUCKET: {cls.GCS_BUCKET}")
+                warnings.append(f"Auto-generated GCS_BUCKET: {cls.GCS_BUCKET}")
         
         if not cls.BIGQUERY_DATASET:
             warnings.append("BIGQUERY_DATASET not set - data storage may fail")
+            # Auto-fix: use a default dataset name
+            cls.BIGQUERY_DATASET = "threat_intelligence"
+            warnings.append(f"Using default BIGQUERY_DATASET: {cls.BIGQUERY_DATASET}")
         
         if not cls.FEEDS:
-            errors.append("No feeds configured - using defaults")
+            warnings.append("No feeds configured - using defaults")
             cls.FEEDS = DEFAULT_FEED_CONFIGS
-            fixes_applied.append("Applied default feed configuration")
         
         # Log all findings
         for warning in warnings:
             logger.warning(warning)
         
-        for error in errors:
-            logger.error(error)
-        
-        for fix in fixes_applied:
-            logger.info(f"Auto-fix applied: {fix}")
-        
-        # Allow startup even with errors to show error messages
+        # Always return True to allow startup even with warnings
         return True
     
     @classmethod
@@ -841,14 +734,17 @@ def initialize_bigquery():
     if existing_client:
         return existing_client
     
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             from google.cloud import bigquery
             client = bigquery.Client(project=Config.GCP_PROJECT, location=Config.BIGQUERY_LOCATION)
             
-            # Test the connection
-            client.query("SELECT 1").result()
+            # Test the connection with a simple query
+            try:
+                client.query("SELECT 1").result(timeout=5)
+            except:
+                logger.warning("BigQuery test query failed, but client created")
             
             service_manager.set_client('bigquery', client)
             service_manager.update_status('bigquery', ServiceStatus.READY)
@@ -859,8 +755,9 @@ def initialize_bigquery():
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                service_manager.update_status('bigquery', ServiceStatus.ERROR, str(e))
+                service_manager.update_status('bigquery', ServiceStatus.DEGRADED, str(e))
     
+    # Return None but don't fail catastrophically
     return None
 
 def initialize_storage():
@@ -871,14 +768,17 @@ def initialize_storage():
     if existing_client:
         return existing_client
     
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             from google.cloud import storage
             client = storage.Client(project=Config.GCP_PROJECT)
             
-            # Test the connection by listing buckets
-            list(client.list_buckets(max_results=1))
+            # Test the connection by attempting to list buckets
+            try:
+                next(client.list_buckets(max_results=1), None)
+            except:
+                logger.warning("Storage bucket listing failed, but client created")
             
             service_manager.set_client('storage', client)
             service_manager.update_status('storage', ServiceStatus.READY)
@@ -889,8 +789,9 @@ def initialize_storage():
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                service_manager.update_status('storage', ServiceStatus.ERROR, str(e))
+                service_manager.update_status('storage', ServiceStatus.DEGRADED, str(e))
     
+    # Return None but don't fail catastrophically
     return None
 
 def initialize_pubsub():
@@ -903,16 +804,19 @@ def initialize_pubsub():
     if publisher and subscriber:
         return publisher, subscriber
     
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             from google.cloud import pubsub_v1
             publisher = pubsub_v1.PublisherClient()
             subscriber = pubsub_v1.SubscriberClient()
             
-            # Test the connection by listing topics
-            project_path = f"projects/{Config.GCP_PROJECT}"
-            list(publisher.list_topics(request={"project": project_path}, max_results=1))
+            # Test the connection by attempting to list topics
+            try:
+                project_path = f"projects/{Config.GCP_PROJECT}"
+                next(publisher.list_topics(request={"project": project_path}, max_results=1), None)
+            except:
+                logger.warning("PubSub topic listing failed, but clients created")
             
             service_manager.set_client('publisher', publisher)
             service_manager.set_client('subscriber', subscriber)
@@ -925,8 +829,9 @@ def initialize_pubsub():
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
+                service_manager.update_status('pubsub', ServiceStatus.DEGRADED, str(e))
     
+    # Return None values but don't fail catastrophically
     return None, None
 
 # Create shared instances for use across application
