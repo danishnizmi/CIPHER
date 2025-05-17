@@ -11,6 +11,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+import re  # For simplified domain validation without tldextract
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for
 from flask import flash, abort, g, current_app, Response, make_response
@@ -30,46 +31,79 @@ logger = logging.getLogger('frontend')
 # Create Blueprint
 frontend_app = Blueprint('frontend', __name__, template_folder='templates', static_folder='static')
 
+# Domain extraction without tldextract
+def extract_domain_from_url(url):
+    """Extract domain from URL without tldextract dependency."""
+    if not url:
+        return None
+    
+    # Strip protocol
+    domain = url.lower()
+    if '://' in domain:
+        domain = domain.split('://', 1)[1]
+    
+    # Strip path
+    if '/' in domain:
+        domain = domain.split('/', 1)[0]
+    
+    # Strip port
+    if ':' in domain:
+        domain = domain.split(':', 1)[0]
+    
+    return domain
+
 # ====== Event Handlers ======
 
 def invalidate_cache_on_ingestion(data):
     """Invalidate cache when new data is ingested."""
-    logger.info("Invalidating cache due to data ingestion")
-    shared_cache.clear('feeds')
-    shared_cache.clear('iocs')
-    shared_cache.clear('stats')
-    shared_cache.clear('threat_summary')
+    try:
+        logger.info("Invalidating cache due to data ingestion")
+        shared_cache.clear('feeds')
+        shared_cache.clear('iocs')
+        shared_cache.clear('stats')
+        shared_cache.clear('threat_summary')
+    except Exception as e:
+        logger.error(f"Error invalidating cache: {e}")
 
 def invalidate_cache_on_analysis(data):
     """Invalidate cache when analysis completes."""
-    logger.info("Invalidating cache due to analysis completion")
-    shared_cache.clear('ai')
-    shared_cache.clear('threat_summary')
-    shared_cache.clear('analyses')
+    try:
+        logger.info("Invalidating cache due to analysis completion")
+        shared_cache.clear('ai')
+        shared_cache.clear('threat_summary')
+        shared_cache.clear('analyses')
+    except Exception as e:
+        logger.error(f"Error invalidating cache: {e}")
 
 # Register event handlers when blueprint is recorded
 @frontend_app.record
 def register_event_handlers(state):
     """Register event handlers when blueprint is registered."""
-    app = state.app
-    if hasattr(app, 'event_bus'):
-        logger.info("Registering frontend event handlers")
-        app.event_bus.subscribe('data_ingested', invalidate_cache_on_ingestion)
-        app.event_bus.subscribe('analysis_completed', invalidate_cache_on_analysis)
-        app.event_bus.subscribe('ingestion_completed', invalidate_cache_on_ingestion)
-        
-        # Update service status
-        service_manager = Config.get_service_manager()
-        service_manager.update_status('frontend', ServiceStatus.READY)
+    try:
+        app = state.app
+        if hasattr(app, 'event_bus'):
+            logger.info("Registering frontend event handlers")
+            app.event_bus.subscribe('data_ingested', invalidate_cache_on_ingestion)
+            app.event_bus.subscribe('analysis_completed', invalidate_cache_on_analysis)
+            app.event_bus.subscribe('ingestion_completed', invalidate_cache_on_ingestion)
+            
+            # Update service status
+            service_manager = Config.get_service_manager()
+            service_manager.update_status('frontend', ServiceStatus.READY)
+    except Exception as e:
+        logger.error(f"Error registering event handlers: {e}")
 
 # ====== API Interaction Functions ======
 
 def get_api_key() -> str:
     """Get API key from config."""
-    if hasattr(Config, 'API_KEY') and Config.API_KEY:
-        api_key = Config.API_KEY.strip()
-        if api_key != 'default-api-key':
-            return api_key
+    try:
+        if hasattr(Config, 'API_KEY') and Config.API_KEY:
+            api_key = Config.API_KEY.strip()
+            if api_key != 'default-api-key':
+                return api_key
+    except Exception as e:
+        logger.error(f"Error getting API key: {e}")
     
     # Use default key for public view
     return 'default-api-key'
@@ -78,18 +112,26 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
     """Make internal API request with proper context handling."""
     
     # Check service status first
-    service_manager = Config.get_service_manager()
-    status = service_manager.get_status()
-    
-    # Allow requests during initialization
-    if status['overall'] == ServiceStatus.ERROR.value:
-        return {"error": "Services unavailable", "status": "error"}
+    try:
+        service_manager = Config.get_service_manager()
+        status = service_manager.get_status()
+        
+        # Allow requests during initialization
+        if status['overall'] == ServiceStatus.ERROR.value:
+            return {"error": "Services unavailable", "status": "error"}
+    except Exception as e:
+        logger.error(f"Error checking service status: {e}")
+        return {"error": "Error checking service status", "status": "error"}
     
     # Create cache key for caching
-    cache_key = f"api:{endpoint}:{method}:{json.dumps(params or {})}:{json.dumps(data or {})}"
-    cached_result = shared_cache.get(cache_key)
-    if cached_result:
-        return cached_result
+    try:
+        cache_key = f"api:{endpoint}:{method}:{json.dumps(params or {})}:{json.dumps(data or {})}"
+        cached_result = shared_cache.get(cache_key)
+        if cached_result:
+            return cached_result
+    except Exception as e:
+        logger.error(f"Error with cache: {e}")
+        # Continue with the request even if caching fails
     
     try:
         # For internal requests, we'll use the HTTP approach for consistency
@@ -167,8 +209,11 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
         try:
             result = response.json() if response.text else {}
             # Cache successful responses
-            if 'error' not in result:
-                shared_cache.set(cache_key, result, ttl=300)
+            try:
+                if 'error' not in result:
+                    shared_cache.set(cache_key, result, ttl=300)
+            except Exception as cache_e:
+                logger.warning(f"Failed to cache response: {cache_e}")
             return result
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON response from {endpoint}")
@@ -183,184 +228,268 @@ def api_request(endpoint: str, method: str = 'GET', data: Dict = None, params: D
 
 def prepare_dashboard_context(current_view: str, days: int) -> Dict[str, Any]:
     """Prepare common dashboard context data."""
-    # Check service status
-    service_manager = Config.get_service_manager()
-    service_status = service_manager.get_status()
-    
-    # Initialize base context
-    context = {
-        'current_view': current_view,
-        'days': days,
-        'service_status': service_status,
-        'public_view': True,
-        'threat_score': 50,
-        'feed_trend': 0,
-        'ioc_trend': 0,
-        'analysis_trend': 0,
-        'activity_dates': [],
-        'activity_counts': [],
-        'ioc_type_labels': [],
-        'ioc_type_values': [],
-        'top_iocs': [],
-        'geo_stats': [],
-        'ai_summary': None,
-        'threat_summary': {'overall_score': 50},
-        'stats': {
-            'feeds': {'total_sources': 0},
-            'iocs': {'total': 0, 'types': []},
-            'analyses': {'total_analyses': 0},
-            'timestamp': datetime.utcnow().isoformat()
+    try:
+        # Check service status
+        service_manager = Config.get_service_manager()
+        service_status = service_manager.get_status()
+        
+        # Initialize base context
+        context = {
+            'current_view': current_view,
+            'days': days,
+            'service_status': service_status,
+            'public_view': True,
+            'threat_score': 50,
+            'feed_trend': 0,
+            'ioc_trend': 0,
+            'analysis_trend': 0,
+            'activity_dates': [],
+            'activity_counts': [],
+            'ioc_type_labels': [],
+            'ioc_type_values': [],
+            'top_iocs': [],
+            'geo_stats': [],
+            'ai_summary': None,
+            'threat_summary': {'overall_score': 50},
+            'stats': {
+                'feeds': {'total_sources': 0},
+                'iocs': {'total': 0, 'types': []},
+                'analyses': {'total_analyses': 0},
+                'timestamp': datetime.utcnow().isoformat()
+            }
         }
-    }
-    
-    # Set page metadata
-    page_metadata = {
-        'feeds': {
-            'title': 'Threat Feeds',
-            'subtitle': 'Intelligence sources and data collection',
-            'icon': 'rss'
-        },
-        'iocs': {
-            'title': 'Indicators of Compromise',
-            'subtitle': 'Observed indicators and threat artifacts',
-            'icon': 'fingerprint'
-        },
-        'ai-analysis': {
-            'title': 'AI-Powered Analysis',
-            'subtitle': 'Machine learning threat intelligence analysis',
-            'icon': 'brain'
-        },
-        'dashboard': {
-            'title': 'Threat Intelligence Dashboard',
-            'subtitle': 'Platform overview and threat summary',
-            'icon': 'tachometer-alt'
+        
+        # Set page metadata
+        page_metadata = {
+            'feeds': {
+                'title': 'Threat Feeds',
+                'subtitle': 'Intelligence sources and data collection',
+                'icon': 'rss'
+            },
+            'iocs': {
+                'title': 'Indicators of Compromise',
+                'subtitle': 'Observed indicators and threat artifacts',
+                'icon': 'fingerprint'
+            },
+            'ai-analysis': {
+                'title': 'AI-Powered Analysis',
+                'subtitle': 'Machine learning threat intelligence analysis',
+                'icon': 'brain'
+            },
+            'dashboard': {
+                'title': 'Threat Intelligence Dashboard',
+                'subtitle': 'Platform overview and threat summary',
+                'icon': 'tachometer-alt'
+            }
         }
-    }
-    
-    metadata = page_metadata.get(current_view, page_metadata['dashboard'])
-    context.update({
-        'page_title': metadata['title'],
-        'page_subtitle': metadata['subtitle'],
-        'page_icon': metadata['icon']
-    })
-    
-    return context
+        
+        metadata = page_metadata.get(current_view, page_metadata['dashboard'])
+        context.update({
+            'page_title': metadata['title'],
+            'page_subtitle': metadata['subtitle'],
+            'page_icon': metadata['icon']
+        })
+        
+        return context
+    except Exception as e:
+        logger.error(f"Error preparing dashboard context: {e}")
+        # Return minimal context to avoid template errors
+        return {
+            'current_view': current_view,
+            'days': days,
+            'service_status': {'overall': 'error', 'services': {}},
+            'stats': {
+                'feeds': {'total_sources': 0},
+                'iocs': {'total': 0, 'types': []},
+                'analyses': {'total_analyses': 0},
+                'timestamp': datetime.utcnow().isoformat()
+            },
+            'page_title': page_metadata.get(current_view, page_metadata['dashboard'])['title'],
+            'page_subtitle': page_metadata.get(current_view, page_metadata['dashboard'])['subtitle'],
+            'page_icon': page_metadata.get(current_view, page_metadata['dashboard'])['icon']
+        }
 
 def load_dashboard_stats(context: Dict[str, Any], days: int):
     """Load statistics for dashboard."""
-    stats_response = api_request('stats', params={"days": days})
-    if not stats_response or 'error' in stats_response:
-        logger.warning(f"Failed to load stats: {stats_response}")
-        return
-    
-    context['stats'] = {
-        'feeds': stats_response.get('feeds', {'total_sources': 0}),
-        'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
-        'analyses': stats_response.get('analyses', {'total_analyses': 0}),
-        'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
-    }
-    
-    # Calculate trends
-    context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0) or 0
-    context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0) or 0
-    context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0) or 0
-    
-    # IOC type data
-    ioc_types = stats_response.get('iocs', {}).get('types', [])
-    context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
-    context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
-    
-    # Process visualization data
-    if 'visualization_data' in stats_response:
-        viz_data = stats_response['visualization_data']
-        if 'daily_counts' in viz_data:
-            # Create date range
-            today = datetime.now().date()
-            date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
-            context['activity_dates'] = date_range
-            
-            # Map counts to dates
-            daily_counts = viz_data['daily_counts']
-            counts = [0] * len(date_range)
-            date_to_index = {date: idx for idx, date in enumerate(date_range)}
-            
-            for entry in daily_counts:
-                if isinstance(entry, dict) and 'date' in entry and 'count' in entry:
-                    date_str = entry['date']
-                    if date_str in date_to_index:
-                        counts[date_to_index[date_str]] = entry['count']
-            
-            context['activity_counts'] = counts
+    try:
+        stats_response = api_request('stats', params={"days": days})
+        if not stats_response or 'error' in stats_response:
+            logger.warning(f"Failed to load stats: {stats_response}")
+            return
+        
+        context['stats'] = {
+            'feeds': stats_response.get('feeds', {'total_sources': 0}),
+            'iocs': stats_response.get('iocs', {'total': 0, 'types': []}),
+            'analyses': stats_response.get('analyses', {'total_analyses': 0}),
+            'timestamp': stats_response.get('timestamp', datetime.utcnow().isoformat())
+        }
+        
+        # Calculate trends
+        context['feed_trend'] = stats_response.get('feeds', {}).get('growth_rate', 0) or 0
+        context['ioc_trend'] = stats_response.get('iocs', {}).get('growth_rate', 0) or 0
+        context['analysis_trend'] = stats_response.get('analyses', {}).get('growth_rate', 0) or 0
+        
+        # IOC type data
+        ioc_types = stats_response.get('iocs', {}).get('types', [])
+        context['ioc_type_labels'] = [item.get('type', '') for item in ioc_types if isinstance(item, dict)]
+        context['ioc_type_values'] = [item.get('count', 0) for item in ioc_types if isinstance(item, dict)]
+        
+        # Process visualization data
+        if 'visualization_data' in stats_response:
+            viz_data = stats_response['visualization_data']
+            if 'daily_counts' in viz_data:
+                # Create date range
+                today = datetime.now().date()
+                date_range = [(today - timedelta(days=i)).isoformat() for i in range(days)][::-1]
+                context['activity_dates'] = date_range
+                
+                # Map counts to dates
+                daily_counts = viz_data['daily_counts']
+                counts = [0] * len(date_range)
+                date_to_index = {date: idx for idx, date in enumerate(date_range)}
+                
+                for entry in daily_counts:
+                    if isinstance(entry, dict) and 'date' in entry and 'count' in entry:
+                        date_str = entry['date']
+                        if date_str in date_to_index:
+                            counts[date_to_index[date_str]] = entry['count']
+                
+                context['activity_counts'] = counts
+    except Exception as e:
+        logger.error(f"Error loading dashboard stats: {e}")
 
 def load_view_specific_data(context: Dict[str, Any], current_view: str, days: int):
     """Load view-specific data."""
-    if current_view == 'feeds':
-        feeds_response = api_request('feeds')
-        if not feeds_response or 'error' in feeds_response:
-            context['feed_items'] = []
+    try:
+        if current_view == 'feeds':
+            feeds_response = api_request('feeds')
+            if not feeds_response or 'error' in feeds_response:
+                context['feed_items'] = []
+            else:
+                context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
+            
+        elif current_view == 'iocs':
+            iocs_response = api_request('iocs', params={"days": days, "limit": 100})
+            if not iocs_response or 'error' in iocs_response:
+                context['ioc_items'] = []
+            else:
+                context['ioc_items'] = iocs_response.get('records', [])
+            
+        elif current_view == 'ai-analysis':
+            ai_response = api_request('ai/analyses', params={"days": days})
+            if not ai_response or 'error' in ai_response:
+                context['ai_analyses'] = {}
+                context['last_ai_analysis'] = None
+            else:
+                # Transform the response for the template
+                if isinstance(ai_response, dict):
+                    context['ai_analyses'] = ai_response
+                    context['overall_threat_level'] = ai_response.get('overall_threat_level', 'Medium')
+                    context['total_feeds_analyzed'] = ai_response.get('total_feeds_analyzed', 0)
+                    context['batch_analyses'] = ai_response.get('batch_analyses', [])
+                    context['threat_distribution'] = ai_response.get('threat_level_distribution', [])
+                    context['last_ai_analysis'] = ai_response.get('last_run_time')
+            
         else:
-            context['feed_items'] = feeds_response.get('feed_details', feeds_response.get('feeds', []))
-        
-    elif current_view == 'iocs':
-        iocs_response = api_request('iocs', params={"days": days, "limit": 100})
-        if not iocs_response or 'error' in iocs_response:
-            context['ioc_items'] = []
-        else:
-            context['ioc_items'] = iocs_response.get('records', [])
-        
-    elif current_view == 'ai-analysis':
-        ai_response = api_request('ai/analyses', params={"days": days})
-        if not ai_response or 'error' in ai_response:
-            context['ai_analyses'] = {}
-            context['last_ai_analysis'] = None
-        else:
-            # Transform the response for the template
-            if isinstance(ai_response, dict):
-                context['ai_analyses'] = ai_response
-                context['overall_threat_level'] = ai_response.get('overall_threat_level', 'Medium')
-                context['total_feeds_analyzed'] = ai_response.get('total_feeds_analyzed', 0)
-                context['batch_analyses'] = ai_response.get('batch_analyses', [])
-                context['threat_distribution'] = ai_response.get('threat_level_distribution', [])
-                context['last_ai_analysis'] = ai_response.get('last_run_time')
-        
-    else:
-        # Dashboard view - load additional data
-        # Get recent IOCs
-        iocs_response = api_request('iocs', params={"days": days, "limit": 10})
-        if iocs_response and 'error' not in iocs_response:
-            context['top_iocs'] = iocs_response.get('records', [])
-        
-        # Get threat summary
-        threat_summary = api_request('threat_summary', params={"days": days})
-        if threat_summary and 'error' not in threat_summary:
-            context['threat_summary'] = threat_summary
-            context['threat_score'] = threat_summary.get('overall_score', 50)
-        
-        # Get AI summary
-        ai_summary = api_request('ai/summary')
-        if ai_summary and 'error' not in ai_summary:
-            context['ai_summary'] = ai_summary
-        
-        # Get geo stats
-        geo_stats = api_request('iocs/geo', params={"days": days})
-        if geo_stats and 'error' not in geo_stats:
-            context['geo_stats'] = geo_stats.get('countries', [])
+            # Dashboard view - load additional data
+            # Get recent IOCs
+            iocs_response = api_request('iocs', params={"days": days, "limit": 10})
+            if iocs_response and 'error' not in iocs_response:
+                context['top_iocs'] = iocs_response.get('records', [])
+            
+            # Get threat summary
+            threat_summary = api_request('threat_summary', params={"days": days})
+            if threat_summary and 'error' not in threat_summary:
+                context['threat_summary'] = threat_summary
+                context['threat_score'] = threat_summary.get('overall_score', 50)
+            
+            # Get AI summary
+            ai_summary = api_request('ai/summary')
+            if ai_summary and 'error' not in ai_summary:
+                context['ai_summary'] = ai_summary
+            
+            # Get geo stats
+            geo_stats = api_request('iocs/geo', params={"days": days})
+            if geo_stats and 'error' not in geo_stats:
+                context['geo_stats'] = geo_stats.get('countries', [])
+    except Exception as e:
+        logger.error(f"Error loading view-specific data: {e}")
 
 # ====== Route Handlers ======
 
 @frontend_app.route('/')
 def index():
     """Root redirects to dashboard."""
-    return redirect(url_for('frontend.dashboard'))
+    try:
+        return redirect(url_for('frontend.dashboard'))
+    except Exception as e:
+        logger.error(f"Error in index route: {e}")
+        return render_template('error.html',
+                             error_code=500,
+                             error_message="Internal Server Error",
+                             error_description="An error occurred while loading the dashboard.",
+                             error_icon="exclamation-triangle"), 500
+
+# Handle direct URL patterns like /dashboard/ai-analysis
+@frontend_app.route('/dashboard/ai-analysis')
+def ai_analysis_direct_route():
+    """Handle direct access to AI analysis dashboard"""
+    try:
+        days = request.args.get('days', '30')
+        try:
+            days = int(days)
+        except (ValueError, TypeError):
+            days = 30
+        return dashboard('ai-analysis', days=days)
+    except Exception as e:
+        logger.error(f"Error in AI analysis direct route: {e}")
+        flash('An error occurred while loading the AI analysis dashboard', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/dashboard/feeds')
+def feeds_direct_route():
+    """Handle direct access to feeds dashboard"""
+    try:
+        days = request.args.get('days', '30')
+        try:
+            days = int(days)
+        except (ValueError, TypeError):
+            days = 30
+        return dashboard('feeds', days=days)
+    except Exception as e:
+        logger.error(f"Error in feeds direct route: {e}")
+        flash('An error occurred while loading the feeds dashboard', 'danger')
+        return redirect(url_for('frontend.dashboard'))
+
+@frontend_app.route('/dashboard/iocs')
+def iocs_direct_route():
+    """Handle direct access to IOCs dashboard"""
+    try:
+        days = request.args.get('days', '30')
+        try:
+            days = int(days)
+        except (ValueError, TypeError):
+            days = 30
+        return dashboard('iocs', days=days)
+    except Exception as e:
+        logger.error(f"Error in IOCs direct route: {e}")
+        flash('An error occurred while loading the IOCs dashboard', 'danger')
+        return redirect(url_for('frontend.dashboard'))
 
 @frontend_app.route('/dashboard')
 @frontend_app.route('/dashboard/<view>')
-def dashboard(view=None):
+def dashboard(view=None, days=None):
     """Dashboard view with dynamic content loading."""
     try:
         # Get view parameters
         current_view = view or request.args.get('view', 'dashboard')
-        days = int(request.args.get('days', '30'))
+        days_param = days or request.args.get('days', '30')
+        
+        # Ensure days is an integer
+        try:
+            days = int(days_param)
+        except (ValueError, TypeError):
+            days = 30
         
         # Prepare base context
         context = prepare_dashboard_context(current_view, days)
@@ -522,38 +651,86 @@ def dynamic_content_detail(content_type, identifier):
         flash('Error loading content details', 'danger')
         return redirect(url_for('frontend.dashboard'))
 
+@frontend_app.route('/analyze/ioc/<ioc_id>', methods=['GET', 'POST'])
+def analyze_ioc(ioc_id):
+    """Trigger AI analysis for a specific IOC."""
+    try:
+        # This is just a stub to prevent errors if referred to in templates
+        flash('AI analysis functionality coming soon', 'info')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+    except Exception as e:
+        logger.error(f"Error in analyze_ioc: {e}")
+        flash('Error analyzing IOC', 'danger')
+        return redirect(url_for('frontend.dashboard', view='iocs'))
+
 # ====== Error Handlers ======
 
 @frontend_app.errorhandler(404)
 def page_not_found(e):
     """Handle 404 errors."""
-    logger.info(f"Page not found: {request.path}")
-    return render_template('error.html', 
-                         error_code=404, 
-                         error_message="Page Not Found",
-                         error_description="The page you're looking for doesn't exist or has been moved.",
-                         error_icon="search-location"), 404
+    try:
+        logger.info(f"Page not found: {request.path}")
+        return render_template('error.html', 
+                            error_code=404, 
+                            error_message="Page Not Found",
+                            error_description="The page you're looking for doesn't exist or has been moved.",
+                            error_icon="search-location"), 404
+    except Exception as render_error:
+        logger.error(f"Error rendering 404 template: {render_error}")
+        return jsonify({
+            "error": "Page not found",
+            "status": 404,
+            "message": "The page you're looking for doesn't exist or has been moved."
+        }), 404
 
 @frontend_app.errorhandler(403)  
 def forbidden(e):
     """Handle 403 errors."""
-    logger.warning(f"Forbidden access: {request.path}")
-    return render_template('error.html',
-                         error_code=403,
-                         error_message="Access Forbidden", 
-                         error_description="You don't have permission to access this resource.",
-                         error_icon="ban"), 403
+    try:
+        logger.warning(f"Forbidden access: {request.path}")
+        return render_template('error.html',
+                            error_code=403,
+                            error_message="Access Forbidden", 
+                            error_description="You don't have permission to access this resource.",
+                            error_icon="ban"), 403
+    except Exception as render_error:
+        logger.error(f"Error rendering 403 template: {render_error}")
+        return jsonify({
+            "error": "Access forbidden",
+            "status": 403,
+            "message": "You don't have permission to access this resource."
+        }), 403
 
 @frontend_app.errorhandler(500)
 def server_error(e):
     """Handle 500 errors."""
-    logger.error(f"Server error: {str(e)}")
-    import traceback
+    try:
+        logger.error(f"Server error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        report_error(e)
+        return render_template('error.html',
+                            error_code=500,
+                            error_message="Internal Server Error",
+                            error_description="An unexpected error occurred. Please try again later.",
+                            error_icon="exclamation-triangle"), 500
+    except Exception as render_error:
+        logger.error(f"Error rendering 500 template: {render_error}")
+        return jsonify({
+            "error": "Internal server error",
+            "status": 500,
+            "message": "An unexpected error occurred. Please try again later."
+        }), 500
+
+# Fallback handler for any unhandled exceptions
+@frontend_app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {str(e)}")
     logger.error(traceback.format_exc())
     report_error(e)
     return render_template('error.html',
                          error_code=500,
-                         error_message="Internal Server Error",
+                         error_message="Unexpected Error",
                          error_description="An unexpected error occurred. Please try again later.",
                          error_icon="exclamation-triangle"), 500
 
@@ -562,13 +739,23 @@ def server_error(e):
 @frontend_app.context_processor
 def inject_global_data():
     """Inject global data into templates."""
-    return {
-        'now': datetime.now(),
-        'environment': ENVIRONMENT,
-        'version': VERSION,
-        'project_id': getattr(Config, 'GCP_PROJECT', None),
-        'debug_mode': DEBUG_MODE,
-    }
+    try:
+        return {
+            'now': datetime.now(),
+            'environment': ENVIRONMENT,
+            'version': VERSION,
+            'project_id': getattr(Config, 'GCP_PROJECT', None),
+            'debug_mode': DEBUG_MODE,
+        }
+    except Exception as e:
+        logger.error(f"Error injecting global data: {e}")
+        return {
+            'now': datetime.now(),
+            'environment': 'production',
+            'version': '1.0.3',
+            'project_id': None,
+            'debug_mode': False,
+        }
 
 # Initialize module
 logger.info("Frontend module initialized successfully")
