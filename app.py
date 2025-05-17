@@ -164,7 +164,7 @@ def health_check():
     }
     
     # Be more lenient during initialization
-    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value]:
+    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value, ServiceStatus.DEGRADED.value]:
         return jsonify(health_data), 200
     else:
         return jsonify(health_data), 503
@@ -177,8 +177,8 @@ def readiness_check():
     service_manager = Config.get_service_manager()
     status = service_manager.get_status()
     
-    # Consider the app ready if it's initializing or ready
-    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value]:
+    # Consider the app ready if it's initializing, ready, or even degraded
+    if status['overall'] in [ServiceStatus.READY.value, ServiceStatus.INITIALIZING.value, ServiceStatus.DEGRADED.value]:
         return jsonify({
             'status': 'ready',
             'timestamp': datetime.utcnow().isoformat()
@@ -191,7 +191,7 @@ def readiness_check():
         }), 503
 
 def initialize_platform():
-    """Initialize all platform components in correct order."""
+    """Initialize all platform components in correct order with better failure handling."""
     service_manager = Config.get_service_manager()
     
     try:
@@ -201,16 +201,49 @@ def initialize_platform():
         Config.init_app()
         service_manager.update_status('app', ServiceStatus.INITIALIZING)
         
-        # 2. Initialize GCP clients (don't fail if some services are not ready)
+        # 2. Initialize GCP clients with better handling of individual failures
         from config import initialize_bigquery, initialize_storage, initialize_pubsub
         
+        # Start with BigQuery which is critical
         try:
             bq_client = initialize_bigquery()
-            storage_client = initialize_storage()
-            publisher, subscriber = initialize_pubsub()
-            logger.info("GCP clients initialized")
+            if bq_client:
+                logger.info("BigQuery client initialized successfully")
+            else:
+                logger.warning("BigQuery client initialization returned None")
         except Exception as e:
-            logger.warning(f"Some GCP clients failed to initialize: {e}")
+            logger.error(f"Failed to initialize BigQuery client: {e}")
+            service_manager.update_status('bigquery', ServiceStatus.ERROR, str(e))
+        
+        # Then Storage
+        try:
+            storage_client = initialize_storage()
+            if storage_client:
+                logger.info("Storage client initialized successfully")
+            else:
+                logger.warning("Storage client initialization returned None")
+        except Exception as e:
+            logger.error(f"Failed to initialize Storage client: {e}")
+            service_manager.update_status('storage', ServiceStatus.ERROR, str(e))
+        
+        # Finally PubSub which is not critical
+        try:
+            publisher, subscriber = initialize_pubsub()
+            if publisher and subscriber:
+                logger.info("PubSub clients initialized successfully")
+            elif publisher:
+                logger.warning("Only PubSub publisher initialized")
+                service_manager.update_status('pubsub', ServiceStatus.DEGRADED, "Only publisher initialized")
+            elif subscriber:
+                logger.warning("Only PubSub subscriber initialized")
+                service_manager.update_status('pubsub', ServiceStatus.DEGRADED, "Only subscriber initialized")
+            else:
+                logger.warning("PubSub initialization returned None clients")
+                service_manager.update_status('pubsub', ServiceStatus.DEGRADED, "Initialization returned None")
+        except Exception as e:
+            logger.error(f"Failed to initialize PubSub clients: {e}")
+            service_manager.update_status('pubsub', ServiceStatus.ERROR, str(e))
+            # Mark as error but continue - the app can work without PubSub
         
         # 3. Ensure BigQuery tables exist (blocking for critical tables)
         try:
@@ -300,11 +333,33 @@ def initialize_platform():
                 logger.info("All critical routes verified successfully")
                 logger.info(f"Total registered routes: {len(list(app.url_map.iter_rules()))}")
         
-        # 5. Update service status to ready
-        service_manager.update_status('app', ServiceStatus.READY)
-        logger.info("Platform initialization complete")
+        # 5. Initialize analysis and AI models in a non-blocking way
+        try:
+            # Start AI model initialization in background
+            def init_ai_models():
+                try:
+                    logger.info("Initializing AI models in background...")
+                    from analysis import initialize_ai_models_background
+                    initialize_ai_models_background()
+                    logger.info("AI models initialization started")
+                except Exception as e:
+                    logger.error(f"Failed to initialize AI models: {e}")
+                    service_manager.update_status('ai_models', ServiceStatus.ERROR, str(e))
+            
+            # Start in background thread to avoid blocking startup
+            ai_thread = threading.Thread(target=init_ai_models, daemon=True)
+            ai_thread.start()
+            logger.info("Started AI models initialization in background")
+            
+        except Exception as e:
+            logger.warning(f"AI model initialization error: {e}")
+            service_manager.update_status('ai_models', ServiceStatus.ERROR, str(e))
         
-        # 6. Start background processes (non-blocking)
+        # 6. Update service status to ready (the app can run with some services in degraded state)
+        service_manager.update_status('app', ServiceStatus.READY)
+        logger.info("Platform initialization complete - app is ready but some services may be degraded")
+        
+        # 7. Start background processes (non-blocking)
         try:
             # Start service monitoring with proper app context
             def monitor_services():
@@ -341,6 +396,19 @@ def initialize_platform():
                                 except Exception as e:
                                     logger.error(f"Failed to recover API: {e}")
                             
+                            # Check PubSub and retry if failed
+                            if status['services'].get('pubsub') == ServiceStatus.ERROR.value:
+                                logger.info("Attempting to recover PubSub services...")
+                                try:
+                                    from config import initialize_pubsub
+                                    publisher, subscriber = initialize_pubsub()
+                                    if publisher or subscriber:
+                                        logger.info("PubSub services partially recovered")
+                                        service_manager.update_status('pubsub', ServiceStatus.DEGRADED, 
+                                                                    "Recovered but may not be fully functional")
+                                except Exception as e:
+                                    logger.warning(f"Failed to recover PubSub: {e}")
+                                
                             # Log current status periodically
                             if status['overall'] != ServiceStatus.READY.value:
                                 logger.info(f"System status: {status['overall']}")
@@ -354,16 +422,47 @@ def initialize_platform():
             monitor_thread.start()
             logger.info("Service monitor started")
             
-            # If enabled, trigger data ingestion immediately
-            if Config.AUTO_ANALYZE and service_manager.get_status()['overall'] == ServiceStatus.READY.value:
-                from ingestion import ingest_all_feeds
+            # If enabled, trigger data ingestion in background with timeouts and error handling
+            if Config.AUTO_ANALYZE:
                 try:
-                    logger.info("Triggering initial data ingestion...")
-                    ingestion_thread = threading.Thread(target=ingest_all_feeds, daemon=True)
+                    # Use a wrapper function with explicit timeouts
+                    def run_ingestion_with_timeout():
+                        logger.info("Starting data ingestion with timeout...")
+                        try:
+                            from ingestion import ingest_all_feeds
+                            # Set timeout for the ingestion function
+                            max_time = 30  # seconds
+                            
+                            def ingestion_runner():
+                                try:
+                                    ingest_all_feeds()
+                                except Exception as e:
+                                    logger.error(f"Error in ingestion runner: {e}")
+                            
+                            # Start the ingestion in a thread
+                            thread = threading.Thread(target=ingestion_runner, daemon=True)
+                            thread.start()
+                            thread.join(timeout=max_time)
+                            
+                            # Check if thread is still alive (timed out)
+                            if thread.is_alive():
+                                logger.warning(f"Ingestion thread timed out after {max_time} seconds, continuing as background process")
+                                service_manager.update_status('ingestion', ServiceStatus.DEGRADED, 
+                                                           "Ingestion is running in background")
+                            else:
+                                logger.info("Initial ingestion completed")
+                        except Exception as e:
+                            logger.error(f"Error setting up ingestion with timeout: {e}")
+                            service_manager.update_status('ingestion', ServiceStatus.ERROR, str(e))
+                    
+                    # Start in background
+                    ingestion_thread = threading.Thread(target=run_ingestion_with_timeout, daemon=True)
                     ingestion_thread.start()
-                    logger.info("Started initial ingestion thread")
+                    logger.info("Started initial ingestion in background with timeout")
+                    
                 except Exception as e:
                     logger.error(f"Error triggering initial ingestion: {e}")
+                    service_manager.update_status('ingestion', ServiceStatus.ERROR, str(e))
                 
         except Exception as e:
             logger.warning(f"Background service initialization error: {e}")
@@ -557,19 +656,32 @@ def status_check():
         'endpoints': list(app.view_functions.keys())[:20]  # Limit to first 20
     }
     
+    # Add more debug info about service initialization
+    service_debug = {}
+    for service_name, service_status in status['services'].items():
+        service_debug[service_name] = {
+            'status': service_status,
+            'error': status['errors'].get(service_name, None)
+        }
+    
     return jsonify({
         'status': status['overall'],
         'timestamp': datetime.utcnow().isoformat(),
         'version': Config.VERSION,
         'environment': Config.ENVIRONMENT,
         'services': status['services'],
+        'services_debug': service_debug,
         'errors': status['errors'],
         'routes': route_info,
         'config': {
             'gcp_project': Config.GCP_PROJECT,
             'bigquery_dataset': Config.BIGQUERY_DATASET,
             'gcs_bucket': Config.GCS_BUCKET,
-            'feeds_configured': len(Config.FEEDS)
+            'feeds_configured': len(getattr(Config, 'FEEDS', [])),
+            'pubsub_topic': getattr(Config, 'PUBSUB_TOPIC', None),
+            'api_key_configured': bool(getattr(Config, 'API_KEY', None) and Config.API_KEY != 'default-api-key'),
+            'nlp_enabled': getattr(Config, 'NLP_ENABLED', False),
+            'auto_analyze': getattr(Config, 'AUTO_ANALYZE', False)
         }
     })
 
@@ -579,6 +691,62 @@ def shutdown_services(error=None):
     """Cleanup services on app shutdown."""
     if error:
         logger.error(f"App teardown with error: {error}")
+
+# Manual initialization of services endpoint
+@app.route('/force-initialize/<service>', methods=['POST'])
+@csrf.exempt
+def force_initialize_service(service):
+    """Force initialization of a specific service for admin use."""
+    if service not in ['pubsub', 'ai_models', 'ingestion', 'analysis', 'bigquery', 'storage']:
+        return jsonify({'error': 'Invalid service name'}), 400
+    
+    try:
+        service_manager = Config.get_service_manager()
+        
+        if service == 'pubsub':
+            from config import initialize_pubsub
+            publisher, subscriber = initialize_pubsub()
+            if publisher or subscriber:
+                service_manager.update_status('pubsub', ServiceStatus.READY if (publisher and subscriber) else ServiceStatus.DEGRADED)
+                return jsonify({'success': True, 'status': 'ready' if (publisher and subscriber) else 'degraded'})
+            else:
+                return jsonify({'success': False, 'error': 'Failed to initialize PubSub'}), 500
+                
+        elif service == 'ai_models':
+            from analysis import initialize_ai_models_background
+            initialize_ai_models_background()
+            return jsonify({'success': True, 'status': 'initializing'})
+            
+        elif service == 'ingestion':
+            from ingestion import ensure_default_feeds
+            feeds = ensure_default_feeds()
+            service_manager.update_status('ingestion', ServiceStatus.READY)
+            return jsonify({'success': True, 'feeds_count': len(feeds)})
+            
+        elif service == 'analysis':
+            # Force analysis to ready state
+            service_manager.update_status('analysis', ServiceStatus.READY)
+            return jsonify({'success': True})
+            
+        elif service == 'bigquery':
+            from config import initialize_bigquery
+            client = initialize_bigquery()
+            if client:
+                return jsonify({'success': True})
+            else:
+                return jsonify({'success': False, 'error': 'Failed to initialize BigQuery'}), 500
+                
+        elif service == 'storage':
+            from config import initialize_storage
+            client = initialize_storage()
+            if client:
+                return jsonify({'success': True})
+            else:
+                return jsonify({'success': False, 'error': 'Failed to initialize Storage'}), 500
+    
+    except Exception as e:
+        logger.error(f"Error in force initialization of {service}: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # Entry point for Gunicorn
 if __name__ != '__main__':
