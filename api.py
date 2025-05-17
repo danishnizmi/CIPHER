@@ -567,7 +567,7 @@ def get_ai_analyses():
         
         # Import the analysis function
         try:
-            from analysis import get_batch_analysis_summary
+            from analysis import get_latest_analysis_results
         except ImportError:
             return jsonify({
                 'overall_threat_level': 'Medium',
@@ -578,9 +578,9 @@ def get_ai_analyses():
                 'error': 'Analysis module not available'
             })
         
-        batch_summary = get_batch_analysis_summary(days)
+        batch_summary = get_latest_analysis_results()
         
-        if batch_summary.get('error'):
+        if 'error' in batch_summary:
             return jsonify({
                 'overall_threat_level': 'Medium',
                 'total_feeds_analyzed': 0,
@@ -593,43 +593,63 @@ def get_ai_analyses():
         # Transform for frontend compatibility
         ai_analyses = {
             'overall_threat_level': 'Medium',
-            'total_feeds_analyzed': batch_summary.get('total_feeds_analyzed', 0),
-            'batch_analyses': batch_summary.get('feeds', []),
-            'threat_level_distribution': batch_summary.get('threat_level_distribution', []),
-            'analysis_trends': batch_summary.get('analysis_trends', []),
-            'summary_stats': batch_summary.get('summary_stats', {}),
+            'total_feeds_analyzed': 0,
+            'batch_analyses': [],
+            'threat_level_distribution': [],
+            'analysis_trends': [],
+            'summary_stats': {},
             'last_run_time': None,
             'is_batch_analysis': True,
             'period_days': days
         }
         
-        # Determine overall threat level from distribution
-        threat_counts = {
-            item['threat_level']: item['count'] 
-            for item in batch_summary.get('threat_level_distribution', [])
-        }
-        
-        total_analyses = sum(threat_counts.values())
-        if total_analyses > 0:
-            critical_pct = (threat_counts.get('critical', 0) / total_analyses) * 100
-            high_pct = (threat_counts.get('high', 0) / total_analyses) * 100
-            
-            if critical_pct > 20:
-                ai_analyses['overall_threat_level'] = 'Critical'
-            elif high_pct > 40 or critical_pct > 5:
-                ai_analyses['overall_threat_level'] = 'High'
-            elif threat_counts.get('low', 0) > threat_counts.get('medium', 0):
-                ai_analyses['overall_threat_level'] = 'Low'
-        
-        # Get most recent analysis timestamp
-        if ai_analyses['batch_analyses']:
-            most_recent_list = [
-                analysis['last_analysis'] 
-                for analysis in ai_analyses['batch_analyses'] 
-                if analysis.get('last_analysis')
+        # Extract data from the analysis results if available
+        if 'high_risk_iocs' in batch_summary:
+            ai_analyses['batch_analyses'] = [
+                {
+                    'feed_id': 'threatfox',
+                    'analysis_count': 1,
+                    'avg_confidence': 80,
+                    'threat_levels': ['high', 'medium'],
+                    'avg_sample_size': len(batch_summary.get('high_risk_iocs', [])),
+                    'last_analysis': batch_summary.get('timestamp')
+                }
             ]
-            if most_recent_list:
-                ai_analyses['last_run_time'] = max(most_recent_list)
+            
+            ai_analyses['total_feeds_analyzed'] = 1
+            ai_analyses['last_run_time'] = batch_summary.get('timestamp')
+            
+            # Create threat level distribution
+            threat_counts = {
+                'critical': 0,
+                'high': 0,
+                'medium': 0,
+                'low': 0
+            }
+            
+            for ioc in batch_summary.get('high_risk_iocs', []):
+                risk_score = ioc.get('risk_score', 0)
+                if risk_score > 85:
+                    threat_counts['critical'] += 1
+                elif risk_score > 70:
+                    threat_counts['high'] += 1
+                elif risk_score > 50:
+                    threat_counts['medium'] += 1
+                else:
+                    threat_counts['low'] += 1
+            
+            ai_analyses['threat_level_distribution'] = [
+                {'threat_level': level, 'count': count}
+                for level, count in threat_counts.items() if count > 0
+            ]
+            
+            # Determine overall threat level based on distribution
+            if threat_counts['critical'] > 10:
+                ai_analyses['overall_threat_level'] = 'Critical'
+            elif threat_counts['high'] > 20:
+                ai_analyses['overall_threat_level'] = 'High'
+            elif threat_counts['low'] > threat_counts['medium']:
+                ai_analyses['overall_threat_level'] = 'Low'
         
         return jsonify(ai_analyses)
         
@@ -877,6 +897,8 @@ def get_iocs_geo():
         logger.error(f"Error getting geo stats: {str(e)}")
         report_error(e)
         return jsonify({"error": "Internal server error"}), 500
+
+# Admin endpoints removed as per requirements (public-facing endpoints only)
 
 # ==================== Error Handlers ====================
 
