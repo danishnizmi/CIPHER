@@ -35,9 +35,16 @@ steps:
       - |
         SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 --project=$PROJECT_ID --format='value(status.url)')
-        echo "CIPHER Platform deployed: $SERVICE_URL/dashboard"
+        echo "🎉 CIPHER Platform deployed successfully!"
+        echo "📊 Dashboard: $SERVICE_URL/dashboard"
+        echo "🏥 Health: $SERVICE_URL/health"
+        echo "📈 Stats: $SERVICE_URL/api/stats"
     id: 'verify'
     waitFor: ['deploy']
+
+# REQUIRED: Logging configuration for service account builds
+options:
+  logging: CLOUD_LOGGING_ONLY
 
 images:
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
