@@ -2,57 +2,109 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: telegram-ai-processor
-  namespace: 'primal-chariot-382610'
+  namespace: '561511062593'
   labels:
     cloud.googleapis.com/location: us-central1
   annotations:
     run.googleapis.com/ingress: all
-    run.googleapis.com/ingress-status: all
+    run.googleapis.com/execution-environment: gen2
+    run.googleapis.com/description: "CIPHER Cybersecurity Intelligence Platform"
 spec:
   template:
     metadata:
       labels:
         run.googleapis.com/startupProbeType: Default
       annotations:
+        # Scaling configuration
         autoscaling.knative.dev/maxScale: '10'
         autoscaling.knative.dev/minScale: '0'
-        run.googleapis.com/cpu-throttling: 'true'
+        
+        # Performance optimizations
         run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: 'false'
         run.googleapis.com/startup-cpu-boost: 'true'
+        
+        # Extended health check timeouts for BigQuery initialization
+        run.googleapis.com/startup-probe-timeout-seconds: '240'
+        run.googleapis.com/startup-probe-period-seconds: '30'
+        run.googleapis.com/startup-probe-failure-threshold: '8'
+        
+        # Standard health check configuration
+        run.googleapis.com/liveness-probe-timeout-seconds: '5'
+        run.googleapis.com/liveness-probe-period-seconds: '30'
+        run.googleapis.com/liveness-probe-failure-threshold: '3'
+        
+        run.googleapis.com/readiness-probe-timeout-seconds: '10'
+        run.googleapis.com/readiness-probe-period-seconds: '10'
+        run.googleapis.com/readiness-probe-failure-threshold: '3'
     spec:
       containerConcurrency: 80
-      timeoutSeconds: 300
-      serviceAccountName: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+      timeoutSeconds: 3600
+      serviceAccountName: cipher-service@primal-chariot-382610.iam.gserviceaccount.com
       containers:
       - image: gcr.io/primal-chariot-382610/telegram-ai-processor:latest
         ports:
         - name: http1
           containerPort: 8080
         env:
+        - name: PORT
+          value: "8080"
         - name: GOOGLE_CLOUD_PROJECT
           value: primal-chariot-382610
-        - name: WEBHOOK_URL
-          value: https://telegram-ai-processor-[HASH]-uc.a.run.app
-        - name: TELEGRAM_SECRET_TOKEN
-          value: your-webhook-secret-token
+        - name: LOG_LEVEL
+          value: INFO
+        - name: DATASET_ID
+          value: telegram_data
+        - name: TABLE_ID
+          value: processed_messages
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app"
         resources:
           limits:
-            cpu: '1'
+            cpu: '2'
+            memory: 4Gi
+          requests:
+            cpu: '0.5'
             memory: 1Gi
-        startupProbe:
-          timeoutSeconds: 240
-          periodSeconds: 240
-          failureThreshold: 1
-          tcpSocket:
-            port: 8080
+        # Health checks with proper endpoints
         livenessProbe:
           httpGet:
-            path: /health
+            path: /health/live
             port: 8080
-          initialDelaySeconds: 30
+            httpHeaders:
+            - name: User-Agent
+              value: "Cloud-Run-Health-Check"
+          initialDelaySeconds: 10
           periodSeconds: 30
           timeoutSeconds: 5
           failureThreshold: 3
+          successThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            httpHeaders:
+            - name: User-Agent
+              value: "Cloud-Run-Health-Check"
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+            httpHeaders:
+            - name: User-Agent
+              value: "Cloud-Run-Health-Check"
+          initialDelaySeconds: 0
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 8  # Allow up to 4 minutes for startup
+          successThreshold: 1
   traffic:
   - percent: 100
     latestRevision: true
