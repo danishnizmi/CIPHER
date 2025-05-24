@@ -40,7 +40,7 @@ spec:
     spec:
       containerConcurrency: 80
       timeoutSeconds: 3600
-      serviceAccountName: cipher-service@primal-chariot-382610.iam.gserviceaccount.com
+      serviceAccountName: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
       containers:
       - image: gcr.io/primal-chariot-382610/telegram-ai-processor:latest
         ports:
