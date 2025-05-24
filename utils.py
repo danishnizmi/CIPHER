@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import asyncio
 from google.cloud import bigquery
@@ -26,16 +26,18 @@ TABLE_ID = os.environ.get("TABLE_ID", "processed_messages")
 telegram_client = None
 gemini_model = None
 
-# Monitored channels (can be configured via environment or database)
+# Updated monitored channels - Cybersecurity focused
 MONITORED_CHANNELS = [
-    "@bbcbreaking",
-    "@cnn", 
-    "@bitcoin",
-    "@ethereum",
-    "@techcrunch",
-    "@reuters",
-    # Add more channels as needed
+    "@DarkfeedNews",        # DARKFEED - Cyber Threat Intelligence
+    "@breachdetector",      # Data Leak Monitor - Threat detection 
+    "@secharvester",        # Security Harvester - Cybersecurity news
+    "@bbcbreaking",         # BBC Breaking News
+    "@cnn",                 # CNN News
+    "@reuters",             # Reuters News
 ]
+
+# Date limit - only process messages from the last 30 days
+MESSAGE_DATE_LIMIT = timedelta(days=30)
 
 async def get_secret(secret_id: str) -> str:
     """Get secret from Secret Manager"""
@@ -108,11 +110,11 @@ async def setup_bigquery_tables():
         except Exception:
             dataset = bigquery.Dataset(dataset_ref)
             dataset.location = "US"
-            dataset.description = "Telegram AI Processor data storage"
+            dataset.description = "CIPHER Telegram Intelligence data storage"
             dataset = bq_client.create_dataset(dataset)
             logger.info(f"Created dataset {DATASET_ID}")
 
-        # Create table schema - FIXED: Removed chat_title, using chat_username
+        # Create table schema - FIXED: Using correct schema
         schema = [
             bigquery.SchemaField("message_id", "STRING", mode="REQUIRED", description="Unique message identifier"),
             bigquery.SchemaField("chat_id", "STRING", mode="REQUIRED", description="Chat/channel identifier"),
@@ -127,6 +129,8 @@ async def setup_bigquery_tables():
             bigquery.SchemaField("key_topics", "STRING", mode="REPEATED", description="Main topics identified"),
             bigquery.SchemaField("urgency_score", "FLOAT", description="Urgency score 0-1"),
             bigquery.SchemaField("category", "STRING", description="Message category"),
+            bigquery.SchemaField("threat_level", "STRING", description="Threat level assessment"),
+            bigquery.SchemaField("channel_type", "STRING", description="Type of channel monitored"),
         ]
 
         table_ref = dataset_ref.table(TABLE_ID)
@@ -135,7 +139,7 @@ async def setup_bigquery_tables():
             logger.info(f"Table {TABLE_ID} already exists")
         except Exception:
             table = bigquery.Table(table_ref, schema=schema)
-            table.description = "Processed Telegram messages with AI analysis"
+            table.description = "CIPHER processed intelligence messages"
             table = bq_client.create_table(table)
             logger.info(f"Created table {TABLE_ID}")
 
@@ -144,6 +148,30 @@ async def setup_bigquery_tables():
     except Exception as e:
         logger.error(f"BigQuery setup failed: {e}")
         raise
+
+def is_message_recent(message_date: datetime) -> bool:
+    """Check if message is within our date limit (last 30 days)"""
+    if not message_date:
+        return False
+    
+    # Make message_date timezone-aware if it isn't already
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    
+    cutoff_date = datetime.now().astimezone() - MESSAGE_DATE_LIMIT
+    return message_date >= cutoff_date
+
+def get_channel_type(channel_username: str) -> str:
+    """Determine channel type based on username"""
+    channel_map = {
+        "@DarkfeedNews": "cyber_threat",
+        "@breachdetector": "data_leak", 
+        "@secharvester": "security_news",
+        "@bbcbreaking": "news",
+        "@cnn": "news",
+        "@reuters": "news"
+    }
+    return channel_map.get(channel_username, "unknown")
 
 async def join_monitored_channels():
     """Join all monitored channels"""
@@ -197,6 +225,11 @@ async def handle_new_message(event):
             # Skip if we can't identify the channel
             return
         
+        # Check if message is recent (within last 30 days)
+        if not is_message_recent(message.date):
+            logger.debug(f"Skipping old message from {chat_username}: {message.date}")
+            return
+        
         # Extract message data
         message_id = str(message.id)
         chat_id = str(chat.id)
@@ -204,15 +237,16 @@ async def handle_new_message(event):
         username = getattr(sender, 'username', '') if sender else ""
         text = message.text or ""
         message_date = message.date
-
+        
+        # Skip if no text content
         if not text:
-            logger.info(f"Message {message_id} has no text content, skipping")
+            logger.debug(f"Message {message_id} has no text content, skipping")
             return
 
         logger.info(f"Processing message {message_id} from channel {chat_username}")
 
         # Process with Gemini AI
-        analysis_result = await analyze_with_gemini(text)
+        analysis_result = await analyze_with_gemini(text, chat_username)
         
         # Prepare data for storage
         message_data = {
@@ -224,6 +258,7 @@ async def handle_new_message(event):
             "message_text": text,
             "message_date": message_date,
             "processed_date": datetime.now(),
+            "channel_type": get_channel_type(chat_username),
             **analysis_result
         }
         
@@ -234,6 +269,77 @@ async def handle_new_message(event):
 
     except Exception as e:
         logger.error(f"Error handling message: {e}")
+
+async def fetch_recent_history():
+    """Fetch recent messages from monitored channels (last 30 days only)"""
+    if not telegram_client:
+        logger.error("Telegram client not initialized")
+        return
+    
+    cutoff_date = datetime.now() - MESSAGE_DATE_LIMIT
+    processed_count = 0
+    
+    for channel_username in MONITORED_CHANNELS:
+        try:
+            logger.info(f"Fetching recent history from {channel_username}")
+            entity = await telegram_client.get_entity(channel_username)
+            
+            # Get messages from the last 30 days
+            async for message in telegram_client.iter_messages(
+                entity, 
+                offset_date=cutoff_date,
+                limit=100  # Limit per channel to avoid overwhelming the system
+            ):
+                # Check if message is too old
+                if not is_message_recent(message.date):
+                    continue
+                
+                # Skip messages without text
+                if not message.text:
+                    continue
+                
+                try:
+                    # Process the message
+                    chat_id = str(entity.id)
+                    message_id = str(message.id)
+                    user_id = str(message.sender_id) if message.sender_id else ""
+                    text = message.text
+                    
+                    logger.info(f"Processing historical message {message_id} from {channel_username}")
+                    
+                    # Analyze with Gemini
+                    analysis_result = await analyze_with_gemini(text, channel_username)
+                    
+                    # Prepare data
+                    message_data = {
+                        "message_id": message_id,
+                        "chat_id": chat_id,
+                        "chat_username": channel_username,
+                        "user_id": user_id,
+                        "username": "",
+                        "message_text": text,
+                        "message_date": message.date,
+                        "processed_date": datetime.now(),
+                        "channel_type": get_channel_type(channel_username),
+                        **analysis_result
+                    }
+                    
+                    # Store in BigQuery
+                    await store_processed_message(message_data)
+                    processed_count += 1
+                    
+                    # Small delay to avoid rate limits
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as msg_error:
+                    logger.error(f"Error processing historical message: {msg_error}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"Error fetching history from {channel_username}: {e}")
+            continue
+    
+    logger.info(f"Processed {processed_count} historical messages")
 
 async def start_monitoring():
     """Start monitoring Telegram channels"""
@@ -249,7 +355,11 @@ async def start_monitoring():
         # Join monitored channels
         await join_monitored_channels()
         
-        # Add event handler
+        # Fetch recent history (last 30 days)
+        logger.info("Fetching recent message history...")
+        await fetch_recent_history()
+        
+        # Add event handler for new messages
         telegram_client.add_event_handler(handle_new_message)
         
         logger.info("Started monitoring Telegram channels")
@@ -270,8 +380,8 @@ async def stop_monitoring():
     except Exception as e:
         logger.error(f"Error stopping monitoring: {e}")
 
-async def analyze_with_gemini(text: str) -> Dict[str, Any]:
-    """Analyze text with Gemini AI"""
+async def analyze_with_gemini(text: str, channel_username: str) -> Dict[str, Any]:
+    """Analyze text with Gemini AI - Enhanced for cybersecurity content"""
     try:
         # Initialize Gemini if not already done
         if not gemini_model:
@@ -282,34 +392,48 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
                     "sentiment": "neutral",
                     "key_topics": [],
                     "urgency_score": 0.0,
-                    "category": "other"
+                    "category": "other",
+                    "threat_level": "low"
                 }
 
-        # Create a comprehensive prompt for analysis
+        # Enhanced prompt for cybersecurity content
+        channel_type = get_channel_type(channel_username)
         prompt = f"""
-        Analyze the following message and provide a JSON response with these fields:
+        Analyze this cybersecurity intelligence message from {channel_username} (type: {channel_type}).
 
+        Provide analysis as JSON with these fields:
         1. sentiment: "positive", "negative", or "neutral"
-        2. key_topics: Array of 3-5 main topics/keywords (lowercase, no special characters)
-        3. urgency_score: Float between 0.0-1.0 (0=not urgent, 1=very urgent)
-        4. category: One of: "news", "breaking", "market", "tech", "politics", "other"
-        5. analysis: Brief 1-2 sentence summary of the message
+        2. key_topics: Array of 3-7 main cybersecurity topics/keywords
+        3. urgency_score: Float 0.0-1.0 (0=routine, 1=critical threat)
+        4. category: "threat_intel", "data_breach", "vulnerability", "malware", "ransomware", "news", "other"
+        5. threat_level: "critical", "high", "medium", "low", "info"
+        6. analysis: Brief 2-3 sentence summary focusing on threat implications
 
-        Consider urgency indicators like:
-        - Breaking news indicators: "BREAKING", "URGENT", "ALERT"
-        - Market movements: price changes, significant events
-        - Time-sensitive information
-        - Crisis or emergency situations
+        For cybersecurity content, consider:
+        - CVE references and vulnerability severity
+        - Active threat campaigns and APT groups
+        - Data breach scope and impact
+        - Ransomware family identification
+        - IOCs (Indicators of Compromise)
+        - Timeline and attribution information
 
-        Message to analyze: "{text}"
+        Urgency scoring for cybersecurity:
+        - 0.9-1.0: Active exploits, major breaches, critical infrastructure
+        - 0.7-0.8: New vulnerabilities, ransomware campaigns, APT activity
+        - 0.5-0.6: Threat intelligence updates, medium-severity vulnerabilities
+        - 0.3-0.4: Security advisories, patch announcements
+        - 0.0-0.2: General security news, educational content
 
-        Respond ONLY with valid JSON in this exact format:
+        Message: "{text[:1500]}"
+
+        Respond with valid JSON only:
         {{
-            "sentiment": "positive|negative|neutral",
-            "key_topics": ["topic1", "topic2", "topic3"],
-            "urgency_score": 0.0,
-            "category": "category_name",
-            "analysis": "Brief summary here"
+            "sentiment": "negative",
+            "key_topics": ["ransomware", "healthcare", "encryption"],
+            "urgency_score": 0.8,
+            "category": "ransomware",
+            "threat_level": "high",
+            "analysis": "New ransomware variant targeting healthcare organizations detected..."
         }}
         """
 
@@ -320,7 +444,7 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
             generation_config=genai.types.GenerationConfig(
                 temperature=0.1,
                 top_p=0.8,
-                max_output_tokens=500,
+                max_output_tokens=600,
             )
         )
         
@@ -344,7 +468,8 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
             "sentiment": str(result.get("sentiment", "neutral")).lower(),
             "key_topics": [str(topic)[:50] for topic in result.get("key_topics", [])[:10]],
             "urgency_score": max(0.0, min(1.0, float(result.get("urgency_score", 0.0)))),
-            "category": str(result.get("category", "other")).lower()
+            "category": str(result.get("category", "other")).lower(),
+            "threat_level": str(result.get("threat_level", "low")).lower()
         }
         
         # Validate sentiment
@@ -352,11 +477,16 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
             analysis_result["sentiment"] = "neutral"
         
         # Validate category
-        valid_categories = ["news", "breaking", "market", "tech", "politics", "other"]
+        valid_categories = ["threat_intel", "data_breach", "vulnerability", "malware", "ransomware", "news", "other"]
         if analysis_result["category"] not in valid_categories:
             analysis_result["category"] = "other"
+            
+        # Validate threat level
+        valid_threat_levels = ["critical", "high", "medium", "low", "info"]
+        if analysis_result["threat_level"] not in valid_threat_levels:
+            analysis_result["threat_level"] = "low"
         
-        logger.info(f"Gemini analysis completed: sentiment={analysis_result['sentiment']}, urgency={analysis_result['urgency_score']}")
+        logger.info(f"Gemini analysis completed: {analysis_result['category']}, threat_level={analysis_result['threat_level']}, urgency={analysis_result['urgency_score']}")
         
         return analysis_result
 
@@ -367,7 +497,8 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
             "sentiment": "neutral",
             "key_topics": [],
             "urgency_score": 0.0,
-            "category": "other"
+            "category": "other",
+            "threat_level": "low"
         }
     except Exception as e:
         logger.error(f"Gemini analysis failed: {e}")
@@ -376,7 +507,8 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
             "sentiment": "neutral",
             "key_topics": [],
             "urgency_score": 0.0,
-            "category": "other"
+            "category": "other",
+            "threat_level": "low"
         }
 
 async def store_processed_message(data: Dict[str, Any]):
@@ -405,7 +537,7 @@ async def store_processed_message(data: Dict[str, Any]):
         raise
 
 async def get_recent_insights(limit: int = 20, offset: int = 0) -> List[Dict]:
-    """Get recent processed insights from BigQuery - FIXED query"""
+    """Get recent processed insights from BigQuery"""
     try:
         query = f"""
         SELECT 
@@ -419,7 +551,9 @@ async def get_recent_insights(limit: int = 20, offset: int = 0) -> List[Dict]:
             sentiment,
             key_topics,
             urgency_score,
-            category
+            category,
+            threat_level,
+            channel_type
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         ORDER BY processed_date DESC
         LIMIT {limit}
@@ -441,7 +575,9 @@ async def get_recent_insights(limit: int = 20, offset: int = 0) -> List[Dict]:
                 "sentiment": row.sentiment,
                 "key_topics": list(row.key_topics) if row.key_topics else [],
                 "urgency_score": float(row.urgency_score) if row.urgency_score is not None else 0.0,
-                "category": row.category
+                "category": row.category,
+                "threat_level": getattr(row, 'threat_level', 'low'),
+                "channel_type": getattr(row, 'channel_type', 'unknown')
             })
         
         logger.info(f"Retrieved {len(results)} insights from BigQuery")
@@ -462,7 +598,8 @@ async def get_message_stats() -> Dict[str, Any]:
             COUNT(CASE WHEN DATE(processed_date) = '{today}' THEN 1 END) as processed_today,
             AVG(urgency_score) as avg_urgency,
             COUNT(DISTINCT chat_id) as unique_channels,
-            COUNT(DISTINCT user_id) as unique_users
+            COUNT(DISTINCT user_id) as unique_users,
+            COUNT(CASE WHEN threat_level IN ('critical', 'high') THEN 1 END) as high_threats
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         """
         
@@ -475,7 +612,8 @@ async def get_message_stats() -> Dict[str, Any]:
                 "processed_today": int(row.processed_today) if row.processed_today else 0,
                 "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
                 "unique_channels": int(row.unique_channels) if row.unique_channels else 0,
-                "unique_users": int(row.unique_users) if row.unique_users else 0
+                "unique_users": int(row.unique_users) if row.unique_users else 0,
+                "high_threats": int(getattr(row, 'high_threats', 0)) if hasattr(row, 'high_threats') else 0
             }
         else:
             stats = {
@@ -483,7 +621,8 @@ async def get_message_stats() -> Dict[str, Any]:
                 "processed_today": 0,
                 "avg_urgency": 0.0,
                 "unique_channels": 0,
-                "unique_users": 0
+                "unique_users": 0,
+                "high_threats": 0
             }
         
         logger.info(f"Retrieved stats: {stats['total_messages']} total messages, {stats['processed_today']} today")
@@ -496,7 +635,8 @@ async def get_message_stats() -> Dict[str, Any]:
             "processed_today": 0,
             "avg_urgency": 0.0,
             "unique_channels": 0,
-            "unique_users": 0
+            "unique_users": 0,
+            "high_threats": 0
         }
 
 # Background task management
