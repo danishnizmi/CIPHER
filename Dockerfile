@@ -1,54 +1,40 @@
-# Production Dockerfile for CIPHER Cybersecurity Intelligence Platform
+# CIPHER Platform - Production Dockerfile
 FROM python:3.11-slim
 
-# Production environment variables
+# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PORT=8080
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies efficiently
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    gcc \
-    g++ \
-    libc6-dev \
-    libffi-dev \
-    libssl-dev \
-    make \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# Set work directory
+# Create app directory
 WORKDIR /app
 
-# Copy requirements first for better Docker layer caching
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies with optimization
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Create necessary directories and set permissions
-RUN mkdir -p /app/templates /app/static /app/logs /tmp && \
-    chown -R appuser:appuser /app /tmp
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app
+USER app
 
-# Switch to non-root user
-USER appuser
-
-# Health check for Cloud Run
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health/live || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/health/live || exit 1
 
 # Expose port
-EXPOSE ${PORT}
+EXPOSE 8080
 
-# Production startup command - simple and reliable
-CMD ["python", "main.py"]
+# Run the application
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
