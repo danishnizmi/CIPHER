@@ -138,7 +138,7 @@ steps:
           --max-instances 10 \
           --concurrency 100 \
           --timeout 3600 \
-          --startup-cpu-boost \
+          --cpu-boost \
           --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
           --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,ENVIRONMENT=production" \
           --execution-environment gen2 \
