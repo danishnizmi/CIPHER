@@ -9,8 +9,7 @@ import asyncio
 import aiohttp
 from google.cloud import bigquery
 from google.cloud import secretmanager
-import vertexai
-from vertexai.generative_models import GenerativeModel
+import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +21,32 @@ secret_client = secretmanager.SecretManagerServiceClient()
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "primal-chariot-382610")
 DATASET_ID = os.environ.get("DATASET_ID", "telegram_data")
 TABLE_ID = os.environ.get("TABLE_ID", "processed_messages")
-VERTEX_AI_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
-VERTEX_AI_MODEL = os.environ.get("VERTEX_AI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
-# Initialize Vertex AI
-try:
-    vertexai.init(project=PROJECT_ID, location=VERTEX_AI_LOCATION)
-    gemini_model = GenerativeModel(VERTEX_AI_MODEL)
-    logger.info(f"Initialized Vertex AI with model {VERTEX_AI_MODEL} in {VERTEX_AI_LOCATION}")
-except Exception as e:
-    logger.error(f"Failed to initialize Vertex AI: {e}")
-    gemini_model = None
+# Initialize Gemini API
+gemini_api_key = None
+gemini_model = None
+
+async def initialize_gemini():
+    """Initialize Gemini API with key from Secret Manager"""
+    global gemini_api_key, gemini_model
+    try:
+        # Get API key from Secret Manager
+        gemini_api_key = await get_secret("gemini-api-key")
+        
+        # Configure Gemini
+        genai.configure(api_key=gemini_api_key)
+        
+        # Initialize model
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+        
+        logger.info(f"Successfully initialized Gemini API with model {GEMINI_MODEL}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini API: {e}")
+        logger.warning("Gemini API not available - AI analysis will be disabled")
+        return False
 
 async def get_secret(secret_id: str) -> str:
     """Get secret from Secret Manager"""
@@ -75,6 +89,8 @@ async def setup_bigquery_tables():
             bigquery.SchemaField("key_topics", "STRING", mode="REPEATED", description="Main topics identified"),
             bigquery.SchemaField("urgency_score", "FLOAT", description="Urgency score 0-1"),
             bigquery.SchemaField("category", "STRING", description="Message category"),
+            bigquery.SchemaField("confidence_score", "FLOAT", description="AI confidence in analysis"),
+            bigquery.SchemaField("processing_time_ms", "INTEGER", description="Time taken to process message"),
         ]
 
         table_ref = dataset_ref.table(TABLE_ID)
@@ -83,7 +99,7 @@ async def setup_bigquery_tables():
             logger.info(f"Table {TABLE_ID} already exists")
         except Exception:
             table = bigquery.Table(table_ref, schema=schema)
-            table.description = "Processed Telegram messages with AI analysis"
+            table.description = "Processed Telegram messages with Gemini AI analysis"
             table = bq_client.create_table(table)
             logger.info(f"Created table {TABLE_ID}")
 
@@ -121,6 +137,7 @@ async def setup_telegram_webhook():
             "url": f"{webhook_url}/webhook/telegram",
             "allowed_updates": ["message", "edited_message"],
             "drop_pending_updates": True,  # Clear any pending updates
+            "max_connections": 40,  # Optimize for production
         }
         
         # Add secret token if available
@@ -173,6 +190,8 @@ def verify_telegram_webhook(headers: Dict, body: bytes) -> bool:
 
 async def process_telegram_message(data: Dict[str, Any]):
     """Process incoming Telegram message with Gemini AI"""
+    start_time = datetime.now()
+    
     try:
         message = data.get("message", {})
         if not message:
@@ -184,6 +203,8 @@ async def process_telegram_message(data: Dict[str, Any]):
         chat_id = str(message.get("chat", {}).get("id"))
         user_id = str(message.get("from", {}).get("id", ""))
         username = message.get("from", {}).get("username", "")
+        first_name = message.get("from", {}).get("first_name", "")
+        last_name = message.get("from", {}).get("last_name", "")
         text = message.get("text", "")
         
         # Handle timestamp
@@ -197,82 +218,97 @@ async def process_telegram_message(data: Dict[str, Any]):
             logger.info(f"Message {message_id} has no text content, skipping")
             return
 
-        logger.info(f"Processing message {message_id} from user {username or user_id}")
+        # Skip bot commands for analysis
+        if text.startswith('/'):
+            logger.info(f"Message {message_id} is a bot command, skipping analysis")
+            return
+
+        logger.info(f"Processing message {message_id} from user {username or first_name or user_id}")
 
         # Process with Gemini AI
         analysis_result = await analyze_with_gemini(text)
+        
+        # Calculate processing time
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
         
         # Prepare data for storage
         message_data = {
             "message_id": message_id,
             "chat_id": chat_id,
             "user_id": user_id,
-            "username": username,
-            "message_text": text,
+            "username": username or f"{first_name} {last_name}".strip(),
+            "message_text": text[:4000],  # Limit text length for BigQuery
             "message_date": date,
             "processed_date": datetime.now(),
+            "processing_time_ms": int(processing_time),
             **analysis_result
         }
         
         # Store in BigQuery
         await store_processed_message(message_data)
         
-        logger.info(f"Successfully processed message {message_id}")
+        logger.info(f"Successfully processed message {message_id} in {processing_time:.0f}ms")
 
     except Exception as e:
         logger.error(f"Message processing failed: {e}")
 
 async def analyze_with_gemini(text: str) -> Dict[str, Any]:
     """Analyze text with Gemini AI"""
+    start_time = datetime.now()
+    
     try:
-        if not gemini_model:
-            logger.error("Gemini model not initialized")
-            return {
-                "gemini_analysis": "AI analysis unavailable - model not initialized",
-                "sentiment": "neutral",
-                "key_topics": [],
-                "urgency_score": 0.0,
-                "category": "other"
-            }
+        # Initialize Gemini if not already done
+        if gemini_model is None:
+            gemini_initialized = await initialize_gemini()
+            if not gemini_initialized:
+                return get_fallback_analysis(text, "Gemini API not initialized")
 
         # Create a comprehensive prompt for analysis
         prompt = f"""
-        Analyze the following message and provide a JSON response with these fields:
+Analyze this Telegram message and respond with ONLY a valid JSON object:
 
-        1. sentiment: "positive", "negative", or "neutral"
-        2. key_topics: Array of 3-5 main topics/keywords (lowercase, no special characters)
-        3. urgency_score: Float between 0.0-1.0 (0=not urgent, 1=very urgent)
-        4. category: One of: "question", "complaint", "suggestion", "information", "request", "other"
-        5. analysis: Brief 1-2 sentence summary of the message
+Message: "{text}"
 
-        Consider urgency indicators like:
-        - Time-sensitive words: "urgent", "asap", "emergency", "help", "problem"
-        - Question marks and requests for help
-        - Negative sentiment combined with specific issues
-        - Complaints about services or problems
+Provide analysis in this exact JSON format:
+{{
+    "sentiment": "positive|negative|neutral",
+    "key_topics": ["topic1", "topic2", "topic3"],
+    "urgency_score": 0.8,
+    "category": "question|complaint|suggestion|information|request|praise|other",
+    "confidence_score": 0.9,
+    "analysis": "Brief 1-2 sentence summary"
+}}
 
-        Message to analyze: "{text}"
+Analysis guidelines:
+- sentiment: Based on emotional tone and language
+- key_topics: 2-5 main themes/subjects (lowercase, no special chars)
+- urgency_score: 0.0-1.0 based on time sensitivity, problems, requests for help
+- category: Most appropriate category for the message type
+- confidence_score: 0.0-1.0 how confident you are in this analysis
+- analysis: Concise summary under 200 characters
 
-        Respond ONLY with valid JSON in this exact format:
-        {{
-            "sentiment": "positive|negative|neutral",
-            "key_topics": ["topic1", "topic2", "topic3"],
-            "urgency_score": 0.0,
-            "category": "category_name",
-            "analysis": "Brief summary here"
-        }}
-        """
+Urgency indicators: "urgent", "asap", "emergency", "help", "problem", "broken", "not working"
+High urgency: Problems, emergencies, time-sensitive requests
+Medium urgency: Questions, requests, complaints
+Low urgency: Information, praise, casual conversation
+
+Respond ONLY with the JSON object, no other text.
+"""
 
         # Generate content using Gemini
         response = await asyncio.to_thread(
-            gemini_model.generate_content, 
+            gemini_model.generate_content,
             prompt,
-            generation_config={
-                "temperature": 0.1,  # Lower temperature for more consistent JSON
-                "top_p": 0.8,
-                "max_output_tokens": 500,
-            }
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,  # Lower temperature for consistent JSON
+                top_p=0.8,
+                max_output_tokens=500,
+                candidate_count=1,
+            )
         )
+        
+        if not response or not response.text:
+            return get_fallback_analysis(text, "Empty response from Gemini")
         
         # Clean and parse JSON response
         response_text = response.text.strip()
@@ -280,55 +316,136 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
         # Remove any markdown formatting
         if response_text.startswith("```json"):
             response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
         if response_text.endswith("```"):
             response_text = response_text[:-3]
         
         response_text = response_text.strip()
         
         # Parse JSON
-        result = json.loads(response_text)
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Try to extract JSON from response
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                raise ValueError("No valid JSON found in response")
         
         # Validate and clean the result
         analysis_result = {
-            "gemini_analysis": str(result.get("analysis", "Analysis completed"))[:1000],  # Limit length
-            "sentiment": str(result.get("sentiment", "neutral")).lower(),
-            "key_topics": [str(topic)[:50] for topic in result.get("key_topics", [])[:10]],  # Limit topics
-            "urgency_score": max(0.0, min(1.0, float(result.get("urgency_score", 0.0)))),  # Clamp 0-1
-            "category": str(result.get("category", "other")).lower()
+            "gemini_analysis": str(result.get("analysis", "Analysis completed"))[:500],
+            "sentiment": validate_sentiment(result.get("sentiment", "neutral")),
+            "key_topics": validate_topics(result.get("key_topics", [])),
+            "urgency_score": validate_score(result.get("urgency_score", 0.0)),
+            "category": validate_category(result.get("category", "other")),
+            "confidence_score": validate_score(result.get("confidence_score", 0.5))
         }
         
-        # Validate sentiment
-        if analysis_result["sentiment"] not in ["positive", "negative", "neutral"]:
-            analysis_result["sentiment"] = "neutral"
-        
-        # Validate category
-        valid_categories = ["question", "complaint", "suggestion", "information", "request", "other"]
-        if analysis_result["category"] not in valid_categories:
-            analysis_result["category"] = "other"
-        
-        logger.info(f"Gemini analysis completed: sentiment={analysis_result['sentiment']}, urgency={analysis_result['urgency_score']}")
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        logger.info(f"Gemini analysis completed in {processing_time:.0f}ms: sentiment={analysis_result['sentiment']}, urgency={analysis_result['urgency_score']}")
         
         return analysis_result
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Gemini JSON response: {e}")
         logger.error(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
-        return {
-            "gemini_analysis": f"JSON parsing failed: {str(e)[:200]}",
-            "sentiment": "neutral",
-            "key_topics": [],
-            "urgency_score": 0.0,
-            "category": "other"
-        }
+        return get_fallback_analysis(text, f"JSON parsing failed: {str(e)}")
+        
     except Exception as e:
         logger.error(f"Gemini analysis failed: {e}")
-        return {
-            "gemini_analysis": f"Analysis failed: {str(e)[:200]}",
-            "sentiment": "neutral",
-            "key_topics": [],
-            "urgency_score": 0.0,
-            "category": "other"
-        }
+        return get_fallback_analysis(text, f"Analysis failed: {str(e)}")
+
+def get_fallback_analysis(text: str, error_msg: str) -> Dict[str, Any]:
+    """Provide fallback analysis when Gemini is unavailable"""
+    # Simple rule-based analysis
+    text_lower = text.lower()
+    
+    # Basic sentiment analysis
+    positive_words = ["good", "great", "excellent", "amazing", "love", "perfect", "thanks", "thank you"]
+    negative_words = ["bad", "terrible", "awful", "hate", "broken", "problem", "issue", "error", "fail"]
+    
+    positive_count = sum(1 for word in positive_words if word in text_lower)
+    negative_count = sum(1 for word in negative_words if word in text_lower)
+    
+    if positive_count > negative_count:
+        sentiment = "positive"
+    elif negative_count > positive_count:
+        sentiment = "negative"
+    else:
+        sentiment = "neutral"
+    
+    # Basic urgency detection
+    urgent_words = ["urgent", "asap", "emergency", "help", "problem", "broken", "not working", "issue"]
+    urgency_score = min(1.0, sum(0.3 for word in urgent_words if word in text_lower))
+    
+    # Basic category detection
+    if "?" in text:
+        category = "question"
+    elif any(word in text_lower for word in ["problem", "issue", "broken", "not working"]):
+        category = "complaint"
+    elif any(word in text_lower for word in ["suggest", "recommend", "should", "could"]):
+        category = "suggestion"
+    else:
+        category = "information"
+    
+    return {
+        "gemini_analysis": f"Fallback analysis: {error_msg[:200]}",
+        "sentiment": sentiment,
+        "key_topics": extract_simple_topics(text),
+        "urgency_score": urgency_score,
+        "category": category,
+        "confidence_score": 0.3  # Low confidence for fallback
+    }
+
+def extract_simple_topics(text: str) -> List[str]:
+    """Extract simple topics from text using basic rules"""
+    import re
+    
+    # Remove common words and extract meaningful terms
+    common_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "is", "are", "was", "were", "be", "been", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your", "his", "her", "its", "our", "their"}
+    
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+    topics = [word for word in words if word not in common_words]
+    
+    # Return up to 5 most relevant topics
+    return topics[:5]
+
+def validate_sentiment(sentiment: str) -> str:
+    """Validate sentiment value"""
+    valid_sentiments = ["positive", "negative", "neutral"]
+    return sentiment.lower() if sentiment.lower() in valid_sentiments else "neutral"
+
+def validate_category(category: str) -> str:
+    """Validate category value"""
+    valid_categories = ["question", "complaint", "suggestion", "information", "request", "praise", "other"]
+    return category.lower() if category.lower() in valid_categories else "other"
+
+def validate_topics(topics: List) -> List[str]:
+    """Validate and clean topics list"""
+    if not isinstance(topics, list):
+        return []
+    
+    cleaned_topics = []
+    for topic in topics[:10]:  # Limit to 10 topics
+        if isinstance(topic, str) and len(topic.strip()) > 0:
+            # Clean topic: lowercase, alphanumeric only, max 50 chars
+            clean_topic = re.sub(r'[^a-zA-Z0-9\s]', '', str(topic))[:50].strip().lower()
+            if clean_topic and len(clean_topic) > 2:
+                cleaned_topics.append(clean_topic)
+    
+    return cleaned_topics
+
+def validate_score(score: Any) -> float:
+    """Validate and clamp score to 0.0-1.0 range"""
+    try:
+        score_float = float(score)
+        return max(0.0, min(1.0, score_float))
+    except (ValueError, TypeError):
+        return 0.0
 
 async def store_processed_message(data: Dict[str, Any]):
     """Store processed message in BigQuery"""
@@ -368,7 +485,9 @@ async def get_recent_insights(limit: int = 20, offset: int = 0) -> List[Dict]:
             sentiment,
             key_topics,
             urgency_score,
-            category
+            category,
+            confidence_score,
+            processing_time_ms
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         ORDER BY processed_date DESC
         LIMIT {limit}
@@ -388,7 +507,9 @@ async def get_recent_insights(limit: int = 20, offset: int = 0) -> List[Dict]:
                 "sentiment": row.sentiment,
                 "key_topics": list(row.key_topics) if row.key_topics else [],
                 "urgency_score": float(row.urgency_score) if row.urgency_score is not None else 0.0,
-                "category": row.category
+                "category": row.category,
+                "confidence_score": float(row.confidence_score) if row.confidence_score is not None else 0.0,
+                "processing_time_ms": int(row.processing_time_ms) if row.processing_time_ms else 0
             })
         
         logger.info(f"Retrieved {len(results)} insights from BigQuery")
@@ -408,8 +529,13 @@ async def get_message_stats() -> Dict[str, Any]:
             COUNT(*) as total_messages,
             COUNT(CASE WHEN DATE(processed_date) = '{today}' THEN 1 END) as processed_today,
             AVG(urgency_score) as avg_urgency,
+            AVG(confidence_score) as avg_confidence,
+            AVG(processing_time_ms) as avg_processing_time,
             COUNT(DISTINCT chat_id) as unique_chats,
-            COUNT(DISTINCT user_id) as unique_users
+            COUNT(DISTINCT user_id) as unique_users,
+            COUNT(CASE WHEN sentiment = 'positive' THEN 1 END) as positive_messages,
+            COUNT(CASE WHEN sentiment = 'negative' THEN 1 END) as negative_messages,
+            COUNT(CASE WHEN urgency_score > 0.7 THEN 1 END) as high_urgency_messages
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         """
         
@@ -421,16 +547,26 @@ async def get_message_stats() -> Dict[str, Any]:
                 "total_messages": int(row.total_messages) if row.total_messages else 0,
                 "processed_today": int(row.processed_today) if row.processed_today else 0,
                 "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
+                "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
+                "avg_processing_time": float(row.avg_processing_time) if row.avg_processing_time else 0.0,
                 "unique_chats": int(row.unique_chats) if row.unique_chats else 0,
-                "unique_users": int(row.unique_users) if row.unique_users else 0
+                "unique_users": int(row.unique_users) if row.unique_users else 0,
+                "positive_messages": int(row.positive_messages) if row.positive_messages else 0,
+                "negative_messages": int(row.negative_messages) if row.negative_messages else 0,
+                "high_urgency_messages": int(row.high_urgency_messages) if row.high_urgency_messages else 0
             }
         else:
             stats = {
                 "total_messages": 0,
                 "processed_today": 0,
                 "avg_urgency": 0.0,
+                "avg_confidence": 0.0,
+                "avg_processing_time": 0.0,
                 "unique_chats": 0,
-                "unique_users": 0
+                "unique_users": 0,
+                "positive_messages": 0,
+                "negative_messages": 0,
+                "high_urgency_messages": 0
             }
         
         logger.info(f"Retrieved stats: {stats['total_messages']} total messages, {stats['processed_today']} today")
@@ -442,8 +578,13 @@ async def get_message_stats() -> Dict[str, Any]:
             "total_messages": 0,
             "processed_today": 0,
             "avg_urgency": 0.0,
+            "avg_confidence": 0.0,
+            "avg_processing_time": 0.0,
             "unique_chats": 0,
-            "unique_users": 0
+            "unique_users": 0,
+            "positive_messages": 0,
+            "negative_messages": 0,
+            "high_urgency_messages": 0
         }
 
 async def reprocess_single_message(message_id: str):
@@ -473,7 +614,9 @@ async def reprocess_single_message(message_id: str):
             return
         
         # Reanalyze with Gemini
+        start_time = datetime.now()
         analysis_result = await analyze_with_gemini(row.message_text)
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
         
         # Update the record
         update_query = f"""
@@ -484,6 +627,8 @@ async def reprocess_single_message(message_id: str):
             key_topics = @topics,
             urgency_score = @urgency,
             category = @category,
+            confidence_score = @confidence,
+            processing_time_ms = @processing_time,
             processed_date = @processed_date
         WHERE message_id = @message_id
         """
@@ -496,6 +641,8 @@ async def reprocess_single_message(message_id: str):
                 bigquery.ArrayQueryParameter("topics", "STRING", analysis_result["key_topics"]),
                 bigquery.ScalarQueryParameter("urgency", "FLOAT", analysis_result["urgency_score"]),
                 bigquery.ScalarQueryParameter("category", "STRING", analysis_result["category"]),
+                bigquery.ScalarQueryParameter("confidence", "FLOAT", analysis_result["confidence_score"]),
+                bigquery.ScalarQueryParameter("processing_time", "INTEGER", int(processing_time)),
                 bigquery.ScalarQueryParameter("processed_date", "TIMESTAMP", datetime.now())
             ]
         )
@@ -507,3 +654,6 @@ async def reprocess_single_message(message_id: str):
         
     except Exception as e:
         logger.error(f"Failed to reprocess message {message_id}: {e}")
+
+# Import regex for topic validation
+import re
