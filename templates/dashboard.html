@@ -1,142 +1,113 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard - Telegram AI Processor{% endblock %}
+{% block title %}Channel Monitor Dashboard - Telegram AI Processor{% endblock %}
 
 {% block content %}
 <div x-data="dashboard()" class="px-4 py-6 sm:px-0">
     
     <!-- Error Message -->
     {% if error %}
-    <div class="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
+    <div class="mb-6 bg-red-50 border border-red-200 rounded-md p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <i class="fas fa-exclamation-circle text-red-400 text-xl"></i>
+                <i class="fas fa-exclamation-circle text-red-400"></i>
             </div>
             <div class="ml-3">
-                <h3 class="text-sm font-medium text-red-800">System Error</h3>
+                <h3 class="text-sm font-medium text-red-800">Error</h3>
                 <div class="mt-2 text-sm text-red-700">{{ error }}</div>
-                <div class="mt-3">
-                    <button @click="refreshData()" class="text-sm bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded">
-                        Try Again
-                    </button>
-                </div>
             </div>
         </div>
     </div>
     {% endif %}
 
     <!-- Monitoring Status Banner -->
-    <div class="mb-6 {% if monitoring.active %}bg-green-50 border-green-200{% else %}bg-yellow-50 border-yellow-200{% endif %} border rounded-lg p-4 shadow-sm">
-        <div class="flex items-center justify-between">
-            <div class="flex items-center">
-                <div class="flex-shrink-0">
+    <div class="mb-6 {% if monitoring.active %}bg-green-50 border-green-200{% else %}bg-yellow-50 border-yellow-200{% endif %} border rounded-md p-4">
+        <div class="flex items-center">
+            <div class="flex-shrink-0">
+                {% if monitoring.active %}
+                <i class="fas fa-satellite-dish text-green-400 text-xl"></i>
+                {% else %}
+                <i class="fas fa-exclamation-triangle text-yellow-400 text-xl"></i>
+                {% endif %}
+            </div>
+            <div class="ml-3">
+                <h3 class="text-sm font-medium {% if monitoring.active %}text-green-800{% else %}text-yellow-800{% endif %}">
                     {% if monitoring.active %}
-                    <div class="w-4 h-4 bg-green-400 rounded-full animate-pulse"></div>
+                    🟢 Channel Monitoring Active
                     {% else %}
-                    <div class="w-4 h-4 bg-yellow-400 rounded-full"></div>
+                    🟡 Channel Monitoring Inactive
+                    {% endif %}
+                </h3>
+                <div class="mt-1 text-sm {% if monitoring.active %}text-green-700{% else %}text-yellow-700{% endif %}">
+                    Monitoring {{ monitoring.total_channels }} public Telegram channels
+                    {% if monitoring.channels %}
+                    <br><strong>Channels:</strong> {{ monitoring.channels|join(', ') }}
                     {% endif %}
                 </div>
-                <div class="ml-3">
-                    <h3 class="text-sm font-medium {% if monitoring.active %}text-green-800{% else %}text-yellow-800{% endif %}">
-                        {% if monitoring.active %}
-                        🟢 Channel Monitoring Active
-                        {% else %}
-                        🟡 Channel Monitoring Inactive
-                        {% endif %}
-                    </h3>
-                    <div class="mt-1 text-sm {% if monitoring.active %}text-green-700{% else %}text-yellow-700{% endif %}">
-                        Monitoring {{ monitoring.total_channels }} public Telegram channels
-                        {% if monitoring.channels %}
-                        <br><strong>Active Channels:</strong> {{ monitoring.channels|join(', ') }}
-                        {% endif %}
-                    </div>
-                </div>
-            </div>
-            <div class="flex space-x-2">
-                <button @click="refreshData()" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
-                    <i class="fas fa-refresh mr-1"></i>
-                    Refresh
-                </button>
-                <a href="/channels" class="inline-flex items-center px-3 py-1.5 border border-gray-300 text-xs font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
-                    <i class="fas fa-cog mr-1"></i>
-                    Manage
-                </a>
             </div>
         </div>
     </div>
 
-    <!-- Statistics Cards Grid -->
+    <!-- Statistics Cards -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <!-- Total Messages -->
-        <div class="bg-white overflow-hidden shadow-sm rounded-lg border border-gray-200">
+        <div class="bg-white overflow-hidden shadow rounded-lg">
             <div class="p-5">
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
-                        <div class="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                            <i class="fas fa-comments text-blue-600 text-lg"></i>
-                        </div>
+                        <i class="fas fa-messages text-2xl text-blue-500"></i>
                     </div>
-                    <div class="ml-4 w-0 flex-1">
+                    <div class="ml-5 w-0 flex-1">
                         <dl>
                             <dt class="text-sm font-medium text-gray-500 truncate">Total Messages</dt>
-                            <dd class="text-2xl font-semibold text-gray-900">{{ "{:,}".format(stats.total_messages) }}</dd>
+                            <dd class="text-lg font-medium text-gray-900">{{ stats.total_messages }}</dd>
                         </dl>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Processed Today -->
-        <div class="bg-white overflow-hidden shadow-sm rounded-lg border border-gray-200">
+        <div class="bg-white overflow-hidden shadow rounded-lg">
             <div class="p-5">
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
-                        <div class="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-                            <i class="fas fa-clock text-green-600 text-lg"></i>
-                        </div>
+                        <i class="fas fa-clock text-2xl text-green-500"></i>
                     </div>
-                    <div class="ml-4 w-0 flex-1">
+                    <div class="ml-5 w-0 flex-1">
                         <dl>
                             <dt class="text-sm font-medium text-gray-500 truncate">Processed Today</dt>
-                            <dd class="text-2xl font-semibold text-gray-900">{{ stats.processed_today }}</dd>
+                            <dd class="text-lg font-medium text-gray-900">{{ stats.processed_today }}</dd>
                         </dl>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Monitored Channels -->
-        <div class="bg-white overflow-hidden shadow-sm rounded-lg border border-gray-200">
+        <div class="bg-white overflow-hidden shadow rounded-lg">
             <div class="p-5">
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
-                        <div class="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-                            <i class="fas fa-satellite-dish text-purple-600 text-lg"></i>
-                        </div>
+                        <i class="fas fa-satellite-dish text-2xl text-purple-500"></i>
                     </div>
-                    <div class="ml-4 w-0 flex-1">
+                    <div class="ml-5 w-0 flex-1">
                         <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Active Channels</dt>
-                            <dd class="text-2xl font-semibold text-gray-900">{{ stats.unique_channels }}/{{ monitoring.total_channels }}</dd>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Monitored Channels</dt>
+                            <dd class="text-lg font-medium text-gray-900">{{ stats.unique_channels }}</dd>
                         </dl>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Average Urgency -->
-        <div class="bg-white overflow-hidden shadow-sm rounded-lg border border-gray-200">
+        <div class="bg-white overflow-hidden shadow rounded-lg">
             <div class="p-5">
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
-                        <div class="w-10 h-10 {% if stats.avg_urgency > 0.7 %}bg-red-100{% elif stats.avg_urgency > 0.4 %}bg-yellow-100{% else %}bg-gray-100{% endif %} rounded-lg flex items-center justify-center">
-                            <i class="fas fa-exclamation-triangle {% if stats.avg_urgency > 0.7 %}text-red-600{% elif stats.avg_urgency > 0.4 %}text-yellow-600{% else %}text-gray-600{% endif %} text-lg"></i>
-                        </div>
+                        <i class="fas fa-exclamation-triangle text-2xl text-yellow-500"></i>
                     </div>
-                    <div class="ml-4 w-0 flex-1">
+                    <div class="ml-5 w-0 flex-1">
                         <dl>
                             <dt class="text-sm font-medium text-gray-500 truncate">Avg Urgency</dt>
-                            <dd class="text-2xl font-semibold text-gray-900">{{ "%.2f"|format(stats.avg_urgency) }}</dd>
+                            <dd class="text-lg font-medium text-gray-900">{{ "%.2f"|format(stats.avg_urgency) }}</dd>
                         </dl>
                     </div>
                 </div>
@@ -144,90 +115,56 @@
         </div>
     </div>
 
-    <!-- Quick Stats Row -->
-    {% if stats.high_urgency_count > 0 %}
-    <div class="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
-        <div class="flex items-center">
-            <i class="fas fa-warning text-red-500 mr-2"></i>
-            <span class="text-sm font-medium text-red-800">
-                {{ stats.high_urgency_count }} high urgency message{{ "s" if stats.high_urgency_count != 1 else "" }} detected
-            </span>
-        </div>
-    </div>
-    {% endif %}
-
-    <!-- Recent Insights Section -->
-    <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg border border-gray-200">
-        <div class="px-4 py-5 sm:px-6 border-b border-gray-200 bg-gray-50">
+    <!-- Recent Insights -->
+    <div class="bg-white shadow overflow-hidden sm:rounded-md">
+        <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
             <div class="flex justify-between items-center">
                 <div>
                     <h3 class="text-lg leading-6 font-medium text-gray-900">Recent Channel Messages</h3>
-                    <p class="mt-1 max-w-2xl text-sm text-gray-500">
-                        Latest messages from monitored channels with AI analysis
-                        {% if insights %} • Showing {{ insights|length }} messages{% endif %}
-                    </p>
+                    <p class="mt-1 max-w-2xl text-sm text-gray-500">Latest messages from monitored public channels with AI analysis</p>
                 </div>
-                <div class="flex space-x-2">
-                    <button @click="refreshData()" class="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
-                        <i class="fas fa-refresh mr-2"></i>
-                        Refresh
-                    </button>
-                    <a href="/insights" class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
-                        <i class="fas fa-list mr-2"></i>
-                        View All
-                    </a>
-                </div>
+                <button @click="refreshData()" class="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    <i class="fas fa-refresh mr-2"></i>
+                    Refresh
+                </button>
             </div>
         </div>
 
         {% if insights %}
         <ul class="divide-y divide-gray-200">
             {% for insight in insights %}
-            <li class="px-4 py-6 hover:bg-gray-50 transition-colors duration-150">
+            <li class="px-4 py-4 hover:bg-gray-50">
                 <div class="flex items-start space-x-4">
-                    <!-- Sentiment Icon -->
                     <div class="flex-shrink-0">
                         {% if insight.sentiment == 'positive' %}
-                        <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                        <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
                             <i class="fas fa-smile text-green-600"></i>
                         </div>
                         {% elif insight.sentiment == 'negative' %}
-                        <div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                        <div class="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
                             <i class="fas fa-frown text-red-600"></i>
                         </div>
                         {% else %}
-                        <div class="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
+                        <div class="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
                             <i class="fas fa-meh text-gray-600"></i>
                         </div>
                         {% endif %}
                     </div>
 
                     <div class="flex-1 min-w-0">
-                        <!-- Header with Channel and Metadata -->
-                        <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center justify-between">
                             <div class="flex items-center space-x-2">
-                                <p class="text-sm font-semibold text-gray-900">{{ insight.chat_username or 'Unknown Channel' }}</p>
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {% if insight.category == 'breaking' %}bg-red-100 text-red-800{% elif insight.category == 'news' %}bg-blue-100 text-blue-800{% elif insight.category == 'crypto' or insight.category == 'market' %}bg-purple-100 text-purple-800{% elif insight.category == 'tech' %}bg-green-100 text-green-800{% else %}bg-gray-100 text-gray-800{% endif %}">
+                                <p class="text-sm font-medium text-gray-900">{{ insight.chat_username or 'Unknown Channel' }}</p>
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
                                     {{ insight.category or 'other' }}
                                 </span>
-                                
-                                <!-- Urgency Badge -->
                                 {% if insight.urgency_score > 0.7 %}
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                                    <i class="fas fa-exclamation-triangle mr-1"></i>
                                     High Urgency
                                 </span>
                                 {% elif insight.urgency_score > 0.4 %}
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                                    <i class="fas fa-exclamation-circle mr-1"></i>
-                                    Medium
-                                </span>
-                                {% endif %}
-                                
-                                <!-- Channel Priority -->
-                                {% if insight.channel_priority == 'high' %}
-                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800">
-                                    Priority
+                                    Medium Urgency
                                 </span>
                                 {% endif %}
                             </div>
@@ -238,159 +175,53 @@
                             </p>
                         </div>
 
-                        <!-- AI Analysis -->
-                        <div class="mb-3">
-                            <p class="text-sm text-gray-700 leading-relaxed">
-                                <i class="fas fa-robot text-blue-500 mr-1"></i>
-                                {{ insight.gemini_analysis or 'No analysis available' }}
-                            </p>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">{{ insight.gemini_analysis or 'No analysis available' }}</p>
                         </div>
 
-                        <!-- Key Topics -->
                         {% if insight.key_topics %}
-                        <div class="mb-3 flex flex-wrap gap-1">
-                            {% for topic in insight.key_topics[:6] %}
-                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                        <div class="mt-2 flex flex-wrap gap-1">
+                            {% for topic in insight.key_topics[:5] %}
+                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-800">
                                 {{ topic }}
                             </span>
                             {% endfor %}
-                            {% if insight.key_topics|length > 6 %}
-                            <span class="text-xs text-gray-500">+{{ insight.key_topics|length - 6 }} more</span>
-                            {% endif %}
                         </div>
                         {% endif %}
 
-                        <!-- Original Message Preview -->
-                        <div class="mt-3 p-3 bg-gray-50 rounded-md border-l-4 border-gray-300">
-                            <p class="text-xs text-gray-600 leading-relaxed">
-                                {% if insight.message_text %}
-                                {% set preview = insight.message_text[:200] %}
-                                {{ preview }}{% if insight.message_text|length > 200 %}...{% endif %}
-                                {% else %}
-                                No message text available
-                                {% endif %}
+                        <div class="mt-2">
+                            <p class="text-xs text-gray-600 line-clamp-2">
+                                {{ (insight.message_text[:150] + '...') if insight.message_text and insight.message_text|length > 150 else insight.message_text }}
                             </p>
-                        </div>
-
-                        <!-- Metrics Footer -->
-                        <div class="mt-3 flex items-center justify-between text-xs text-gray-500">
-                            <div class="flex items-center space-x-4">
-                                <span>Urgency: {{ "%.1f"|format(insight.urgency_score * 100) }}%</span>
-                                <span>Sentiment: {{ insight.sentiment.title() }}</span>
-                                {% if insight.username %}
-                                <span>From: @{{ insight.username }}</span>
-                                {% endif %}
-                            </div>
                         </div>
                     </div>
                 </div>
             </li>
             {% endfor %}
         </ul>
-
-        <!-- Load More -->
-        <div class="px-4 py-3 bg-gray-50 border-t border-gray-200 text-center">
-            <a href="/insights" class="text-sm text-blue-600 hover:text-blue-800 font-medium">
-                View all insights →
-            </a>
-        </div>
-        
         {% else %}
-        <!-- Empty State -->
-        <div class="px-4 py-12 text-center">
-            <div class="mx-auto w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mb-4">
-                <i class="fas fa-inbox text-4xl text-gray-400"></i>
-            </div>
+        <div class="px-4 py-8 text-center">
+            <i class="fas fa-inbox text-4xl text-gray-300 mb-4"></i>
             <h3 class="text-lg font-medium text-gray-900 mb-2">No Messages Yet</h3>
-            <p class="text-gray-500 mb-4">
+            <p class="text-gray-500">
                 {% if not monitoring.active %}
-                Channel monitoring is not active. Please check your configuration.
+                Channel monitoring is not active. Check your Telegram credentials.
                 {% else %}
                 Waiting for new messages from monitored channels...
                 {% endif %}
             </p>
-            {% if not monitoring.active %}
-            <div class="space-y-2 text-sm text-gray-600">
-                <p>To get started:</p>
-                <ol class="list-decimal list-inside space-y-1">
-                    <li>Configure your Telegram API credentials</li>
-                    <li>Set up your Gemini AI API key</li>
-                    <li>Restart the monitoring service</li>
-                </ol>
-            </div>
-            {% endif %}
         </div>
         {% endif %}
-    </div>
-
-    <!-- Footer Actions -->
-    <div class="mt-6 text-center">
-        <div class="inline-flex space-x-4">
-            <a href="/analytics" class="text-sm text-blue-600 hover:text-blue-800 font-medium">
-                <i class="fas fa-chart-bar mr-1"></i>
-                View Analytics
-            </a>
-            <a href="/channels" class="text-sm text-blue-600 hover:text-blue-800 font-medium">
-                <i class="fas fa-cog mr-1"></i>
-                Manage Channels
-            </a>
-            <a href="/health" class="text-sm text-blue-600 hover:text-blue-800 font-medium">
-                <i class="fas fa-heartbeat mr-1"></i>
-                System Health
-            </a>
-        </div>
     </div>
 </div>
 
 <script>
 function dashboard() {
     return {
-        init() {
-            // Auto-refresh every 30 seconds
-            setInterval(() => {
-                this.refreshData();
-            }, 30000);
-        },
-        
         refreshData() {
             window.location.reload();
-        },
-        
-        formatDate(dateString) {
-            if (!dateString) return 'Unknown';
-            try {
-                const date = new Date(dateString);
-                return date.toLocaleString();
-            } catch (e) {
-                return dateString;
-            }
         }
     }
 }
-
-// Add some smooth scrolling and animations
-document.addEventListener('DOMContentLoaded', function() {
-    // Smooth scroll for anchor links
-    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-        anchor.addEventListener('click', function (e) {
-            e.preventDefault();
-            document.querySelector(this.getAttribute('href')).scrollIntoView({
-                behavior: 'smooth'
-            });
-        });
-    });
-    
-    // Add fade-in animation to cards
-    const cards = document.querySelectorAll('.bg-white');
-    cards.forEach((card, index) => {
-        card.style.opacity = '0';
-        card.style.transform = 'translateY(20px)';
-        setTimeout(() => {
-            card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
-            card.style.opacity = '1';
-            card.style.transform = 'translateY(0)';
-        }, index * 100);
-    });
-});
 </script>
 {% endblock %}
