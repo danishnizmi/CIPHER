@@ -1,54 +1,16 @@
-# CIPHER Platform - Cloud Build Configuration
-# CLEAN VERSION: No custom substitutions whatsoever
-
 steps:
-  # Step 1: Build the container image
+  # Build image
   - name: 'gcr.io/cloud-builders/docker'
-    args: [
-      'build',
-      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
-      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
-      '.'
-    ]
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID', '.']
     id: 'build-image'
 
-  # Step 2: Push the container image with build ID
+  # Push image
   - name: 'gcr.io/cloud-builders/docker'
-    args: [
-      'push', 
-      'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
-    ]
+    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
     id: 'push-image'
     waitFor: ['build-image']
 
-  # Step 3: Push latest tag
-  - name: 'gcr.io/cloud-builders/docker'
-    args: [
-      'push', 
-      'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
-    ]
-    id: 'push-latest'
-    waitFor: ['build-image']
-
-  # Step 4: Setup BigQuery dataset
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "Setting up BigQuery dataset..."
-        
-        # Enable APIs
-        gcloud services enable bigquery.googleapis.com run.googleapis.com --quiet
-        
-        # Create BigQuery dataset if it doesn't exist
-        bq ls --project_id=$PROJECT_ID telegram_data 2>/dev/null || \
-        bq mk --dataset --location=US --description="CIPHER Intelligence Data" $PROJECT_ID:telegram_data
-        
-        echo "BigQuery setup completed"
-    id: 'setup-bigquery'
-
-  # Step 5: Deploy to Cloud Run
+  # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args: [
@@ -60,41 +22,22 @@ steps:
       '--service-account', 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
       '--memory', '4Gi',
       '--cpu', '2',
-      '--timeout', '3600',
-      '--max-instances', '10',
-      '--port', '8080',
-      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages'
+      '--port', '8080'
     ]
-    id: 'deploy-cloud-run'
-    waitFor: ['push-image', 'setup-bigquery']
+    id: 'deploy'
+    waitFor: ['push-image']
 
-  # Step 6: Simple health check
+  # Verify deployment
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Getting service URL..."
         SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
-          --region=us-central1 \
-          --project=$PROJECT_ID \
-          --format='value(status.url)')
-        
-        echo "Service deployed at: $SERVICE_URL"
-        echo "Dashboard: $SERVICE_URL/dashboard"
-        echo "CIPHER Platform deployment complete!"
-    id: 'verify-deployment'
-    waitFor: ['deploy-cloud-run']
+          --region=us-central1 --project=$PROJECT_ID --format='value(status.url)')
+        echo "CIPHER Platform deployed: $SERVICE_URL/dashboard"
+    id: 'verify'
+    waitFor: ['deploy']
 
-# Build options
-options:
-  machineType: 'E2_HIGHCPU_8'
-  logging: CLOUD_LOGGING_ONLY
-
-# Timeout
-timeout: '1200s'
-
-# Images to push
 images:
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
-  - 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
