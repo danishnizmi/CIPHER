@@ -7,6 +7,7 @@ import asyncio
 import re
 from google.cloud import bigquery
 from google.cloud import secretmanager
+from google.cloud import storage
 import google.generativeai as genai
 from telethon import TelegramClient, events, functions
 from telethon.errors import (
@@ -14,20 +15,29 @@ from telethon.errors import (
     PhoneCodeInvalidError, 
     FloodWaitError,
     ChannelPrivateError,
-    UsernameNotOccupiedError
+    UsernameNotOccupiedError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedError,
+    UnauthorizedError
 )
 from telethon.tl.types import Channel, Chat
+import tempfile
 
 logger = logging.getLogger(__name__)
 
 # Initialize clients
 bq_client = bigquery.Client()
 secret_client = secretmanager.SecretManagerServiceClient()
+storage_client = storage.Client()
 
 # Project configuration
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "primal-chariot-382610")
 DATASET_ID = os.environ.get("DATASET_ID", "telegram_data")
 TABLE_ID = os.environ.get("TABLE_ID", "processed_messages")
+
+# Session configuration
+BUCKET_NAME = f"{PROJECT_ID}-telegram-sessions"
+SESSION_NAME = "cipher_session"
 
 # MTProto client
 telegram_client = None
@@ -98,6 +108,90 @@ async def get_secret(secret_id: str) -> str:
         logger.error(f"Failed to get secret {secret_id}: {e}")
         raise
 
+async def download_session_from_storage() -> Optional[str]:
+    """Download Telegram session from Cloud Storage"""
+    try:
+        logger.info(f"Downloading session from gs://{BUCKET_NAME}/{SESSION_NAME}.session")
+        
+        # Get bucket
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(f"{SESSION_NAME}.session")
+        
+        # Check if session exists
+        if not blob.exists():
+            logger.error(f"Session file not found in Cloud Storage: gs://{BUCKET_NAME}/{SESSION_NAME}.session")
+            logger.error("Please run the local authentication script first to upload a session")
+            return None
+        
+        # Download session data
+        session_data = blob.download_as_bytes()
+        
+        if not session_data:
+            logger.error("Downloaded session file is empty")
+            return None
+        
+        # Get metadata for logging
+        blob.reload()
+        metadata = blob.metadata or {}
+        logger.info(f"Session downloaded successfully (created: {metadata.get('created_at', 'unknown')})")
+        
+        return session_data
+        
+    except Exception as e:
+        logger.error(f"Failed to download session from Cloud Storage: {e}")
+        return None
+
+async def upload_session_to_storage(session_data: bytes) -> bool:
+    """Upload updated session to Cloud Storage"""
+    try:
+        logger.info("Uploading updated session to Cloud Storage...")
+        
+        # Ensure bucket exists
+        bucket = storage_client.bucket(BUCKET_NAME)
+        try:
+            bucket.reload()
+        except:
+            # Create bucket if it doesn't exist
+            bucket = storage_client.create_bucket(BUCKET_NAME, location="US")
+            logger.info(f"Created session storage bucket: {BUCKET_NAME}")
+        
+        # Upload session
+        blob = bucket.blob(f"{SESSION_NAME}.session")
+        blob.upload_from_string(session_data)
+        
+        # Update metadata
+        blob.metadata = {
+            "updated_by": "cipher_cloud_service",
+            "updated_at": datetime.now().isoformat(),
+            "session_type": "mtproto_authenticated"
+        }
+        blob.patch()
+        
+        logger.info("Session updated in Cloud Storage successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to upload session to Cloud Storage: {e}")
+        return False
+
+async def create_session_file(session_data: bytes) -> Optional[str]:
+    """Create temporary session file from downloaded data"""
+    try:
+        # Create temporary file for session
+        temp_dir = tempfile.gettempdir()
+        session_path = os.path.join(temp_dir, f"{SESSION_NAME}.session")
+        
+        # Write session data to file
+        with open(session_path, 'wb') as f:
+            f.write(session_data)
+        
+        logger.info(f"Created temporary session file: {session_path}")
+        return session_path
+        
+    except Exception as e:
+        logger.error(f"Failed to create session file: {e}")
+        return None
+
 async def initialize_gemini():
     """Initialize Gemini AI with enhanced configuration for cybersecurity"""
     global gemini_model
@@ -135,14 +229,15 @@ async def initialize_gemini():
         return False
 
 async def initialize_telegram_client():
-    """Initialize Telegram MTProto client with enhanced error handling"""
+    """Initialize Telegram MTProto client using pre-authenticated session from Cloud Storage"""
     global telegram_client
     
     try:
+        logger.info("Initializing Telegram client with pre-authenticated session from Cloud Storage")
+        
         # Get MTProto credentials from Secret Manager
         api_id_str = await get_secret("telegram-api-id")
-        api_hash = await get_secret("telegram-api-hash") 
-        phone_number = await get_secret("telegram-phone-number")
+        api_hash = await get_secret("telegram-api-hash")
         
         # Validate credentials
         try:
@@ -152,15 +247,25 @@ async def initialize_telegram_client():
             
         if not api_hash or len(api_hash) < 10:
             raise ValueError("Invalid API hash format")
-            
-        if not phone_number.startswith('+'):
-            raise ValueError("Phone number must include country code with +")
         
-        logger.info(f"Initializing Telegram client with API ID: {api_id}")
+        logger.info(f"Using API ID: {api_id}")
         
-        # Create client with optimized settings
+        # Download session from Cloud Storage
+        session_data = await download_session_from_storage()
+        if not session_data:
+            logger.error("Failed to download session from Cloud Storage")
+            logger.error("Please run the local authentication script to create a session first")
+            return False
+        
+        # Create temporary session file
+        session_path = await create_session_file(session_data)
+        if not session_path:
+            logger.error("Failed to create session file")
+            return False
+        
+        # Create client with the session file
         telegram_client = TelegramClient(
-            'cipher_session',  # Session name
+            session_path,  # Use the downloaded session file
             api_id, 
             api_hash,
             timeout=30,
@@ -173,6 +278,7 @@ async def initialize_telegram_client():
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                logger.info(f"Connection attempt {attempt + 1}/{max_retries}")
                 await telegram_client.connect()
                 break
             except Exception as e:
@@ -182,18 +288,33 @@ async def initialize_telegram_client():
                 await asyncio.sleep(5)
         
         # Check authorization status
-        if not await telegram_client.is_user_authorized():
-            logger.warning("Telegram client not authorized")
-            logger.warning("For production deployment, ensure the session is pre-authorized")
-            # In production, the session should already be authorized
-            # You would handle 2FA authentication separately
+        try:
+            is_authorized = await telegram_client.is_user_authorized()
+            if not is_authorized:
+                logger.error("Session is not authorized - authentication may have expired")
+                logger.error("Please run the local authentication script again to refresh the session")
+                return False
+            
+            # Verify client is working by getting user info
+            me = await telegram_client.get_me()
+            logger.info(f"Successfully authenticated as: {me.username or me.first_name} (ID: {me.id})")
+            
+            # Update session in Cloud Storage if it changed
+            try:
+                updated_session = telegram_client.session.save()
+                if updated_session and updated_session != session_data:
+                    await upload_session_to_storage(updated_session)
+            except Exception as e:
+                logger.warning(f"Failed to update session in storage: {e}")
+            
+            logger.info("Telegram client initialized successfully")
+            return True
+            
+        except (AuthKeyUnregisteredError, UserDeactivatedError, UnauthorizedError) as e:
+            logger.error(f"Session authentication error: {e}")
+            logger.error("The session may have expired or been revoked")
+            logger.error("Please run the local authentication script again")
             return False
-        
-        # Verify client is working
-        me = await telegram_client.get_me()
-        logger.info(f"Telegram client authorized as: {me.username or me.first_name}")
-        
-        return True
         
     except Exception as e:
         logger.error(f"Failed to initialize Telegram client: {e}")
@@ -945,10 +1066,11 @@ async def start_monitoring():
         if not gemini_success:
             logger.error("Failed to initialize Gemini AI - continuing with fallback analysis")
         
-        # Initialize Telegram client
+        # Initialize Telegram client using Cloud Storage session
         telegram_success = await initialize_telegram_client()
         if not telegram_success:
             logger.error("Failed to initialize Telegram client")
+            logger.error("Make sure you have run the local authentication script to create a session")
             return False
         
         # Join cybersecurity channels
@@ -979,6 +1101,14 @@ async def stop_monitoring():
     """Stop cybersecurity monitoring and cleanup"""
     try:
         if telegram_client:
+            # Try to save session before disconnecting
+            try:
+                session_data = telegram_client.session.save()
+                if session_data:
+                    await upload_session_to_storage(session_data)
+            except Exception as e:
+                logger.warning(f"Failed to save session during shutdown: {e}")
+            
             await telegram_client.disconnect()
         logger.info("Stopped CIPHER cybersecurity monitoring")
     except Exception as e:
