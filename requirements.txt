@@ -11,4 +11,4 @@ telethon==1.36.0
 pydantic==2.9.2
 python-jose[cryptography]==3.3.0
 structlog==24.4.0
-asyncio-mqtt==0.16.2
+cryptg==0.4.0
