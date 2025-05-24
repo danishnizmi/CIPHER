@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # CIPHER Platform - Production Deployment Script
-# This script handles complete deployment with permission fixes
+# Using existing cloud-build-service account with all permissions
 
 set -e
 
@@ -9,8 +9,7 @@ set -e
 PROJECT_ID="primal-chariot-382610"
 SERVICE_NAME="telegram-ai-processor"
 REGION="us-central1"
-SERVICE_ACCOUNT="cipher-service@${PROJECT_ID}.iam.gserviceaccount.com"
-CLOUD_BUILD_SA="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+SERVICE_ACCOUNT="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
 DATASET_ID="telegram_data"
 TABLE_ID="processed_messages"
 
@@ -19,6 +18,7 @@ echo "============================================"
 echo "Project: $PROJECT_ID"
 echo "Service: $SERVICE_NAME"
 echo "Region: $REGION"
+echo "Service Account: $SERVICE_ACCOUNT"
 echo ""
 
 # Check if gcloud is authenticated
@@ -32,6 +32,21 @@ fi
 echo "📋 Setting up project..."
 gcloud config set project $PROJECT_ID
 
+# Verify cloud-build-service account exists and has permissions
+echo "🔍 Verifying service account permissions..."
+PERMISSIONS=$(gcloud projects get-iam-policy $PROJECT_ID \
+    --flatten="bindings[].members" \
+    --filter="bindings.members:$SERVICE_ACCOUNT" \
+    --format="value(bindings.role)" | wc -l)
+
+if [ "$PERMISSIONS" -eq 0 ]; then
+    echo "❌ Error: Service account $SERVICE_ACCOUNT has no permissions"
+    echo "Please check the service account exists and has proper IAM roles"
+    exit 1
+else
+    echo "✅ Service account has $PERMISSIONS IAM roles configured"
+fi
+
 # Enable required APIs
 echo "🔧 Enabling required Google Cloud APIs..."
 gcloud services enable \
@@ -42,82 +57,33 @@ gcloud services enable \
     artifactregistry.googleapis.com \
     logging.googleapis.com \
     monitoring.googleapis.com \
-    --project=$PROJECT_ID
+    --project=$PROJECT_ID \
+    --quiet
 
 echo "✅ APIs enabled successfully"
-
-# Fix BigQuery permissions
-echo "🗄️ Setting up BigQuery permissions..."
-
-# Create service account if it doesn't exist
-gcloud iam service-accounts describe $SERVICE_ACCOUNT --project=$PROJECT_ID >/dev/null 2>&1 || {
-    echo "Creating service account: $SERVICE_ACCOUNT"
-    gcloud iam service-accounts create cipher-service \
-        --display-name="CIPHER Service Account" \
-        --description="Service account for CIPHER cybersecurity platform" \
-        --project=$PROJECT_ID
-}
-
-# Grant BigQuery permissions to service account
-echo "Setting BigQuery permissions for cipher-service..."
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SERVICE_ACCOUNT" \
-    --role="roles/bigquery.admin" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SERVICE_ACCOUNT" \
-    --role="roles/bigquery.jobUser" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SERVICE_ACCOUNT" \
-    --role="roles/bigquery.dataEditor" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SERVICE_ACCOUNT" \
-    --role="roles/logging.logWriter" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SERVICE_ACCOUNT" \
-    --role="roles/monitoring.metricWriter" \
-    --quiet
-
-# Grant Cloud Build permissions
-echo "Setting Cloud Build permissions..."
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$CLOUD_BUILD_SA" \
-    --role="roles/bigquery.admin" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$CLOUD_BUILD_SA" \
-    --role="roles/run.admin" \
-    --quiet
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$CLOUD_BUILD_SA" \
-    --role="roles/iam.serviceAccountUser" \
-    --quiet
-
-echo "✅ Permissions configured successfully"
 
 # Setup BigQuery dataset and table
 echo "📊 Setting up BigQuery dataset and table..."
 
-# Create dataset if it doesn't exist
-bq ls --project_id=$PROJECT_ID $DATASET_ID >/dev/null 2>&1 || {
+# Check if dataset exists
+if bq ls --project_id=$PROJECT_ID $DATASET_ID >/dev/null 2>&1; then
+    echo "✅ BigQuery dataset '$DATASET_ID' already exists"
+else
     echo "Creating BigQuery dataset: $DATASET_ID"
     bq mk --dataset \
         --location=US \
         --description="CIPHER Telegram Intelligence Data" \
         $PROJECT_ID:$DATASET_ID
-}
+fi
 
-# Create table schema
-cat > /tmp/cipher_table_schema.json << 'EOF'
+# Check if table exists  
+if bq ls --project_id=$PROJECT_ID $DATASET_ID.$TABLE_ID >/dev/null 2>&1; then
+    echo "✅ BigQuery table '$TABLE_ID' already exists"
+else
+    echo "Creating BigQuery table: $TABLE_ID"
+    
+    # Create table schema
+    cat > /tmp/cipher_table_schema.json << 'EOF'
 [
   {
     "name": "message_id",
@@ -160,25 +126,46 @@ cat > /tmp/cipher_table_schema.json << 'EOF'
     "type": "TIMESTAMP",
     "mode": "REQUIRED",
     "description": "When this record was created"
+  },
+  {
+    "name": "processed_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "Date partition field"
+  },
+  {
+    "name": "channel_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Channel type for clustering"
+  },
+  {
+    "name": "category",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Message category for clustering"
   }
 ]
 EOF
 
-# Create table if it doesn't exist
-bq ls --project_id=$PROJECT_ID $DATASET_ID.$TABLE_ID >/dev/null 2>&1 || {
-    echo "Creating BigQuery table: $TABLE_ID"
     bq mk --table \
-        --description="CIPHER processed messages" \
+        --description="CIPHER processed messages with partitioning and clustering" \
+        --time_partitioning_field=processed_date \
+        --time_partitioning_type=DAY \
+        --clustering_fields=threat_level,channel_type,category \
         $PROJECT_ID:$DATASET_ID.$TABLE_ID \
         /tmp/cipher_table_schema.json
-}
+        
+    # Cleanup temp file
+    rm -f /tmp/cipher_table_schema.json
+fi
 
 echo "✅ BigQuery setup completed"
 
 # Build and deploy the service
 echo "🚀 Building and deploying CIPHER service..."
 
-# Deploy using gcloud run deploy
+# Deploy using gcloud run deploy with cloud-build-service account
 gcloud run deploy $SERVICE_NAME \
     --source . \
     --platform managed \
@@ -192,7 +179,7 @@ gcloud run deploy $SERVICE_NAME \
     --min-instances 0 \
     --port 8080 \
     --concurrency 80 \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=$DATASET_ID,TABLE_ID=$TABLE_ID,PORT=8080,PYTHONUNBUFFERED=1" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=$DATASET_ID,TABLE_ID=$TABLE_ID,PORT=8080,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
     --project $PROJECT_ID \
     --quiet
 
@@ -211,10 +198,15 @@ echo "Service URL: $SERVICE_URL"
 echo "Dashboard: $SERVICE_URL/dashboard"
 echo "Health Check: $SERVICE_URL/health"
 echo "Stats API: $SERVICE_URL/api/stats"
+echo "Service Account: $SERVICE_ACCOUNT"
 echo ""
 
 # Test the deployment
 echo "🧪 Testing deployment..."
+
+# Wait for service to be ready
+echo "Waiting for service to stabilize..."
+sleep 30
 
 # Test health endpoints
 echo "Testing /health/live endpoint..."
@@ -241,6 +233,14 @@ else
     echo "❌ Stats API: FAILED (HTTP $HTTP_STATUS)"
 fi
 
+echo "Testing /api/monitoring/status endpoint..."
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/monitoring/status" || echo "000")
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "✅ Monitoring API: PASSED"
+else
+    echo "❌ Monitoring API: FAILED (HTTP $HTTP_STATUS)"
+fi
+
 echo ""
 echo "🔍 Deployment Status:"
 gcloud run services describe $SERVICE_NAME \
@@ -249,14 +249,25 @@ gcloud run services describe $SERVICE_NAME \
     --format='table(status.conditions[].type,status.conditions[].status,status.conditions[].reason)'
 
 echo ""
+echo "📊 Service Account Permissions:"
+gcloud projects get-iam-policy $PROJECT_ID \
+    --flatten="bindings[].members" \
+    --filter="bindings.members:$SERVICE_ACCOUNT" \
+    --format="table(bindings.role)"
+
+echo ""
 echo "📝 Quick Access Commands:"
-echo "View logs: gcloud logs read 'resource.type=cloud_run_revision' --project=$PROJECT_ID --limit=50"
+echo "View logs: gcloud run services logs read $SERVICE_NAME --region=$REGION --project=$PROJECT_ID --limit=50"
 echo "Update service: ./deploy.sh"
 echo "View service: gcloud run services describe $SERVICE_NAME --region=$REGION --project=$PROJECT_ID"
-
-# Cleanup temporary files
-rm -f /tmp/cipher_table_schema.json
+echo "Scale service: gcloud run services update $SERVICE_NAME --region=$REGION --max-instances=20"
 
 echo ""
 echo "🛡️ CIPHER Platform is now operational!"
 echo "Monitor the dashboard at: $SERVICE_URL/dashboard"
+echo "Real-time cybersecurity intelligence monitoring active!"
+echo ""
+echo "📡 Monitoring Channels:"
+echo "🔴 @DarkfeedNews - Threat Intelligence"
+echo "🟠 @breachdetector - Data Breach Monitor" 
+echo "🔵 @secharvester - Security News"
