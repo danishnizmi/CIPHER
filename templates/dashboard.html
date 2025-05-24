@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CIPHER - AI Intelligence Dashboard</title>
+    <title>CIPHER - Cybersecurity Intelligence Platform</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -26,21 +26,9 @@
                         'fade-in': 'fadeIn 0.6s ease-out',
                         'slide-up': 'slideUp 0.6s ease-out',
                         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-                        'bounce-slow': 'bounce 2s infinite',
-                        'spin-slow': 'spin 3s linear infinite',
                         'glow': 'glow 2s ease-in-out infinite alternate',
                         'typing': 'typing 3.5s steps(40, end), blink-caret .75s step-end infinite',
-                        'matrix': 'matrix 10s linear infinite',
-                        'float': 'float 6s ease-in-out infinite',
                         'neon-pulse': 'neonPulse 2s ease-in-out infinite',
-                    },
-                    backgroundImage: {
-                        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
-                        'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-                        'cyber-grid': 'linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px)',
-                    },
-                    backgroundSize: {
-                        'grid': '20px 20px',
                     },
                 }
             }
@@ -74,60 +62,9 @@
             50% { border-color: #6366f1; }
         }
         
-        @keyframes matrix {
-            0% { transform: translateY(-100%); opacity: 0; }
-            10% { opacity: 1; }
-            90% { opacity: 1; }
-            100% { transform: translateY(100vh); opacity: 0; }
-        }
-        
-        @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-10px); }
-        }
-        
         @keyframes neonPulse {
             0%, 100% { text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3), 0 0 15px rgba(99, 102, 241, 0.1); }
             50% { text-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5), 0 0 30px rgba(99, 102, 241, 0.3); }
-        }
-        
-        .typing-effect {
-            white-space: nowrap;
-            overflow: hidden;
-            border-right: 2px solid #6366f1;
-            animation: typing 3.5s steps(40, end), blink-caret .75s step-end infinite;
-        }
-        
-        .matrix-bg {
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
-            background-size: 400% 400%;
-            animation: gradientShift 15s ease infinite;
-        }
-        
-        @keyframes gradientShift {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-        
-        .cyber-border {
-            background: linear-gradient(45deg, transparent, #6366f1, transparent);
-            background-size: 200% 200%;
-            animation: borderGlow 3s ease-in-out infinite;
-        }
-        
-        @keyframes borderGlow {
-            0%, 100% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-        }
-        
-        .hover-lift {
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        
-        .hover-lift:hover {
-            transform: translateY(-8px) scale(1.02);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3), 0 0 20px rgba(99, 102, 241, 0.2);
         }
         
         .glass-effect {
@@ -141,42 +78,20 @@
             text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3);
         }
         
-        .progress-bar {
-            background: linear-gradient(90deg, #6366f1, #8b5cf6, #06b6d4);
-            background-size: 200% 100%;
-            animation: progressFlow 2s linear infinite;
+        .cyber-grid {
+            background-image: 
+                linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px);
+            background-size: 20px 20px;
         }
         
-        @keyframes progressFlow {
-            0% { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
+        .hover-lift {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         
-        .data-stream {
-            font-family: 'JetBrains Mono', monospace;
-            color: #06b6d4;
-            text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);
-        }
-        
-        .pulse-ring {
-            animation: pulseRing 2s cubic-bezier(0.455, 0.03, 0.515, 0.955) infinite;
-        }
-        
-        @keyframes pulseRing {
-            0% { transform: scale(0.33); }
-            40%, 50% { opacity: 1; }
-            100% { transform: scale(1); opacity: 0; }
-        }
-        
-        .insight-card {
-            transition: all 0.3s ease;
-            border-left: 4px solid transparent;
-        }
-        
-        .insight-card:hover {
-            border-left-color: #6366f1;
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(139, 92, 246, 0.05));
-            transform: translateX(8px);
+        .hover-lift:hover {
+            transform: translateY(-4px) scale(1.02);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
         }
         
         .status-indicator {
@@ -195,7 +110,18 @@
             transform: translate(-50%, -50%);
             animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
         }
+
+        .progress-bar {
+            background: linear-gradient(90deg, #6366f1, #8b5cf6, #06b6d4);
+            background-size: 200% 100%;
+            animation: progressFlow 2s linear infinite;
+        }
         
+        @keyframes progressFlow {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
         .terminal-window {
             background: #0a0a0a;
             border-radius: 8px;
@@ -217,7 +143,18 @@
             height: 12px;
             border-radius: 50%;
         }
+
+        .insight-card {
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent;
+        }
         
+        .insight-card:hover {
+            border-left-color: #6366f1;
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(139, 92, 246, 0.05));
+            transform: translateX(8px);
+        }
+
         .loading-dots {
             display: inline-flex;
             gap: 4px;
@@ -238,30 +175,33 @@
             0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
             40% { transform: scale(1); opacity: 1; }
         }
-        
-        .cyber-scrollbar::-webkit-scrollbar {
-            width: 8px;
+
+        .threat-indicator {
+            position: relative;
+            overflow: hidden;
         }
-        
-        .cyber-scrollbar::-webkit-scrollbar-track {
-            background: #1e293b;
-            border-radius: 4px;
+
+        .threat-indicator::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            animation: scan 2s linear infinite;
         }
-        
-        .cyber-scrollbar::-webkit-scrollbar-thumb {
-            background: linear-gradient(45deg, #6366f1, #8b5cf6);
-            border-radius: 4px;
-        }
-        
-        .cyber-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+
+        @keyframes scan {
+            0% { left: -100%; }
+            100% { left: 100%; }
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans overflow-x-hidden">
+<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans overflow-x-hidden" x-data="cipherDashboard()">
     
     <!-- Animated Background -->
-    <div class="fixed inset-0 bg-cyber-grid bg-grid opacity-20 pointer-events-none"></div>
+    <div class="fixed inset-0 cyber-grid opacity-20 pointer-events-none"></div>
     <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
     
     <!-- Navigation Header -->
@@ -274,35 +214,36 @@
                             <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
                                 <i class="fas fa-shield-alt text-white text-lg"></i>
                             </div>
-                            <div class="absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse"></div>
+                            <div class="absolute -top-1 -right-1 w-4 h-4 rounded-full animate-pulse" 
+                                 :class="systemStatus === 'operational' ? 'bg-green-400' : systemStatus === 'initializing' ? 'bg-yellow-400' : 'bg-red-400'"></div>
                         </div>
                         <div>
                             <h1 class="text-xl font-bold neon-text animate-neon-pulse">CIPHER</h1>
-                            <p class="text-xs text-gray-400 font-mono">AI Intelligence Platform</p>
+                            <p class="text-xs text-gray-400 font-mono">Cybersecurity Intelligence Platform</p>
                         </div>
                     </div>
                 </div>
                 
                 <div class="flex items-center space-x-4">
                     <div class="hidden md:flex items-center space-x-6">
-                        <a href="/analytics" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
-                            <i class="fas fa-chart-line mr-2"></i>Analytics
-                        </a>
-                        <a href="/channels" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
-                            <i class="fas fa-satellite-dish mr-2"></i>Channels
-                        </a>
-                        <a href="/health" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
-                            <i class="fas fa-heartbeat mr-2"></i>System
-                        </a>
+                        <div class="text-gray-300 text-sm font-medium">
+                            <i class="fas fa-chart-line mr-2"></i>
+                            <span x-text="stats.total_messages || 0"></span> Signals
+                        </div>
+                        <div class="text-gray-300 text-sm font-medium">
+                            <i class="fas fa-exclamation-triangle mr-2"></i>
+                            <span x-text="stats.high_threats || 0"></span> High Threats
+                        </div>
                     </div>
                     
                     <div class="flex items-center space-x-3">
                         <div class="flex items-center">
                             <div class="status-indicator w-3 h-3 bg-green-400 rounded-full mr-2"></div>
-                            <span class="text-sm text-gray-400 data-stream" id="current-time"></span>
+                            <span class="text-sm text-gray-400 font-mono" x-text="currentTime"></span>
                         </div>
-                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
-                            LIVE
+                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded" 
+                             :class="systemStatus === 'operational' ? 'text-green-400' : 'text-yellow-400'">
+                            <span x-text="systemStatus === 'operational' ? 'LIVE' : 'INIT'"></span>
                         </div>
                     </div>
                 </div>
@@ -311,148 +252,98 @@
     </nav>
 
     <!-- Main Content -->
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8" x-data="cipherDashboard()">
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
         <!-- Hero Section with Status -->
         <div class="mb-8">
             <div class="text-center mb-6">
-                <h2 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-cipher-blue via-cipher-purple to-cyan-400 bg-clip-text text-transparent typing-effect mb-2">
-                    Telegram Intelligence Monitor
+                <h2 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-cipher-blue via-cipher-purple to-cyan-400 bg-clip-text text-transparent mb-2 animate-fade-in">
+                    Cybersecurity Intelligence Monitor
                 </h2>
                 <p class="text-gray-400 max-w-2xl mx-auto animate-fade-in">
-                    Real-time monitoring and AI analysis of public Telegram channels with advanced threat intelligence
+                    Real-time monitoring and AI analysis of cybersecurity threats and intelligence feeds
                 </p>
             </div>
             
             <!-- System Status Banner -->
-            <div class="glass-effect rounded-xl p-6 border cyber-border hover-lift animate-slide-up">
+            <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift animate-slide-up">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center space-x-4">
                         <div class="relative">
-                            {% if monitoring.active %}
-                            <div class="w-16 h-16 bg-gradient-to-r from-green-400 to-emerald-500 rounded-full flex items-center justify-center animate-pulse-slow">
+                            <div class="w-16 h-16 rounded-full flex items-center justify-center"
+                                 :class="monitoring.active ? 'bg-gradient-to-r from-green-400 to-emerald-500 animate-pulse-slow' : 'bg-gradient-to-r from-yellow-400 to-orange-500'">
                                 <i class="fas fa-satellite-dish text-white text-2xl"></i>
                             </div>
-                            <div class="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-20"></div>
-                            {% else %}
-                            <div class="w-16 h-16 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full flex items-center justify-center">
-                                <i class="fas fa-exclamation-triangle text-white text-2xl"></i>
-                            </div>
-                            {% endif %}
+                            <div class="absolute inset-0 rounded-full animate-ping opacity-20"
+                                 :class="monitoring.active ? 'bg-green-400' : 'bg-yellow-400'"></div>
                         </div>
                         
                         <div>
                             <h3 class="text-xl font-semibold mb-1">
-                                {% if monitoring.active %}
-                                <span class="text-green-400">🟢 CIPHER ACTIVE</span>
-                                {% else %}
-                                <span class="text-yellow-400">🟡 CIPHER STANDBY</span>
-                                {% endif %}
+                                <span :class="monitoring.active ? 'text-green-400' : 'text-yellow-400'" 
+                                      x-text="monitoring.active ? '🟢 CIPHER ACTIVE' : '🟡 CIPHER STANDBY'"></span>
                             </h3>
                             <p class="text-gray-400 mb-2">
-                                Monitoring {{ monitoring.total_channels }} cybersecurity intelligence channels
+                                Monitoring <span x-text="monitoring.total_channels || 3"></span> cybersecurity intelligence channels
                             </p>
-                            {% if monitoring.channels %}
                             <div class="flex flex-wrap gap-2">
-                                {% for channel in monitoring.channels[:3] %}
-                                <span class="px-2 py-1 {% if channel == '@DarkfeedNews' %}bg-red-500/20 text-red-400 border-red-500/30{% elif channel == '@breachdetector' %}bg-orange-500/20 text-orange-400 border-orange-500/30{% elif channel == '@secharvester' %}bg-blue-500/20 text-blue-400 border-blue-500/30{% else %}bg-cipher-blue/20 text-cipher-blue border-cipher-blue/30{% endif %} text-xs rounded-full border data-stream">
-                                    {{ channel }}
-                                </span>
-                                {% endfor %}
-                                {% if monitoring.channels|length > 3 %}
-                                <span class="px-2 py-1 bg-gray-700/50 text-gray-400 text-xs rounded-full">
-                                    +{{ monitoring.channels|length - 3 }} more
-                                </span>
-                                {% endif %}
+                                <template x-for="channel in monitoring.channels || ['@DarkfeedNews', '@breachdetector', '@secharvester']">
+                                    <span class="px-2 py-1 text-xs rounded-full border font-mono"
+                                          :class="getChannelColor(channel)">
+                                        <span x-text="channel"></span>
+                                    </span>
+                                </template>
                             </div>
-                            {% endif %}
                         </div>
                     </div>
                     
                     <div class="flex space-x-3">
-                        <button @click="refreshData()" class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-cipher-blue/25">
+                        <button @click="refreshData()" 
+                                class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-cipher-blue/25">
                             <i class="fas fa-sync-alt mr-2" :class="{'animate-spin': isRefreshing}"></i>
                             <span x-text="isRefreshing ? 'Refreshing...' : 'Refresh'"></span>
                         </button>
-                        <a href="/channels" class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg transition-all duration-300 border border-white/20 hover:border-cipher-blue/50">
-                            <i class="fas fa-cogs mr-2"></i>
-                            Configure
-                        </a>
                     </div>
                 </div>
             </div>
         </div>
-
-        <!-- Error Display -->
-        {% if error %}
-        <div class="mb-6 glass-effect rounded-lg p-4 border border-red-500/30 bg-red-500/10 animate-fade-in">
-            <div class="flex items-center">
-                <div class="w-10 h-10 bg-red-500/20 rounded-full flex items-center justify-center mr-4">
-                    <i class="fas fa-exclamation-triangle text-red-400"></i>
-                </div>
-                <div>
-                    <h3 class="text-red-400 font-semibold">System Alert</h3>
-                    <p class="text-red-300/80 text-sm mt-1">{{ error }}</p>
-                    <button @click="refreshData()" class="mt-2 text-xs bg-red-500/20 hover:bg-red-500/30 px-3 py-1 rounded transition-colors">
-                        Retry Connection
-                    </button>
-                </div>
-            </div>
-        </div>
-        {% endif %}
 
         <!-- Statistics Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <!-- Total Intelligence -->
             <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10">
                 <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center group-hover:animate-bounce-slow">
+                    <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center group-hover:animate-pulse">
                         <i class="fas fa-database text-white text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <div class="text-2xl font-bold neon-text" x-data="{ count: 0 }" x-init="
-                            let target = {{ stats.total_messages }};
-                            let step = target / 60;
-                            let timer = setInterval(() => {
-                                count += step;
-                                if (count >= target) {
-                                    count = target;
-                                    clearInterval(timer);
-                                }
-                            }, 16);
-                        " x-text="Math.floor(count).toLocaleString()">0</div>
+                        <div class="text-2xl font-bold neon-text" x-text="(stats.total_messages || 0).toLocaleString()">0</div>
                         <div class="text-xs text-gray-400 font-mono">TOTAL INTEL</div>
                     </div>
                 </div>
                 <div class="w-full bg-gray-700/30 rounded-full h-2">
-                    <div class="progress-bar h-2 rounded-full" style="width: {{ (stats.total_messages / 1000 * 100) if stats.total_messages < 1000 else 100 }}%"></div>
+                    <div class="progress-bar h-2 rounded-full" :style="`width: ${Math.min(100, ((stats.total_messages || 0) / 1000) * 100)}%`"></div>
                 </div>
             </div>
 
             <!-- High Threats -->
             <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.1s;">
                 <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r {% if stats.high_threats > 0 %}from-red-500 to-orange-500{% else %}from-green-500 to-emerald-500{% endif %} rounded-lg flex items-center justify-center {% if stats.high_threats > 0 %}animate-pulse{% else %}group-hover:animate-spin-slow{% endif %}">
+                    <div class="w-12 h-12 rounded-lg flex items-center justify-center threat-indicator"
+                         :class="(stats.high_threats || 0) > 0 ? 'bg-gradient-to-r from-red-500 to-orange-500 animate-pulse' : 'bg-gradient-to-r from-green-500 to-emerald-500'">
                         <i class="fas fa-exclamation-triangle text-white text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <div class="text-2xl font-bold {% if stats.high_threats > 0 %}text-red-400{% else %}text-green-400{% endif %}" x-data="{ count: 0 }" x-init="
-                            let target = {{ stats.high_threats or 0 }};
-                            let step = target / 40;
-                            let timer = setInterval(() => {
-                                count += step;
-                                if (count >= target) {
-                                    count = target;
-                                    clearInterval(timer);
-                                }
-                            }, 20);
-                        " x-text="Math.floor(count)">0</div>
+                        <div class="text-2xl font-bold" 
+                             :class="(stats.high_threats || 0) > 0 ? 'text-red-400' : 'text-green-400'" 
+                             x-text="stats.high_threats || 0">0</div>
                         <div class="text-xs text-gray-400 font-mono">HIGH THREATS</div>
                     </div>
                 </div>
-                <div class="flex items-center text-xs {% if stats.high_threats > 0 %}text-red-400{% else %}text-green-400{% endif %}">
-                    <i class="fas fa-{% if stats.high_threats > 0 %}shield-alt{% else %}check-circle{% endif %} mr-1"></i>
-                    <span class="data-stream">{% if stats.high_threats > 0 %}ACTIVE THREATS{% else %}SECURE{% endif %}</span>
+                <div class="flex items-center text-xs" 
+                     :class="(stats.high_threats || 0) > 0 ? 'text-red-400' : 'text-green-400'">
+                    <i :class="(stats.high_threats || 0) > 0 ? 'fas fa-shield-alt' : 'fas fa-check-circle'" class="mr-1"></i>
+                    <span class="font-mono" x-text="(stats.high_threats || 0) > 0 ? 'ACTIVE THREATS' : 'SECURE'"></span>
                 </div>
             </div>
 
@@ -464,19 +355,18 @@
                     </div>
                     <div class="text-right">
                         <div class="text-2xl font-bold text-purple-400">
-                            <span x-data="{ count: 0 }" x-init="
-                                let target = {{ stats.unique_channels }};
-                                setTimeout(() => { count = target; }, 500);
-                            " x-text="count">0</span>
-                            <span class="text-gray-500">/{{ monitoring.total_channels }}</span>
+                            <span x-text="stats.unique_channels || 0">0</span>
+                            <span class="text-gray-500">/<span x-text="monitoring.total_channels || 3"></span></span>
                         </div>
                         <div class="text-xs text-gray-400 font-mono">CHANNELS</div>
                     </div>
                 </div>
                 <div class="flex space-x-1">
-                    {% for i in range(monitoring.total_channels) %}
-                    <div class="flex-1 h-2 rounded-full {% if i < stats.unique_channels %}bg-purple-500{% else %}bg-gray-700{% endif %} animate-pulse" style="animation-delay: {{ i * 0.1 }}s;"></div>
-                    {% endfor %}
+                    <template x-for="i in (monitoring.total_channels || 3)">
+                        <div class="flex-1 h-2 rounded-full animate-pulse" 
+                             :class="i <= (stats.unique_channels || 0) ? 'bg-purple-500' : 'bg-gray-700'"
+                             :style="`animation-delay: ${(i-1) * 0.1}s`"></div>
+                    </template>
                 </div>
             </div>
 
@@ -487,15 +377,62 @@
                         <i class="fas fa-clock text-white text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <div class="text-2xl font-bold text-cyan-400">
-                            {{ stats.processed_today }}
-                        </div>
+                        <div class="text-2xl font-bold text-cyan-400" x-text="stats.processed_today || 0">0</div>
                         <div class="text-xs text-gray-400 font-mono">TODAY</div>
                     </div>
                 </div>
-                <div class="text-xs text-cyan-400 data-stream">
+                <div class="text-xs text-cyan-400 font-mono">
                     <i class="fas fa-sync-alt mr-1 animate-spin"></i>
                     <span>LIVE MONITORING</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Threat Analytics Section -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8" x-show="threatAnalytics && Object.keys(threatAnalytics).length > 0">
+            <!-- Threat Levels Distribution -->
+            <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-chart-pie text-cipher-blue mr-2"></i>
+                    Threat Level Distribution
+                </h3>
+                <div class="space-y-3">
+                    <template x-for="(count, level) in threatAnalytics.threat_levels || {}">
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-mono capitalize" 
+                                  :class="getThreatLevelColor(level)" 
+                                  x-text="level"></span>
+                            <div class="flex items-center space-x-2">
+                                <div class="w-20 bg-gray-700 rounded-full h-2">
+                                    <div class="h-2 rounded-full" 
+                                         :class="getThreatLevelBg(level)"
+                                         :style="`width: ${threatAnalytics.summary ? (count / threatAnalytics.summary.total_threats * 100) : 0}%`"></div>
+                                </div>
+                                <span class="text-sm font-mono w-8 text-right" x-text="count"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Active Campaigns -->
+            <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-bullseye text-cipher-purple mr-2"></i>
+                    Active Campaigns
+                </h3>
+                <div class="space-y-3">
+                    <template x-for="campaign in (threatAnalytics.active_campaigns || []).slice(0, 5)">
+                        <div class="flex items-center justify-between p-2 bg-white/5 rounded-lg">
+                            <div>
+                                <span class="text-sm font-medium" x-text="campaign.campaign"></span>
+                                <div class="text-xs text-gray-400" x-text="`${campaign.incidents} incidents`"></div>
+                            </div>
+                            <span class="text-xs px-2 py-1 rounded-full font-mono"
+                                  :class="campaign.threat_level === 'high' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'"
+                                  x-text="campaign.threat_level.toUpperCase()"></span>
+                        </div>
+                    </template>
                 </div>
             </div>
         </div>
@@ -511,260 +448,135 @@
                     <div class="flex items-center space-x-3">
                         <span class="text-green-400 font-mono text-sm">CIPHER@intelligence:~$</span>
                         <span class="text-gray-400 text-sm">Real-time Intelligence Feed</span>
-                        {% if insights %}
-                        <span class="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs rounded border border-green-500/30">
-                            {{ insights|length }} SIGNALS
+                        <span class="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs rounded border border-green-500/30" 
+                              x-show="insights && insights.length > 0">
+                            <span x-text="insights.length"></span> SIGNALS
                         </span>
-                        {% endif %}
                     </div>
                     <div class="flex items-center space-x-3">
-                        {% if not insights and monitoring.active %}
-                        <div class="loading-dots">
+                        <div class="loading-dots" x-show="isLoading">
                             <span></span>
                             <span></span>
                             <span></span>
                         </div>
-                        <span class="text-xs text-gray-400">Scanning...</span>
-                        {% endif %}
+                        <span class="text-xs text-gray-400" x-show="isLoading">Scanning...</span>
                         <button @click="refreshData()" class="text-cipher-blue hover:text-cipher-purple transition-colors">
                             <i class="fas fa-sync-alt text-sm" :class="{'animate-spin': isRefreshing}"></i>
                         </button>
-                        <a href="/insights" class="text-cipher-blue hover:text-cipher-purple transition-colors">
-                            <i class="fas fa-external-link-alt text-sm"></i>
-                        </a>
                     </div>
                 </div>
             </div>
 
             <!-- Content -->
             <div class="p-6">
-                {% if insights %}
-                <div class="space-y-4 max-h-96 overflow-y-auto cyber-scrollbar">
-                    {% for insight in insights %}
-                    <div class="insight-card glass-effect rounded-lg p-4 group animate-fade-in" style="animation-delay: {{ loop.index0 * 0.1 }}s;">
-                        <div class="flex items-start space-x-4">
-                            <!-- Threat Indicator -->
-                            <div class="flex-shrink-0 relative">
-                                {% if insight.urgency_score > 0.7 %}
-                                <div class="w-12 h-12 bg-gradient-to-r from-red-500 to-orange-500 rounded-full flex items-center justify-center animate-pulse">
-                                    <i class="fas fa-exclamation-triangle text-white"></i>
-                                </div>
-                                <div class="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-20"></div>
-                                {% elif insight.urgency_score > 0.4 %}
-                                <div class="w-12 h-12 bg-gradient-to-r from-yellow-500 to-orange-500 rounded-full flex items-center justify-center">
-                                    <i class="fas fa-eye text-white"></i>
-                                </div>
-                                {% elif insight.sentiment == 'positive' %}
-                                <div class="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-500 rounded-full flex items-center justify-center">
-                                    <i class="fas fa-smile text-white"></i>
-                                </div>
-                                {% elif insight.sentiment == 'negative' %}
-                                <div class="w-12 h-12 bg-gradient-to-r from-red-500 to-pink-500 rounded-full flex items-center justify-center">
-                                    <i class="fas fa-frown text-white"></i>
-                                </div>
-                                {% else %}
-                                <div class="w-12 h-12 bg-gradient-to-r from-gray-500 to-slate-500 rounded-full flex items-center justify-center">
-                                    <i class="fas fa-meh text-white"></i>
-                                </div>
-                                {% endif %}
-                            </div>
-
-                            <div class="flex-1 min-w-0">
-                                <!-- Header -->
-                                <div class="flex items-center justify-between mb-3">
-                                    <div class="flex items-center space-x-3">
-                                        <span class="font-semibold text-cipher-blue data-stream">{{ insight.chat_username or 'UNKNOWN_SOURCE' }}</span>
-                                        
-                                        <!-- Channel Type Badge -->
-                                        {% if insight.channel_type == 'cyber_threat' %}
-                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 font-mono">
-                                            <i class="fas fa-skull mr-1"></i>THREAT_INTEL
-                                        </span>
-                                        {% elif insight.channel_type == 'data_leak' %}
-                                        <span class="px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded-full border border-orange-500/30 font-mono">
-                                            <i class="fas fa-database mr-1"></i>DATA_LEAK
-                                        </span>
-                                        {% elif insight.channel_type == 'security_news' %}
-                                        <span class="px-2 py-1 bg-blue-500/20 text-blue-400 text-xs rounded-full border border-blue-500/30 font-mono">
-                                            <i class="fas fa-newspaper mr-1"></i>SEC_NEWS
-                                        </span>
-                                        {% else %}
-                                        <span class="px-2 py-1 bg-gray-500/20 text-gray-400 text-xs rounded-full border border-gray-500/30 font-mono">
-                                            {{ insight.category.upper() or 'OTHER' }}
-                                        </span>
-                                        {% endif %}
-                                        
-                                        <!-- Threat Level Badge -->
-                                        {% if insight.threat_level == 'critical' %}
-                                        <span class="px-2 py-1 bg-red-600/30 text-red-300 text-xs rounded-full border border-red-600/50 animate-pulse font-mono">
-                                            <i class="fas fa-exclamation-triangle mr-1"></i>CRITICAL
-                                        </span>
-                                        {% elif insight.threat_level == 'high' %}
-                                        <span class="px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded-full border border-orange-500/30 font-mono">
-                                            <i class="fas fa-shield-alt mr-1"></i>HIGH
-                                        </span>
-                                        {% elif insight.threat_level == 'medium' %}
-                                        <span class="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-xs rounded-full border border-yellow-500/30 font-mono">
-                                            <i class="fas fa-eye mr-1"></i>MEDIUM
-                                        </span>
-                                        {% elif insight.urgency_score > 0.7 %}
-                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 animate-pulse font-mono">
-                                            <i class="fas fa-exclamation-triangle mr-1"></i>URGENT
-                                        </span>
-                                        {% endif %}
+                <!-- Insights List -->
+                <div class="space-y-4 max-h-96 overflow-y-auto" x-show="insights && insights.length > 0">
+                    <template x-for="(insight, index) in insights.slice(0, 10)" :key="index">
+                        <div class="insight-card glass-effect rounded-lg p-4 animate-fade-in" 
+                             :style="`animation-delay: ${index * 0.1}s`">
+                            <div class="flex items-start space-x-4">
+                                <!-- Threat Indicator -->
+                                <div class="flex-shrink-0 relative">
+                                    <div class="w-12 h-12 rounded-full flex items-center justify-center"
+                                         :class="getThreatIcon(insight)">
+                                        <i :class="getThreatIconClass(insight)" class="text-white"></i>
                                     </div>
-                                    <span class="text-xs text-gray-500 font-mono">
-                                        {% if insight.message_date %}
-                                        {{ insight.message_date[:19] | replace('T', ' ') }}
-                                        {% endif %}
-                                    </span>
+                                    <div class="absolute inset-0 rounded-full animate-ping opacity-20"
+                                         :class="getThreatIconBg(insight)"
+                                         x-show="insight.urgency_score > 0.7"></div>
                                 </div>
 
-                                <!-- AI Analysis -->
-                                <div class="mb-3 p-3 bg-cipher-blue/5 rounded-lg border-l-4 border-cipher-blue">
-                                    <div class="flex items-start space-x-2">
-                                        <i class="fas fa-robot text-cipher-blue mt-0.5"></i>
-                                        <p class="text-gray-300 text-sm leading-relaxed">
-                                            {{ insight.gemini_analysis or 'No analysis available' }}
-                                        </p>
+                                <div class="flex-1 min-w-0">
+                                    <!-- Header -->
+                                    <div class="flex items-center justify-between mb-3">
+                                        <div class="flex items-center space-x-3">
+                                            <span class="font-semibold text-cipher-blue font-mono" x-text="insight.chat_username || 'UNKNOWN_SOURCE'"></span>
+                                            
+                                            <!-- Category Badge -->
+                                            <span class="px-2 py-1 text-xs rounded-full border font-mono"
+                                                  :class="getCategoryColor(insight.category)"
+                                                  x-text="(insight.category || 'other').toUpperCase()"></span>
+                                            
+                                            <!-- Threat Level Badge -->
+                                            <span class="px-2 py-1 text-xs rounded-full border font-mono"
+                                                  :class="getThreatLevelBadge(insight.threat_level)"
+                                                  x-show="insight.threat_level && insight.threat_level !== 'low'"
+                                                  x-text="(insight.threat_level || '').toUpperCase()"></span>
+                                        </div>
+                                        <span class="text-xs text-gray-500 font-mono" x-text="formatDate(insight.message_date)"></span>
                                     </div>
-                                </div>
 
-                                <!-- Topics -->
-                                {% if insight.key_topics %}
-                                <div class="mb-3 flex flex-wrap gap-2">
-                                    {% for topic in insight.key_topics[:5] %}
-                                    <span class="px-2 py-1 bg-white/5 text-gray-300 text-xs rounded border border-white/10 hover:border-cipher-blue/50 transition-colors font-mono">
-                                        #{{ topic }}
-                                    </span>
-                                    {% endfor %}
-                                    {% if insight.key_topics|length > 5 %}
-                                    <span class="text-xs text-gray-500 px-2 py-1">+{{ insight.key_topics|length - 5 }} more</span>
-                                    {% endif %}
-                                </div>
-                                {% endif %}
+                                    <!-- AI Analysis -->
+                                    <div class="mb-3 p-3 bg-cipher-blue/5 rounded-lg border-l-4 border-cipher-blue" x-show="insight.gemini_analysis">
+                                        <div class="flex items-start space-x-2">
+                                            <i class="fas fa-robot text-cipher-blue mt-0.5"></i>
+                                            <p class="text-gray-300 text-sm leading-relaxed" x-text="insight.gemini_analysis || 'No analysis available'"></p>
+                                        </div>
+                                    </div>
 
-                                <!-- Original Message -->
-                                <div class="terminal-window">
-                                    <div class="terminal-header">
-                                        <div class="terminal-dot bg-red-500"></div>
-                                        <div class="terminal-dot bg-yellow-500"></div>
-                                        <div class="terminal-dot bg-green-500"></div>
-                                        <span class="text-xs text-gray-400 ml-3 font-mono">INTERCEPTED_MESSAGE</span>
+                                    <!-- Topics -->
+                                    <div class="mb-3 flex flex-wrap gap-2" x-show="insight.key_topics && insight.key_topics.length > 0">
+                                        <template x-for="topic in insight.key_topics.slice(0, 5)">
+                                            <span class="px-2 py-1 bg-white/5 text-gray-300 text-xs rounded border border-white/10 hover:border-cipher-blue/50 transition-colors font-mono"
+                                                  x-text="`#${topic}`"></span>
+                                        </template>
+                                        <span class="text-xs text-gray-500 px-2 py-1" 
+                                              x-show="insight.key_topics.length > 5"
+                                              x-text="`+${insight.key_topics.length - 5} more`"></span>
                                     </div>
-                                    <div class="p-3">
-                                        <p class="text-gray-400 text-xs leading-relaxed font-mono">
-                                            {% if insight.message_text %}
-                                            {% set preview = insight.message_text[:200] %}
-                                            {{ preview }}{% if insight.message_text|length > 200 %}...{% endif %}
-                                            {% else %}
-                                            [ENCRYPTED_OR_MEDIA_CONTENT]
-                                            {% endif %}
-                                        </p>
-                                    </div>
-                                </div>
 
-                                <!-- Metrics -->
-                                <div class="mt-3 flex items-center justify-between text-xs">
-                                    <div class="flex items-center space-x-4 text-gray-500">
-                                        <span class="data-stream">THREAT: {{ "%.0f"|format(insight.urgency_score * 100) }}%</span>
-                                        <span class="data-stream">SENTIMENT: {{ insight.sentiment.upper() }}</span>
-                                        {% if insight.username %}
-                                        <span class="data-stream">SOURCE: @{{ insight.username }}</span>
-                                        {% endif %}
-                                    </div>
-                                    <div class="flex items-center space-x-2">
-                                        <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                        <span class="text-green-400 font-mono">ANALYZED</span>
+                                    <!-- Metrics -->
+                                    <div class="flex items-center justify-between text-xs">
+                                        <div class="flex items-center space-x-4 text-gray-500">
+                                            <span class="font-mono">THREAT: <span x-text="Math.round((insight.urgency_score || 0) * 100)"></span>%</span>
+                                            <span class="font-mono">SENTIMENT: <span x-text="(insight.sentiment || 'neutral').toUpperCase()"></span></span>
+                                            <span class="font-mono" x-show="insight.username">SOURCE: @<span x-text="insight.username"></span></span>
+                                        </div>
+                                        <div class="flex items-center space-x-2">
+                                            <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                                            <span class="text-green-400 font-mono">ANALYZED</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
+                    </template>
+                </div>
+
+                <!-- Empty State -->
+                <div class="text-center py-12" x-show="!insights || insights.length === 0">
+                    <div class="w-24 h-24 bg-gradient-to-r from-gray-600 to-slate-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
+                        <i class="fas fa-search text-4xl text-gray-400"></i>
                     </div>
-                    {% endfor %}
+                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Threat Intelligence Detected</h3>
+                    <p class="text-gray-500 mb-6 max-w-md mx-auto">
+                        <span x-show="!monitoring.active">
+                            CIPHER cybersecurity monitoring system is currently initializing. Threat intelligence will appear here when detected.
+                        </span>
+                        <span x-show="monitoring.active">
+                            CIPHER is actively scanning monitored cybersecurity channels. Threat intelligence will appear here when detected.
+                        </span>
+                    </p>
                 </div>
 
                 <!-- Footer -->
                 <div class="mt-6 pt-4 border-t border-white/10 flex justify-between items-center">
                     <div class="text-sm text-gray-400 font-mono">
                         <i class="fas fa-database mr-2"></i>
-                        {{ insights|length }} intelligence signals processed
+                        <span x-text="insights ? insights.length : 0"></span> intelligence signals processed
                     </div>
-                    <a href="/insights" class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 text-sm font-medium">
-                        <i class="fas fa-list mr-2"></i>
-                        View All Intelligence
-                    </a>
+                    <div class="flex space-x-4 text-sm">
+                        <button @click="showAllInsights = !showAllInsights" 
+                                class="text-cipher-blue hover:text-cipher-purple transition-colors"
+                                x-show="insights && insights.length > 10">
+                            <i class="fas fa-list mr-2"></i>
+                            <span x-text="showAllInsights ? 'Show Less' : 'View All'"></span>
+                        </button>
+                    </div>
                 </div>
-                
-                {% else %}
-                <!-- Empty State -->
-                <div class="text-center py-12">
-                    <div class="w-24 h-24 bg-gradient-to-r from-gray-600 to-slate-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-float">
-                        <i class="fas fa-search text-4xl text-gray-400"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Threat Intelligence Detected</h3>
-                    <p class="text-gray-500 mb-6 max-w-md mx-auto">
-                        {% if not monitoring.active %}
-                        CIPHER cybersecurity monitoring system is currently offline. Please check system configuration and restart monitoring services.
-                        {% else %}
-                        CIPHER is actively scanning monitored cybersecurity channels. Threat intelligence will appear here when detected.
-                        {% endif %}
-                    </p>
-                    
-                    {% if not monitoring.active %}
-                    <div class="glass-effect rounded-lg p-6 max-w-md mx-auto text-left">
-                        <h4 class="text-sm font-semibold text-yellow-400 mb-3">
-                            <i class="fas fa-cogs mr-2"></i>CYBERSECURITY SYSTEM REQUIREMENTS
-                        </h4>
-                        <ul class="space-y-2 text-sm text-gray-400">
-                            <li class="flex items-center">
-                                <i class="fas fa-check-circle text-green-400 mr-2"></i>
-                                Configure Telegram API credentials
-                            </li>
-                            <li class="flex items-center">
-                                <i class="fas fa-check-circle text-green-400 mr-2"></i>
-                                Set up Gemini AI API key
-                            </li>
-                            <li class="flex items-center">
-                                <i class="fas fa-exclamation-circle text-yellow-400 mr-2"></i>
-                                Restart threat monitoring services
-                            </li>
-                        </ul>
-                        <div class="mt-4 pt-4 border-t border-white/10">
-                            <div class="text-xs text-gray-500 mb-2">Monitored Sources:</div>
-                            <div class="space-y-1 text-xs">
-                                <div class="text-red-400">• DARKFEED - Threat Intelligence</div>
-                                <div class="text-orange-400">• Data Leak Monitor - Breach Detection</div>
-                                <div class="text-blue-400">• Security Harvester - Security News</div>
-                            </div>
-                        </div>
-                        <div class="mt-4 pt-4 border-t border-white/10">
-                            <a href="/health" class="text-cipher-blue hover:text-cipher-purple transition-colors text-sm font-medium">
-                                <i class="fas fa-diagnostic mr-2"></i>Run System Diagnostics
-                            </a>
-                        </div>
-                    </div>
-                    {% endif %}
-                </div>
-                {% endif %}
             </div>
         </div>
 
-        <!-- Quick Actions -->
-        <div class="mt-8 flex justify-center space-x-4">
-            <a href="/analytics" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-cipher-blue/50 transition-all duration-300 group">
-                <i class="fas fa-chart-bar text-cipher-blue mr-2 group-hover:animate-bounce"></i>
-                <span class="text-gray-300 group-hover:text-white">Advanced Analytics</span>
-            </a>
-            <a href="/channels" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-cipher-purple/50 transition-all duration-300 group">
-                <i class="fas fa-satellite-dish text-cipher-purple mr-2 group-hover:animate-spin"></i>
-                <span class="text-gray-300 group-hover:text-white">Channel Management</span>
-            </a>
-            <a href="/health" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-green-500/50 transition-all duration-300 group">
-                <i class="fas fa-heartbeat text-green-400 mr-2 group-hover:animate-pulse"></i>
-                <span class="text-gray-300 group-hover:text-white">System Health</span>
-            </a>
-        </div>
     </main>
 
     <!-- Footer -->
@@ -779,137 +591,259 @@
                     </div>
                 </div>
                 <div class="flex items-center space-x-4 text-xs text-gray-500">
-                    <span class="font-mono">PROJECT: {{ PROJECT_ID or 'primal-chariot-382610' }}</span>
-                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                     <span class="font-mono">SECURE</span>
+                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span class="font-mono" x-text="systemStatus.toUpperCase()"></span>
                 </div>
             </div>
         </div>
     </footer>
 
     <script>
-        // Alpine.js Dashboard Component
         function cipherDashboard() {
             return {
+                // State
                 isRefreshing: false,
+                isLoading: false,
+                showAllInsights: false,
+                currentTime: '',
+                systemStatus: 'initializing',
                 
+                // Data
+                stats: {},
+                insights: [],
+                monitoring: {},
+                threatAnalytics: {},
+                
+                // Initialize
                 init() {
-                    // Auto-refresh every 30 seconds
-                    setInterval(() => {
-                        this.refreshData();
-                    }, 30000);
+                    this.updateTime();
+                    this.loadData();
                     
-                    // Initialize animations
-                    this.initAnimations();
+                    // Update time every second
+                    setInterval(() => this.updateTime(), 1000);
+                    
+                    // Auto-refresh every 30 seconds
+                    setInterval(() => this.loadData(), 30000);
                 },
                 
-                refreshData() {
-                    this.isRefreshing = true;
+                // Update current time
+                updateTime() {
+                    const now = new Date();
+                    this.currentTime = now.toLocaleTimeString('en-US', { 
+                        hour12: false,
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                },
+                
+                // Load all data
+                async loadData() {
+                    this.isLoading = true;
                     
-                    // Simulate network delay
+                    try {
+                        await Promise.all([
+                            this.fetchStats(),
+                            this.fetchInsights(),
+                            this.fetchMonitoring(),
+                            this.fetchThreatAnalytics()
+                        ]);
+                        
+                        // Determine system status
+                        if (this.monitoring.active) {
+                            this.systemStatus = 'operational';
+                        } else if (this.stats.total_messages > 0) {
+                            this.systemStatus = 'initializing';
+                        } else {
+                            this.systemStatus = 'degraded';
+                        }
+                        
+                    } catch (error) {
+                        console.error('Error loading data:', error);
+                        this.systemStatus = 'error';
+                    }
+                    
+                    this.isLoading = false;
+                },
+                
+                // Fetch statistics
+                async fetchStats() {
+                    try {
+                        const response = await fetch('/api/stats');
+                        if (response.ok) {
+                            this.stats = await response.json();
+                        }
+                    } catch (error) {
+                        console.error('Error fetching stats:', error);
+                        this.stats = {
+                            total_messages: 0,
+                            processed_today: 0,
+                            high_threats: 0,
+                            unique_channels: 0,
+                            monitoring_active: false
+                        };
+                    }
+                },
+                
+                // Fetch insights
+                async fetchInsights() {
+                    try {
+                        const response = await fetch('/api/insights?limit=20');
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.insights = data.insights || [];
+                        }
+                    } catch (error) {
+                        console.error('Error fetching insights:', error);
+                        this.insights = [];
+                    }
+                },
+                
+                // Fetch monitoring status
+                async fetchMonitoring() {
+                    try {
+                        const response = await fetch('/api/monitoring/status');
+                        if (response.ok) {
+                            this.monitoring = await response.json();
+                        }
+                    } catch (error) {
+                        console.error('Error fetching monitoring:', error);
+                        this.monitoring = {
+                            active: false,
+                            channels: ['@DarkfeedNews', '@breachdetector', '@secharvester'],
+                            total_channels: 3
+                        };
+                    }
+                },
+                
+                // Fetch threat analytics
+                async fetchThreatAnalytics() {
+                    try {
+                        const response = await fetch('/api/threat-analytics');
+                        if (response.ok) {
+                            this.threatAnalytics = await response.json();
+                        }
+                    } catch (error) {
+                        console.error('Error fetching threat analytics:', error);
+                        this.threatAnalytics = {};
+                    }
+                },
+                
+                // Refresh data manually
+                async refreshData() {
+                    if (this.isRefreshing) return;
+                    
+                    this.isRefreshing = true;
+                    await this.loadData();
+                    
+                    // Show refresh state for at least 1 second
                     setTimeout(() => {
-                        window.location.reload();
+                        this.isRefreshing = false;
                     }, 1000);
                 },
                 
-                initAnimations() {
-                    // Stagger card animations
-                    const cards = document.querySelectorAll('.hover-lift');
-                    cards.forEach((card, index) => {
-                        card.style.animationDelay = `${index * 0.1}s`;
-                    });
-                }
-            }
-        }
-
-        // Update current time
-        function updateTime() {
-            const now = new Date();
-            const timeElement = document.getElementById('current-time');
-            if (timeElement) {
-                timeElement.textContent = now.toLocaleTimeString('en-US', { 
-                    hour12: false,
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit'
-                });
-            }
-        }
-        
-        setInterval(updateTime, 1000);
-        updateTime();
-
-        // Smooth scroll for internal links
-        document.addEventListener('DOMContentLoaded', function() {
-            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-                anchor.addEventListener('click', function (e) {
-                    e.preventDefault();
-                    const target = document.querySelector(this.getAttribute('href'));
-                    if (target) {
-                        target.scrollIntoView({
-                            behavior: 'smooth',
-                            block: 'start'
+                // Utility functions for styling
+                getChannelColor(channel) {
+                    const colors = {
+                        '@DarkfeedNews': 'bg-red-500/20 text-red-400 border-red-500/30',
+                        '@breachdetector': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+                        '@secharvester': 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                    };
+                    return colors[channel] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+                },
+                
+                getThreatLevelColor(level) {
+                    const colors = {
+                        'critical': 'text-red-400',
+                        'high': 'text-orange-400',
+                        'medium': 'text-yellow-400',
+                        'low': 'text-green-400',
+                        'info': 'text-blue-400'
+                    };
+                    return colors[level] || 'text-gray-400';
+                },
+                
+                getThreatLevelBg(level) {
+                    const colors = {
+                        'critical': 'bg-red-500',
+                        'high': 'bg-orange-500',
+                        'medium': 'bg-yellow-500',
+                        'low': 'bg-green-500',
+                        'info': 'bg-blue-500'
+                    };
+                    return colors[level] || 'bg-gray-500';
+                },
+                
+                getThreatLevelBadge(level) {
+                    const colors = {
+                        'critical': 'bg-red-600/30 text-red-300 border-red-600/50 animate-pulse',
+                        'high': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+                        'medium': 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+                    };
+                    return colors[level] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+                },
+                
+                getCategoryColor(category) {
+                    const colors = {
+                        'threat_intel': 'bg-red-500/20 text-red-400 border-red-500/30',
+                        'data_breach': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+                        'vulnerability': 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+                        'malware': 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+                        'apt': 'bg-red-600/20 text-red-300 border-red-600/30',
+                        'ransomware': 'bg-red-700/20 text-red-300 border-red-700/30'
+                    };
+                    return colors[category] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+                },
+                
+                getThreatIcon(insight) {
+                    if (insight.urgency_score > 0.7) {
+                        return 'bg-gradient-to-r from-red-500 to-orange-500 animate-pulse';
+                    } else if (insight.urgency_score > 0.4) {
+                        return 'bg-gradient-to-r from-yellow-500 to-orange-500';
+                    } else if (insight.sentiment === 'positive') {
+                        return 'bg-gradient-to-r from-green-500 to-emerald-500';
+                    } else if (insight.sentiment === 'negative') {
+                        return 'bg-gradient-to-r from-red-500 to-pink-500';
+                    }
+                    return 'bg-gradient-to-r from-gray-500 to-slate-500';
+                },
+                
+                getThreatIconClass(insight) {
+                    if (insight.urgency_score > 0.7) {
+                        return 'fas fa-exclamation-triangle';
+                    } else if (insight.urgency_score > 0.4) {
+                        return 'fas fa-eye';
+                    } else if (insight.sentiment === 'positive') {
+                        return 'fas fa-smile';
+                    } else if (insight.sentiment === 'negative') {
+                        return 'fas fa-frown';
+                    }
+                    return 'fas fa-info-circle';
+                },
+                
+                getThreatIconBg(insight) {
+                    if (insight.urgency_score > 0.7) {
+                        return 'bg-red-500';
+                    }
+                    return 'bg-yellow-500';
+                },
+                
+                formatDate(dateString) {
+                    if (!dateString) return '';
+                    try {
+                        return new Date(dateString).toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
                         });
+                    } catch {
+                        return dateString.substring(0, 19).replace('T', ' ');
                     }
-                });
-            });
-        });
-
-        // Add Matrix effect (optional, subtle background animation)
-        function createMatrixEffect() {
-            const chars = '01';
-            const drops = [];
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            canvas.style.position = 'fixed';
-            canvas.style.top = '0';
-            canvas.style.left = '0';
-            canvas.style.width = '100%';
-            canvas.style.height = '100%';
-            canvas.style.pointerEvents = 'none';
-            canvas.style.zIndex = '-1';
-            canvas.style.opacity = '0.03';
-            
-            document.body.appendChild(canvas);
-            
-            function resizeCanvas() {
-                canvas.width = window.innerWidth;
-                canvas.height = window.innerHeight;
-                
-                const columns = canvas.width / 20;
-                for (let i = 0; i < columns; i++) {
-                    drops[i] = Math.random() * canvas.height;
                 }
             }
-            
-            function draw() {
-                ctx.fillStyle = 'rgba(15, 23, 42, 0.05)';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                
-                ctx.fillStyle = '#6366f1';
-                ctx.font = '12px monospace';
-                
-                for (let i = 0; i < drops.length; i++) {
-                    const char = chars[Math.floor(Math.random() * chars.length)];
-                    ctx.fillText(char, i * 20, drops[i]);
-                    
-                    if (drops[i] * 20 > canvas.height && Math.random() > 0.975) {
-                        drops[i] = 0;
-                    }
-                    drops[i] += 20;
-                }
-            }
-            
-            resizeCanvas();
-            window.addEventListener('resize', resizeCanvas);
-            setInterval(draw, 100);
         }
-        
-        // Initialize matrix effect after page load
-        window.addEventListener('load', () => {
-            setTimeout(createMatrixEffect, 2000);
-        });
     </script>
 </body>
 </html>
