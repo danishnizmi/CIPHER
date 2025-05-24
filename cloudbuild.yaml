@@ -1,43 +1,138 @@
 steps:
-  # Build the Docker image
+  # Step 1: Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
     args: [
       'build',
       '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
       '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
       '.'
     ]
+    timeout: '600s'
 
-  # Push the Docker image to Container Registry
+  # Step 2: Push the Docker image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-build-id'
     args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
+    waitFor: ['build-image']
 
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest'
     args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest']
+    waitFor: ['build-image']
 
-  # Get webhook secret from Secret Manager
+  # Step 3: Enable required APIs (idempotent)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'get-webhook-secret'
+    id: 'enable-apis'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        WEBHOOK_SECRET=$(gcloud secrets versions access latest --secret="telegram-webhook-secret" 2>/dev/null || echo "")
-        if [ -z "$WEBHOOK_SECRET" ]; then
-          echo "Generating new webhook secret..."
-          WEBHOOK_SECRET=$(openssl rand -base64 32)
-          echo -n "$WEBHOOK_SECRET" | gcloud secrets create telegram-webhook-secret --data-file=- || \
-          echo -n "$WEBHOOK_SECRET" | gcloud secrets versions add telegram-webhook-secret --data-file=-
-        fi
-        echo "$WEBHOOK_SECRET" > /workspace/webhook_secret.txt
+        echo "Ensuring required APIs are enabled..."
+        gcloud services enable \
+          cloudbuild.googleapis.com \
+          run.googleapis.com \
+          bigquery.googleapis.com \
+          secretmanager.googleapis.com \
+          aiplatform.googleapis.com \
+          logging.googleapis.com \
+          monitoring.googleapis.com
+        echo "APIs enabled successfully"
+    waitFor: ['-']
 
-  # Deploy to Cloud Run
+  # Step 4: Setup or verify webhook secret
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'setup-webhook-secret'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Setting up webhook secret..."
+        
+        # Check if webhook secret exists
+        if gcloud secrets describe telegram-webhook-secret >/dev/null 2>&1; then
+          echo "Webhook secret already exists, retrieving..."
+          WEBHOOK_SECRET=$(gcloud secrets versions access latest --secret="telegram-webhook-secret")
+        else
+          echo "Creating new webhook secret..."
+          WEBHOOK_SECRET=$(openssl rand -base64 32)
+          echo -n "$WEBHOOK_SECRET" | gcloud secrets create telegram-webhook-secret --data-file=-
+          
+          # Grant service account access
+          gcloud secrets add-iam-policy-binding telegram-webhook-secret \
+            --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/secretmanager.secretAccessor"
+        fi
+        
+        echo "$WEBHOOK_SECRET" > /workspace/webhook_secret.txt
+        echo "Webhook secret ready"
+    waitFor: ['enable-apis']
+
+  # Step 5: Verify bot token exists
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'verify-bot-token'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Checking bot token..."
+        
+        if gcloud secrets describe telegram-bot-token >/dev/null 2>&1; then
+          BOT_TOKEN=$(gcloud secrets versions access latest --secret="telegram-bot-token" 2>/dev/null || echo "")
+          
+          if [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "REPLACE_WITH_YOUR_TELEGRAM_BOT_TOKEN" ]; then
+            echo "⚠️  WARNING: Bot token is not set or is placeholder!"
+            echo "   Please set your actual bot token:"
+            echo "   echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+            echo "   Then redeploy to enable webhook functionality"
+            echo "placeholder" > /workspace/bot_token_status.txt
+          else
+            echo "Bot token is configured ✓"
+            echo "configured" > /workspace/bot_token_status.txt
+          fi
+        else
+          echo "⚠️  WARNING: Bot token secret does not exist!"
+          echo "   Creating placeholder secret. Please update with your actual bot token:"
+          echo "   echo -n 'YOUR_BOT_TOKEN' | gcloud secrets create telegram-bot-token --data-file=-"
+          
+          echo -n "REPLACE_WITH_YOUR_TELEGRAM_BOT_TOKEN" | gcloud secrets create telegram-bot-token --data-file=-
+          
+          # Grant service account access
+          gcloud secrets add-iam-policy-binding telegram-bot-token \
+            --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/secretmanager.secretAccessor"
+          
+          echo "placeholder" > /workspace/bot_token_status.txt
+        fi
+    waitFor: ['setup-webhook-secret']
+
+  # Step 6: Create BigQuery dataset (idempotent)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'setup-bigquery'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Setting up BigQuery dataset..."
+        
+        # Create dataset if it doesn't exist
+        if ! bq show --dataset $PROJECT_ID:telegram_data >/dev/null 2>&1; then
+          bq mk --location=US --description="Telegram AI Processor data" telegram_data
+          echo "Created BigQuery dataset: telegram_data"
+        else
+          echo "BigQuery dataset already exists ✓"
+        fi
+    waitFor: ['verify-bot-token']
+
+  # Step 7: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-service'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
+        echo "Deploying to Cloud Run..."
+        
         WEBHOOK_SECRET=$(cat /workspace/webhook_secret.txt)
         
         gcloud run deploy telegram-ai-processor \
@@ -60,15 +155,21 @@ steps:
           --set-env-vars="TABLE_ID=processed_messages" \
           --set-env-vars="VERTEX_AI_MODEL=gemini-1.5-flash" \
           --set-env-vars="VERTEX_AI_LOCATION=us-central1" \
-          --set-env-vars="TELEGRAM_SECRET_TOKEN=$WEBHOOK_SECRET"
+          --set-env-vars="TELEGRAM_SECRET_TOKEN=$WEBHOOK_SECRET" \
+          --quiet
+        
+        echo "Cloud Run deployment completed ✓"
+    waitFor: ['push-build-id', 'push-latest', 'setup-bigquery']
 
-  # Get the actual service URL and update webhook configuration
+  # Step 8: Configure webhook URL and test service
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'configure-webhook'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
+        echo "Configuring webhook and testing service..."
+        
         # Get the actual service URL
         SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
@@ -79,30 +180,83 @@ steps:
         # Update the webhook URL environment variable
         gcloud run services update telegram-ai-processor \
           --region=us-central1 \
-          --set-env-vars="WEBHOOK_URL=$SERVICE_URL"
+          --set-env-vars="WEBHOOK_URL=$SERVICE_URL" \
+          --quiet
         
-        # Configure Telegram webhook if bot token exists
-        BOT_TOKEN=$(gcloud secrets versions access latest --secret="telegram-bot-token" 2>/dev/null || echo "")
+        # Test health endpoint
+        echo "Testing service health..."
+        sleep 10  # Give service time to start
         
-        if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "REPLACE_WITH_YOUR_TELEGRAM_BOT_TOKEN" ]; then
-          echo "Configuring Telegram webhook..."
-          WEBHOOK_SECRET=$(cat /workspace/webhook_secret.txt)
+        if curl -f "$SERVICE_URL/health" >/dev/null 2>&1; then
+          echo "Health check passed ✓"
+        else
+          echo "⚠️  Health check failed - service may still be starting"
+        fi
+        
+        # Store service URL for next step
+        echo "$SERVICE_URL" > /workspace/service_url.txt
+        
+        echo "Service configuration completed ✓"
+    waitFor: ['deploy-service']
+
+  # Step 9: Configure Telegram webhook (if bot token is valid)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'telegram-webhook'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Configuring Telegram webhook..."
+        
+        SERVICE_URL=$(cat /workspace/service_url.txt)
+        WEBHOOK_SECRET=$(cat /workspace/webhook_secret.txt)
+        BOT_TOKEN_STATUS=$(cat /workspace/bot_token_status.txt)
+        
+        if [ "$BOT_TOKEN_STATUS" = "configured" ]; then
+          BOT_TOKEN=$(gcloud secrets versions access latest --secret="telegram-bot-token")
           
-          curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" \
+          echo "Setting webhook with Telegram API..."
+          
+          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" \
             -H "Content-Type: application/json" \
             -d "{
               \"url\": \"$SERVICE_URL/webhook/telegram\",
               \"secret_token\": \"$WEBHOOK_SECRET\",
-              \"allowed_updates\": [\"message\", \"edited_message\"]
-            }"
+              \"allowed_updates\": [\"message\", \"edited_message\"],
+              \"drop_pending_updates\": true
+            }")
           
-          echo "Telegram webhook configured successfully"
-          echo "Bot webhook URL: $SERVICE_URL/webhook/telegram"
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "✅ Telegram webhook configured successfully!"
+            echo "   Webhook URL: $SERVICE_URL/webhook/telegram"
+          else
+            echo "❌ Failed to configure Telegram webhook:"
+            echo "$RESPONSE"
+          fi
+          
+          # Get webhook info for verification
+          echo ""
+          echo "Webhook verification:"
+          curl -s "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo" | python3 -m json.tool || echo "Failed to get webhook info"
+          
         else
-          echo "⚠️  Bot token not configured. Please set it manually:"
-          echo "   echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
-          echo "   Then redeploy to configure webhook automatically"
+          echo "⚠️  Skipping Telegram webhook configuration - bot token not properly set"
+          echo "   To configure webhook manually after setting bot token:"
+          echo "   1. Set your bot token: echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+          echo "   2. Redeploy this service"
+          echo "   3. Or manually set webhook: curl -X POST \"https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook\" -d \"{\\\"url\\\": \\\"$SERVICE_URL/webhook/telegram\\\"}\""
         fi
+    waitFor: ['configure-webhook']
+
+  # Step 10: Final status and instructions
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deployment-summary'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        SERVICE_URL=$(cat /workspace/service_url.txt)
+        BOT_TOKEN_STATUS=$(cat /workspace/bot_token_status.txt)
         
         echo ""
         echo "🎉 DEPLOYMENT COMPLETE!"
@@ -110,19 +264,58 @@ steps:
         echo "📍 Service URL: $SERVICE_URL"
         echo "🔗 Dashboard: $SERVICE_URL"
         echo "🤖 Webhook URL: $SERVICE_URL/webhook/telegram"
+        echo "🏥 Health Check: $SERVICE_URL/health"
         echo "=================================="
+        echo ""
+        
+        if [ "$BOT_TOKEN_STATUS" = "configured" ]; then
+          echo "✅ Bot token configured - webhook should be active"
+          echo "📨 Send a message to your bot to test the integration"
+        else
+          echo "⚠️  Bot token needs to be configured:"
+          echo "   1. Get your bot token from @BotFather on Telegram"
+          echo "   2. Run: echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+          echo "   3. Redeploy: gcloud builds submit --config cloudbuild.yaml ."
+        fi
+        
+        echo ""
+        echo "🔧 Useful commands:"
+        echo "   • View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=20"
+        echo "   • Check service: gcloud run services describe telegram-ai-processor --region=us-central1"
+        echo "   • Update bot token: echo -n 'NEW_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+        echo "   • View BigQuery data: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
+        echo ""
+        echo "🎯 Next steps:"
+        echo "   1. Visit the dashboard: $SERVICE_URL"
+        echo "   2. Send test messages to your bot"
+        echo "   3. Monitor the logs and dashboard for activity"
+        echo ""
+        echo "✨ Your Telegram AI Processor is ready!"
+    waitFor: ['telegram-webhook']
 
-# Use the service account for all steps
+# Service account configuration
 serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
 
+# Build options
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
   substitution_option: 'ALLOW_LOOSE'
+  dynamic_substitutions: true
 
-timeout: '1200s'
+# Increase timeout for comprehensive deployment
+timeout: '1800s'
 
+# Build tags for organization
 tags:
   - 'telegram-ai-processor'
   - 'cloud-run'
   - 'production'
+  - 'ai-pipeline'
+
+# Substitutions (optional overrides)
+substitutions:
+  _REGION: 'us-central1'
+  _SERVICE_NAME: 'telegram-ai-processor'
+  _DATASET_ID: 'telegram_data'
+  _TABLE_ID: 'processed_messages'
