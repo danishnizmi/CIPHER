@@ -21,7 +21,7 @@ steps:
     args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest']
     waitFor: ['build-image']
 
-  # Step 3: Enable required APIs (idempotent)
+  # Step 3: Enable required APIs and fix permissions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'enable-apis'
     entrypoint: 'bash'
@@ -37,6 +37,17 @@ steps:
           logging.googleapis.com \
           monitoring.googleapis.com
         echo "APIs enabled successfully"
+        
+        echo "Granting BigQuery permissions to Cloud Build service account..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/bigquery.jobUser"
+        
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/bigquery.dataEditor"
+        
+        echo "BigQuery permissions granted successfully"
     waitFor: ['-']
 
   # Step 4: Verify existing secrets have values
@@ -110,7 +121,7 @@ steps:
           --port 8080 \
           --memory 4Gi \
           --cpu 2 \
-          --min-instances 1 \
+          --min-instances 0 \
           --max-instances 10 \
           --concurrency 100 \
           --timeout 3600 \
@@ -118,6 +129,7 @@ steps:
           --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
           --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080" \
           --execution-environment gen2 \
+          --no-cpu-throttling \
           --quiet
         
         echo "CIPHER deployment completed ✓"
