@@ -1,13 +1,13 @@
 # CIPHER Platform - Cloud Build Configuration
-# FIXED: Removed invalid SERVICE_URL substitution
+# FINAL FIX: Proper variable substitution for Cloud Build
 
 steps:
   # Step 1: Build the container image
   - name: 'gcr.io/cloud-builders/docker'
     args: [
       'build',
-      '-t', 'gcr.io/$$PROJECT_ID/telegram-ai-processor:$$BUILD_ID',
-      '-t', 'gcr.io/$$PROJECT_ID/telegram-ai-processor:latest',
+      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
+      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
       '.'
     ]
     id: 'build-image'
@@ -16,7 +16,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: [
       'push', 
-      'gcr.io/$$PROJECT_ID/telegram-ai-processor:$$BUILD_ID'
+      'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
     ]
     id: 'push-image'
     waitFor: ['build-image']
@@ -25,7 +25,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: [
       'push', 
-      'gcr.io/$$PROJECT_ID/telegram-ai-processor:latest'
+      'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
     ]
     id: 'push-latest'
     waitFor: ['build-image']
@@ -36,26 +36,26 @@ steps:
     args:
       - '-c'
       - |
-        echo "Setting up BigQuery dataset for project: $$PROJECT_ID"
+        echo "Setting up BigQuery dataset for project: $PROJECT_ID"
         
         # Enable APIs
         gcloud services enable bigquery.googleapis.com run.googleapis.com --quiet
         
         # Create BigQuery dataset if it doesn't exist
-        bq ls --project_id=$$PROJECT_ID telegram_data 2>/dev/null || \
-        bq mk --dataset --location=US --description="CIPHER Intelligence Data" $$PROJECT_ID:telegram_data
+        bq ls --project_id=$PROJECT_ID telegram_data 2>/dev/null || \
+        bq mk --dataset --location=US --description="CIPHER Intelligence Data" $PROJECT_ID:telegram_data
         
         # Create table if it doesn't exist
-        bq ls --project_id=$$PROJECT_ID telegram_data.processed_messages 2>/dev/null || \
+        bq ls --project_id=$PROJECT_ID telegram_data.processed_messages 2>/dev/null || \
         bq mk --table \
           --time_partitioning_field=processed_date \
           --time_partitioning_type=DAY \
           --clustering_fields=threat_level,channel_type,category \
           --description="CIPHER processed messages" \
-          $$PROJECT_ID:telegram_data.processed_messages \
+          $PROJECT_ID:telegram_data.processed_messages \
           message_id:STRING:REQUIRED,channel:STRING:REQUIRED,timestamp:TIMESTAMP:REQUIRED,content:STRING:REQUIRED,threat_level:STRING,threat_type:STRING,processed_at:TIMESTAMP:REQUIRED,processed_date:DATE:REQUIRED,channel_type:STRING,category:STRING
         
-        echo "BigQuery setup completed for $$PROJECT_ID"
+        echo "BigQuery setup completed for $PROJECT_ID"
     id: 'setup-bigquery'
 
   # Step 5: Deploy to Cloud Run
@@ -63,11 +63,11 @@ steps:
     entrypoint: 'gcloud'
     args: [
       'run', 'deploy', 'telegram-ai-processor',
-      '--image', 'gcr.io/$$PROJECT_ID/telegram-ai-processor:$$BUILD_ID',
+      '--image', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
       '--region', 'us-central1',
       '--platform', 'managed',
       '--allow-unauthenticated',
-      '--service-account', 'cloud-build-service@$$PROJECT_ID.iam.gserviceaccount.com',
+      '--service-account', 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
       '--memory', '4Gi',
       '--cpu', '2',
       '--timeout', '3600',
@@ -75,7 +75,7 @@ steps:
       '--min-instances', '0',
       '--port', '8080',
       '--concurrency', '80',
-      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1'
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1'
     ]
     id: 'deploy-cloud-run'
     waitFor: ['push-image', 'setup-bigquery']
@@ -88,13 +88,13 @@ steps:
       - |
         echo "🔍 Starting health checks for CIPHER platform..."
         
-        # Get service URL dynamically (not using invalid substitution)
-        SERVICE_URL=$$(gcloud run services describe telegram-ai-processor \
+        # Get service URL dynamically
+        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
-          --project=$$PROJECT_ID \
+          --project=$PROJECT_ID \
           --format='value(status.url)')
         
-        echo "✅ Service URL: $$SERVICE_URL"
+        echo "✅ Service URL: $SERVICE_URL"
         
         # Wait for service to be ready
         echo "⏳ Waiting for service to be ready..."
@@ -102,7 +102,7 @@ steps:
         
         # Test liveness endpoint
         echo "🧪 Testing liveness endpoint..."
-        if curl -f -s --max-time 30 "$$SERVICE_URL/health/live" > /dev/null; then
+        if curl -f -s --max-time 30 "$SERVICE_URL/health/live" > /dev/null; then
           echo "✅ Liveness check: PASSED"
         else
           echo "❌ Liveness check: FAILED"
@@ -111,7 +111,7 @@ steps:
         
         # Test readiness endpoint
         echo "🧪 Testing readiness endpoint..."
-        if curl -f -s --max-time 30 "$$SERVICE_URL/health" > /dev/null; then
+        if curl -f -s --max-time 30 "$SERVICE_URL/health" > /dev/null; then
           echo "✅ Readiness check: PASSED"
         else
           echo "⚠️  Readiness check: DEGRADED (may be using fallback data)"
@@ -119,7 +119,7 @@ steps:
         
         # Test stats API
         echo "🧪 Testing stats API..."
-        if curl -f -s --max-time 30 "$$SERVICE_URL/api/stats" > /dev/null; then
+        if curl -f -s --max-time 30 "$SERVICE_URL/api/stats" > /dev/null; then
           echo "✅ Stats API: WORKING"
         else
           echo "⚠️  Stats API: DEGRADED"
@@ -127,7 +127,7 @@ steps:
         
         # Test monitoring API
         echo "🧪 Testing monitoring API..."
-        if curl -f -s --max-time 30 "$$SERVICE_URL/api/monitoring/status" > /dev/null; then
+        if curl -f -s --max-time 30 "$SERVICE_URL/api/monitoring/status" > /dev/null; then
           echo "✅ Monitoring API: WORKING"
         else
           echo "⚠️  Monitoring API: DEGRADED"
@@ -136,11 +136,11 @@ steps:
         echo ""
         echo "🎉 CIPHER Platform deployment successful!"
         echo "======================================"
-        echo "📊 Dashboard: $$SERVICE_URL/dashboard"
-        echo "🏥 Health: $$SERVICE_URL/health"
-        echo "📈 Stats: $$SERVICE_URL/api/stats"
-        echo "🔧 Service Account: cloud-build-service@$$PROJECT_ID.iam.gserviceaccount.com"
-        echo "📊 BigQuery: $$PROJECT_ID:telegram_data.processed_messages"
+        echo "📊 Dashboard: $SERVICE_URL/dashboard"
+        echo "🏥 Health: $SERVICE_URL/health"
+        echo "📈 Stats: $SERVICE_URL/api/stats"
+        echo "🔧 Service Account: cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        echo "📊 BigQuery: $PROJECT_ID:telegram_data.processed_messages"
         echo ""
         echo "🔴 @DarkfeedNews - Threat Intelligence"
         echo "🟠 @breachdetector - Data Breach Monitor"
@@ -166,10 +166,5 @@ timeout: '1200s'
 
 # Images to push to registry
 images:
-  - 'gcr.io/$$PROJECT_ID/telegram-ai-processor:$$BUILD_ID'
-  - 'gcr.io/$$PROJECT_ID/telegram-ai-processor:latest'
-
-# ONLY VALID substitutions (removed invalid SERVICE_URL)
-substitutions:
-  _SERVICE_NAME: 'telegram-ai-processor'
-  _REGION: 'us-central1'
+  - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
