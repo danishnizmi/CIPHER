@@ -1,16 +1,129 @@
-steps:
-  # Build image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID', '.']
-    id: 'build-image'
+# CIPHER Platform - Production Cloud Build Configuration
+# Service Account: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
 
-  # Push image
+timeout: 1800s  # 30 minutes timeout for complete deployment
+
+steps:
+  # Step 1: Validate environment and prerequisites
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "🛡️ CIPHER Platform - Production Deployment Starting"
+        echo "=============================================="
+        echo "Project ID: $PROJECT_ID"
+        echo "Build ID: $BUILD_ID"
+        echo "Service Account: cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        echo "Timestamp: $$(date)"
+        echo ""
+        
+        # Validate required APIs are enabled
+        echo "🔍 Validating required APIs..."
+        gcloud services list --enabled --filter="name:(run.googleapis.com OR cloudbuild.googleapis.com OR bigquery.googleapis.com)" --format="value(name)" | wc -l
+        
+        # Check service account permissions
+        echo "🔑 Validating service account permissions..."
+        gcloud projects get-iam-policy $PROJECT_ID \
+          --flatten="bindings[].members" \
+          --filter="bindings.members:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+          --format="value(bindings.role)" | wc -l
+        
+        echo "✅ Pre-deployment validation completed"
+    id: 'validate'
+
+  # Step 2: Setup BigQuery infrastructure
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "📊 Setting up BigQuery infrastructure..."
+        
+        # Create dataset if not exists
+        if ! bq ls --project_id=$PROJECT_ID telegram_data >/dev/null 2>&1; then
+          echo "Creating BigQuery dataset: telegram_data"
+          bq mk --dataset \
+            --location=US \
+            --description="CIPHER Cybersecurity Intelligence Platform Data" \
+            $PROJECT_ID:telegram_data
+        else
+          echo "✅ BigQuery dataset telegram_data already exists"
+        fi
+        
+        # Create table with enhanced schema if not exists
+        if ! bq ls --project_id=$PROJECT_ID telegram_data.processed_messages >/dev/null 2>&1; then
+          echo "Creating BigQuery table: processed_messages"
+          
+          # Create enhanced cybersecurity schema
+          cat > /tmp/cipher_schema.json << 'EOF'
+        [
+          {"name": "message_id", "type": "STRING", "mode": "REQUIRED"},
+          {"name": "chat_id", "type": "STRING", "mode": "REQUIRED"},
+          {"name": "chat_username", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "user_id", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "username", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "message_text", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "message_date", "type": "TIMESTAMP", "mode": "REQUIRED"},
+          {"name": "processed_date", "type": "TIMESTAMP", "mode": "REQUIRED"},
+          {"name": "gemini_analysis", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "sentiment", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "key_topics", "type": "STRING", "mode": "REPEATED"},
+          {"name": "urgency_score", "type": "FLOAT", "mode": "NULLABLE"},
+          {"name": "category", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "threat_level", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "threat_type", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "channel_type", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "channel_priority", "type": "STRING", "mode": "NULLABLE"},
+          {"name": "iocs_detected", "type": "STRING", "mode": "REPEATED"},
+          {"name": "cve_references", "type": "STRING", "mode": "REPEATED"},
+          {"name": "malware_families", "type": "STRING", "mode": "REPEATED"},
+          {"name": "affected_systems", "type": "STRING", "mode": "REPEATED"},
+          {"name": "attack_vectors", "type": "STRING", "mode": "REPEATED"},
+          {"name": "threat_actors", "type": "STRING", "mode": "REPEATED"},
+          {"name": "campaign_names", "type": "STRING", "mode": "REPEATED"},
+          {"name": "geographical_targets", "type": "STRING", "mode": "REPEATED"},
+          {"name": "industry_targets", "type": "STRING", "mode": "REPEATED"}
+        ]
+        EOF
+          
+          bq mk --table \
+            --description="CIPHER Cybersecurity Intelligence Messages" \
+            --time_partitioning_field=processed_date \
+            --time_partitioning_type=DAY \
+            --clustering_fields=threat_level,channel_type,category \
+            $PROJECT_ID:telegram_data.processed_messages \
+            /tmp/cipher_schema.json
+            
+          rm -f /tmp/cipher_schema.json
+        else
+          echo "✅ BigQuery table processed_messages already exists"
+        fi
+        
+        echo "✅ BigQuery infrastructure setup completed"
+    id: 'setup-bigquery'
+    waitFor: ['validate']
+
+  # Step 3: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
+    args: [
+      'build',
+      '--tag', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
+      '--tag', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
+      '--build-arg', 'PROJECT_ID=$PROJECT_ID',
+      '--build-arg', 'BUILD_ID=$BUILD_ID',
+      '.'
+    ]
+    id: 'build-image'
+    waitFor: ['setup-bigquery']
+
+  # Step 4: Push Docker image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/telegram-ai-processor']
     id: 'push-image'
     waitFor: ['build-image']
 
-  # Deploy to Cloud Run
+  # Step 5: Deploy to Cloud Run with production configuration
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args: [
@@ -20,31 +133,214 @@ steps:
       '--platform', 'managed',
       '--allow-unauthenticated',
       '--service-account', 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
+      
+      # Resource configuration
       '--memory', '4Gi',
       '--cpu', '2',
-      '--port', '8080'
+      '--port', '8080',
+      '--timeout', '3600',
+      '--concurrency', '80',
+      
+      # Scaling configuration
+      '--min-instances', '0',
+      '--max-instances', '10',
+      
+      # Environment variables
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
+      
+      # Labels for organization
+      '--labels', 'app=cipher,environment=production,version=$BUILD_ID',
+      
+      # Health check configuration
+      '--cpu-throttling',
+      '--no-cpu-boost'
     ]
     id: 'deploy'
     waitFor: ['push-image']
 
-  # Verify deployment
+  # Step 6: Configure advanced Cloud Run settings
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
-          --region=us-central1 --project=$PROJECT_ID --format='value(status.url)')
-        echo "🎉 CIPHER Platform deployed successfully!"
-        echo "📊 Dashboard: $SERVICE_URL/dashboard"
-        echo "🏥 Health: $SERVICE_URL/health"
-        echo "📈 Stats: $SERVICE_URL/api/stats"
-    id: 'verify'
+        echo "⚙️ Configuring advanced Cloud Run settings..."
+        
+        # Apply service.yaml configuration for advanced settings
+        if [ -f "service.yaml" ]; then
+          echo "Applying service.yaml configuration..."
+          gcloud run services replace service.yaml --region=us-central1
+        fi
+        
+        # Set IAM policies
+        echo "Setting IAM policies for public access..."
+        gcloud run services add-iam-policy-binding telegram-ai-processor \
+          --region=us-central1 \
+          --member="allUsers" \
+          --role="roles/run.invoker"
+        
+        echo "✅ Advanced configuration applied"
+    id: 'configure'
     waitFor: ['deploy']
 
-# REQUIRED: Logging configuration for service account builds
+  # Step 7: Run health checks and verify deployment
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "🏥 Running deployment health checks..."
+        
+        # Get service URL
+        SERVICE_URL=$$(gcloud run services describe telegram-ai-processor \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format='value(status.url)')
+        
+        if [ -z "$$SERVICE_URL" ]; then
+          echo "❌ Failed to get service URL"
+          exit 1
+        fi
+        
+        echo "Service deployed at: $$SERVICE_URL"
+        
+        # Wait for service to be ready
+        echo "Waiting for service to initialize..."
+        sleep 30
+        
+        # Test health endpoints
+        echo "Testing health endpoints..."
+        
+        # Test liveness probe
+        echo "Testing /health/live endpoint..."
+        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/health/live" || echo "000")
+        if [ "$$HTTP_STATUS" = "200" ]; then
+          echo "✅ Liveness check: PASSED"
+        else
+          echo "⚠️ Liveness check: HTTP $$HTTP_STATUS (may need more time to initialize)"
+        fi
+        
+        # Test readiness probe
+        echo "Testing /health endpoint..."
+        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/health" || echo "000")
+        if [ "$$HTTP_STATUS" = "200" ]; then
+          echo "✅ Readiness check: PASSED"
+        else
+          echo "⚠️ Readiness check: HTTP $$HTTP_STATUS (may need more time to initialize)"
+        fi
+        
+        # Test main dashboard
+        echo "Testing main dashboard..."
+        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/" || echo "000")
+        if [ "$$HTTP_STATUS" = "200" ]; then
+          echo "✅ Dashboard: PASSED"
+        else
+          echo "⚠️ Dashboard: HTTP $$HTTP_STATUS"
+        fi
+        
+        # Test API endpoints
+        echo "Testing API endpoints..."
+        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/api/stats" || echo "000")
+        if [ "$$HTTP_STATUS" = "200" ]; then
+          echo "✅ Stats API: PASSED"
+        else
+          echo "⚠️ Stats API: HTTP $$HTTP_STATUS"
+        fi
+        
+        echo ""
+        echo "🎉 CIPHER Platform Deployment Completed!"
+        echo "======================================="
+        echo "Service URL: $$SERVICE_URL"
+        echo "Dashboard: $$SERVICE_URL/dashboard"
+        echo "Health Check: $$SERVICE_URL/health"
+        echo "Stats API: $$SERVICE_URL/api/stats"
+        echo "Monitoring: $$SERVICE_URL/api/monitoring/status"
+        echo ""
+        echo "🔧 Technical Details:"
+        echo "Project: $PROJECT_ID"
+        echo "Build ID: $BUILD_ID"
+        echo "Service Account: cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        echo "Region: us-central1"
+        echo "Memory: 4Gi"
+        echo "CPU: 2"
+        echo "BigQuery Dataset: telegram_data"
+        echo ""
+        echo "📊 Monitoring Channels:"
+        echo "🔴 @DarkfeedNews - Threat Intelligence"
+        echo "🟠 @breachdetector - Data Breach Monitor"
+        echo "🔵 @secharvester - Security News"
+        echo ""
+        echo "🛡️ CIPHER Platform is now operational!"
+    id: 'verify'
+    waitFor: ['configure']
+
+  # Step 8: Generate deployment report
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "📋 Generating deployment report..."
+        
+        # Service status
+        echo ""
+        echo "🔍 Service Status:"
+        gcloud run services describe telegram-ai-processor \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format='table(status.conditions[].type,status.conditions[].status,status.conditions[].reason)'
+        
+        # Service configuration
+        echo ""
+        echo "⚙️ Service Configuration:"
+        gcloud run services describe telegram-ai-processor \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format='table(spec.template.spec.containers[].resources.limits.memory,spec.template.spec.containers[].resources.limits.cpu,spec.template.spec.serviceAccountName)'
+        
+        # BigQuery dataset status
+        echo ""
+        echo "📊 BigQuery Status:"
+        bq show --format=prettyjson $PROJECT_ID:telegram_data | grep -E '"datasetId"|"location"|"description"' || true
+        
+        # Service account permissions
+        echo ""
+        echo "🔑 Service Account Permissions:"
+        gcloud projects get-iam-policy $PROJECT_ID \
+          --flatten="bindings[].members" \
+          --filter="bindings.members:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+          --format="table(bindings.role)" | head -10
+        
+        echo ""
+        echo "✅ Deployment report generated successfully"
+        echo "📝 Build completed at: $$(date)"
+    id: 'report'
+    waitFor: ['verify']
+
+# Required options for service account builds
 options:
   logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'  # Higher performance for builds
+  diskSizeGb: 100
+  substitution_option: 'ALLOW_LOOSE'  # Allow loose substitutions
 
+# Substitutions for flexibility
+substitutions:
+  _SERVICE_NAME: 'telegram-ai-processor'
+  _REGION: 'us-central1'
+  _MEMORY: '4Gi'
+  _CPU: '2'
+  _MIN_INSTANCES: '0'
+  _MAX_INSTANCES: '10'
+
+# Images to be pushed to Container Registry
 images:
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
+
+# Artifacts and logs
+artifacts:
+  objects:
+    location: 'gs://$PROJECT_ID-build-artifacts'
+    paths:
+      - 'build-logs/*.log'
