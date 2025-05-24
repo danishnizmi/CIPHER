@@ -350,12 +350,12 @@
                                 {% endif %}
                             </h3>
                             <p class="text-gray-400 mb-2">
-                                Monitoring {{ monitoring.total_channels }} intelligence channels
+                                Monitoring {{ monitoring.total_channels }} cybersecurity intelligence channels
                             </p>
                             {% if monitoring.channels %}
                             <div class="flex flex-wrap gap-2">
                                 {% for channel in monitoring.channels[:3] %}
-                                <span class="px-2 py-1 bg-cipher-blue/20 text-cipher-blue text-xs rounded-full border border-cipher-blue/30 data-stream">
+                                <span class="px-2 py-1 {% if channel == '@DarkfeedNews' %}bg-red-500/20 text-red-400 border-red-500/30{% elif channel == '@breachdetector' %}bg-orange-500/20 text-orange-400 border-orange-500/30{% elif channel == '@secharvester' %}bg-blue-500/20 text-blue-400 border-blue-500/30{% else %}bg-cipher-blue/20 text-cipher-blue border-cipher-blue/30{% endif %} text-xs rounded-full border data-stream">
                                     {{ channel }}
                                 </span>
                                 {% endfor %}
@@ -403,11 +403,11 @@
 
         <!-- Statistics Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            <!-- Total Messages -->
+            <!-- Total Intelligence -->
             <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10">
                 <div class="flex items-center justify-between mb-4">
                     <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center group-hover:animate-bounce-slow">
-                        <i class="fas fa-comments text-white text-xl"></i>
+                        <i class="fas fa-database text-white text-xl"></i>
                     </div>
                     <div class="text-right">
                         <div class="text-2xl font-bold neon-text" x-data="{ count: 0 }" x-init="
@@ -421,23 +421,23 @@
                                 }
                             }, 16);
                         " x-text="Math.floor(count).toLocaleString()">0</div>
-                        <div class="text-xs text-gray-400 font-mono">TOTAL MESSAGES</div>
+                        <div class="text-xs text-gray-400 font-mono">TOTAL INTEL</div>
                     </div>
                 </div>
                 <div class="w-full bg-gray-700/30 rounded-full h-2">
-                    <div class="progress-bar h-2 rounded-full" style="width: {{ (stats.total_messages / 10000 * 100) if stats.total_messages < 10000 else 100 }}%"></div>
+                    <div class="progress-bar h-2 rounded-full" style="width: {{ (stats.total_messages / 1000 * 100) if stats.total_messages < 1000 else 100 }}%"></div>
                 </div>
             </div>
 
-            <!-- Processed Today -->
+            <!-- High Threats -->
             <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.1s;">
                 <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg flex items-center justify-center group-hover:animate-spin-slow">
-                        <i class="fas fa-clock text-white text-xl"></i>
+                    <div class="w-12 h-12 bg-gradient-to-r {% if stats.high_threats > 0 %}from-red-500 to-orange-500{% else %}from-green-500 to-emerald-500{% endif %} rounded-lg flex items-center justify-center {% if stats.high_threats > 0 %}animate-pulse{% else %}group-hover:animate-spin-slow{% endif %}">
+                        <i class="fas fa-exclamation-triangle text-white text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <div class="text-2xl font-bold text-green-400" x-data="{ count: 0 }" x-init="
-                            let target = {{ stats.processed_today }};
+                        <div class="text-2xl font-bold {% if stats.high_threats > 0 %}text-red-400{% else %}text-green-400{% endif %}" x-data="{ count: 0 }" x-init="
+                            let target = {{ stats.high_threats or 0 }};
                             let step = target / 40;
                             let timer = setInterval(() => {
                                 count += step;
@@ -447,12 +447,12 @@
                                 }
                             }, 20);
                         " x-text="Math.floor(count)">0</div>
-                        <div class="text-xs text-gray-400 font-mono">TODAY</div>
+                        <div class="text-xs text-gray-400 font-mono">HIGH THREATS</div>
                     </div>
                 </div>
-                <div class="flex items-center text-xs text-green-400">
-                    <i class="fas fa-arrow-up mr-1"></i>
-                    <span class="data-stream">Active Processing</span>
+                <div class="flex items-center text-xs {% if stats.high_threats > 0 %}text-red-400{% else %}text-green-400{% endif %}">
+                    <i class="fas fa-{% if stats.high_threats > 0 %}shield-alt{% else %}check-circle{% endif %} mr-1"></i>
+                    <span class="data-stream">{% if stats.high_threats > 0 %}ACTIVE THREATS{% else %}SECURE{% endif %}</span>
                 </div>
             </div>
 
@@ -480,27 +480,22 @@
                 </div>
             </div>
 
-            <!-- Threat Level -->
+            <!-- Processed Today -->
             <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.3s;">
                 <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r {% if stats.avg_urgency > 0.7 %}from-red-500 to-orange-500{% elif stats.avg_urgency > 0.4 %}from-yellow-500 to-orange-500{% else %}from-gray-500 to-slate-500{% endif %} rounded-lg flex items-center justify-center group-hover:animate-glow">
-                        <i class="fas fa-shield-alt text-white text-xl"></i>
+                    <div class="w-12 h-12 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-lg flex items-center justify-center group-hover:animate-glow">
+                        <i class="fas fa-clock text-white text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <div class="text-2xl font-bold {% if stats.avg_urgency > 0.7 %}text-red-400{% elif stats.avg_urgency > 0.4 %}text-yellow-400{% else %}text-gray-400{% endif %}">
-                            {{ "%.1f"|format(stats.avg_urgency * 100) }}%
+                        <div class="text-2xl font-bold text-cyan-400">
+                            {{ stats.processed_today }}
                         </div>
-                        <div class="text-xs text-gray-400 font-mono">THREAT LEVEL</div>
+                        <div class="text-xs text-gray-400 font-mono">TODAY</div>
                     </div>
                 </div>
-                <div class="text-xs {% if stats.avg_urgency > 0.7 %}text-red-400{% elif stats.avg_urgency > 0.4 %}text-yellow-400{% else %}text-green-400{% endif %} data-stream">
-                    {% if stats.avg_urgency > 0.7 %}
-                    <i class="fas fa-exclamation-triangle mr-1"></i>HIGH ALERT
-                    {% elif stats.avg_urgency > 0.4 %}
-                    <i class="fas fa-eye mr-1"></i>MONITORING
-                    {% else %}
-                    <i class="fas fa-check-circle mr-1"></i>SECURE
-                    {% endif %}
+                <div class="text-xs text-cyan-400 data-stream">
+                    <i class="fas fa-sync-alt mr-1 animate-spin"></i>
+                    <span>LIVE MONITORING</span>
                 </div>
             </div>
         </div>
@@ -579,18 +574,42 @@
                                 <div class="flex items-center justify-between mb-3">
                                     <div class="flex items-center space-x-3">
                                         <span class="font-semibold text-cipher-blue data-stream">{{ insight.chat_username or 'UNKNOWN_SOURCE' }}</span>
-                                        <span class="px-2 py-1 bg-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-500/20 text-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-400 text-xs rounded-full border border-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-500/30 font-mono">
+                                        
+                                        <!-- Channel Type Badge -->
+                                        {% if insight.channel_type == 'cyber_threat' %}
+                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 font-mono">
+                                            <i class="fas fa-skull mr-1"></i>THREAT_INTEL
+                                        </span>
+                                        {% elif insight.channel_type == 'data_leak' %}
+                                        <span class="px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded-full border border-orange-500/30 font-mono">
+                                            <i class="fas fa-database mr-1"></i>DATA_LEAK
+                                        </span>
+                                        {% elif insight.channel_type == 'security_news' %}
+                                        <span class="px-2 py-1 bg-blue-500/20 text-blue-400 text-xs rounded-full border border-blue-500/30 font-mono">
+                                            <i class="fas fa-newspaper mr-1"></i>SEC_NEWS
+                                        </span>
+                                        {% else %}
+                                        <span class="px-2 py-1 bg-gray-500/20 text-gray-400 text-xs rounded-full border border-gray-500/30 font-mono">
                                             {{ insight.category.upper() or 'OTHER' }}
                                         </span>
+                                        {% endif %}
                                         
-                                        <!-- Threat Level -->
-                                        {% if insight.urgency_score > 0.7 %}
-                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 animate-pulse font-mono">
+                                        <!-- Threat Level Badge -->
+                                        {% if insight.threat_level == 'critical' %}
+                                        <span class="px-2 py-1 bg-red-600/30 text-red-300 text-xs rounded-full border border-red-600/50 animate-pulse font-mono">
                                             <i class="fas fa-exclamation-triangle mr-1"></i>CRITICAL
                                         </span>
-                                        {% elif insight.urgency_score > 0.4 %}
+                                        {% elif insight.threat_level == 'high' %}
+                                        <span class="px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded-full border border-orange-500/30 font-mono">
+                                            <i class="fas fa-shield-alt mr-1"></i>HIGH
+                                        </span>
+                                        {% elif insight.threat_level == 'medium' %}
                                         <span class="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-xs rounded-full border border-yellow-500/30 font-mono">
                                             <i class="fas fa-eye mr-1"></i>MEDIUM
+                                        </span>
+                                        {% elif insight.urgency_score > 0.7 %}
+                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 animate-pulse font-mono">
+                                            <i class="fas fa-exclamation-triangle mr-1"></i>URGENT
                                         </span>
                                         {% endif %}
                                     </div>
@@ -683,19 +702,19 @@
                     <div class="w-24 h-24 bg-gradient-to-r from-gray-600 to-slate-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-float">
                         <i class="fas fa-search text-4xl text-gray-400"></i>
                     </div>
-                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Intelligence Signals Detected</h3>
+                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Threat Intelligence Detected</h3>
                     <p class="text-gray-500 mb-6 max-w-md mx-auto">
                         {% if not monitoring.active %}
-                        CIPHER monitoring system is currently offline. Please check system configuration and restart monitoring services.
+                        CIPHER cybersecurity monitoring system is currently offline. Please check system configuration and restart monitoring services.
                         {% else %}
-                        CIPHER is actively scanning monitored channels. Intelligence signals will appear here when detected.
+                        CIPHER is actively scanning monitored cybersecurity channels. Threat intelligence will appear here when detected.
                         {% endif %}
                     </p>
                     
                     {% if not monitoring.active %}
                     <div class="glass-effect rounded-lg p-6 max-w-md mx-auto text-left">
                         <h4 class="text-sm font-semibold text-yellow-400 mb-3">
-                            <i class="fas fa-cogs mr-2"></i>SYSTEM REQUIREMENTS
+                            <i class="fas fa-cogs mr-2"></i>CYBERSECURITY SYSTEM REQUIREMENTS
                         </h4>
                         <ul class="space-y-2 text-sm text-gray-400">
                             <li class="flex items-center">
@@ -708,9 +727,17 @@
                             </li>
                             <li class="flex items-center">
                                 <i class="fas fa-exclamation-circle text-yellow-400 mr-2"></i>
-                                Restart monitoring services
+                                Restart threat monitoring services
                             </li>
                         </ul>
+                        <div class="mt-4 pt-4 border-t border-white/10">
+                            <div class="text-xs text-gray-500 mb-2">Monitored Sources:</div>
+                            <div class="space-y-1 text-xs">
+                                <div class="text-red-400">• DARKFEED - Threat Intelligence</div>
+                                <div class="text-orange-400">• Data Leak Monitor - Breach Detection</div>
+                                <div class="text-blue-400">• Security Harvester - Security News</div>
+                            </div>
+                        </div>
                         <div class="mt-4 pt-4 border-t border-white/10">
                             <a href="/health" class="text-cipher-blue hover:text-cipher-purple transition-colors text-sm font-medium">
                                 <i class="fas fa-diagnostic mr-2"></i>Run System Diagnostics
