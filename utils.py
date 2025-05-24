@@ -439,20 +439,8 @@ async def get_message_stats() -> Dict[str, Any]:
         
         if not bq_client:
             # Return default stats if BigQuery not available
-            return {
-                "total_messages": 0,
-                "processed_today": 0,
-                "avg_urgency": 0.0,
-                "unique_channels": len(MONITORED_CHANNELS),
-                "unique_users": 0,
-                "high_threats": 0,
-                "critical_threats": 0,
-                "data_breaches": 0,
-                "malware_alerts": 0,
-                "vulnerabilities": 0,
-                "cve_mentions": 0,
-                "monitoring_active": telegram_client is not None and telegram_client.is_connected() if telegram_client else False
-            }
+            logger.warning("BigQuery client not available - returning default stats")
+            return _get_default_stats()
         
         today = datetime.now().date()
         week_ago = today - timedelta(days=7)
@@ -474,37 +462,32 @@ async def get_message_stats() -> Dict[str, Any]:
         WHERE DATE(processed_date) >= '{week_ago}'
         """
         
-        query_job = bq_client.query(query, timeout=30)
-        row = next(iter(query_job), None)
-        
-        if row:
-            stats = {
-                "total_messages": int(row.total_messages) if row.total_messages else 0,
-                "processed_today": int(row.processed_today) if row.processed_today else 0,
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                "unique_channels": int(row.unique_channels) if row.unique_channels else 0,
-                "unique_users": int(row.unique_users) if row.unique_users else 0,
-                "high_threats": int(row.high_threats) if row.high_threats else 0,
-                "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
-                "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
-                "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
-                "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
-                "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
-            }
-        else:
-            stats = {
-                "total_messages": 0,
-                "processed_today": 0,
-                "avg_urgency": 0.0,
-                "unique_channels": 0,
-                "unique_users": 0,
-                "high_threats": 0,
-                "critical_threats": 0,
-                "data_breaches": 0,
-                "malware_alerts": 0,
-                "vulnerabilities": 0,
-                "cve_mentions": 0,
-            }
+        try:
+            query_job = bq_client.query(query, timeout=30)
+            row = next(iter(query_job), None)
+            
+            if row:
+                stats = {
+                    "total_messages": int(row.total_messages) if row.total_messages else 0,
+                    "processed_today": int(row.processed_today) if row.processed_today else 0,
+                    "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
+                    "unique_channels": int(row.unique_channels) if row.unique_channels else 0,
+                    "unique_users": int(row.unique_users) if row.unique_users else 0,
+                    "high_threats": int(row.high_threats) if row.high_threats else 0,
+                    "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
+                    "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
+                    "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
+                    "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
+                    "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
+                }
+            else:
+                stats = _get_default_stats()
+                
+        except Exception as query_error:
+            # Log the specific BigQuery error but don't fail
+            logger.error(f"BigQuery query failed: {query_error}")
+            stats = _get_default_stats()
+            stats["bigquery_error"] = "Query failed - using defaults"
         
         # Add monitoring status
         stats["monitoring_active"] = (
@@ -515,21 +498,26 @@ async def get_message_stats() -> Dict[str, Any]:
         return stats
 
     except Exception as e:
-        logger.error(f"Failed to get stats: {e}")
-        return {
-            "total_messages": 0,
-            "processed_today": 0,
-            "avg_urgency": 0.0,
-            "unique_channels": len(MONITORED_CHANNELS),
-            "unique_users": 0,
-            "high_threats": 0,
-            "critical_threats": 0,
-            "data_breaches": 0,
-            "malware_alerts": 0,
-            "vulnerabilities": 0,
-            "cve_mentions": 0,
-            "monitoring_active": False
-        }
+        logger.error(f"Failed to get cybersecurity stats: {e}")
+        return _get_default_stats()
+
+def _get_default_stats() -> Dict[str, Any]:
+    """Return default stats when BigQuery unavailable"""
+    return {
+        "total_messages": 0,
+        "processed_today": 0,
+        "avg_urgency": 0.0,
+        "unique_channels": len(MONITORED_CHANNELS),
+        "unique_users": 0,
+        "high_threats": 0,
+        "critical_threats": 0,
+        "data_breaches": 0,
+        "malware_alerts": 0,
+        "vulnerabilities": 0,
+        "cve_mentions": 0,
+        "monitoring_active": False,
+        "note": "Statistics will be available after BigQuery initialization"
+    }
 
 async def start_background_monitoring():
     """Start background monitoring with error handling"""
