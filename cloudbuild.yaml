@@ -4,60 +4,69 @@ steps:
     id: 'build-image'
     args: [
       'build',
-      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
-      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
+      '-t', 'gcr.io/$PROJECT_ID/cipher-intelligence:$BUILD_ID',
+      '-t', 'gcr.io/$PROJECT_ID/cipher-intelligence:latest',
       '.'
     ]
     timeout: '600s'
 
-  # Step 2: Push the Docker image to Container Registry
+  # Step 2: Push Docker images
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-build-id'
-    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
+    args: ['push', 'gcr.io/$PROJECT_ID/cipher-intelligence:$BUILD_ID']
     waitFor: ['build-image']
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-latest'
-    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest']
+    args: ['push', 'gcr.io/$PROJECT_ID/cipher-intelligence:latest']
     waitFor: ['build-image']
 
-  # Step 3: Enable required APIs and fix permissions
+  # Step 3: Enable APIs and fix permissions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'enable-apis'
+    id: 'enable-apis-and-permissions'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Ensuring required APIs are enabled..."
+        echo "🔧 Enabling required APIs..."
         gcloud services enable \
           cloudbuild.googleapis.com \
           run.googleapis.com \
           bigquery.googleapis.com \
           secretmanager.googleapis.com \
           logging.googleapis.com \
-          monitoring.googleapis.com
-        echo "APIs enabled successfully"
+          monitoring.googleapis.com \
+          storage.googleapis.com \
+          aiplatform.googleapis.com
+        echo "✅ APIs enabled successfully"
         
-        echo "Granting BigQuery permissions to Cloud Build service account..."
+        echo "🔑 Granting BigQuery permissions..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/bigquery.jobUser"
+          --role="roles/bigquery.jobUser" \
+          --quiet
         
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/bigquery.dataEditor"
+          --role="roles/bigquery.dataEditor" \
+          --quiet
         
-        echo "BigQuery permissions granted successfully"
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/storage.objectAdmin" \
+          --quiet
+        
+        echo "✅ BigQuery and Storage permissions granted"
     waitFor: ['-']
 
-  # Step 4: Verify existing secrets have values
+  # Step 4: Verify secrets configuration
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-secrets'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Checking existing secrets..."
+        echo "🔐 Verifying CIPHER secrets configuration..."
         
         # Function to check secret
         check_secret() {
@@ -65,56 +74,60 @@ steps:
           if gcloud secrets describe $secret_name >/dev/null 2>&1; then
             local secret_value=$(gcloud secrets versions access latest --secret="$secret_name" 2>/dev/null || echo "")
             if [ -n "$secret_value" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_API_ID" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_API_HASH" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_PHONE" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_GEMINI_API_KEY" ]; then
-              echo "✅ Secret $secret_name is configured with real value"
+              echo "✅ Secret $secret_name is properly configured"
               echo "configured" > /workspace/${secret_name}_status.txt
             else
-              echo "⚠️  Secret $secret_name exists but may need updating"
+              echo "⚠️  Secret $secret_name exists but needs updating"
               echo "needs_update" > /workspace/${secret_name}_status.txt
             fi
           else
-            echo "❌ Secret $secret_name does not exist"
+            echo "❌ Secret $secret_name is missing"
             echo "missing" > /workspace/${secret_name}_status.txt
           fi
         }
         
-        # Check all required secrets
+        # Check all required secrets for CIPHER
         check_secret "telegram-api-id"
         check_secret "telegram-api-hash"
         check_secret "telegram-phone-number"
         check_secret "gemini-api-key"
         
-        echo "Secret verification completed"
-    waitFor: ['enable-apis']
+        echo "🔐 Secret verification completed"
+    waitFor: ['enable-apis-and-permissions']
 
-  # Step 5: Create BigQuery dataset (idempotent)
+  # Step 5: Setup BigQuery for cybersecurity data
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-bigquery'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Setting up BigQuery dataset..."
+        echo "📊 Setting up BigQuery for CIPHER cybersecurity intelligence..."
         
         # Create dataset if it doesn't exist
         if ! bq show --dataset $PROJECT_ID:telegram_data >/dev/null 2>&1; then
-          bq mk --location=US --description="CIPHER Cybersecurity Intelligence Platform" telegram_data
-          echo "Created BigQuery dataset: telegram_data"
+          bq mk --location=US \
+            --description="CIPHER Cybersecurity Intelligence Platform - Threat Intelligence Data" \
+            telegram_data
+          echo "✅ Created BigQuery dataset: telegram_data"
         else
-          echo "BigQuery dataset already exists ✓"
+          echo "✅ BigQuery dataset already exists"
         fi
+        
+        echo "📊 BigQuery setup completed"
     waitFor: ['verify-secrets']
 
-  # Step 6: Deploy to Cloud Run with optimized configuration
+  # Step 6: Deploy CIPHER to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'deploy-service'
+    id: 'deploy-cipher'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Deploying CIPHER to Cloud Run with production configuration..."
+        echo "🚀 Deploying CIPHER Cybersecurity Intelligence Platform..."
         
         gcloud run deploy telegram-ai-processor \
-          --image gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID \
+          --image gcr.io/$PROJECT_ID/cipher-intelligence:$BUILD_ID \
           --platform managed \
           --region us-central1 \
           --allow-unauthenticated \
@@ -127,63 +140,78 @@ steps:
           --timeout 3600 \
           --startup-cpu-boost \
           --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-          --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080" \
+          --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,ENVIRONMENT=production" \
           --execution-environment gen2 \
           --no-cpu-throttling \
           --quiet
         
-        echo "CIPHER deployment completed ✓"
+        echo "✅ CIPHER deployment completed"
     waitFor: ['push-build-id', 'push-latest', 'setup-bigquery']
 
-  # Step 7: Wait for service to be ready and test
+  # Step 7: Test deployment and verify functionality
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'test-service'
+    id: 'test-cipher-deployment'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Testing CIPHER service deployment..."
+        echo "🧪 Testing CIPHER deployment..."
         
-        # Get the actual service URL
+        # Get the service URL
         SERVICE_URL=$$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "CIPHER service deployed at: $$SERVICE_URL"
+        echo "🛡️  CIPHER deployed at: $$SERVICE_URL"
         
         # Wait for service to be ready
-        echo "Waiting for CIPHER to initialize..."
-        for i in {1..30}; do
-          echo "Health check attempt $$i/30..."
+        echo "⏳ Waiting for CIPHER to initialize..."
+        for i in {1..20}; do
+          echo "Health check attempt $$i/20..."
           
+          # Test liveness probe first
           if curl -f -s "$$SERVICE_URL/health/live" >/dev/null 2>&1; then
             echo "✅ CIPHER liveness check passed"
+            
+            # Test main health endpoint
+            if curl -f -s "$$SERVICE_URL/health" >/dev/null 2>&1; then
+              echo "✅ CIPHER main health check passed"
+              break
+            fi
+          fi
+          
+          if [ $$i -eq 20 ]; then
+            echo "⚠️  Service not fully responding yet but continuing..."
             break
           fi
           
-          if [ $$i -eq 30 ]; then
-            echo "⚠️  Service not responding to liveness checks but continuing..."
-            break
-          fi
-          
-          sleep 10
+          sleep 15
         done
         
-        # Test startup probe
-        echo "Testing CIPHER startup status..."
-        if curl -f -s "$$SERVICE_URL/health/startup" >/dev/null 2>&1; then
-          echo "✅ CIPHER startup probe responding"
+        # Test additional endpoints
+        echo "🔍 Testing CIPHER endpoints..."
+        
+        # Test status endpoint
+        if curl -f -s "$$SERVICE_URL/status" >/dev/null 2>&1; then
+          echo "✅ CIPHER status endpoint responding"
         else
-          echo "⚠️  Startup probe not responding yet"
+          echo "⚠️  Status endpoint not responding yet"
+        fi
+        
+        # Test API endpoints
+        if curl -f -s "$$SERVICE_URL/api/stats" >/dev/null 2>&1; then
+          echo "✅ CIPHER API endpoints responding"
+        else
+          echo "⚠️  API endpoints not responding yet"
         fi
         
         # Store service URL for summary
         echo "$$SERVICE_URL" > /workspace/service_url.txt
         
-        echo "CIPHER testing completed ✓"
-    waitFor: ['deploy-service']
+        echo "🧪 CIPHER testing completed"
+    waitFor: ['deploy-cipher']
 
-  # Step 8: Final status and instructions
+  # Step 8: Deployment summary and status
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deployment-summary'
     entrypoint: 'bash'
@@ -199,22 +227,23 @@ steps:
         GEMINI_KEY_STATUS=$$(cat /workspace/gemini-api-key_status.txt 2>/dev/null || echo "unknown")
         
         echo ""
-        echo "🎉 CIPHER DEPLOYMENT COMPLETE!"
-        echo "========================================"
-        echo "🛡️  CIPHER Intelligence Platform"
+        echo "🛡️  CIPHER DEPLOYMENT COMPLETE!"
+        echo "========================================================================"
+        echo "🎯 CIPHER Cybersecurity Intelligence Platform"
         echo "📍 Service URL: $$SERVICE_URL"
         echo "🔗 Dashboard: $$SERVICE_URL"
         echo "📊 System Status: $$SERVICE_URL/status"
         echo "🏥 Health Check: $$SERVICE_URL/health"
-        echo "========================================"
+        echo "📡 API Endpoints: $$SERVICE_URL/api/stats"
+        echo "========================================================================"
         echo ""
         
         # Check configuration status
         READY=true
         CONFIGURED_COUNT=0
         
-        echo "📋 CONFIGURATION STATUS:"
-        echo "========================"
+        echo "📋 CIPHER CONFIGURATION STATUS:"
+        echo "================================"
         
         if [ "$$TELEGRAM_API_ID_STATUS" = "configured" ]; then
           echo "✅ Telegram API ID configured"
@@ -249,54 +278,70 @@ steps:
         fi
         
         echo ""
-        echo "Configuration: $$CONFIGURED_COUNT/4 secrets properly configured"
+        echo "Configuration Status: $$CONFIGURED_COUNT/4 secrets properly configured"
         
         if [ "$$READY" = "true" ]; then
           echo ""
-          echo "🎯 CIPHER SYSTEM OPERATIONAL!"
-          echo "All secrets configured. Cybersecurity monitoring active."
-          echo "🔍 Monitored Sources:"
-          echo "   • @DarkfeedNews - Threat Intelligence"
-          echo "   • @breachdetector - Data Breach Monitor"
-          echo "   • @secharvester - Security News"
+          echo "🎯 CIPHER SYSTEM FULLY OPERATIONAL!"
+          echo "All secrets configured. Full cybersecurity monitoring active."
+          echo ""
+          echo "🔍 CYBERSECURITY INTELLIGENCE SOURCES:"
+          echo "   🔴 @DarkfeedNews - Advanced Persistent Threats & Zero-days"
+          echo "   🟠 @breachdetector - Real-time Data Breach Monitoring"
+          echo "   🔵 @secharvester - CVE Tracking & Security Advisories"
+          echo ""
+          echo "🛡️  CIPHER CAPABILITIES:"
+          echo "   • Real-time threat intelligence monitoring"
+          echo "   • APT campaign tracking and attribution"
+          echo "   • Data breach detection and alerting"
+          echo "   • CVE and vulnerability monitoring"
+          echo "   • IOC extraction and correlation"
+          echo "   • Malware family identification"
+          echo "   • Threat actor attribution"
+          echo "   • Geographic and industry targeting analysis"
           echo ""
           echo "🚀 Access your CIPHER dashboard: $$SERVICE_URL"
         else
           echo ""
           echo "🔧 CONFIGURATION ISSUES DETECTED"
-          echo "Some secrets need attention. Service will start but monitoring may be limited."
-          echo "Check logs and secret values."
+          echo "Some secrets need attention. CIPHER will start but monitoring may be limited."
+          echo "Please update secret values and redeploy for full functionality."
         fi
         
         echo ""
-        echo "🔧 Useful Commands:"
-        echo "   • View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=20"
+        echo "🔧 CIPHER MANAGEMENT COMMANDS:"
+        echo "   • View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=50"
         echo "   • Service status: gcloud run services describe telegram-ai-processor --region=us-central1"
-        echo "   • Check system: curl $$SERVICE_URL/status"
+        echo "   • System health: curl $$SERVICE_URL/health"
+        echo "   • API status: curl $$SERVICE_URL/api/stats"
+        echo "   • Threat analytics: curl $$SERVICE_URL/api/threat-analytics"
+        echo "   • Check BigQuery: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \\`$PROJECT_ID.telegram_data.processed_messages\\`'"
         echo ""
-        echo "✨ CIPHER Cybersecurity Intelligence Platform is ready!"
-    waitFor: ['test-service']
+        echo "🛡️  CIPHER Cybersecurity Intelligence Platform is ready!"
+        echo "Monitor threats, track APTs, and stay ahead of cybersecurity risks."
+    waitFor: ['test-cipher-deployment']
 
 # Service account configuration
 serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
 
-# Build options for production
+# Build options optimized for production
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
   substitution_option: 'ALLOW_LOOSE'
   dynamic_substitutions: true
 
-# Extended timeout for production deployment
-timeout: '2400s'
+# Extended timeout for comprehensive deployment
+timeout: '3000s'
 
-# Build tags
+# Build tags for organization
 tags:
-  - 'cipher-intelligence-platform'
-  - 'cybersecurity-monitoring'
+  - 'cipher-cybersecurity-platform'
+  - 'threat-intelligence'
   - 'production'
+  - 'cybersecurity-monitoring'
 
-# Substitutions
+# Substitutions for flexibility
 substitutions:
   _REGION: 'us-central1'
   _SERVICE_NAME: 'telegram-ai-processor'
