@@ -10,6 +10,7 @@ import asyncio
 from google.cloud import bigquery
 from google.cloud import secretmanager
 from google.cloud import storage
+from google.api_core import exceptions as gcp_exceptions
 import google.generativeai as genai
 
 # Configure logging
@@ -99,8 +100,10 @@ async def initialize_clients():
             # Initialize BigQuery client
             try:
                 bq_client = bigquery.Client(project=PROJECT_ID)
-                # Test connection
-                list(bq_client.list_datasets(max_results=1))
+                # Test connection with a simple query
+                query = f"SELECT 1 as test"
+                query_job = bq_client.query(query)
+                list(query_job.result())  # Force execution
                 logger.info("BigQuery client initialized successfully")
             except Exception as e:
                 logger.error(f"BigQuery client initialization failed: {e}")
@@ -131,6 +134,40 @@ async def initialize_clients():
         except Exception as e:
             logger.error(f"Failed to initialize Google Cloud clients: {e}")
             return False
+
+async def create_storage_bucket():
+    """Create storage bucket if it doesn't exist"""
+    try:
+        if not storage_client:
+            await initialize_clients()
+        
+        if not storage_client:
+            logger.error("Storage client not available for bucket creation")
+            return False
+        
+        try:
+            # Check if bucket exists
+            bucket = storage_client.bucket(BUCKET_NAME)
+            bucket.reload()
+            logger.info(f"Storage bucket {BUCKET_NAME} already exists")
+            return True
+        except gcp_exceptions.NotFound:
+            # Create bucket
+            logger.info(f"Creating storage bucket: {BUCKET_NAME}")
+            bucket = storage_client.bucket(BUCKET_NAME)
+            bucket.storage_class = "STANDARD"
+            bucket.location = "US"
+            
+            bucket = storage_client.create_bucket(bucket, timeout=30)
+            logger.info(f"Created storage bucket: {BUCKET_NAME}")
+            return True
+        except Exception as e:
+            logger.error(f"Error checking/creating bucket: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Failed to create storage bucket: {e}")
+        return False
 
 async def get_secret(secret_id: str) -> Optional[str]:
     """Get secret from Secret Manager with retries and validation"""
@@ -174,7 +211,7 @@ async def setup_bigquery_tables():
         try:
             dataset = bq_client.get_dataset(dataset_ref)
             logger.info(f"BigQuery dataset {DATASET_ID} already exists")
-        except Exception:
+        except gcp_exceptions.NotFound:
             dataset = bigquery.Dataset(dataset_ref)
             dataset.location = "US"
             dataset.description = "CIPHER Cybersecurity Intelligence Platform - Threat Intelligence Data"
@@ -231,7 +268,7 @@ async def setup_bigquery_tables():
             if missing_fields:
                 logger.info(f"Table schema will be updated with new fields: {missing_fields}")
                 
-        except Exception:
+        except gcp_exceptions.NotFound:
             table = bigquery.Table(table_ref, schema=schema)
             table.description = "CIPHER Cybersecurity Intelligence Messages - Threat Intelligence Data"
             
@@ -299,6 +336,9 @@ async def download_session_from_storage() -> Optional[bytes]:
         
         if not storage_client:
             raise Exception("Storage client not available")
+        
+        # Ensure bucket exists
+        await create_storage_bucket()
         
         logger.info(f"Downloading Telegram session from gs://{BUCKET_NAME}/{SESSION_NAME}.session")
         
@@ -393,6 +433,9 @@ async def initialize_telegram_client():
         me = await telegram_client.get_me()
         logger.info(f"Telegram client connected successfully: {me.username or me.first_name} (ID: {me.id})")
         
+        # Start monitoring channels for new messages
+        await start_channel_monitoring()
+        
         return True
         
     except Exception as e:
@@ -403,6 +446,162 @@ async def initialize_telegram_client():
             except:
                 pass
             telegram_client = None
+        return False
+
+async def start_channel_monitoring():
+    """Start monitoring cybersecurity channels for new messages"""
+    if not telegram_client:
+        logger.error("Telegram client not available for monitoring")
+        return False
+    
+    try:
+        from telethon import events
+        
+        logger.info("Starting cybersecurity channel monitoring...")
+        
+        # Event handler for new messages
+        @telegram_client.on(events.NewMessage)
+        async def handle_new_message(event):
+            try:
+                # Check if message is from a monitored channel
+                chat = await event.get_chat()
+                if hasattr(chat, 'username') and f"@{chat.username}" in MONITORED_CHANNELS:
+                    logger.info(f"New message from {chat.username}: processing...")
+                    await process_message(event)
+                    
+            except Exception as e:
+                logger.error(f"Error handling new message: {e}")
+        
+        # Get recent messages from monitored channels
+        for channel_username in MONITORED_CHANNELS:
+            try:
+                logger.info(f"Fetching recent messages from {channel_username}...")
+                
+                # Get entity
+                entity = await telegram_client.get_entity(channel_username)
+                
+                # Get recent messages (last 24 hours)
+                async for message in telegram_client.iter_messages(entity, limit=50):
+                    if message.date and (datetime.now() - message.date.replace(tzinfo=None)) < timedelta(hours=24):
+                        await process_message(message, entity)
+                    
+                logger.info(f"Processed recent messages from {channel_username}")
+                await asyncio.sleep(2)  # Rate limiting
+                
+            except Exception as e:
+                logger.error(f"Error processing channel {channel_username}: {e}")
+        
+        logger.info("Channel monitoring initialized successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to start channel monitoring: {e}")
+        return False
+
+async def process_message(message, entity=None):
+    """Process a cybersecurity message with AI analysis"""
+    try:
+        if not message.text:
+            return
+        
+        # Get chat info
+        if entity:
+            chat = entity
+        else:
+            chat = await message.get_chat()
+        
+        chat_username = f"@{chat.username}" if hasattr(chat, 'username') else "Unknown"
+        
+        # Skip if not from monitored channels
+        if chat_username not in MONITORED_CHANNELS:
+            return
+        
+        logger.info(f"Processing message from {chat_username}")
+        
+        # Get channel metadata
+        channel_metadata = CHANNEL_METADATA.get(chat_username, {})
+        
+        # Analyze with Gemini AI
+        analysis = await analyze_with_gemini(message.text, chat_username, channel_metadata)
+        
+        # Extract indicators
+        indicators = extract_cybersecurity_indicators(message.text)
+        
+        # Prepare data for BigQuery
+        processed_data = {
+            "message_id": str(message.id),
+            "chat_id": str(chat.id),
+            "chat_username": chat_username,
+            "user_id": str(message.sender_id) if message.sender_id else None,
+            "username": None,  # Will be filled if available
+            "message_text": message.text[:10000],  # Limit text length
+            "message_date": message.date.isoformat() if message.date else datetime.now().isoformat(),
+            "processed_date": datetime.now().isoformat(),
+            
+            # AI analysis
+            "gemini_analysis": analysis.get("gemini_analysis", ""),
+            "sentiment": analysis.get("sentiment", "neutral"),
+            "key_topics": analysis.get("key_topics", []),
+            "urgency_score": analysis.get("urgency_score", 0.0),
+            "category": analysis.get("category", "other"),
+            
+            # Threat intelligence
+            "threat_level": analysis.get("threat_level", "low"),
+            "threat_type": analysis.get("threat_type", "unknown"),
+            "channel_type": channel_metadata.get("type", "unknown"),
+            "channel_priority": channel_metadata.get("priority", "medium"),
+            "iocs_detected": indicators.get("ip_addresses", []) + indicators.get("domains", []) + indicators.get("file_hashes", []),
+            "cve_references": indicators.get("cve_references", []),
+            "malware_families": indicators.get("malware_families", []),
+            "affected_systems": analysis.get("affected_systems", []),
+            
+            # Advanced fields
+            "attack_vectors": indicators.get("attack_vectors", []) + analysis.get("attack_vectors", []),
+            "threat_actors": indicators.get("threat_actors", []) + analysis.get("threat_actors", []),
+            "campaign_names": indicators.get("campaign_names", []) + analysis.get("campaign_names", []),
+            "geographical_targets": analysis.get("geographical_targets", []),
+            "industry_targets": analysis.get("industry_targets", []),
+        }
+        
+        # Insert into BigQuery
+        await insert_to_bigquery(processed_data)
+        
+        logger.info(f"Successfully processed message from {chat_username} - Threat level: {analysis.get('threat_level', 'low')}")
+        
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+
+async def insert_to_bigquery(data: Dict[str, Any]):
+    """Insert processed message data into BigQuery"""
+    try:
+        if not bq_client:
+            await initialize_clients()
+        
+        if not bq_client:
+            logger.error("BigQuery client not available")
+            return False
+        
+        table_ref = bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = bq_client.get_table(table_ref)
+        
+        # Convert datetime strings to proper format
+        if isinstance(data.get("message_date"), str):
+            data["message_date"] = datetime.fromisoformat(data["message_date"].replace("Z", "+00:00"))
+        if isinstance(data.get("processed_date"), str):
+            data["processed_date"] = datetime.fromisoformat(data["processed_date"].replace("Z", "+00:00"))
+        
+        # Insert row
+        errors = bq_client.insert_rows_json(table, [data])
+        
+        if errors:
+            logger.error(f"BigQuery insert errors: {errors}")
+            return False
+        
+        logger.info("Successfully inserted data into BigQuery")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to insert data into BigQuery: {e}")
         return False
 
 def extract_cybersecurity_indicators(text: str) -> Dict[str, List[str]]:
@@ -535,14 +734,6 @@ async def analyze_with_gemini(text: str, channel_username: str, channel_metadata
         - Apply threat multiplier of {threat_multiplier} to urgency score
         - Extract specific threat actors, campaign names, affected regions/industries
         - Identify attack vectors and techniques
-
-        Key indicators to analyze:
-        - CVE references and CVSS scores
-        - Malware family names and IOCs
-        - Attack techniques and TTPs
-        - Threat actor attribution
-        - Geographic and industry targeting
-        - Timeline and impact assessment
 
         Message to analyze: "{text[:2000]}"
 
@@ -922,6 +1113,12 @@ async def start_background_monitoring():
     
     try:
         logger.info("🛡️ Starting CIPHER cybersecurity monitoring system...")
+        
+        # Initialize clients first
+        await initialize_clients()
+        
+        # Create storage bucket if needed
+        await create_storage_bucket()
         
         # Initialize Gemini AI
         gemini_success = await initialize_gemini()
