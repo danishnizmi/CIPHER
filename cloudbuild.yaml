@@ -1,0 +1,70 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
+      '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
+      '.'
+    ]
+
+  # Push the Docker image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args: [
+      'run', 'deploy', 'telegram-ai-processor',
+      '--image', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
+      '--platform', 'managed',
+      '--region', 'us-central1',
+      '--allow-unauthenticated',
+      '--port', '8080',
+      '--memory', '1Gi',
+      '--cpu', '1',
+      '--min-instances', '0',
+      '--max-instances', '10',
+      '--concurrency', '80',
+      '--timeout', '300',
+      '--service-account', 'cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com',
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=primal-chariot-382610',
+      '--set-env-vars', 'WEBHOOK_URL=https://telegram-ai-processor-[HASH]-uc.a.run.app',
+      '--set-env-vars', 'TELEGRAM_SECRET_TOKEN=your-webhook-secret'
+    ]
+
+  # Update webhook URL (optional step to get the actual URL and update secrets)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Get the service URL
+        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
+          --region=us-central1 \
+          --format='value(status.url)')
+        
+        echo "Service deployed at: $SERVICE_URL"
+        
+        # Update the webhook URL environment variable
+        gcloud run services update telegram-ai-processor \
+          --region=us-central1 \
+          --set-env-vars="WEBHOOK_URL=$SERVICE_URL"
+
+# Use the service account for all steps
+serviceAccount: 'projects/primal-chariot-382610/serviceAccounts/cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+timeout: '1200s'
+
+tags:
+  - 'telegram-ai-processor'
+  - 'cloud-run'
+  - 'production'
