@@ -1,165 +1,262 @@
 #!/bin/bash
 
-# Quick deployment script for Telegram AI Processor with existing secrets
-# Usage: ./deploy.sh
+# CIPHER Platform - Production Deployment Script
+# This script handles complete deployment with permission fixes
 
 set -e
 
+# Configuration
 PROJECT_ID="primal-chariot-382610"
-REGION="us-central1"
 SERVICE_NAME="telegram-ai-processor"
+REGION="us-central1"
+SERVICE_ACCOUNT="cipher-service@${PROJECT_ID}.iam.gserviceaccount.com"
+CLOUD_BUILD_SA="cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com"
+DATASET_ID="telegram_data"
+TABLE_ID="processed_messages"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+echo "🛡️ CIPHER Platform - Production Deployment"
+echo "============================================"
+echo "Project: $PROJECT_ID"
+echo "Service: $SERVICE_NAME"
+echo "Region: $REGION"
+echo ""
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+# Check if gcloud is authenticated
+if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
+    echo "❌ Error: No active gcloud authentication found"
+    echo "Please run: gcloud auth login"
+    exit 1
+fi
+
+# Set the project
+echo "📋 Setting up project..."
+gcloud config set project $PROJECT_ID
+
+# Enable required APIs
+echo "🔧 Enabling required Google Cloud APIs..."
+gcloud services enable \
+    bigquery.googleapis.com \
+    run.googleapis.com \
+    cloudbuild.googleapis.com \
+    container.googleapis.com \
+    artifactregistry.googleapis.com \
+    logging.googleapis.com \
+    monitoring.googleapis.com \
+    --project=$PROJECT_ID
+
+echo "✅ APIs enabled successfully"
+
+# Fix BigQuery permissions
+echo "🗄️ Setting up BigQuery permissions..."
+
+# Create service account if it doesn't exist
+gcloud iam service-accounts describe $SERVICE_ACCOUNT --project=$PROJECT_ID >/dev/null 2>&1 || {
+    echo "Creating service account: $SERVICE_ACCOUNT"
+    gcloud iam service-accounts create cipher-service \
+        --display-name="CIPHER Service Account" \
+        --description="Service account for CIPHER cybersecurity platform" \
+        --project=$PROJECT_ID
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+# Grant BigQuery permissions to service account
+echo "Setting BigQuery permissions for cipher-service..."
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/bigquery.admin" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/bigquery.jobUser" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/bigquery.dataEditor" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/logging.logWriter" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/monitoring.metricWriter" \
+    --quiet
+
+# Grant Cloud Build permissions
+echo "Setting Cloud Build permissions..."
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$CLOUD_BUILD_SA" \
+    --role="roles/bigquery.admin" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$CLOUD_BUILD_SA" \
+    --role="roles/run.admin" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$CLOUD_BUILD_SA" \
+    --role="roles/iam.serviceAccountUser" \
+    --quiet
+
+echo "✅ Permissions configured successfully"
+
+# Setup BigQuery dataset and table
+echo "📊 Setting up BigQuery dataset and table..."
+
+# Create dataset if it doesn't exist
+bq ls --project_id=$PROJECT_ID $DATASET_ID >/dev/null 2>&1 || {
+    echo "Creating BigQuery dataset: $DATASET_ID"
+    bq mk --dataset \
+        --location=US \
+        --description="CIPHER Telegram Intelligence Data" \
+        $PROJECT_ID:$DATASET_ID
 }
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+# Create table schema
+cat > /tmp/cipher_table_schema.json << 'EOF'
+[
+  {
+    "name": "message_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Unique identifier for the message"
+  },
+  {
+    "name": "channel",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Source channel name"
+  },
+  {
+    "name": "timestamp",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "When the message was processed"
+  },
+  {
+    "name": "content",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Original message content"
+  },
+  {
+    "name": "threat_level",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "AI-assessed threat level"
+  },
+  {
+    "name": "threat_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Type of threat detected"
+  },
+  {
+    "name": "processed_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "When this record was created"
+  }
+]
+EOF
+
+# Create table if it doesn't exist
+bq ls --project_id=$PROJECT_ID $DATASET_ID.$TABLE_ID >/dev/null 2>&1 || {
+    echo "Creating BigQuery table: $TABLE_ID"
+    bq mk --table \
+        --description="CIPHER processed messages" \
+        $PROJECT_ID:$DATASET_ID.$TABLE_ID \
+        /tmp/cipher_table_schema.json
 }
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+echo "✅ BigQuery setup completed"
 
-# Function to check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+# Build and deploy the service
+echo "🚀 Building and deploying CIPHER service..."
 
-# Check prerequisites
-check_prerequisites() {
-    print_status "Checking prerequisites..."
-    
-    if ! command_exists gcloud; then
-        print_error "gcloud CLI not found. Please install Google Cloud SDK."
-        exit 1
-    fi
-    
-    # Check if authenticated
-    if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
-        print_error "Please authenticate with gcloud first: gcloud auth login"
-        exit 1
-    fi
-    
-    print_success "Prerequisites check passed"
-}
+# Deploy using gcloud run deploy
+gcloud run deploy $SERVICE_NAME \
+    --source . \
+    --platform managed \
+    --region $REGION \
+    --allow-unauthenticated \
+    --service-account $SERVICE_ACCOUNT \
+    --memory 4Gi \
+    --cpu 2 \
+    --timeout 3600 \
+    --max-instances 10 \
+    --min-instances 0 \
+    --port 8080 \
+    --concurrency 80 \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=$DATASET_ID,TABLE_ID=$TABLE_ID,PORT=8080,PYTHONUNBUFFERED=1" \
+    --project $PROJECT_ID \
+    --quiet
 
-# Check existing secrets
-check_secrets() {
-    print_status "Checking existing secrets..."
-    
-    gcloud config set project $PROJECT_ID
-    
-    SECRETS_OK=true
-    SECRETS=("telegram-api-id" "telegram-api-hash" "telegram-phone-number" "gemini-api-key")
-    
-    for secret in "${SECRETS[@]}"; do
-        if gcloud secrets describe $secret >/dev/null 2>&1; then
-            print_success "Secret $secret exists"
-        else
-            print_error "Secret $secret is missing"
-            SECRETS_OK=false
-        fi
-    done
-    
-    if [ "$SECRETS_OK" = false ]; then
-        print_error "Some required secrets are missing. Please create them first."
-        exit 1
-    fi
-    
-    print_success "All required secrets exist"
-}
+echo "✅ Service deployed successfully"
 
-# Deploy application
-deploy_app() {
-    print_status "Deploying application with Cloud Build..."
-    
-    # Submit build
-    gcloud builds submit --config cloudbuild.yaml .
-    
-    print_success "Application deployed successfully"
-}
+# Get service URL
+SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
+    --region=$REGION \
+    --project=$PROJECT_ID \
+    --format='value(status.url)')
 
-# Get service info
-get_service_info() {
-    print_status "Getting service information..."
-    
-    SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
-        --region=$REGION \
-        --format='value(status.url)' 2>/dev/null || echo "Not deployed")
-    
-    echo ""
-    echo "=================================="
-    echo "🎉 DEPLOYMENT COMPLETE"
-    echo "=================================="
-    echo "📍 Service URL: $SERVICE_URL"
-    echo "🔗 Dashboard: $SERVICE_URL"
-    echo "📊 Monitoring: $SERVICE_URL/monitoring/status"
-    echo "🏥 Health: $SERVICE_URL/health"
-    echo "=================================="
-    echo ""
-    
-    if [ "$SERVICE_URL" != "Not deployed" ]; then
-        echo "📝 Next steps:"
-        echo "1. Visit $SERVICE_URL to check the dashboard"
-        echo "2. Monitor the logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE_NAME\" --limit 20"
-        echo "3. Check monitoring status: curl $SERVICE_URL/monitoring/status"
-        echo ""
-        echo "🔧 Useful commands:"
-        echo "   View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE_NAME\" --limit 20"
-        echo "   Service status: gcloud run services describe $SERVICE_NAME --region=$REGION"
-        echo "   Check BigQuery: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
-    fi
-}
+echo ""
+echo "🎉 CIPHER Platform Deployment Complete!"
+echo "======================================"
+echo "Service URL: $SERVICE_URL"
+echo "Dashboard: $SERVICE_URL/dashboard"
+echo "Health Check: $SERVICE_URL/health"
+echo "Stats API: $SERVICE_URL/api/stats"
+echo ""
 
-# Test deployment
-test_deployment() {
-    print_status "Testing deployment..."
-    
-    SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
-        --region=$REGION \
-        --format='value(status.url)' 2>/dev/null || echo "")
-    
-    if [ -n "$SERVICE_URL" ]; then
-        print_status "Waiting for service to be ready..."
-        sleep 10
-        
-        if curl -s -f "$SERVICE_URL/health" >/dev/null; then
-            print_success "Service health check passed"
-        else
-            print_warning "Service health check failed - may still be starting"
-        fi
-    else
-        print_error "Could not get service URL"
-    fi
-}
+# Test the deployment
+echo "🧪 Testing deployment..."
 
-# Main deployment logic
-main() {
-    echo "🚀 Telegram AI Processor Deployment (Using Existing Secrets)"
-    echo "============================================================="
-    
-    check_prerequisites
-    check_secrets
-    deploy_app
-    test_deployment
-    get_service_info
-    
-    echo ""
-    print_success "Deployment completed! Your Telegram AI Processor should now be running."
-    print_status "The service will use your existing secrets for Telegram and Gemini APIs."
-}
+# Test health endpoints
+echo "Testing /health/live endpoint..."
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health/live" || echo "000")
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "✅ Liveness check: PASSED"
+else
+    echo "❌ Liveness check: FAILED (HTTP $HTTP_STATUS)"
+fi
 
-# Run main function
-main "$@"
+echo "Testing /health endpoint..."
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo "000")
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "✅ Readiness check: PASSED"
+else
+    echo "❌ Readiness check: FAILED (HTTP $HTTP_STATUS)"
+fi
+
+echo "Testing /api/stats endpoint..."
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/stats" || echo "000")
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "✅ Stats API: PASSED"
+else
+    echo "❌ Stats API: FAILED (HTTP $HTTP_STATUS)"
+fi
+
+echo ""
+echo "🔍 Deployment Status:"
+gcloud run services describe $SERVICE_NAME \
+    --region=$REGION \
+    --project=$PROJECT_ID \
+    --format='table(status.conditions[].type,status.conditions[].status,status.conditions[].reason)'
+
+echo ""
+echo "📝 Quick Access Commands:"
+echo "View logs: gcloud logs read 'resource.type=cloud_run_revision' --project=$PROJECT_ID --limit=50"
+echo "Update service: ./deploy.sh"
+echo "View service: gcloud run services describe $SERVICE_NAME --region=$REGION --project=$PROJECT_ID"
+
+# Cleanup temporary files
+rm -f /tmp/cipher_table_schema.json
+
+echo ""
+echo "🛡️ CIPHER Platform is now operational!"
+echo "Monitor the dashboard at: $SERVICE_URL/dashboard"
