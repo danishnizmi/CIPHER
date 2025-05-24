@@ -3,12 +3,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 import logging
 from typing import Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime
 from utils import (
-    process_telegram_message, 
     get_recent_insights, 
     get_message_stats,
-    verify_telegram_webhook
+    MONITORED_CHANNELS,
+    telegram_client
 )
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ templates = Jinja2Templates(directory="templates")
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    """Main dashboard page showing processed insights"""
+    """Main dashboard page showing processed insights from monitored channels"""
     try:
         # Get recent insights from BigQuery
         insights = await get_recent_insights(limit=20)
@@ -25,12 +25,20 @@ async def dashboard(request: Request):
         # Get message statistics
         stats = await get_message_stats()
         
+        # Get monitoring status
+        monitoring_status = {
+            "active": telegram_client is not None and telegram_client.is_connected() if telegram_client else False,
+            "channels": MONITORED_CHANNELS,
+            "total_channels": len(MONITORED_CHANNELS)
+        }
+        
         return templates.TemplateResponse(
             "dashboard.html", 
             {
                 "request": request,
                 "insights": insights,
                 "stats": stats,
+                "monitoring": monitoring_status,
                 "current_time": datetime.now().isoformat()
             }
         )
@@ -41,33 +49,11 @@ async def dashboard(request: Request):
             {
                 "request": request,
                 "insights": [],
-                "stats": {"total_messages": 0, "processed_today": 0},
+                "stats": {"total_messages": 0, "processed_today": 0, "unique_channels": 0, "unique_users": 0, "avg_urgency": 0.0},
+                "monitoring": {"active": False, "channels": [], "total_channels": 0},
                 "error": "Failed to load dashboard data"
             }
         )
-
-@router.post("/webhook/telegram")
-async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handle incoming Telegram webhook messages"""
-    try:
-        # Get the raw body for webhook verification
-        body = await request.body()
-        
-        # Verify webhook authenticity
-        if not verify_telegram_webhook(request.headers, body):
-            raise HTTPException(status_code=401, detail="Unauthorized webhook")
-        
-        # Parse JSON data
-        data = await request.json()
-        
-        # Process message in background
-        background_tasks.add_task(process_telegram_message, data)
-        
-        return {"status": "ok"}
-        
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        raise HTTPException(status_code=500, detail="Webhook processing failed")
 
 @router.get("/api/insights")
 async def get_insights_api(limit: int = 10, offset: int = 0):
@@ -89,22 +75,72 @@ async def get_stats_api():
         logger.error(f"API stats error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch statistics")
 
-@router.post("/api/reprocess/{message_id}")
-async def reprocess_message(message_id: str, background_tasks: BackgroundTasks):
-    """Reprocess a specific message with Gemini AI"""
+@router.get("/api/monitoring/status")
+async def get_monitoring_status():
+    """API endpoint to get monitoring status"""
     try:
-        # Add reprocessing task to background
-        background_tasks.add_task(reprocess_single_message, message_id)
-        return {"status": "processing", "message_id": message_id}
+        status = {
+            "active": telegram_client is not None and telegram_client.is_connected() if telegram_client else False,
+            "channels": MONITORED_CHANNELS,
+            "total_channels": len(MONITORED_CHANNELS),
+            "last_check": datetime.now().isoformat()
+        }
+        return status
     except Exception as e:
-        logger.error(f"Reprocess error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to queue reprocessing")
+        logger.error(f"Monitoring status error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get monitoring status")
 
-async def reprocess_single_message(message_id: str):
-    """Background task to reprocess a single message"""
+@router.get("/api/channels")
+async def get_monitored_channels():
+    """API endpoint to get list of monitored channels"""
     try:
-        # This would fetch the original message and reprocess it
-        logger.info(f"Reprocessing message {message_id}")
-        # Implementation would go here
+        channels_info = []
+        for channel in MONITORED_CHANNELS:
+            channels_info.append({
+                "username": channel,
+                "display_name": channel.replace("@", "").title(),
+                "monitoring": True
+            })
+        
+        return {
+            "channels": channels_info,
+            "total": len(channels_info)
+        }
     except Exception as e:
-        logger.error(f"Failed to reprocess message {message_id}: {e}")
+        logger.error(f"Channels API error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch channels")
+
+@router.get("/channels", response_class=HTMLResponse)
+async def channels_page(request: Request):
+    """Channels management page"""
+    try:
+        channels_info = []
+        for channel in MONITORED_CHANNELS:
+            channels_info.append({
+                "username": channel,
+                "display_name": channel.replace("@", "").title(),
+                "monitoring": True,
+                "status": "active" if telegram_client and telegram_client.is_connected() else "inactive"
+            })
+        
+        return templates.TemplateResponse(
+            "channels.html",
+            {
+                "request": request,
+                "channels": channels_info,
+                "total_channels": len(channels_info),
+                "monitoring_active": telegram_client is not None and telegram_client.is_connected() if telegram_client else False
+            }
+        )
+    except Exception as e:
+        logger.error(f"Channels page error: {e}")
+        return templates.TemplateResponse(
+            "channels.html",
+            {
+                "request": request,
+                "channels": [],
+                "total_channels": 0,
+                "monitoring_active": False,
+                "error": "Failed to load channels data"
+            }
+        )
