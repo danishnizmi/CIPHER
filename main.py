@@ -1,13 +1,10 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 import logging
 from google.cloud import bigquery
 from google.auth import default
 import os
 from datetime import datetime, timezone
-import asyncio
 from typing import Optional
 import json
 
@@ -16,9 +13,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CIPHER - Cybersecurity Intelligence Platform")
-
-# Templates and static files
-templates = Jinja2Templates(directory="templates")
 
 # Global variables for caching and status
 _bigquery_client = None
