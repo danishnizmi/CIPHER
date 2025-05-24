@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard - Telegram AI Processor{% endblock %}
+{% block title %}Channel Monitor Dashboard - Telegram AI Processor{% endblock %}
 
 {% block content %}
 <div x-data="dashboard()" class="px-4 py-6 sm:px-0">
@@ -19,6 +19,34 @@
         </div>
     </div>
     {% endif %}
+
+    <!-- Monitoring Status Banner -->
+    <div class="mb-6 {% if monitoring.active %}bg-green-50 border-green-200{% else %}bg-yellow-50 border-yellow-200{% endif %} border rounded-md p-4">
+        <div class="flex items-center">
+            <div class="flex-shrink-0">
+                {% if monitoring.active %}
+                <i class="fas fa-satellite-dish text-green-400 text-xl"></i>
+                {% else %}
+                <i class="fas fa-exclamation-triangle text-yellow-400 text-xl"></i>
+                {% endif %}
+            </div>
+            <div class="ml-3">
+                <h3 class="text-sm font-medium {% if monitoring.active %}text-green-800{% else %}text-yellow-800{% endif %}">
+                    {% if monitoring.active %}
+                    🟢 Channel Monitoring Active
+                    {% else %}
+                    🟡 Channel Monitoring Inactive
+                    {% endif %}
+                </h3>
+                <div class="mt-1 text-sm {% if monitoring.active %}text-green-700{% else %}text-yellow-700{% endif %}">
+                    Monitoring {{ monitoring.total_channels }} public Telegram channels
+                    {% if monitoring.channels %}
+                    <br><strong>Channels:</strong> {{ monitoring.channels|join(', ') }}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Statistics Cards -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -58,12 +86,12 @@
             <div class="p-5">
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
-                        <i class="fas fa-users text-2xl text-purple-500"></i>
+                        <i class="fas fa-satellite-dish text-2xl text-purple-500"></i>
                     </div>
                     <div class="ml-5 w-0 flex-1">
                         <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Unique Users</dt>
-                            <dd class="text-lg font-medium text-gray-900">{{ stats.unique_users }}</dd>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Monitored Channels</dt>
+                            <dd class="text-lg font-medium text-gray-900">{{ stats.unique_channels }}</dd>
                         </dl>
                     </div>
                 </div>
@@ -92,8 +120,8 @@
         <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
             <div class="flex justify-between items-center">
                 <div>
-                    <h3 class="text-lg leading-6 font-medium text-gray-900">Recent Insights</h3>
-                    <p class="mt-1 max-w-2xl text-sm text-gray-500">Latest processed messages with AI analysis</p>
+                    <h3 class="text-lg leading-6 font-medium text-gray-900">Recent Channel Messages</h3>
+                    <p class="mt-1 max-w-2xl text-sm text-gray-500">Latest messages from monitored public channels with AI analysis</p>
                 </div>
                 <button @click="refreshData()" class="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
                     <i class="fas fa-refresh mr-2"></i>
@@ -125,74 +153,3 @@
 
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center justify-between">
-                            <div class="flex items-center space-x-2">
-                                <p class="text-sm font-medium text-gray-900">@{{ insight.username }}</p>
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-                                    {% if insight.category == 'question' %}bg-blue-100 text-blue-800
-                                    {% elif insight.category == 'complaint' %}bg-red-100 text-red-800
-                                    {% elif insight.category == 'suggestion' %}bg-green-100 text-green-800
-                                    {% else %}bg-gray-100 text-gray-800{% endif %}">
-                                    {{ insight.category|title }}
-                                </span>
-                            </div>
-                            <div class="flex items-center space-x-2">
-                                {% if insight.urgency_score > 0.7 %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                                    <i class="fas fa-exclamation-triangle mr-1"></i>
-                                    High Priority
-                                </span>
-                                {% elif insight.urgency_score > 0.4 %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                                    <i class="fas fa-exclamation-circle mr-1"></i>
-                                    Medium Priority
-                                </span>
-                                {% endif %}
-                                <span class="text-xs text-gray-500">{{ insight.message_date[:16] if insight.message_date else 'Unknown' }}</span>
-                            </div>
-                        </div>
-
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-900 bg-gray-50 rounded p-2 border-l-4 border-blue-200">{{ insight.message_text[:200] }}{% if insight.message_text|length > 200 %}...{% endif %}</p>
-                        </div>
-
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">{{ insight.gemini_analysis }}</p>
-                        </div>
-
-                        {% if insight.key_topics %}
-                        <div class="mt-2 flex flex-wrap gap-1">
-                            {% for topic in insight.key_topics %}
-                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">
-                                #{{ topic }}
-                            </span>
-                            {% endfor %}
-                        </div>
-                        {% endif %}
-                    </div>
-                </div>
-            </li>
-            {% endfor %}
-        </ul>
-        {% else %}
-        <div class="text-center py-12">
-            <i class="fas fa-inbox text-4xl text-gray-300 mb-4"></i>
-            <p class="text-gray-500">No messages processed yet. Send a message to your Telegram bot to get started!</p>
-        </div>
-        {% endif %}
-    </div>
-</div>
-
-<script>
-function dashboard() {
-    return {
-        async refreshData() {
-            try {
-                window.location.reload();
-            } catch (error) {
-                console.error('Failed to refresh data:', error);
-            }
-        }
-    }
-}
-</script>
-{% endblock %}
