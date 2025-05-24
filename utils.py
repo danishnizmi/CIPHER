@@ -82,24 +82,14 @@ async def check_rate_limit(operation: str) -> bool:
     return True
 
 async def get_secret(secret_id: str) -> str:
-    """Get secret from Secret Manager with validation"""
+    """Get secret from Secret Manager"""
     try:
         name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/latest"
         response = secret_client.access_secret_version(request={"name": name})
         secret_value = response.payload.data.decode("UTF-8").strip()
         
-        # Validate secret is not placeholder
-        placeholder_values = [
-            "REPLACE_WITH_YOUR_API_ID",
-            "REPLACE_WITH_YOUR_API_HASH", 
-            "REPLACE_WITH_YOUR_PHONE",
-            "REPLACE_WITH_YOUR_GEMINI_API_KEY",
-            "YOUR_ACTUAL_API_ID",
-            "YOUR_ACTUAL_API_HASH"
-        ]
-        
-        if secret_value in placeholder_values or not secret_value:
-            raise ValueError(f"Secret {secret_id} contains placeholder value or is empty")
+        if not secret_value:
+            raise ValueError(f"Secret {secret_id} is empty")
         
         logger.info("Successfully retrieved secret", secret_id=secret_id)
         return secret_value
