@@ -1,227 +1,888 @@
-{% extends "base.html" %}
-
-{% block title %}Channel Monitor Dashboard - Telegram AI Processor{% endblock %}
-
-{% block content %}
-<div x-data="dashboard()" class="px-4 py-6 sm:px-0">
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CIPHER - AI Intelligence Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'cipher-blue': '#0066ff',
+                        'cipher-purple': '#6366f1',
+                        'cipher-dark': '#0f172a',
+                        'cipher-darker': '#020617',
+                    },
+                    fontFamily: {
+                        'mono': ['JetBrains Mono', 'Fira Code', 'Monaco', 'monospace'],
+                        'sans': ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.6s ease-out',
+                        'slide-up': 'slideUp 0.6s ease-out',
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'bounce-slow': 'bounce 2s infinite',
+                        'spin-slow': 'spin 3s linear infinite',
+                        'glow': 'glow 2s ease-in-out infinite alternate',
+                        'typing': 'typing 3.5s steps(40, end), blink-caret .75s step-end infinite',
+                        'matrix': 'matrix 10s linear infinite',
+                        'float': 'float 6s ease-in-out infinite',
+                        'neon-pulse': 'neonPulse 2s ease-in-out infinite',
+                    },
+                    backgroundImage: {
+                        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
+                        'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
+                        'cyber-grid': 'linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px)',
+                    },
+                    backgroundSize: {
+                        'grid': '20px 20px',
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(40px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes glow {
+            from { box-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3); }
+            to { box-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5); }
+        }
+        
+        @keyframes typing {
+            from { width: 0; }
+            to { width: 100%; }
+        }
+        
+        @keyframes blink-caret {
+            from, to { border-color: transparent; }
+            50% { border-color: #6366f1; }
+        }
+        
+        @keyframes matrix {
+            0% { transform: translateY(-100%); opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { transform: translateY(100vh); opacity: 0; }
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+        
+        @keyframes neonPulse {
+            0%, 100% { text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3), 0 0 15px rgba(99, 102, 241, 0.1); }
+            50% { text-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5), 0 0 30px rgba(99, 102, 241, 0.3); }
+        }
+        
+        .typing-effect {
+            white-space: nowrap;
+            overflow: hidden;
+            border-right: 2px solid #6366f1;
+            animation: typing 3.5s steps(40, end), blink-caret .75s step-end infinite;
+        }
+        
+        .matrix-bg {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+            background-size: 400% 400%;
+            animation: gradientShift 15s ease infinite;
+        }
+        
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        
+        .cyber-border {
+            background: linear-gradient(45deg, transparent, #6366f1, transparent);
+            background-size: 200% 200%;
+            animation: borderGlow 3s ease-in-out infinite;
+        }
+        
+        @keyframes borderGlow {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        
+        .hover-lift {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-lift:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3), 0 0 20px rgba(99, 102, 241, 0.2);
+        }
+        
+        .glass-effect {
+            backdrop-filter: blur(16px) saturate(180%);
+            background-color: rgba(17, 25, 40, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.125);
+        }
+        
+        .neon-text {
+            color: #6366f1;
+            text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3);
+        }
+        
+        .progress-bar {
+            background: linear-gradient(90deg, #6366f1, #8b5cf6, #06b6d4);
+            background-size: 200% 100%;
+            animation: progressFlow 2s linear infinite;
+        }
+        
+        @keyframes progressFlow {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        
+        .data-stream {
+            font-family: 'JetBrains Mono', monospace;
+            color: #06b6d4;
+            text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);
+        }
+        
+        .pulse-ring {
+            animation: pulseRing 2s cubic-bezier(0.455, 0.03, 0.515, 0.955) infinite;
+        }
+        
+        @keyframes pulseRing {
+            0% { transform: scale(0.33); }
+            40%, 50% { opacity: 1; }
+            100% { transform: scale(1); opacity: 0; }
+        }
+        
+        .insight-card {
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent;
+        }
+        
+        .insight-card:hover {
+            border-left-color: #6366f1;
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(139, 92, 246, 0.05));
+            transform: translateX(8px);
+        }
+        
+        .status-indicator {
+            position: relative;
+        }
+        
+        .status-indicator::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: inherit;
+            transform: translate(-50%, -50%);
+            animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+        
+        .terminal-window {
+            background: #0a0a0a;
+            border-radius: 8px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+        
+        .terminal-header {
+            background: #1a1a1a;
+            padding: 12px 16px;
+            border-bottom: 1px solid #333;
+            border-radius: 8px 8px 0 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .terminal-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        
+        .loading-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+        
+        .loading-dots span {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #6366f1;
+            animation: loadingDots 1.4s ease-in-out infinite both;
+        }
+        
+        .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+        
+        @keyframes loadingDots {
+            0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+        
+        .cyber-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .cyber-scrollbar::-webkit-scrollbar-track {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+        
+        .cyber-scrollbar::-webkit-scrollbar-thumb {
+            background: linear-gradient(45deg, #6366f1, #8b5cf6);
+            border-radius: 4px;
+        }
+        
+        .cyber-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans overflow-x-hidden">
     
-    <!-- Error Message -->
-    {% if error %}
-    <div class="mb-6 bg-red-50 border border-red-200 rounded-md p-4">
-        <div class="flex">
-            <div class="flex-shrink-0">
-                <i class="fas fa-exclamation-circle text-red-400"></i>
-            </div>
-            <div class="ml-3">
-                <h3 class="text-sm font-medium text-red-800">Error</h3>
-                <div class="mt-2 text-sm text-red-700">{{ error }}</div>
-            </div>
-        </div>
-    </div>
-    {% endif %}
-
-    <!-- Monitoring Status Banner -->
-    <div class="mb-6 {% if monitoring.active %}bg-green-50 border-green-200{% else %}bg-yellow-50 border-yellow-200{% endif %} border rounded-md p-4">
-        <div class="flex items-center">
-            <div class="flex-shrink-0">
-                {% if monitoring.active %}
-                <i class="fas fa-satellite-dish text-green-400 text-xl"></i>
-                {% else %}
-                <i class="fas fa-exclamation-triangle text-yellow-400 text-xl"></i>
-                {% endif %}
-            </div>
-            <div class="ml-3">
-                <h3 class="text-sm font-medium {% if monitoring.active %}text-green-800{% else %}text-yellow-800{% endif %}">
-                    {% if monitoring.active %}
-                    🟢 Channel Monitoring Active
-                    {% else %}
-                    🟡 Channel Monitoring Inactive
-                    {% endif %}
-                </h3>
-                <div class="mt-1 text-sm {% if monitoring.active %}text-green-700{% else %}text-yellow-700{% endif %}">
-                    Monitoring {{ monitoring.total_channels }} public Telegram channels
-                    {% if monitoring.channels %}
-                    <br><strong>Channels:</strong> {{ monitoring.channels|join(', ') }}
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Statistics Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <div class="bg-white overflow-hidden shadow rounded-lg">
-            <div class="p-5">
-                <div class="flex items-center">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-messages text-2xl text-blue-500"></i>
-                    </div>
-                    <div class="ml-5 w-0 flex-1">
-                        <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Total Messages</dt>
-                            <dd class="text-lg font-medium text-gray-900">{{ stats.total_messages }}</dd>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="bg-white overflow-hidden shadow rounded-lg">
-            <div class="p-5">
-                <div class="flex items-center">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-clock text-2xl text-green-500"></i>
-                    </div>
-                    <div class="ml-5 w-0 flex-1">
-                        <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Processed Today</dt>
-                            <dd class="text-lg font-medium text-gray-900">{{ stats.processed_today }}</dd>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="bg-white overflow-hidden shadow rounded-lg">
-            <div class="p-5">
-                <div class="flex items-center">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-satellite-dish text-2xl text-purple-500"></i>
-                    </div>
-                    <div class="ml-5 w-0 flex-1">
-                        <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Monitored Channels</dt>
-                            <dd class="text-lg font-medium text-gray-900">{{ stats.unique_channels }}</dd>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="bg-white overflow-hidden shadow rounded-lg">
-            <div class="p-5">
-                <div class="flex items-center">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-exclamation-triangle text-2xl text-yellow-500"></i>
-                    </div>
-                    <div class="ml-5 w-0 flex-1">
-                        <dl>
-                            <dt class="text-sm font-medium text-gray-500 truncate">Avg Urgency</dt>
-                            <dd class="text-lg font-medium text-gray-900">{{ "%.2f"|format(stats.avg_urgency) }}</dd>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Recent Insights -->
-    <div class="bg-white shadow overflow-hidden sm:rounded-md">
-        <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
-            <div class="flex justify-between items-center">
-                <div>
-                    <h3 class="text-lg leading-6 font-medium text-gray-900">Recent Channel Messages</h3>
-                    <p class="mt-1 max-w-2xl text-sm text-gray-500">Latest messages from monitored public channels with AI analysis</p>
-                </div>
-                <button @click="refreshData()" class="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
-                    <i class="fas fa-refresh mr-2"></i>
-                    Refresh
-                </button>
-            </div>
-        </div>
-
-        {% if insights %}
-        <ul class="divide-y divide-gray-200">
-            {% for insight in insights %}
-            <li class="px-4 py-4 hover:bg-gray-50">
-                <div class="flex items-start space-x-4">
-                    <div class="flex-shrink-0">
-                        {% if insight.sentiment == 'positive' %}
-                        <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-                            <i class="fas fa-smile text-green-600"></i>
+    <!-- Animated Background -->
+    <div class="fixed inset-0 bg-cyber-grid bg-grid opacity-20 pointer-events-none"></div>
+    <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
+    
+    <!-- Navigation Header -->
+    <nav class="glass-effect border-b border-white/10 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16 items-center">
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-3">
+                        <div class="relative">
+                            <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
+                                <i class="fas fa-shield-alt text-white text-lg"></i>
+                            </div>
+                            <div class="absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse"></div>
                         </div>
-                        {% elif insight.sentiment == 'negative' %}
-                        <div class="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
-                            <i class="fas fa-frown text-red-600"></i>
+                        <div>
+                            <h1 class="text-xl font-bold neon-text animate-neon-pulse">CIPHER</h1>
+                            <p class="text-xs text-gray-400 font-mono">AI Intelligence Platform</p>
                         </div>
-                        {% else %}
-                        <div class="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
-                            <i class="fas fa-meh text-gray-600"></i>
-                        </div>
-                        {% endif %}
                     </div>
+                </div>
+                
+                <div class="flex items-center space-x-4">
+                    <div class="hidden md:flex items-center space-x-6">
+                        <a href="/analytics" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-chart-line mr-2"></i>Analytics
+                        </a>
+                        <a href="/channels" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-satellite-dish mr-2"></i>Channels
+                        </a>
+                        <a href="/health" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-heartbeat mr-2"></i>System
+                        </a>
+                    </div>
+                    
+                    <div class="flex items-center space-x-3">
+                        <div class="flex items-center">
+                            <div class="status-indicator w-3 h-3 bg-green-400 rounded-full mr-2"></div>
+                            <span class="text-sm text-gray-400 data-stream" id="current-time"></span>
+                        </div>
+                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
+                            LIVE
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
 
-                    <div class="flex-1 min-w-0">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center space-x-2">
-                                <p class="text-sm font-medium text-gray-900">{{ insight.chat_username or 'Unknown Channel' }}</p>
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                    {{ insight.category or 'other' }}
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8" x-data="cipherDashboard()">
+        
+        <!-- Hero Section with Status -->
+        <div class="mb-8">
+            <div class="text-center mb-6">
+                <h2 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-cipher-blue via-cipher-purple to-cyan-400 bg-clip-text text-transparent typing-effect mb-2">
+                    Telegram Intelligence Monitor
+                </h2>
+                <p class="text-gray-400 max-w-2xl mx-auto animate-fade-in">
+                    Real-time monitoring and AI analysis of public Telegram channels with advanced threat intelligence
+                </p>
+            </div>
+            
+            <!-- System Status Banner -->
+            <div class="glass-effect rounded-xl p-6 border cyber-border hover-lift animate-slide-up">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-4">
+                        <div class="relative">
+                            {% if monitoring.active %}
+                            <div class="w-16 h-16 bg-gradient-to-r from-green-400 to-emerald-500 rounded-full flex items-center justify-center animate-pulse-slow">
+                                <i class="fas fa-satellite-dish text-white text-2xl"></i>
+                            </div>
+                            <div class="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-20"></div>
+                            {% else %}
+                            <div class="w-16 h-16 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full flex items-center justify-center">
+                                <i class="fas fa-exclamation-triangle text-white text-2xl"></i>
+                            </div>
+                            {% endif %}
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xl font-semibold mb-1">
+                                {% if monitoring.active %}
+                                <span class="text-green-400">🟢 CIPHER ACTIVE</span>
+                                {% else %}
+                                <span class="text-yellow-400">🟡 CIPHER STANDBY</span>
+                                {% endif %}
+                            </h3>
+                            <p class="text-gray-400 mb-2">
+                                Monitoring {{ monitoring.total_channels }} intelligence channels
+                            </p>
+                            {% if monitoring.channels %}
+                            <div class="flex flex-wrap gap-2">
+                                {% for channel in monitoring.channels[:3] %}
+                                <span class="px-2 py-1 bg-cipher-blue/20 text-cipher-blue text-xs rounded-full border border-cipher-blue/30 data-stream">
+                                    {{ channel }}
                                 </span>
-                                {% if insight.urgency_score > 0.7 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                                    High Urgency
-                                </span>
-                                {% elif insight.urgency_score > 0.4 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                                    Medium Urgency
+                                {% endfor %}
+                                {% if monitoring.channels|length > 3 %}
+                                <span class="px-2 py-1 bg-gray-700/50 text-gray-400 text-xs rounded-full">
+                                    +{{ monitoring.channels|length - 3 }} more
                                 </span>
                                 {% endif %}
                             </div>
-                            <p class="text-xs text-gray-500">
-                                {% if insight.message_date %}
-                                {{ insight.message_date[:19] | replace('T', ' ') }}
-                                {% endif %}
-                            </p>
-                        </div>
-
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">{{ insight.gemini_analysis or 'No analysis available' }}</p>
-                        </div>
-
-                        {% if insight.key_topics %}
-                        <div class="mt-2 flex flex-wrap gap-1">
-                            {% for topic in insight.key_topics[:5] %}
-                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-800">
-                                {{ topic }}
-                            </span>
-                            {% endfor %}
-                        </div>
-                        {% endif %}
-
-                        <div class="mt-2">
-                            <p class="text-xs text-gray-600 line-clamp-2">
-                                {{ (insight.message_text[:150] + '...') if insight.message_text and insight.message_text|length > 150 else insight.message_text }}
-                            </p>
+                            {% endif %}
                         </div>
                     </div>
+                    
+                    <div class="flex space-x-3">
+                        <button @click="refreshData()" class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-cipher-blue/25">
+                            <i class="fas fa-sync-alt mr-2" :class="{'animate-spin': isRefreshing}"></i>
+                            <span x-text="isRefreshing ? 'Refreshing...' : 'Refresh'"></span>
+                        </button>
+                        <a href="/channels" class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg transition-all duration-300 border border-white/20 hover:border-cipher-blue/50">
+                            <i class="fas fa-cogs mr-2"></i>
+                            Configure
+                        </a>
+                    </div>
                 </div>
-            </li>
-            {% endfor %}
-        </ul>
-        {% else %}
-        <div class="px-4 py-8 text-center">
-            <i class="fas fa-inbox text-4xl text-gray-300 mb-4"></i>
-            <h3 class="text-lg font-medium text-gray-900 mb-2">No Messages Yet</h3>
-            <p class="text-gray-500">
-                {% if not monitoring.active %}
-                Channel monitoring is not active. Check your Telegram credentials.
-                {% else %}
-                Waiting for new messages from monitored channels...
-                {% endif %}
-            </p>
+            </div>
+        </div>
+
+        <!-- Error Display -->
+        {% if error %}
+        <div class="mb-6 glass-effect rounded-lg p-4 border border-red-500/30 bg-red-500/10 animate-fade-in">
+            <div class="flex items-center">
+                <div class="w-10 h-10 bg-red-500/20 rounded-full flex items-center justify-center mr-4">
+                    <i class="fas fa-exclamation-triangle text-red-400"></i>
+                </div>
+                <div>
+                    <h3 class="text-red-400 font-semibold">System Alert</h3>
+                    <p class="text-red-300/80 text-sm mt-1">{{ error }}</p>
+                    <button @click="refreshData()" class="mt-2 text-xs bg-red-500/20 hover:bg-red-500/30 px-3 py-1 rounded transition-colors">
+                        Retry Connection
+                    </button>
+                </div>
+            </div>
         </div>
         {% endif %}
-    </div>
-</div>
 
-<script>
-function dashboard() {
-    return {
-        refreshData() {
-            window.location.reload();
+        <!-- Statistics Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <!-- Total Messages -->
+            <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center group-hover:animate-bounce-slow">
+                        <i class="fas fa-comments text-white text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-2xl font-bold neon-text" x-data="{ count: 0 }" x-init="
+                            let target = {{ stats.total_messages }};
+                            let step = target / 60;
+                            let timer = setInterval(() => {
+                                count += step;
+                                if (count >= target) {
+                                    count = target;
+                                    clearInterval(timer);
+                                }
+                            }, 16);
+                        " x-text="Math.floor(count).toLocaleString()">0</div>
+                        <div class="text-xs text-gray-400 font-mono">TOTAL MESSAGES</div>
+                    </div>
+                </div>
+                <div class="w-full bg-gray-700/30 rounded-full h-2">
+                    <div class="progress-bar h-2 rounded-full" style="width: {{ (stats.total_messages / 10000 * 100) if stats.total_messages < 10000 else 100 }}%"></div>
+                </div>
+            </div>
+
+            <!-- Processed Today -->
+            <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.1s;">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg flex items-center justify-center group-hover:animate-spin-slow">
+                        <i class="fas fa-clock text-white text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-2xl font-bold text-green-400" x-data="{ count: 0 }" x-init="
+                            let target = {{ stats.processed_today }};
+                            let step = target / 40;
+                            let timer = setInterval(() => {
+                                count += step;
+                                if (count >= target) {
+                                    count = target;
+                                    clearInterval(timer);
+                                }
+                            }, 20);
+                        " x-text="Math.floor(count)">0</div>
+                        <div class="text-xs text-gray-400 font-mono">TODAY</div>
+                    </div>
+                </div>
+                <div class="flex items-center text-xs text-green-400">
+                    <i class="fas fa-arrow-up mr-1"></i>
+                    <span class="data-stream">Active Processing</span>
+                </div>
+            </div>
+
+            <!-- Active Channels -->
+            <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.2s;">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="w-12 h-12 bg-gradient-to-r from-purple-500 to-indigo-500 rounded-lg flex items-center justify-center group-hover:animate-pulse">
+                        <i class="fas fa-satellite-dish text-white text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-2xl font-bold text-purple-400">
+                            <span x-data="{ count: 0 }" x-init="
+                                let target = {{ stats.unique_channels }};
+                                setTimeout(() => { count = target; }, 500);
+                            " x-text="count">0</span>
+                            <span class="text-gray-500">/{{ monitoring.total_channels }}</span>
+                        </div>
+                        <div class="text-xs text-gray-400 font-mono">CHANNELS</div>
+                    </div>
+                </div>
+                <div class="flex space-x-1">
+                    {% for i in range(monitoring.total_channels) %}
+                    <div class="flex-1 h-2 rounded-full {% if i < stats.unique_channels %}bg-purple-500{% else %}bg-gray-700{% endif %} animate-pulse" style="animation-delay: {{ i * 0.1 }}s;"></div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- Threat Level -->
+            <div class="glass-effect rounded-xl p-6 hover-lift group animate-fade-in border border-white/10" style="animation-delay: 0.3s;">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="w-12 h-12 bg-gradient-to-r {% if stats.avg_urgency > 0.7 %}from-red-500 to-orange-500{% elif stats.avg_urgency > 0.4 %}from-yellow-500 to-orange-500{% else %}from-gray-500 to-slate-500{% endif %} rounded-lg flex items-center justify-center group-hover:animate-glow">
+                        <i class="fas fa-shield-alt text-white text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-2xl font-bold {% if stats.avg_urgency > 0.7 %}text-red-400{% elif stats.avg_urgency > 0.4 %}text-yellow-400{% else %}text-gray-400{% endif %}">
+                            {{ "%.1f"|format(stats.avg_urgency * 100) }}%
+                        </div>
+                        <div class="text-xs text-gray-400 font-mono">THREAT LEVEL</div>
+                    </div>
+                </div>
+                <div class="text-xs {% if stats.avg_urgency > 0.7 %}text-red-400{% elif stats.avg_urgency > 0.4 %}text-yellow-400{% else %}text-green-400{% endif %} data-stream">
+                    {% if stats.avg_urgency > 0.7 %}
+                    <i class="fas fa-exclamation-triangle mr-1"></i>HIGH ALERT
+                    {% elif stats.avg_urgency > 0.4 %}
+                    <i class="fas fa-eye mr-1"></i>MONITORING
+                    {% else %}
+                    <i class="fas fa-check-circle mr-1"></i>SECURE
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Real-time Intelligence Feed -->
+        <div class="glass-effect rounded-xl border border-white/10 hover-lift">
+            <!-- Header -->
+            <div class="terminal-header">
+                <div class="terminal-dot bg-red-500"></div>
+                <div class="terminal-dot bg-yellow-500"></div>
+                <div class="terminal-dot bg-green-500"></div>
+                <div class="flex-1 flex items-center justify-between ml-4">
+                    <div class="flex items-center space-x-3">
+                        <span class="text-green-400 font-mono text-sm">CIPHER@intelligence:~$</span>
+                        <span class="text-gray-400 text-sm">Real-time Intelligence Feed</span>
+                        {% if insights %}
+                        <span class="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs rounded border border-green-500/30">
+                            {{ insights|length }} SIGNALS
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        {% if not insights and monitoring.active %}
+                        <div class="loading-dots">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                        <span class="text-xs text-gray-400">Scanning...</span>
+                        {% endif %}
+                        <button @click="refreshData()" class="text-cipher-blue hover:text-cipher-purple transition-colors">
+                            <i class="fas fa-sync-alt text-sm" :class="{'animate-spin': isRefreshing}"></i>
+                        </button>
+                        <a href="/insights" class="text-cipher-blue hover:text-cipher-purple transition-colors">
+                            <i class="fas fa-external-link-alt text-sm"></i>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div class="p-6">
+                {% if insights %}
+                <div class="space-y-4 max-h-96 overflow-y-auto cyber-scrollbar">
+                    {% for insight in insights %}
+                    <div class="insight-card glass-effect rounded-lg p-4 group animate-fade-in" style="animation-delay: {{ loop.index0 * 0.1 }}s;">
+                        <div class="flex items-start space-x-4">
+                            <!-- Threat Indicator -->
+                            <div class="flex-shrink-0 relative">
+                                {% if insight.urgency_score > 0.7 %}
+                                <div class="w-12 h-12 bg-gradient-to-r from-red-500 to-orange-500 rounded-full flex items-center justify-center animate-pulse">
+                                    <i class="fas fa-exclamation-triangle text-white"></i>
+                                </div>
+                                <div class="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-20"></div>
+                                {% elif insight.urgency_score > 0.4 %}
+                                <div class="w-12 h-12 bg-gradient-to-r from-yellow-500 to-orange-500 rounded-full flex items-center justify-center">
+                                    <i class="fas fa-eye text-white"></i>
+                                </div>
+                                {% elif insight.sentiment == 'positive' %}
+                                <div class="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-500 rounded-full flex items-center justify-center">
+                                    <i class="fas fa-smile text-white"></i>
+                                </div>
+                                {% elif insight.sentiment == 'negative' %}
+                                <div class="w-12 h-12 bg-gradient-to-r from-red-500 to-pink-500 rounded-full flex items-center justify-center">
+                                    <i class="fas fa-frown text-white"></i>
+                                </div>
+                                {% else %}
+                                <div class="w-12 h-12 bg-gradient-to-r from-gray-500 to-slate-500 rounded-full flex items-center justify-center">
+                                    <i class="fas fa-meh text-white"></i>
+                                </div>
+                                {% endif %}
+                            </div>
+
+                            <div class="flex-1 min-w-0">
+                                <!-- Header -->
+                                <div class="flex items-center justify-between mb-3">
+                                    <div class="flex items-center space-x-3">
+                                        <span class="font-semibold text-cipher-blue data-stream">{{ insight.chat_username or 'UNKNOWN_SOURCE' }}</span>
+                                        <span class="px-2 py-1 bg-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-500/20 text-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-400 text-xs rounded-full border border-{% if insight.category == 'breaking' %}red{% elif insight.category == 'news' %}blue{% elif insight.category == 'crypto' %}purple{% elif insight.category == 'tech' %}green{% else %}gray{% endif %}-500/30 font-mono">
+                                            {{ insight.category.upper() or 'OTHER' }}
+                                        </span>
+                                        
+                                        <!-- Threat Level -->
+                                        {% if insight.urgency_score > 0.7 %}
+                                        <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30 animate-pulse font-mono">
+                                            <i class="fas fa-exclamation-triangle mr-1"></i>CRITICAL
+                                        </span>
+                                        {% elif insight.urgency_score > 0.4 %}
+                                        <span class="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-xs rounded-full border border-yellow-500/30 font-mono">
+                                            <i class="fas fa-eye mr-1"></i>MEDIUM
+                                        </span>
+                                        {% endif %}
+                                    </div>
+                                    <span class="text-xs text-gray-500 font-mono">
+                                        {% if insight.message_date %}
+                                        {{ insight.message_date[:19] | replace('T', ' ') }}
+                                        {% endif %}
+                                    </span>
+                                </div>
+
+                                <!-- AI Analysis -->
+                                <div class="mb-3 p-3 bg-cipher-blue/5 rounded-lg border-l-4 border-cipher-blue">
+                                    <div class="flex items-start space-x-2">
+                                        <i class="fas fa-robot text-cipher-blue mt-0.5"></i>
+                                        <p class="text-gray-300 text-sm leading-relaxed">
+                                            {{ insight.gemini_analysis or 'No analysis available' }}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <!-- Topics -->
+                                {% if insight.key_topics %}
+                                <div class="mb-3 flex flex-wrap gap-2">
+                                    {% for topic in insight.key_topics[:5] %}
+                                    <span class="px-2 py-1 bg-white/5 text-gray-300 text-xs rounded border border-white/10 hover:border-cipher-blue/50 transition-colors font-mono">
+                                        #{{ topic }}
+                                    </span>
+                                    {% endfor %}
+                                    {% if insight.key_topics|length > 5 %}
+                                    <span class="text-xs text-gray-500 px-2 py-1">+{{ insight.key_topics|length - 5 }} more</span>
+                                    {% endif %}
+                                </div>
+                                {% endif %}
+
+                                <!-- Original Message -->
+                                <div class="terminal-window">
+                                    <div class="terminal-header">
+                                        <div class="terminal-dot bg-red-500"></div>
+                                        <div class="terminal-dot bg-yellow-500"></div>
+                                        <div class="terminal-dot bg-green-500"></div>
+                                        <span class="text-xs text-gray-400 ml-3 font-mono">INTERCEPTED_MESSAGE</span>
+                                    </div>
+                                    <div class="p-3">
+                                        <p class="text-gray-400 text-xs leading-relaxed font-mono">
+                                            {% if insight.message_text %}
+                                            {% set preview = insight.message_text[:200] %}
+                                            {{ preview }}{% if insight.message_text|length > 200 %}...{% endif %}
+                                            {% else %}
+                                            [ENCRYPTED_OR_MEDIA_CONTENT]
+                                            {% endif %}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <!-- Metrics -->
+                                <div class="mt-3 flex items-center justify-between text-xs">
+                                    <div class="flex items-center space-x-4 text-gray-500">
+                                        <span class="data-stream">THREAT: {{ "%.0f"|format(insight.urgency_score * 100) }}%</span>
+                                        <span class="data-stream">SENTIMENT: {{ insight.sentiment.upper() }}</span>
+                                        {% if insight.username %}
+                                        <span class="data-stream">SOURCE: @{{ insight.username }}</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="flex items-center space-x-2">
+                                        <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                                        <span class="text-green-400 font-mono">ANALYZED</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <!-- Footer -->
+                <div class="mt-6 pt-4 border-t border-white/10 flex justify-between items-center">
+                    <div class="text-sm text-gray-400 font-mono">
+                        <i class="fas fa-database mr-2"></i>
+                        {{ insights|length }} intelligence signals processed
+                    </div>
+                    <a href="/insights" class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 text-sm font-medium">
+                        <i class="fas fa-list mr-2"></i>
+                        View All Intelligence
+                    </a>
+                </div>
+                
+                {% else %}
+                <!-- Empty State -->
+                <div class="text-center py-12">
+                    <div class="w-24 h-24 bg-gradient-to-r from-gray-600 to-slate-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-float">
+                        <i class="fas fa-search text-4xl text-gray-400"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Intelligence Signals Detected</h3>
+                    <p class="text-gray-500 mb-6 max-w-md mx-auto">
+                        {% if not monitoring.active %}
+                        CIPHER monitoring system is currently offline. Please check system configuration and restart monitoring services.
+                        {% else %}
+                        CIPHER is actively scanning monitored channels. Intelligence signals will appear here when detected.
+                        {% endif %}
+                    </p>
+                    
+                    {% if not monitoring.active %}
+                    <div class="glass-effect rounded-lg p-6 max-w-md mx-auto text-left">
+                        <h4 class="text-sm font-semibold text-yellow-400 mb-3">
+                            <i class="fas fa-cogs mr-2"></i>SYSTEM REQUIREMENTS
+                        </h4>
+                        <ul class="space-y-2 text-sm text-gray-400">
+                            <li class="flex items-center">
+                                <i class="fas fa-check-circle text-green-400 mr-2"></i>
+                                Configure Telegram API credentials
+                            </li>
+                            <li class="flex items-center">
+                                <i class="fas fa-check-circle text-green-400 mr-2"></i>
+                                Set up Gemini AI API key
+                            </li>
+                            <li class="flex items-center">
+                                <i class="fas fa-exclamation-circle text-yellow-400 mr-2"></i>
+                                Restart monitoring services
+                            </li>
+                        </ul>
+                        <div class="mt-4 pt-4 border-t border-white/10">
+                            <a href="/health" class="text-cipher-blue hover:text-cipher-purple transition-colors text-sm font-medium">
+                                <i class="fas fa-diagnostic mr-2"></i>Run System Diagnostics
+                            </a>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="mt-8 flex justify-center space-x-4">
+            <a href="/analytics" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-cipher-blue/50 transition-all duration-300 group">
+                <i class="fas fa-chart-bar text-cipher-blue mr-2 group-hover:animate-bounce"></i>
+                <span class="text-gray-300 group-hover:text-white">Advanced Analytics</span>
+            </a>
+            <a href="/channels" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-cipher-purple/50 transition-all duration-300 group">
+                <i class="fas fa-satellite-dish text-cipher-purple mr-2 group-hover:animate-spin"></i>
+                <span class="text-gray-300 group-hover:text-white">Channel Management</span>
+            </a>
+            <a href="/health" class="px-6 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 hover:border-green-500/50 transition-all duration-300 group">
+                <i class="fas fa-heartbeat text-green-400 mr-2 group-hover:animate-pulse"></i>
+                <span class="text-gray-300 group-hover:text-white">System Health</span>
+            </a>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="glass-effect border-t border-white/10 mt-16">
+        <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center">
+                <div class="flex items-center space-x-4">
+                    <div class="text-sm text-gray-400">
+                        <span class="font-mono">CIPHER</span> v1.0.0 | Powered by 
+                        <span class="text-cipher-blue">Google Cloud</span> & 
+                        <span class="text-cipher-purple">Gemini AI</span>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4 text-xs text-gray-500">
+                    <span class="font-mono">PROJECT: {{ PROJECT_ID or 'primal-chariot-382610' }}</span>
+                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span class="font-mono">SECURE</span>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Alpine.js Dashboard Component
+        function cipherDashboard() {
+            return {
+                isRefreshing: false,
+                
+                init() {
+                    // Auto-refresh every 30 seconds
+                    setInterval(() => {
+                        this.refreshData();
+                    }, 30000);
+                    
+                    // Initialize animations
+                    this.initAnimations();
+                },
+                
+                refreshData() {
+                    this.isRefreshing = true;
+                    
+                    // Simulate network delay
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                },
+                
+                initAnimations() {
+                    // Stagger card animations
+                    const cards = document.querySelectorAll('.hover-lift');
+                    cards.forEach((card, index) => {
+                        card.style.animationDelay = `${index * 0.1}s`;
+                    });
+                }
+            }
         }
-    }
-}
-</script>
-{% endblock %}
+
+        // Update current time
+        function updateTime() {
+            const now = new Date();
+            const timeElement = document.getElementById('current-time');
+            if (timeElement) {
+                timeElement.textContent = now.toLocaleTimeString('en-US', { 
+                    hour12: false,
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            }
+        }
+        
+        setInterval(updateTime, 1000);
+        updateTime();
+
+        // Smooth scroll for internal links
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        target.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+        });
+
+        // Add Matrix effect (optional, subtle background animation)
+        function createMatrixEffect() {
+            const chars = '01';
+            const drops = [];
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            canvas.style.position = 'fixed';
+            canvas.style.top = '0';
+            canvas.style.left = '0';
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+            canvas.style.pointerEvents = 'none';
+            canvas.style.zIndex = '-1';
+            canvas.style.opacity = '0.03';
+            
+            document.body.appendChild(canvas);
+            
+            function resizeCanvas() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+                
+                const columns = canvas.width / 20;
+                for (let i = 0; i < columns; i++) {
+                    drops[i] = Math.random() * canvas.height;
+                }
+            }
+            
+            function draw() {
+                ctx.fillStyle = 'rgba(15, 23, 42, 0.05)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = '#6366f1';
+                ctx.font = '12px monospace';
+                
+                for (let i = 0; i < drops.length; i++) {
+                    const char = chars[Math.floor(Math.random() * chars.length)];
+                    ctx.fillText(char, i * 20, drops[i]);
+                    
+                    if (drops[i] * 20 > canvas.height && Math.random() > 0.975) {
+                        drops[i] = 0;
+                    }
+                    drops[i] += 20;
+                }
+            }
+            
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            setInterval(draw, 100);
+        }
+        
+        // Initialize matrix effect after page load
+        window.addEventListener('load', () => {
+            setTimeout(createMatrixEffect, 2000);
+        });
+    </script>
+</body>
+</html>
