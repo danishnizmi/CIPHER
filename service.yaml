@@ -61,6 +61,8 @@ spec:
           value: "1"
         - name: PYTHONPATH
           value: "/app"
+        - name: SERVICE_ACCOUNT
+          value: "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         resources:
           limits:
             cpu: '2'
