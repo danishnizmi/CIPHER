@@ -1,13 +1,12 @@
-# Multi-stage build for production optimization
-FROM python:3.11-slim as base
+# Production Dockerfile for CIPHER Cybersecurity Intelligence Platform
+FROM python:3.11-slim
 
 # Production environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PORT=8080 \
-    PYTHONPATH=/app
+    PORT=8080
 
 # Install system dependencies efficiently
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,10 +26,10 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 # Set work directory
 WORKDIR /app
 
-# Copy requirements and install dependencies first (better caching)
+# Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 
-# Install Python dependencies optimized for production
+# Install Python dependencies with optimization
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -44,16 +43,12 @@ RUN mkdir -p /app/templates /app/static /app/logs /tmp && \
 # Switch to non-root user
 USER appuser
 
-# Health check - CRITICAL for Cloud Run
-HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=3 \
+# Health check for Cloud Run
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health/live || exit 1
 
 # Expose port
 EXPOSE ${PORT}
 
-# Production command - starts web server immediately
-CMD ["python", "-m", "uvicorn", "main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--access-log", \
-     "--log-level", "info"]
+# Production startup command - simple and reliable
+CMD ["python", "main.py"]
