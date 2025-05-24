@@ -1,7 +1,7 @@
-# Use Python 3.11 slim image for optimal performance
+# Multi-stage build for production optimization
 FROM python:3.11-slim as base
 
-# Set environment variables for Cloud Run
+# Production environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8080 \
     PYTHONPATH=/app
 
-# Install system dependencies in a single layer
+# Install system dependencies efficiently
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gcc \
@@ -18,20 +18,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     libssl-dev \
     make \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Create non-root user early
+# Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 # Set work directory
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Copy requirements and install dependencies first (better caching)
 COPY requirements.txt .
 
-# Install Python dependencies with optimization
+# Install Python dependencies optimized for production
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -39,31 +38,24 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 
 # Create necessary directories and set permissions
-RUN mkdir -p /app/templates /app/static /app/logs /tmp/sessions && \
-    chown -R appuser:appuser /app /tmp/sessions && \
-    chmod -R 755 /app && \
-    chmod -R 777 /tmp/sessions
+RUN mkdir -p /app/templates /app/static /app/logs /tmp && \
+    chown -R appuser:appuser /app /tmp
 
 # Switch to non-root user
 USER appuser
 
+# Health check - CRITICAL for Cloud Run
+HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health/live || exit 1
+
 # Expose port
 EXPOSE ${PORT}
 
-# Health check optimized for Cloud Run
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health/live || exit 1
-
-# Production-ready startup command optimized for Cloud Run
-CMD exec uvicorn main:app \
-    --host 0.0.0.0 \
-    --port ${PORT} \
-    --workers 1 \
-    --loop uvloop \
-    --http httptools \
-    --access-log \
-    --log-level info \
-    --timeout-keep-alive 65 \
-    --timeout-graceful-shutdown 30 \
-    --max-requests 1000 \
-    --max-requests-jitter 100
+# Production command - starts web server immediately
+CMD ["python", "-m", "uvicorn", "main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8080", \
+     "--workers", "1", \
+     "--access-log", \
+     "--log-level", "info", \
+     "--timeout-keep-alive", "30"]
