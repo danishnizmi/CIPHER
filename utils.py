@@ -109,7 +109,7 @@ async def get_secret(secret_id: str) -> str:
         raise
 
 async def download_session_from_storage() -> Optional[str]:
-    """Download Telegram session from Cloud Storage"""
+    """Download Telegram session from Cloud Storage with backup support"""
     try:
         logger.info(f"Downloading session from gs://{BUCKET_NAME}/{SESSION_NAME}.session")
         
@@ -133,7 +133,17 @@ async def download_session_from_storage() -> Optional[str]:
         # Get metadata for logging
         blob.reload()
         metadata = blob.metadata or {}
-        logger.info(f"Session downloaded successfully (created: {metadata.get('created_at', 'unknown')})")
+        created_at = metadata.get('created_at', 'unknown')
+        phone = metadata.get('phone_number', 'unknown')
+        logger.info(f"Session downloaded successfully (created: {created_at}, phone: {phone})")
+        
+        # Create backup of current session
+        try:
+            backup_blob = bucket.blob(f"{SESSION_NAME}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.session")
+            backup_blob.upload_from_string(session_data)
+            logger.info(f"Session backup created: {backup_blob.name}")
+        except Exception as e:
+            logger.warning(f"Failed to create session backup: {e}")
         
         return session_data
         
@@ -142,7 +152,7 @@ async def download_session_from_storage() -> Optional[str]:
         return None
 
 async def upload_session_to_storage(session_data: bytes) -> bool:
-    """Upload updated session to Cloud Storage"""
+    """Upload updated session to Cloud Storage with versioning"""
     try:
         logger.info("Uploading updated session to Cloud Storage...")
         
@@ -155,26 +165,115 @@ async def upload_session_to_storage(session_data: bytes) -> bool:
             bucket = storage_client.create_bucket(BUCKET_NAME, location="US")
             logger.info(f"Created session storage bucket: {BUCKET_NAME}")
         
-        # Upload session
+        # Create versioned backup before updating
+        try:
+            current_blob = bucket.blob(f"{SESSION_NAME}.session")
+            if current_blob.exists():
+                backup_name = f"{SESSION_NAME}_version_{datetime.now().strftime('%Y%m%d_%H%M%S')}.session"
+                backup_blob = bucket.blob(backup_name)
+                backup_blob.upload_from_string(current_blob.download_as_bytes())
+                logger.info(f"Created version backup: {backup_name}")
+        except Exception as e:
+            logger.warning(f"Failed to create version backup: {e}")
+        
+        # Upload new session
         blob = bucket.blob(f"{SESSION_NAME}.session")
         blob.upload_from_string(session_data)
         
-        # Update metadata
+        # Update metadata with enhanced information
         blob.metadata = {
             "updated_by": "cipher_cloud_service",
             "updated_at": datetime.now().isoformat(),
-            "session_type": "mtproto_authenticated"
+            "session_type": "mtproto_authenticated",
+            "version": "1.0",
+            "auto_backup": "enabled",
+            "last_validation": datetime.now().isoformat()
         }
         blob.patch()
         
-        logger.info("Session updated in Cloud Storage successfully")
+        logger.info("Session updated in Cloud Storage successfully with versioning")
         return True
         
     except Exception as e:
         logger.error(f"Failed to upload session to Cloud Storage: {e}")
         return False
 
+async def validate_and_refresh_session() -> bool:
+    """Validate current session and refresh if needed"""
+    global telegram_client
+    
+    try:
+        if not telegram_client:
+            logger.warning("No Telegram client to validate")
+            return False
+        
+        # Test if session is still valid
+        try:
+            is_authorized = await telegram_client.is_user_authorized()
+            if not is_authorized:
+                logger.error("Session authorization expired")
+                return False
+            
+            # Try a simple API call to verify connectivity
+            me = await telegram_client.get_me()
+            logger.info(f"Session validation successful for user: {me.username or me.first_name} (ID: {me.id})")
+            
+            # Update session in storage if it has changed
+            try:
+                updated_session = telegram_client.session.save()
+                if updated_session:
+                    await upload_session_to_storage(updated_session)
+                    logger.info("Session refreshed and updated in storage")
+            except Exception as e:
+                logger.warning(f"Failed to refresh session in storage: {e}")
+            
+            return True
+            
+        except (AuthKeyUnregisteredError, UserDeactivatedError, UnauthorizedError) as e:
+            logger.error(f"Session authentication error during validation: {e}")
+            logger.error("Session may have expired or been revoked")
+            return False
+        except Exception as e:
+            logger.warning(f"Session validation test failed: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Session validation failed: {e}")
+        return False
+
+async def session_health_monitor():
+    """Background task to monitor session health"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Check every hour
+            if telegram_client and telegram_client.is_connected():
+                logger.info("Running hourly session health check...")
+                is_valid = await validate_and_refresh_session()
+                if not is_valid:
+                    logger.error("Session health check failed - manual intervention may be required")
+                else:
+                    logger.info("Session health check passed")
+        except Exception as e:
+            logger.error(f"Session health monitor error: {e}")
+            await asyncio.sleep(300)  # Wait 5 minutes before retrying
+
 async def create_session_file(session_data: bytes) -> Optional[str]:
+    """Create temporary session file from downloaded data"""
+    try:
+        # Create temporary file for session
+        temp_dir = tempfile.gettempdir()
+        session_path = os.path.join(temp_dir, f"{SESSION_NAME}.session")
+        
+        # Write session data to file
+        with open(session_path, 'wb') as f:
+            f.write(session_data)
+        
+        logger.info(f"Created temporary session file: {session_path}")
+        return session_path
+        
+    except Exception as e:
+        logger.error(f"Failed to create session file: {e}")
+        return None
     """Create temporary session file from downloaded data"""
     try:
         # Create temporary file for session
@@ -1115,7 +1214,7 @@ async def stop_monitoring():
         logger.error(f"Error stopping cybersecurity monitoring: {e}")
 
 async def start_background_monitoring():
-    """Start cybersecurity monitoring in background task"""
+    """Start cybersecurity monitoring in background task with session monitoring"""
     global _monitoring_task
     
     if _monitoring_task and not _monitoring_task.done():
@@ -1128,17 +1227,32 @@ async def start_background_monitoring():
             logger.error("Failed to start cybersecurity monitoring")
             return
         
+        # Start main monitoring task
         _monitoring_task = asyncio.create_task(telegram_client.run_until_disconnected())
-        logger.info("Background cybersecurity monitoring started")
+        
+        # Start session health monitoring
+        asyncio.create_task(session_health_monitor())
+        
+        logger.info("Background cybersecurity monitoring started with session health monitoring")
         
     except Exception as e:
         logger.error(f"Failed to start background cybersecurity monitoring: {e}")
 
 async def stop_background_monitoring():
-    """Stop background cybersecurity monitoring"""
+    """Stop background cybersecurity monitoring with session preservation"""
     global _monitoring_task
     
     try:
+        # Save session before stopping
+        if telegram_client and telegram_client.is_connected():
+            try:
+                session_data = telegram_client.session.save()
+                if session_data:
+                    await upload_session_to_storage(session_data)
+                    logger.info("Session saved before shutdown")
+            except Exception as e:
+                logger.warning(f"Failed to save session during shutdown: {e}")
+        
         await stop_monitoring()
         if _monitoring_task and not _monitoring_task.done():
             _monitoring_task.cancel()
@@ -1147,7 +1261,7 @@ async def stop_background_monitoring():
             except asyncio.CancelledError:
                 pass
         
-        logger.info("Background cybersecurity monitoring stopped")
+        logger.info("Background cybersecurity monitoring stopped with session preservation")
     except Exception as e:
         logger.error(f"Failed to stop background cybersecurity monitoring: {e}")
 
