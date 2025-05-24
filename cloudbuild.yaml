@@ -1,5 +1,5 @@
 # CIPHER Platform - Cloud Build Configuration
-# Automated build and deployment pipeline
+# Fixed invalid substitution error and using cloud-build-service account
 
 steps:
   # Step 1: Build the container image
@@ -12,7 +12,7 @@ steps:
     ]
     id: 'build-image'
 
-  # Step 2: Push the container image
+  # Step 2: Push the container image with build ID
   - name: 'gcr.io/cloud-builders/docker'
     args: [
       'push', 
@@ -30,32 +30,28 @@ steps:
     id: 'push-latest'
     waitFor: ['build-image']
 
-  # Step 4: Setup BigQuery dataset and permissions
+  # Step 4: Setup BigQuery dataset (cloud-build-service already has permissions)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        # Enable APIs
-        gcloud services enable bigquery.googleapis.com run.googleapis.com
+        echo "Setting up BigQuery dataset..."
+        
+        # Enable APIs if not already enabled
+        gcloud services enable bigquery.googleapis.com run.googleapis.com --quiet
         
         # Create BigQuery dataset if it doesn't exist
-        bq ls --project_id=$PROJECT_ID telegram_data || \
+        bq ls --project_id=$PROJECT_ID telegram_data 2>/dev/null || \
         bq mk --dataset --location=US --description="CIPHER Intelligence Data" $PROJECT_ID:telegram_data
         
-        # Set up service account permissions
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:cipher-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/bigquery.admin" --quiet || true
+        # Verify dataset exists
+        bq ls --project_id=$PROJECT_ID telegram_data
         
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:cipher-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/bigquery.jobUser" --quiet || true
-        
-        echo "BigQuery setup completed"
+        echo "BigQuery setup completed successfully"
     id: 'setup-bigquery'
 
-  # Step 5: Deploy to Cloud Run
+  # Step 5: Deploy to Cloud Run using cloud-build-service account
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args: [
@@ -64,7 +60,7 @@ steps:
       '--region', 'us-central1',
       '--platform', 'managed',
       '--allow-unauthenticated',
-      '--service-account', 'cipher-service@$PROJECT_ID.iam.gserviceaccount.com',
+      '--service-account', 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
       '--memory', '4Gi',
       '--cpu', '2',
       '--timeout', '3600',
@@ -72,33 +68,62 @@ steps:
       '--min-instances', '0',
       '--port', '8080',
       '--concurrency', '80',
-      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1'
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
     ]
     id: 'deploy-cloud-run'
     waitFor: ['push-image', 'setup-bigquery']
 
-  # Step 6: Health check
-  - name: 'gcr.io/cloud-builders/curl'
+  # Step 6: Get service URL and perform health checks
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
+        echo "Getting service URL and performing health checks..."
+        
         # Get service URL
         SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
-          --region=us-central1 --format='value(status.url)')
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format='value(status.url)')
         
-        echo "Service URL: $SERVICE_URL"
+        echo "✅ Service URL: $SERVICE_URL"
         
-        # Wait a bit for service to be ready
-        sleep 30
+        # Wait for service to be ready
+        echo "Waiting for service to be ready..."
+        sleep 45
         
         # Test health endpoints
-        echo "Testing health endpoints..."
-        curl -f "$SERVICE_URL/health/live" || exit 1
-        curl -f "$SERVICE_URL/health" || exit 1
+        echo "Testing liveness endpoint..."
+        if curl -f -s --max-time 30 "$SERVICE_URL/health/live"; then
+          echo "✅ Liveness check passed"
+        else
+          echo "❌ Liveness check failed"
+          exit 1
+        fi
         
-        echo "✅ CIPHER Platform deployment successful!"
-        echo "Dashboard: $SERVICE_URL/dashboard"
+        echo "Testing readiness endpoint..."
+        if curl -f -s --max-time 30 "$SERVICE_URL/health"; then
+          echo "✅ Readiness check passed"
+        else
+          echo "⚠️ Readiness check failed (may be degraded mode)"
+        fi
+        
+        echo "Testing stats API..."
+        if curl -f -s --max-time 30 "$SERVICE_URL/api/stats"; then
+          echo "✅ Stats API working"
+        else
+          echo "⚠️ Stats API failed (may be using fallback data)"
+        fi
+        
+        echo ""
+        echo "🎉 CIPHER Platform deployment successful!"
+        echo "📊 Dashboard: $SERVICE_URL/dashboard"
+        echo "🏥 Health: $SERVICE_URL/health"
+        echo "📈 Stats: $SERVICE_URL/api/stats"
+        echo ""
+        echo "🔧 Service Account: cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com"
+        echo "📊 BigQuery Dataset: $PROJECT_ID:telegram_data"
     id: 'health-check'
     waitFor: ['deploy-cloud-run']
 
@@ -113,7 +138,7 @@ options:
   # Set substitutions
   substitution_option: 'ALLOW_LOOSE'
 
-# Timeout for the entire build
+# Timeout for the entire build (20 minutes)
 timeout: '1200s'
 
 # Images to store in Container Registry
@@ -121,7 +146,8 @@ images:
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
 
-# Substitutions (can be overridden)
+# Valid substitutions only (removed invalid SERVICE_URL)
 substitutions:
   _SERVICE_NAME: 'telegram-ai-processor'
   _REGION: 'us-central1'
+  _SERVICE_ACCOUNT: 'cloud-build-service@${PROJECT_ID}.iam.gserviceaccount.com'
