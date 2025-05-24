@@ -6,33 +6,12 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-import structlog
-import uvicorn
+import logging
 
-from frontend import router as frontend_router
-
-# Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
-
-logger = structlog.get_logger(__name__)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global state
 app_state = {
@@ -43,8 +22,7 @@ app_state = {
     "startup_errors": [],
     "version": "1.0.0",
     "startup_phase": "web_server_starting",
-    "initialization_progress": 0,
-    "last_health_check": None
+    "initialization_progress": 0
 }
 
 # Background initialization task
@@ -60,66 +38,74 @@ async def background_initialization():
         app_state["initialization_progress"] = 10
         
         # Import utils module (heavy imports happen here)
-        from utils import (
-            setup_bigquery_tables, 
-            start_background_monitoring, 
-            stop_background_monitoring,
-            get_message_stats,
-            telegram_client
-        )
-        
-        app_state["initialization_progress"] = 25
-        app_state["startup_phase"] = "bigquery_setup"
-        
-        # Initialize BigQuery
         try:
-            await setup_bigquery_tables()
-            app_state["bigquery_ready"] = True
-            app_state["initialization_progress"] = 50
-            logger.info("BigQuery setup completed")
-        except Exception as e:
-            error_msg = f"BigQuery setup failed: {str(e)}"
-            app_state["startup_errors"].append(error_msg)
-            logger.error("BigQuery setup failed", error=str(e))
-        
-        app_state["startup_phase"] = "telegram_initialization"
-        app_state["initialization_progress"] = 60
-        
-        # Initialize Telegram monitoring
-        try:
-            await start_background_monitoring()
+            from utils import (
+                setup_bigquery_tables, 
+                start_background_monitoring, 
+                stop_background_monitoring,
+                get_message_stats,
+                telegram_client
+            )
             
-            # Give it time to connect
-            await asyncio.sleep(5)
+            app_state["initialization_progress"] = 25
+            app_state["startup_phase"] = "bigquery_setup"
             
-            # Check connection status
-            if telegram_client and telegram_client.is_connected():
-                app_state["telegram_ready"] = True
-                app_state["monitoring_active"] = True
-                app_state["initialization_progress"] = 100
-                app_state["startup_phase"] = "fully_operational"
-                logger.info("CIPHER monitoring system fully operational")
-            else:
-                app_state["startup_phase"] = "telegram_connection_issues"
-                app_state["initialization_progress"] = 75
-                logger.warning("Telegram monitoring partially initialized")
+            # Initialize BigQuery
+            try:
+                await setup_bigquery_tables()
+                app_state["bigquery_ready"] = True
+                app_state["initialization_progress"] = 50
+                logger.info("BigQuery setup completed")
+            except Exception as e:
+                error_msg = f"BigQuery setup failed: {str(e)}"
+                app_state["startup_errors"].append(error_msg)
+                logger.error("BigQuery setup failed", exc_info=True)
+            
+            app_state["startup_phase"] = "telegram_initialization"
+            app_state["initialization_progress"] = 60
+            
+            # Initialize Telegram monitoring
+            try:
+                await start_background_monitoring()
                 
-        except Exception as e:
-            error_msg = f"Telegram monitoring failed: {str(e)}"
-            app_state["startup_errors"].append(error_msg)
-            app_state["startup_phase"] = "telegram_failed"
-            app_state["initialization_progress"] = 75
-            logger.error("Telegram monitoring failed", error=str(e))
+                # Give it time to connect
+                await asyncio.sleep(5)
+                
+                # Check connection status
+                if telegram_client and telegram_client.is_connected():
+                    app_state["telegram_ready"] = True
+                    app_state["monitoring_active"] = True
+                    app_state["initialization_progress"] = 100
+                    app_state["startup_phase"] = "fully_operational"
+                    logger.info("CIPHER monitoring system fully operational")
+                else:
+                    app_state["startup_phase"] = "telegram_connection_issues"
+                    app_state["initialization_progress"] = 75
+                    logger.warning("Telegram monitoring partially initialized")
+                    
+            except Exception as e:
+                error_msg = f"Telegram monitoring failed: {str(e)}"
+                app_state["startup_errors"].append(error_msg)
+                app_state["startup_phase"] = "telegram_failed"
+                app_state["initialization_progress"] = 75
+                logger.error("Telegram monitoring failed", exc_info=True)
+            
+        except ImportError as e:
+            logger.error(f"Failed to import utils module: {e}")
+            app_state["startup_errors"].append(f"Module import failed: {str(e)}")
+            app_state["startup_phase"] = "import_failed"
         
         app_state["startup_complete"] = True
         logger.info("Background initialization completed", 
-                   phase=app_state["startup_phase"],
-                   progress=app_state["initialization_progress"])
+                   extra={
+                       "phase": app_state["startup_phase"],
+                       "progress": app_state["initialization_progress"]
+                   })
         
     except Exception as e:
         app_state["startup_errors"].append(f"Background initialization failed: {str(e)}")
         app_state["startup_phase"] = "initialization_failed"
-        logger.error("Background initialization failed", error=str(e))
+        logger.error("Background initialization failed", exc_info=True)
 
 async def graceful_shutdown():
     """Handle graceful shutdown"""
@@ -137,12 +123,15 @@ async def graceful_shutdown():
         
         # Stop monitoring if it was started
         if app_state.get("monitoring_active"):
-            from utils import stop_background_monitoring
-            await stop_background_monitoring()
+            try:
+                from utils import stop_background_monitoring
+                await stop_background_monitoring()
+            except Exception as e:
+                logger.error(f"Error stopping monitoring: {e}")
         
         logger.info("Graceful shutdown completed")
     except Exception as e:
-        logger.error("Error during shutdown", error=str(e))
+        logger.error("Error during shutdown", exc_info=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -185,8 +174,8 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     """Global exception handler"""
     logger.error("Unhandled exception", 
-                path=str(request.url.path),
-                error=str(exc))
+                extra={"path": str(request.url.path), "error": str(exc)},
+                exc_info=True)
     
     return JSONResponse(
         status_code=500,
@@ -197,17 +186,13 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Include routers
-app.include_router(frontend_router, tags=["frontend"])
-
-# CRITICAL: Immediate health checks for Cloud Run
+# CRITICAL: Immediate health checks for Cloud Run - NO BigQuery dependency
 @app.get("/health", tags=["health"])
 async def health_check():
-    """Primary health check - responds immediately"""
+    """Primary health check - responds immediately WITHOUT BigQuery"""
     import time
-    app_state["last_health_check"] = time.time()
     
-    # Always return 200 if web server is running
+    # Always return 200 if web server is running - DO NOT call BigQuery
     return {
         "status": "healthy",
         "service": "cipher-intelligence-platform",
@@ -215,6 +200,7 @@ async def health_check():
         "phase": app_state["startup_phase"],
         "progress": app_state["initialization_progress"],
         "web_server": "operational",
+        "timestamp": time.time(),
         "bigquery": "ready" if app_state["bigquery_ready"] else "initializing",
         "telegram": "ready" if app_state["telegram_ready"] else "initializing",
         "monitoring": "active" if app_state["monitoring_active"] else "starting"
@@ -223,7 +209,7 @@ async def health_check():
 @app.get("/health/live", tags=["health"])
 async def liveness_check():
     """Kubernetes liveness probe - always healthy if server running"""
-    return {"status": "alive"}
+    return {"status": "alive", "timestamp": asyncio.get_event_loop().time()}
 
 @app.get("/health/ready", tags=["health"]) 
 async def readiness_check():
@@ -263,17 +249,19 @@ async def detailed_status():
 
 @app.get("/api/system/status", tags=["api"])
 async def api_system_status():
-    """API endpoint for system status"""
+    """API endpoint for system status - NO BigQuery dependency"""
     try:
-        # Try to get monitoring stats if available
+        # Only try to get stats if BigQuery is ready
         stats = {}
         if app_state["startup_complete"] and app_state["bigquery_ready"]:
             try:
                 from utils import get_message_stats
                 stats = await get_message_stats()
             except Exception as e:
-                logger.warning("Could not get stats", error=str(e))
+                logger.warning(f"Could not get stats: {e}")
                 stats = {"error": "Stats unavailable during initialization"}
+        else:
+            stats = {"note": "Statistics will be available after initialization"}
         
         return {
             "status": "operational",
@@ -283,45 +271,94 @@ async def api_system_status():
             "stats": stats
         }
     except Exception as e:
+        logger.error(f"Error in system status: {e}")
         return {
             "status": "initializing",
             "error": str(e),
             "phase": app_state["startup_phase"]
         }
 
-# Root endpoint that works immediately
-@app.get("/", tags=["frontend"])
-async def root():
-    """Root endpoint - redirects to dashboard"""
-    try:
-        # Try to load frontend if it's available
-        if app_state["initialization_progress"] > 25:
-            from frontend import router
+# Include frontend router
+try:
+    from frontend import router as frontend_router
+    app.include_router(frontend_router, tags=["frontend"])
+    logger.info("Frontend router included successfully")
+except Exception as e:
+    logger.warning(f"Frontend router not available: {e}")
+    
+    # Minimal fallback dashboard endpoint
+    @app.get("/", tags=["frontend"])
+    async def fallback_dashboard():
+        """Fallback dashboard when frontend not available"""
         return JSONResponse({
             "service": "CIPHER Intelligence Platform",
             "status": app_state["startup_phase"],
             "progress": f"{app_state['initialization_progress']}%",
-            "dashboard": "/dashboard" if app_state["initialization_progress"] > 50 else "initializing",
-            "message": "Cybersecurity Intelligence Platform"
+            "message": "Cybersecurity Intelligence Platform",
+            "dashboard": "Frontend loading...",
+            "health": "/health",
+            "status_api": "/status"
         })
+
+# Root endpoint that works immediately
+@app.get("/api/health/full", tags=["health"])
+async def full_health_check():
+    """Full health check with all component status"""
+    try:
+        components = {
+            "web_server": {"status": "healthy", "message": "Operational"},
+            "bigquery": {
+                "status": "healthy" if app_state["bigquery_ready"] else "initializing",
+                "message": "Ready" if app_state["bigquery_ready"] else "Initializing..."
+            },
+            "telegram": {
+                "status": "healthy" if app_state["telegram_ready"] else "initializing", 
+                "message": "Connected" if app_state["telegram_ready"] else "Connecting..."
+            },
+            "monitoring": {
+                "status": "active" if app_state["monitoring_active"] else "starting",
+                "message": "Monitoring channels" if app_state["monitoring_active"] else "Starting up..."
+            }
+        }
+        
+        # Overall status
+        if app_state["startup_phase"] == "fully_operational":
+            overall_status = "healthy"
+        elif app_state["startup_phase"] in ["web_server_starting", "importing_modules", "bigquery_setup", "telegram_initialization"]:
+            overall_status = "initializing"
+        else:
+            overall_status = "degraded"
+        
+        return {
+            "status": overall_status,
+            "service": "CIPHER Intelligence Platform",
+            "version": app_state["version"],
+            "phase": app_state["startup_phase"],
+            "progress": app_state["initialization_progress"],
+            "components": components,
+            "errors": app_state["startup_errors"] if app_state["startup_errors"] else None,
+            "timestamp": asyncio.get_event_loop().time()
+        }
+        
     except Exception as e:
-        return JSONResponse({
-            "service": "CIPHER Intelligence Platform", 
-            "status": "web_server_ready",
-            "message": "Platform initializing"
-        })
+        return {
+            "status": "error",
+            "error": str(e),
+            "phase": app_state["startup_phase"]
+        }
 
 if __name__ == "__main__":
     # Production server configuration
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
     
+    import uvicorn
+    
     # Start server immediately with minimal config
     uvicorn.run(
         app,
         host=host,
         port=port,
-        workers=1,
         access_log=True,
         log_level="info"
     )
