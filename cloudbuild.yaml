@@ -34,7 +34,6 @@ steps:
           run.googleapis.com \
           bigquery.googleapis.com \
           secretmanager.googleapis.com \
-          aiplatform.googleapis.com \
           logging.googleapis.com \
           monitoring.googleapis.com
         echo "APIs enabled successfully"
@@ -68,15 +67,16 @@ steps:
         echo "Webhook secret ready"
     waitFor: ['enable-apis']
 
-  # Step 5: Verify bot token exists
+  # Step 5: Verify bot token and Gemini API key
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'verify-bot-token'
+    id: 'verify-secrets'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Checking bot token..."
+        echo "Checking required secrets..."
         
+        # Check bot token
         if gcloud secrets describe telegram-bot-token >/dev/null 2>&1; then
           BOT_TOKEN_VALUE=$$(gcloud secrets versions access latest --secret="telegram-bot-token" 2>/dev/null || echo "")
           
@@ -84,7 +84,6 @@ steps:
             echo "⚠️  WARNING: Bot token is not set or is placeholder!"
             echo "   Please set your actual bot token:"
             echo "   echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
-            echo "   Then redeploy to enable webhook functionality"
             echo "placeholder" > /workspace/bot_token_status.txt
           else
             echo "Bot token is configured ✓"
@@ -104,6 +103,34 @@ steps:
           
           echo "placeholder" > /workspace/bot_token_status.txt
         fi
+        
+        # Check Gemini API key
+        if gcloud secrets describe gemini-api-key >/dev/null 2>&1; then
+          GEMINI_KEY_VALUE=$$(gcloud secrets versions access latest --secret="gemini-api-key" 2>/dev/null || echo "")
+          
+          if [ -z "$$GEMINI_KEY_VALUE" ] || [ "$$GEMINI_KEY_VALUE" = "REPLACE_WITH_YOUR_GEMINI_API_KEY" ]; then
+            echo "⚠️  WARNING: Gemini API key is not set or is placeholder!"
+            echo "   Please set your actual Gemini API key:"
+            echo "   echo -n 'YOUR_GEMINI_API_KEY' | gcloud secrets versions add gemini-api-key --data-file=-"
+            echo "placeholder" > /workspace/gemini_key_status.txt
+          else
+            echo "Gemini API key is configured ✓"
+            echo "configured" > /workspace/gemini_key_status.txt
+          fi
+        else
+          echo "⚠️  WARNING: Gemini API key secret does not exist!"
+          echo "   Creating placeholder secret. Please update with your actual API key:"
+          echo "   echo -n 'YOUR_GEMINI_API_KEY' | gcloud secrets create gemini-api-key --data-file=-"
+          
+          echo -n "REPLACE_WITH_YOUR_GEMINI_API_KEY" | gcloud secrets create gemini-api-key --data-file=-
+          
+          # Grant service account access
+          gcloud secrets add-iam-policy-binding gemini-api-key \
+            --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/secretmanager.secretAccessor"
+          
+          echo "placeholder" > /workspace/gemini_key_status.txt
+        fi
     waitFor: ['setup-webhook-secret']
 
   # Step 6: Create BigQuery dataset (idempotent)
@@ -122,7 +149,7 @@ steps:
         else
           echo "BigQuery dataset already exists ✓"
         fi
-    waitFor: ['verify-bot-token']
+    waitFor: ['verify-secrets']
 
   # Step 7: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -153,8 +180,7 @@ steps:
           --set-env-vars="LOG_LEVEL=INFO" \
           --set-env-vars="DATASET_ID=telegram_data" \
           --set-env-vars="TABLE_ID=processed_messages" \
-          --set-env-vars="VERTEX_AI_MODEL=gemini-1.5-flash" \
-          --set-env-vars="VERTEX_AI_LOCATION=us-central1" \
+          --set-env-vars="GEMINI_MODEL=gemini-1.5-flash" \
           --set-env-vars="TELEGRAM_SECRET_TOKEN=$$WEBHOOK_SECRET_VALUE" \
           --quiet
         
@@ -223,7 +249,8 @@ steps:
               \"url\": \"$$SERVICE_URL/webhook/telegram\",
               \"secret_token\": \"$$WEBHOOK_SECRET_VALUE\",
               \"allowed_updates\": [\"message\", \"edited_message\"],
-              \"drop_pending_updates\": true
+              \"drop_pending_updates\": true,
+              \"max_connections\": 40
             }")
           
           if echo "$$RESPONSE" | grep -q '"ok":true'; then
@@ -257,6 +284,7 @@ steps:
       - |
         SERVICE_URL=$$(cat /workspace/service_url.txt)
         BOT_TOKEN_STATUS=$$(cat /workspace/bot_token_status.txt)
+        GEMINI_KEY_STATUS=$$(cat /workspace/gemini_key_status.txt)
         
         echo ""
         echo "🎉 DEPLOYMENT COMPLETE!"
@@ -268,14 +296,32 @@ steps:
         echo "=================================="
         echo ""
         
-        if [ "$$BOT_TOKEN_STATUS" = "configured" ]; then
-          echo "✅ Bot token configured - webhook should be active"
-          echo "📨 Send a message to your bot to test the integration"
+        # Check configuration status
+        if [ "$$BOT_TOKEN_STATUS" = "configured" ] && [ "$$GEMINI_KEY_STATUS" = "configured" ]; then
+          echo "✅ All secrets configured - system fully operational!"
+          echo "📨 Send a message to your bot to test the AI analysis"
         else
-          echo "⚠️  Bot token needs to be configured:"
-          echo "   1. Get your bot token from @BotFather on Telegram"
-          echo "   2. Run: echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
-          echo "   3. Redeploy: gcloud builds submit --config cloudbuild.yaml ."
+          echo "⚠️  Configuration needed:"
+          
+          if [ "$$BOT_TOKEN_STATUS" != "configured" ]; then
+            echo ""
+            echo "🤖 Telegram Bot Token:"
+            echo "   1. Message @BotFather on Telegram"
+            echo "   2. Create bot with /newbot command"
+            echo "   3. Get your bot token"
+            echo "   4. Run: echo -n 'YOUR_BOT_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+          fi
+          
+          if [ "$$GEMINI_KEY_STATUS" != "configured" ]; then
+            echo ""
+            echo "🧠 Gemini API Key:"
+            echo "   1. Visit: https://ai.google.dev/gemini-api/docs/api-key"
+            echo "   2. Create a new API key"
+            echo "   3. Run: echo -n 'YOUR_GEMINI_API_KEY' | gcloud secrets versions add gemini-api-key --data-file=-"
+          fi
+          
+          echo ""
+          echo "   5. Redeploy: gcloud builds submit --config cloudbuild.yaml ."
         fi
         
         echo ""
@@ -283,14 +329,16 @@ steps:
         echo "   • View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=20"
         echo "   • Check service: gcloud run services describe telegram-ai-processor --region=us-central1"
         echo "   • Update bot token: echo -n 'NEW_TOKEN' | gcloud secrets versions add telegram-bot-token --data-file=-"
+        echo "   • Update Gemini key: echo -n 'NEW_KEY' | gcloud secrets versions add gemini-api-key --data-file=-"
         echo "   • View BigQuery data: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
         echo ""
         echo "🎯 Next steps:"
-        echo "   1. Visit the dashboard: $$SERVICE_URL"
-        echo "   2. Send test messages to your bot"
-        echo "   3. Monitor the logs and dashboard for activity"
+        echo "   1. Configure missing secrets (if any)"
+        echo "   2. Visit the dashboard: $$SERVICE_URL"
+        echo "   3. Send test messages to your bot"
+        echo "   4. Monitor the logs and dashboard for AI analysis results"
         echo ""
-        echo "✨ Your Telegram AI Processor is ready!"
+        echo "✨ Your Telegram AI Processor with Gemini is ready!"
     waitFor: ['telegram-webhook']
 
 # Service account configuration
@@ -311,9 +359,9 @@ tags:
   - 'telegram-ai-processor'
   - 'cloud-run'
   - 'production'
-  - 'ai-pipeline'
+  - 'gemini-api'
 
-# Substitutions (all variables that Cloud Build should know about)
+# Substitutions (optional overrides)
 substitutions:
   _REGION: 'us-central1'
   _SERVICE_NAME: 'telegram-ai-processor'
