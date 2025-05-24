@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Quick deployment script for Telegram AI Processor
-# Usage: ./deploy.sh [--setup] [--update-secrets]
+# Quick deployment script for Telegram AI Processor with existing secrets
+# Usage: ./deploy.sh
 
 set -e
 
@@ -46,10 +46,6 @@ check_prerequisites() {
         exit 1
     fi
     
-    if ! command_exists docker; then
-        print_warning "Docker not found. Cloud Build will handle container building."
-    fi
-    
     # Check if authenticated
     if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
         print_error "Please authenticate with gcloud first: gcloud auth login"
@@ -59,52 +55,35 @@ check_prerequisites() {
     print_success "Prerequisites check passed"
 }
 
-# Setup initial resources
-setup_resources() {
-    print_status "Setting up initial resources..."
+# Check existing secrets
+check_secrets() {
+    print_status "Checking existing secrets..."
     
     gcloud config set project $PROJECT_ID
     
-    # Enable APIs
-    print_status "Enabling required APIs..."
-    gcloud services enable \
-        cloudbuild.googleapis.com \
-        run.googleapis.com \
-        bigquery.googleapis.com \
-        secretmanager.googleapis.com \
-        aiplatform.googleapis.com \
-        logging.googleapis.com
+    SECRETS_OK=true
+    SECRETS=("telegram-api-id" "telegram-api-hash" "telegram-phone-number" "gemini-api-key")
     
-    print_success "APIs enabled"
-}
-
-# Update secrets
-update_secrets() {
-    print_status "Updating secrets..."
+    for secret in "${SECRETS[@]}"; do
+        if gcloud secrets describe $secret >/dev/null 2>&1; then
+            print_success "Secret $secret exists"
+        else
+            print_error "Secret $secret is missing"
+            SECRETS_OK=false
+        fi
+    done
     
-    echo -n "Enter your Telegram bot token: "
-    read -s BOT_TOKEN
-    echo
-    
-    if [ -n "$BOT_TOKEN" ]; then
-        echo -n "$BOT_TOKEN" | gcloud secrets create telegram-bot-token --data-file=- 2>/dev/null || \
-        echo -n "$BOT_TOKEN" | gcloud secrets versions add telegram-bot-token --data-file=-
-        print_success "Bot token updated"
-    else
-        print_warning "No bot token provided, skipping update"
+    if [ "$SECRETS_OK" = false ]; then
+        print_error "Some required secrets are missing. Please create them first."
+        exit 1
     fi
     
-    # Generate webhook secret
-    WEBHOOK_SECRET=$(openssl rand -base64 32)
-    echo -n "$WEBHOOK_SECRET" | gcloud secrets create telegram-webhook-secret --data-file=- 2>/dev/null || \
-    echo -n "$WEBHOOK_SECRET" | gcloud secrets versions add telegram-webhook-secret --data-file=-
-    
-    print_success "Webhook secret generated and stored"
+    print_success "All required secrets exist"
 }
 
 # Deploy application
 deploy_app() {
-    print_status "Deploying application..."
+    print_status "Deploying application with Cloud Build..."
     
     # Submit build
     gcloud builds submit --config cloudbuild.yaml .
@@ -126,59 +105,61 @@ get_service_info() {
     echo "=================================="
     echo "📍 Service URL: $SERVICE_URL"
     echo "🔗 Dashboard: $SERVICE_URL"
-    echo "🤖 Webhook URL: $SERVICE_URL/webhook/telegram"
+    echo "📊 Monitoring: $SERVICE_URL/monitoring/status"
+    echo "🏥 Health: $SERVICE_URL/health"
     echo "=================================="
     echo ""
     
     if [ "$SERVICE_URL" != "Not deployed" ]; then
         echo "📝 Next steps:"
-        echo "1. Set your Telegram bot webhook:"
-        echo "   curl -X POST \"https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook\" \\"
-        echo "        -H \"Content-Type: application/json\" \\"
-        echo "        -d \"{\\\"url\\\": \\\"$SERVICE_URL/webhook/telegram\\\"}\""
-        echo ""
-        echo "2. Send a message to your bot to test the integration"
+        echo "1. Visit $SERVICE_URL to check the dashboard"
+        echo "2. Monitor the logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE_NAME\" --limit 20"
+        echo "3. Check monitoring status: curl $SERVICE_URL/monitoring/status"
         echo ""
         echo "🔧 Useful commands:"
         echo "   View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE_NAME\" --limit 20"
         echo "   Service status: gcloud run services describe $SERVICE_NAME --region=$REGION"
+        echo "   Check BigQuery: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
+    fi
+}
+
+# Test deployment
+test_deployment() {
+    print_status "Testing deployment..."
+    
+    SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
+        --region=$REGION \
+        --format='value(status.url)' 2>/dev/null || echo "")
+    
+    if [ -n "$SERVICE_URL" ]; then
+        print_status "Waiting for service to be ready..."
+        sleep 10
+        
+        if curl -s -f "$SERVICE_URL/health" >/dev/null; then
+            print_success "Service health check passed"
+        else
+            print_warning "Service health check failed - may still be starting"
+        fi
+    else
+        print_error "Could not get service URL"
     fi
 }
 
 # Main deployment logic
 main() {
-    echo "🚀 Telegram AI Processor Deployment"
-    echo "===================================="
+    echo "🚀 Telegram AI Processor Deployment (Using Existing Secrets)"
+    echo "============================================================="
     
     check_prerequisites
-    
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --setup)
-                setup_resources
-                shift
-                ;;
-            --update-secrets)
-                update_secrets
-                shift
-                ;;
-            *)
-                print_warning "Unknown option: $1"
-                shift
-                ;;
-        esac
-    done
-    
-    # If no specific flags, do full deployment
-    if [ $# -eq 0 ]; then
-        setup_resources
-        update_secrets
-    fi
-    
+    check_secrets
     deploy_app
+    test_deployment
     get_service_info
+    
+    echo ""
+    print_success "Deployment completed! Your Telegram AI Processor should now be running."
+    print_status "The service will use your existing secrets for Telegram and Gemini APIs."
 }
 
-# Run main function with all arguments
+# Run main function
 main "$@"
