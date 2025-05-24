@@ -153,3 +153,75 @@
 
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-2">
+                                <p class="text-sm font-medium text-gray-900">{{ insight.chat_username or 'Unknown Channel' }}</p>
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                    {{ insight.category or 'other' }}
+                                </span>
+                                {% if insight.urgency_score > 0.7 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                    High Urgency
+                                </span>
+                                {% elif insight.urgency_score > 0.4 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                                    Medium Urgency
+                                </span>
+                                {% endif %}
+                            </div>
+                            <p class="text-xs text-gray-500">
+                                {% if insight.message_date %}
+                                {{ insight.message_date[:19] | replace('T', ' ') }}
+                                {% endif %}
+                            </p>
+                        </div>
+
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">{{ insight.gemini_analysis or 'No analysis available' }}</p>
+                        </div>
+
+                        {% if insight.key_topics %}
+                        <div class="mt-2 flex flex-wrap gap-1">
+                            {% for topic in insight.key_topics[:5] %}
+                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-800">
+                                {{ topic }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+
+                        <div class="mt-2">
+                            <p class="text-xs text-gray-600 line-clamp-2">
+                                {{ (insight.message_text[:150] + '...') if insight.message_text and insight.message_text|length > 150 else insight.message_text }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="px-4 py-8 text-center">
+            <i class="fas fa-inbox text-4xl text-gray-300 mb-4"></i>
+            <h3 class="text-lg font-medium text-gray-900 mb-2">No Messages Yet</h3>
+            <p class="text-gray-500">
+                {% if not monitoring.active %}
+                Channel monitoring is not active. Check your Telegram credentials.
+                {% else %}
+                Waiting for new messages from monitored channels...
+                {% endif %}
+            </p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+function dashboard() {
+    return {
+        refreshData() {
+            window.location.reload();
+        }
+    }
+}
+</script>
+{% endblock %}
