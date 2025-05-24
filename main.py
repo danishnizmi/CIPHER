@@ -10,23 +10,10 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 import structlog
 import uvicorn
-import logging
 
 from frontend import router as frontend_router
-from utils import (
-    setup_bigquery_tables, 
-    start_background_monitoring, 
-    stop_background_monitoring,
-    get_message_stats,
-    telegram_client
-)
 
-# Configure structured logging for Cloud Run
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
+# Configure structured logging
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -55,483 +42,286 @@ app_state = {
     "monitoring_active": False,
     "startup_errors": [],
     "version": "1.0.0",
-    "startup_time": None
+    "startup_phase": "web_server_starting",
+    "initialization_progress": 0,
+    "last_health_check": None
 }
 
-async def graceful_shutdown(signum=None):
-    """Handle graceful shutdown"""
-    logger.info("Received shutdown signal", signal=signum)
+# Background initialization task
+_background_init_task = None
+
+async def background_initialization():
+    """Initialize services in background after web server starts"""
+    global app_state
+    
     try:
-        await stop_background_monitoring()
+        logger.info("Starting background initialization")
+        app_state["startup_phase"] = "importing_modules"
+        app_state["initialization_progress"] = 10
+        
+        # Import utils module (heavy imports happen here)
+        from utils import (
+            setup_bigquery_tables, 
+            start_background_monitoring, 
+            stop_background_monitoring,
+            get_message_stats,
+            telegram_client
+        )
+        
+        app_state["initialization_progress"] = 25
+        app_state["startup_phase"] = "bigquery_setup"
+        
+        # Initialize BigQuery
+        try:
+            await setup_bigquery_tables()
+            app_state["bigquery_ready"] = True
+            app_state["initialization_progress"] = 50
+            logger.info("BigQuery setup completed")
+        except Exception as e:
+            error_msg = f"BigQuery setup failed: {str(e)}"
+            app_state["startup_errors"].append(error_msg)
+            logger.error("BigQuery setup failed", error=str(e))
+        
+        app_state["startup_phase"] = "telegram_initialization"
+        app_state["initialization_progress"] = 60
+        
+        # Initialize Telegram monitoring
+        try:
+            await start_background_monitoring()
+            
+            # Give it time to connect
+            await asyncio.sleep(5)
+            
+            # Check connection status
+            if telegram_client and telegram_client.is_connected():
+                app_state["telegram_ready"] = True
+                app_state["monitoring_active"] = True
+                app_state["initialization_progress"] = 100
+                app_state["startup_phase"] = "fully_operational"
+                logger.info("CIPHER monitoring system fully operational")
+            else:
+                app_state["startup_phase"] = "telegram_connection_issues"
+                app_state["initialization_progress"] = 75
+                logger.warning("Telegram monitoring partially initialized")
+                
+        except Exception as e:
+            error_msg = f"Telegram monitoring failed: {str(e)}"
+            app_state["startup_errors"].append(error_msg)
+            app_state["startup_phase"] = "telegram_failed"
+            app_state["initialization_progress"] = 75
+            logger.error("Telegram monitoring failed", error=str(e))
+        
+        app_state["startup_complete"] = True
+        logger.info("Background initialization completed", 
+                   phase=app_state["startup_phase"],
+                   progress=app_state["initialization_progress"])
+        
+    except Exception as e:
+        app_state["startup_errors"].append(f"Background initialization failed: {str(e)}")
+        app_state["startup_phase"] = "initialization_failed"
+        logger.error("Background initialization failed", error=str(e))
+
+async def graceful_shutdown():
+    """Handle graceful shutdown"""
+    global _background_init_task
+    logger.info("Starting graceful shutdown")
+    
+    try:
+        # Cancel background initialization if still running
+        if _background_init_task and not _background_init_task.done():
+            _background_init_task.cancel()
+            try:
+                await _background_init_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Stop monitoring if it was started
+        if app_state.get("monitoring_active"):
+            from utils import stop_background_monitoring
+            await stop_background_monitoring()
+        
         logger.info("Graceful shutdown completed")
     except Exception as e:
         logger.error("Error during shutdown", error=str(e))
 
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown"""
-    if sys.platform != "win32":
-        try:
-            loop = asyncio.get_event_loop()
-            for sig in [signal.SIGTERM, signal.SIGINT]:
-                loop.add_signal_handler(
-                    sig, 
-                    lambda s=sig: asyncio.create_task(graceful_shutdown(s))
-                )
-        except Exception as e:
-            logger.warning("Could not setup signal handlers", error=str(e))
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan management with comprehensive initialization"""
+    """FastAPI lifespan - start web server IMMEDIATELY"""
+    global _background_init_task
     
-    # Startup
-    import datetime
-    app_state["startup_time"] = datetime.datetime.now().isoformat()
-    logger.info("Starting CIPHER Cybersecurity Intelligence Platform", version=app_state["version"])
+    # Startup - WEB SERVER STARTS FIRST
+    logger.info("CIPHER Platform starting - web server priority")
     
-    # Setup signal handlers
-    setup_signal_handlers()
+    # Start background initialization immediately but don't wait
+    _background_init_task = asyncio.create_task(background_initialization())
     
-    # Verify environment variables
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    if not project_id:
-        error_msg = "GOOGLE_CLOUD_PROJECT environment variable not set"
-        app_state["startup_errors"].append(error_msg)
-        logger.error(error_msg)
-    else:
-        logger.info("Environment configured", project_id=project_id)
-    
-    # Initialize BigQuery tables with retry
-    bigquery_retries = 3
-    for attempt in range(bigquery_retries):
-        try:
-            logger.info(f"BigQuery initialization attempt {attempt + 1}/{bigquery_retries}")
-            await setup_bigquery_tables()
-            app_state["bigquery_ready"] = True
-            logger.info("BigQuery initialization successful")
-            break
-        except Exception as e:
-            error_msg = f"BigQuery initialization attempt {attempt + 1} failed: {str(e)}"
-            logger.warning(error_msg)
-            if attempt == bigquery_retries - 1:
-                app_state["startup_errors"].append(f"BigQuery initialization failed after {bigquery_retries} attempts")
-                logger.error("BigQuery initialization failed completely", error=str(e))
-            else:
-                await asyncio.sleep(5)  # Wait before retry
-    
-    # Start Telegram monitoring with retry
-    telegram_retries = 2
-    for attempt in range(telegram_retries):
-        try:
-            logger.info(f"Telegram monitoring initialization attempt {attempt + 1}/{telegram_retries}")
-            success = await start_background_monitoring()
-            
-            if success:
-                # Give it a moment to initialize
-                await asyncio.sleep(3)
-                
-                # Check if monitoring actually started
-                if telegram_client and telegram_client.is_connected():
-                    app_state["telegram_ready"] = True
-                    app_state["monitoring_active"] = True
-                    logger.info("Telegram cybersecurity monitoring initialization successful")
-                    break
-                else:
-                    logger.warning("Telegram client not connected after initialization")
-            else:
-                logger.warning("Telegram monitoring initialization returned false")
-            
-            if attempt == telegram_retries - 1:
-                error_msg = "Telegram monitoring failed to connect after retries"
-                app_state["startup_errors"].append(error_msg)
-                logger.error(error_msg)
-                
-        except Exception as e:
-            error_msg = f"Telegram monitoring initialization attempt {attempt + 1} failed: {str(e)}"
-            logger.warning(error_msg)
-            if attempt == telegram_retries - 1:
-                app_state["startup_errors"].append(f"Telegram monitoring failed after {telegram_retries} attempts: {str(e)}")
-                logger.error("Telegram monitoring initialization failed completely", error=str(e))
-            else:
-                await asyncio.sleep(5)  # Wait before retry
-    
-    app_state["startup_complete"] = True
-    
-    # Log startup summary
-    if app_state["bigquery_ready"] and app_state["telegram_ready"]:
-        logger.info("CIPHER application startup completed successfully")
-    elif app_state["bigquery_ready"]:
-        logger.warning("CIPHER started with partial functionality - BigQuery ready, Telegram issues")
-    else:
-        logger.warning("CIPHER started with limited functionality", 
-                      bigquery_ready=app_state["bigquery_ready"],
-                      telegram_ready=app_state["telegram_ready"],
-                      errors=app_state["startup_errors"])
+    # Web server is ready NOW - no blocking initialization
+    logger.info("Web server ready - background initialization started")
     
     yield
     
     # Shutdown
-    logger.info("Shutting down CIPHER Cybersecurity Intelligence Platform")
-    try:
-        await stop_background_monitoring()
-        app_state["monitoring_active"] = False
-        logger.info("CIPHER application shutdown completed")
-    except Exception as e:
-        logger.error("Error during CIPHER application shutdown", error=str(e))
+    await graceful_shutdown()
 
-# Initialize FastAPI app with comprehensive configuration
+# Initialize FastAPI app - MINIMAL CONFIG FOR FAST STARTUP
 app = FastAPI(
     title="CIPHER - Cybersecurity Intelligence Platform",
-    description="Real-time cybersecurity threat intelligence monitoring and analysis platform",
+    description="Real-time cybersecurity threat intelligence monitoring",
     version=app_state["version"],
-    lifespan=lifespan,
-    docs_url="/api/docs" if os.getenv("ENVIRONMENT") == "development" else None,
-    redoc_url="/api/redoc" if os.getenv("ENVIRONMENT") == "development" else None,
+    lifespan=lifespan
 )
 
-# Add security middleware
-app.add_middleware(
-    TrustedHostMiddleware, 
-    allowed_hosts=["*"]  # Configure for production
-)
-
+# Essential middleware only
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 # Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Global exception handler with logging"""
+    """Global exception handler"""
     logger.error("Unhandled exception", 
-                path=request.url.path,
-                method=request.method,
-                error=str(exc),
-                exc_info=True)
+                path=str(request.url.path),
+                error=str(exc))
     
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal server error",
-            "detail": "An unexpected error occurred. Please check the logs.",
-            "path": request.url.path,
-            "service": "CIPHER"
+            "detail": "Service temporarily unavailable",
+            "phase": app_state.get("startup_phase", "unknown")
         }
     )
 
 # Include routers
 app.include_router(frontend_router, tags=["frontend"])
 
-# Health check endpoints
-@app.get("/health", tags=["monitoring"])
+# CRITICAL: Immediate health checks for Cloud Run
+@app.get("/health", tags=["health"])
 async def health_check():
-    """Comprehensive health check endpoint"""
-    try:
-        # Basic health check that doesn't require external services
-        health_status = {
-            "status": "healthy" if app_state["startup_complete"] else "starting",
-            "service": "CIPHER Cybersecurity Intelligence Platform",
-            "version": app_state["version"],
-            "mode": "cybersecurity-monitoring",
-            "startup_complete": app_state["startup_complete"],
-            "startup_time": app_state.get("startup_time"),
-            "components": {
-                "bigquery": {
-                    "status": "healthy" if app_state["bigquery_ready"] else "error",
-                    "ready": app_state["bigquery_ready"]
-                },
-                "telegram": {
-                    "status": "healthy" if app_state["telegram_ready"] else "error", 
-                    "ready": app_state["telegram_ready"],
-                    "connected": telegram_client.is_connected() if telegram_client else False
-                },
-                "monitoring": {
-                    "status": "active" if app_state["monitoring_active"] else "inactive",
-                    "active": app_state["monitoring_active"]
-                }
-            },
-            "startup_errors": app_state["startup_errors"] if app_state["startup_errors"] else None
-        }
-        
-        # Try to get stats if possible, but don't fail health check if this fails
-        try:
-            if app_state["bigquery_ready"]:
-                stats = await get_message_stats()
-                health_status["stats"] = stats
-        except Exception as e:
-            logger.warning("Could not get stats for health check", error=str(e))
-            health_status["stats_error"] = str(e)
-        
-        # Determine overall status
-        if not app_state["startup_complete"]:
-            health_status["status"] = "starting"
-            status_code = 202  # Accepted - still starting
-        elif app_state["startup_errors"]:
-            health_status["status"] = "degraded"
-            status_code = 200  # OK but degraded
-        elif app_state["bigquery_ready"]:
-            health_status["status"] = "healthy"
-            status_code = 200  # OK
-        else:
-            health_status["status"] = "unhealthy"
-            status_code = 503  # Service unavailable
-            
-        return JSONResponse(content=health_status, status_code=status_code)
-        
-    except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        return JSONResponse(
-            content={
-                "status": "error",
-                "service": "CIPHER Cybersecurity Intelligence Platform", 
-                "error": str(e),
-                "components": {
-                    "bigquery": {"status": "unknown"},
-                    "telegram": {"status": "unknown"},
-                    "monitoring": {"status": "unknown"}
-                }
-            },
-            status_code=503
-        )
-
-@app.get("/health/ready", tags=["monitoring"])
-async def readiness_check():
-    """Kubernetes readiness probe"""
-    if app_state["startup_complete"]:
-        return {"status": "ready", "service": "CIPHER"}
-    else:
-        raise HTTPException(
-            status_code=503, 
-            detail="CIPHER service not ready"
-        )
-
-@app.get("/health/live", tags=["monitoring"])
-async def liveness_check():
-    """Kubernetes liveness probe"""
-    return {
-        "status": "alive", 
-        "service": "CIPHER",
-        "timestamp": asyncio.get_event_loop().time()
-    }
-
-# Simple startup endpoint that always responds
-@app.get("/", tags=["frontend"])
-async def root_redirect():
-    """Root endpoint that redirects to dashboard"""
-    if app_state["startup_complete"]:
-        # Use frontend router for full dashboard
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/dashboard")
-    else:
-        return {
-            "service": "CIPHER Cybersecurity Intelligence Platform",
-            "status": "initializing",
-            "message": "System is starting up. Please wait a moment and try again.",
-            "health_check": "/health"
-        }
-
-# Add a simple dashboard route that doesn't require complex initialization
-@app.get("/dashboard", tags=["frontend"])
-async def simple_dashboard():
-    """Simple dashboard status"""
-    if not app_state["startup_complete"]:
-        return JSONResponse({
-            "service": "CIPHER",
-            "status": "initializing",
-            "message": "Cybersecurity intelligence platform is starting up...",
-            "components": {
-                "bigquery": app_state["bigquery_ready"],
-                "telegram": app_state["telegram_ready"],
-                "monitoring": app_state["monitoring_active"]
-            }
-        })
+    """Primary health check - responds immediately"""
+    import time
+    app_state["last_health_check"] = time.time()
     
-    # If startup complete, let frontend router handle it
-    from fastapi import Request
-    from fastapi.templating import Jinja2Templates
-    
-    # This is a fallback - the frontend router should handle the full dashboard
-    return JSONResponse({
-        "service": "CIPHER Cybersecurity Intelligence Platform",
-        "status": "operational",
-        "redirect": "Use /api endpoints or full frontend routes"
-    })
-
-# Monitoring and status endpoints
-@app.get("/monitoring/status", tags=["monitoring"])
-async def monitoring_status():
-    """Get detailed monitoring status"""
-    try:
-        from utils import MONITORED_CHANNELS
-        
-        status = {
-            "service": "CIPHER Cybersecurity Intelligence Platform",
-            "monitoring_active": app_state["monitoring_active"],
-            "telegram_connected": telegram_client.is_connected() if telegram_client else False,
-            "monitored_channels": MONITORED_CHANNELS,
-            "total_channels": len(MONITORED_CHANNELS),
-            "startup_complete": app_state["startup_complete"],
-            "component_status": {
-                "bigquery": app_state["bigquery_ready"],
-                "telegram": app_state["telegram_ready"], 
-                "monitoring": app_state["monitoring_active"]
-            },
-            "errors": app_state["startup_errors"] if app_state["startup_errors"] else None,
-            "startup_time": app_state.get("startup_time")
-        }
-        
-        return status
-        
-    except Exception as e:
-        logger.error("Failed to get monitoring status", error=str(e))
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to get monitoring status: {str(e)}"
-        )
-
-@app.get("/api/system/info", tags=["system"])
-async def system_info():
-    """Get system information"""
+    # Always return 200 if web server is running
     return {
-        "service": "CIPHER Cybersecurity Intelligence Platform",
+        "status": "healthy",
+        "service": "cipher-intelligence-platform",
         "version": app_state["version"],
-        "environment": os.getenv("ENVIRONMENT", "production"),
-        "project_id": os.getenv("GOOGLE_CLOUD_PROJECT", "unknown"),
-        "region": os.getenv("REGION", "unknown"),
-        "startup_time": app_state.get("startup_time"),
-        "python_version": sys.version,
-        "platform": "Google Cloud Run"
+        "phase": app_state["startup_phase"],
+        "progress": app_state["initialization_progress"],
+        "web_server": "operational",
+        "bigquery": "ready" if app_state["bigquery_ready"] else "initializing",
+        "telegram": "ready" if app_state["telegram_ready"] else "initializing",
+        "monitoring": "active" if app_state["monitoring_active"] else "starting"
     }
 
-@app.post("/api/monitoring/restart", tags=["monitoring"])
-async def restart_monitoring():
-    """Restart monitoring (admin endpoint)"""
+@app.get("/health/live", tags=["health"])
+async def liveness_check():
+    """Kubernetes liveness probe - always healthy if server running"""
+    return {"status": "alive"}
+
+@app.get("/health/ready", tags=["health"]) 
+async def readiness_check():
+    """Readiness check - web server always ready"""
+    return {
+        "status": "ready",
+        "web_server": "ready",
+        "initialization": app_state["startup_phase"]
+    }
+
+@app.get("/health/startup", tags=["health"])
+async def startup_check():
+    """Startup probe - responds immediately for Cloud Run"""
+    return {
+        "status": "started",
+        "phase": app_state["startup_phase"],
+        "progress": f"{app_state['initialization_progress']}%"
+    }
+
+# Status endpoints
+@app.get("/status", tags=["status"])
+async def detailed_status():
+    """Detailed system status"""
+    return {
+        "system": "CIPHER Cybersecurity Intelligence Platform",
+        "status": app_state["startup_phase"],
+        "progress": app_state["initialization_progress"],
+        "components": {
+            "web_server": "operational",
+            "bigquery": "ready" if app_state["bigquery_ready"] else "initializing",
+            "telegram": "ready" if app_state["telegram_ready"] else "initializing", 
+            "monitoring": "active" if app_state["monitoring_active"] else "starting"
+        },
+        "errors": app_state["startup_errors"] if app_state["startup_errors"] else None,
+        "startup_complete": app_state["startup_complete"]
+    }
+
+@app.get("/api/system/status", tags=["api"])
+async def api_system_status():
+    """API endpoint for system status"""
     try:
-        logger.info("Restarting CIPHER monitoring via API request")
-        
-        # Stop current monitoring
-        await stop_background_monitoring()
-        app_state["monitoring_active"] = False
-        
-        # Wait a moment
-        await asyncio.sleep(2)
-        
-        # Start monitoring again
-        success = await start_background_monitoring()
-        
-        # Check if it started successfully
-        await asyncio.sleep(2)
-        if success and telegram_client and telegram_client.is_connected():
-            app_state["monitoring_active"] = True
-            app_state["telegram_ready"] = True
-            status = "success"
-            message = "CIPHER monitoring restarted successfully"
-        else:
-            status = "partial"
-            message = "CIPHER monitoring restart initiated but connection not confirmed"
+        # Try to get monitoring stats if available
+        stats = {}
+        if app_state["startup_complete"] and app_state["bigquery_ready"]:
+            try:
+                from utils import get_message_stats
+                stats = await get_message_stats()
+            except Exception as e:
+                logger.warning("Could not get stats", error=str(e))
+                stats = {"error": "Stats unavailable during initialization"}
         
         return {
-            "status": status,
-            "message": message,
+            "status": "operational",
+            "phase": app_state["startup_phase"], 
+            "initialization_progress": app_state["initialization_progress"],
             "monitoring_active": app_state["monitoring_active"],
-            "service": "CIPHER"
+            "stats": stats
         }
-        
     except Exception as e:
-        logger.error("Failed to restart CIPHER monitoring", error=str(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to restart CIPHER monitoring: {str(e)}"
-        )
+        return {
+            "status": "initializing",
+            "error": str(e),
+            "phase": app_state["startup_phase"]
+        }
 
-# Metrics endpoint for monitoring
-@app.get("/metrics", tags=["monitoring"])
-async def metrics():
-    """Prometheus-style metrics endpoint"""
+# Root endpoint that works immediately
+@app.get("/", tags=["frontend"])
+async def root():
+    """Root endpoint - redirects to dashboard"""
     try:
-        # Basic metrics that don't require external calls
-        metrics_text = f"""# HELP cipher_startup_complete Whether CIPHER startup is complete
-# TYPE cipher_startup_complete gauge
-cipher_startup_complete {1 if app_state["startup_complete"] else 0}
-
-# HELP cipher_bigquery_ready Whether BigQuery is ready
-# TYPE cipher_bigquery_ready gauge
-cipher_bigquery_ready {1 if app_state["bigquery_ready"] else 0}
-
-# HELP cipher_telegram_ready Whether Telegram is ready
-# TYPE cipher_telegram_ready gauge
-cipher_telegram_ready {1 if app_state["telegram_ready"] else 0}
-
-# HELP cipher_monitoring_active Whether monitoring is active
-# TYPE cipher_monitoring_active gauge
-cipher_monitoring_active {1 if app_state["monitoring_active"] else 0}
-
-# HELP cipher_startup_errors Number of startup errors
-# TYPE cipher_startup_errors gauge
-cipher_startup_errors {len(app_state["startup_errors"])}
-"""
-        
-        # Try to add stats if available
-        try:
-            if app_state["bigquery_ready"]:
-                stats = await get_message_stats()
-                metrics_text += f"""
-# HELP cipher_messages_total Total messages processed
-# TYPE cipher_messages_total counter
-cipher_messages_total {stats.get('total_messages', 0)}
-
-# HELP cipher_threats_high High threat messages
-# TYPE cipher_threats_high counter
-cipher_threats_high {stats.get('high_threats', 0)}
-
-# HELP cipher_channels_monitored Number of channels monitored
-# TYPE cipher_channels_monitored gauge
-cipher_channels_monitored {stats.get('unique_channels', 0)}
-"""
-        except Exception as e:
-            logger.debug("Could not get detailed stats for metrics", error=str(e))
-        
-        return JSONResponse(
-            content=metrics_text,
-            media_type="text/plain"
-        )
-        
+        # Try to load frontend if it's available
+        if app_state["initialization_progress"] > 25:
+            from frontend import router
+        return JSONResponse({
+            "service": "CIPHER Intelligence Platform",
+            "status": app_state["startup_phase"],
+            "progress": f"{app_state['initialization_progress']}%",
+            "dashboard": "/dashboard" if app_state["initialization_progress"] > 50 else "initializing",
+            "message": "Cybersecurity Intelligence Platform"
+        })
     except Exception as e:
-        logger.error("Failed to generate metrics", error=str(e))
-        raise HTTPException(status_code=500, detail="Failed to generate metrics")
+        return JSONResponse({
+            "service": "CIPHER Intelligence Platform", 
+            "status": "web_server_ready",
+            "message": "Platform initializing"
+        })
 
 if __name__ == "__main__":
     # Production server configuration
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
-    workers = int(os.environ.get("WORKERS", 1))
     
-    logger.info("Starting CIPHER server", port=port, host=host)
-    
-    # Configure uvicorn with production settings
-    config = uvicorn.Config(
+    # Start server immediately with minimal config
+    uvicorn.run(
         app,
         host=host,
         port=port,
-        workers=workers,
-        loop="uvloop" if sys.platform != "win32" else "asyncio",
-        http="httptools",
+        workers=1,
         access_log=True,
-        log_level="info",
-        timeout_keep_alive=30,
-        timeout_graceful_shutdown=30,
+        log_level="info"
     )
-    
-    server = uvicorn.Server(config)
-    
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        logger.info("CIPHER server interrupted by user")
-    except Exception as e:
-        logger.error("CIPHER server error", error=str(e))
-        sys.exit(1)
