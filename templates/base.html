@@ -1,31 +1,146 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="scroll-smooth">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Telegram AI Processor{% endblock %}</title>
+    <title>{% block title %}CIPHER - Cybersecurity Intelligence Platform{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'cipher-blue': '#0066ff',
+                        'cipher-purple': '#6366f1',
+                        'cipher-dark': '#0f172a',
+                        'cipher-darker': '#020617',
+                    },
+                    fontFamily: {
+                        'mono': ['JetBrains Mono', 'Fira Code', 'Monaco', 'monospace'],
+                        'sans': ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.6s ease-out',
+                        'slide-up': 'slideUp 0.6s ease-out',
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'glow': 'glow 2s ease-in-out infinite alternate',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(40px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes glow {
+            from { box-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3); }
+            to { box-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5); }
+        }
+        
+        .glass-effect {
+            backdrop-filter: blur(16px) saturate(180%);
+            background-color: rgba(17, 25, 40, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.125);
+        }
+        
+        .neon-text {
+            color: #6366f1;
+            text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3);
+        }
+        
+        .cyber-grid {
+            background-image: 
+                linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        
+        .hover-lift {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-lift:hover {
+            transform: translateY(-4px) scale(1.02);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+        }
+        
+        .status-indicator {
+            position: relative;
+        }
+        
+        .status-indicator::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: inherit;
+            transform: translate(-50%, -50%);
+            animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+    </style>
 </head>
-<body class="bg-gray-50 min-h-screen">
-    <!-- Navigation -->
-    <nav class="bg-white shadow-lg border-b">
+<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans">
+    
+    <!-- Animated Background -->
+    <div class="fixed inset-0 cyber-grid opacity-20 pointer-events-none"></div>
+    <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
+    
+    <!-- Navigation Header -->
+    <nav class="glass-effect border-b border-white/10 sticky top-0 z-50">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between h-16">
-                <div class="flex items-center">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-robot text-2xl text-blue-600"></i>
-                    </div>
-                    <div class="ml-4">
-                        <h1 class="text-xl font-semibold text-gray-900">Telegram AI Processor</h1>
+            <div class="flex justify-between h-16 items-center">
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-3">
+                        <div class="relative">
+                            <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
+                                <i class="fas fa-shield-alt text-white text-lg"></i>
+                            </div>
+                            <div class="absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse"></div>
+                        </div>
+                        <div>
+                            <h1 class="text-xl font-bold neon-text">CIPHER</h1>
+                            <p class="text-xs text-gray-400 font-mono">Cybersecurity Intelligence Platform</p>
+                        </div>
                     </div>
                 </div>
+                
                 <div class="flex items-center space-x-4">
-                    <span class="text-sm text-gray-500" id="current-time"></span>
-                    <div class="flex items-center">
-                        <div class="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
-                        <span class="ml-2 text-sm text-gray-600">Live</span>
+                    <div class="hidden md:flex items-center space-x-6">
+                        <a href="/" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                        </a>
+                        <a href="/api/stats" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-chart-line mr-2"></i>Analytics
+                        </a>
+                        <a href="/status" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                            <i class="fas fa-heartbeat mr-2"></i>System
+                        </a>
+                    </div>
+                    
+                    <div class="flex items-center space-x-3">
+                        <div class="flex items-center">
+                            <div class="status-indicator w-3 h-3 bg-green-400 rounded-full mr-2"></div>
+                            <span class="text-sm text-gray-400 font-mono" id="current-time"></span>
+                        </div>
+                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
+                            LIVE
+                        </div>
                     </div>
                 </div>
             </div>
@@ -33,19 +148,25 @@
     </nav>
 
     <!-- Main Content -->
-    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+    <main class="min-h-screen">
         {% block content %}{% endblock %}
     </main>
 
     <!-- Footer -->
-    <footer class="bg-white border-t mt-12">
-        <div class="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8">
+    <footer class="glass-effect border-t border-white/10 mt-16">
+        <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between items-center">
-                <p class="text-sm text-gray-500">
-                    Powered by Google Cloud Platform & Gemini AI
-                </p>
-                <div class="flex space-x-4">
-                    <span class="text-xs text-gray-400">Project: primal-chariot-382610</span>
+                <div class="flex items-center space-x-4">
+                    <div class="text-sm text-gray-400">
+                        <span class="font-mono">CIPHER</span> v1.0.0 | Powered by 
+                        <span class="text-cipher-blue">Google Cloud</span> & 
+                        <span class="text-cipher-purple">Gemini AI</span>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4 text-xs text-gray-500">
+                    <span class="font-mono">PROJECT: {{ PROJECT_ID or 'primal-chariot-382610' }}</span>
+                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span class="font-mono">SECURE</span>
                 </div>
             </div>
         </div>
@@ -55,17 +176,42 @@
         // Update current time
         function updateTime() {
             const now = new Date();
-            document.getElementById('current-time').textContent = now.toLocaleTimeString();
+            const timeElement = document.getElementById('current-time');
+            if (timeElement) {
+                timeElement.textContent = now.toLocaleTimeString('en-US', { 
+                    hour12: false,
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            }
         }
+        
         setInterval(updateTime, 1000);
         updateTime();
 
-        // Auto-refresh dashboard every 30 seconds
+        // Auto-refresh for real-time updates
         if (window.location.pathname === '/') {
             setInterval(() => {
                 window.location.reload();
-            }, 30000);
+            }, 30000); // Refresh every 30 seconds
         }
+
+        // Smooth scroll for internal links
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        target.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+        });
     </script>
 
     {% block scripts %}{% endblock %}
