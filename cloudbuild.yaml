@@ -6,12 +6,11 @@ steps:
       'build',
       '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID',
       '-t', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest',
-      '--build-arg', 'BUILD_ID=$BUILD_ID',
       '.'
     ]
     timeout: '600s'
 
-  # Step 2: Push the Docker images
+  # Step 2: Push the Docker image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-build-id'
     args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID']
@@ -22,153 +21,95 @@ steps:
     args: ['push', 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest']
     waitFor: ['build-image']
 
-  # Step 3: Enable required APIs
+  # Step 3: Enable required APIs (idempotent)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'enable-apis'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "🔧 Enabling required APIs..."
+        echo "Ensuring required APIs are enabled..."
         gcloud services enable \
           cloudbuild.googleapis.com \
           run.googleapis.com \
           bigquery.googleapis.com \
           secretmanager.googleapis.com \
           logging.googleapis.com \
-          monitoring.googleapis.com \
-          storage.googleapis.com \
-          aiplatform.googleapis.com
-        echo "✅ APIs enabled successfully"
+          monitoring.googleapis.com
+        echo "APIs enabled successfully"
     waitFor: ['-']
 
-  # Step 4: Validate and setup Telegram API credentials
+  # Step 4: Verify existing secrets have values
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-telegram-secrets'
+    id: 'verify-secrets'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "🔐 Setting up Telegram API credentials..."
+        echo "Checking existing secrets..."
         
-        # Function to create or update secret
-        create_or_update_secret() {
+        # Function to check secret
+        check_secret() {
           local secret_name=$1
-          local secret_value=$2
-          local description=$3
-          
           if gcloud secrets describe $secret_name >/dev/null 2>&1; then
-            current_value=$(gcloud secrets versions access latest --secret="$secret_name" 2>/dev/null || echo "")
-            if [ "$current_value" = "$secret_value" ] || [ -z "$current_value" ]; then
-              echo "⚠️  Secret $secret_name needs to be updated with actual value"
-              echo "   Run: echo -n 'YOUR_ACTUAL_VALUE' | gcloud secrets versions add $secret_name --data-file=-"
-              echo "update_needed" > /workspace/${secret_name}_status.txt
-            else
-              echo "✅ Secret $secret_name is configured"
+            local secret_value=$(gcloud secrets versions access latest --secret="$secret_name" 2>/dev/null || echo "")
+            if [ -n "$secret_value" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_API_ID" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_API_HASH" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_PHONE" ] && [ "$secret_value" != "REPLACE_WITH_YOUR_GEMINI_API_KEY" ]; then
+              echo "✅ Secret $secret_name is configured with real value"
               echo "configured" > /workspace/${secret_name}_status.txt
+            else
+              echo "⚠️  Secret $secret_name exists but may need updating"
+              echo "needs_update" > /workspace/${secret_name}_status.txt
             fi
           else
-            echo "Creating secret: $secret_name"
-            echo -n "$secret_value" | gcloud secrets create $secret_name --data-file=- --labels="component=telegram-ai-processor"
-            
-            # Grant access to Cloud Build service account
-            gcloud secrets add-iam-policy-binding $secret_name \
-              --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-              --role="roles/secretmanager.secretAccessor"
-            
-            # Grant access to Cloud Run service account  
-            gcloud secrets add-iam-policy-binding $secret_name \
-              --member="serviceAccount:$PROJECT_ID@appspot.gserviceaccount.com" \
-              --role="roles/secretmanager.secretAccessor"
-            
-            echo "update_needed" > /workspace/${secret_name}_status.txt
+            echo "❌ Secret $secret_name does not exist"
+            echo "missing" > /workspace/${secret_name}_status.txt
           fi
         }
         
-        # Create/check Telegram API secrets
-        create_or_update_secret "telegram-api-id" "REPLACE_WITH_YOUR_API_ID" "Telegram API ID from https://my.telegram.org/apps"
-        create_or_update_secret "telegram-api-hash" "REPLACE_WITH_YOUR_API_HASH" "Telegram API Hash from https://my.telegram.org/apps"
-        create_or_update_secret "telegram-phone-number" "REPLACE_WITH_YOUR_PHONE" "Phone number in international format (+1234567890)"
+        # Check all required secrets
+        check_secret "telegram-api-id"
+        check_secret "telegram-api-hash"
+        check_secret "telegram-phone-number"
+        check_secret "gemini-api-key"
         
-        echo "📱 Telegram secrets setup completed"
+        echo "Secret verification completed"
     waitFor: ['enable-apis']
 
-  # Step 5: Setup Gemini API key
+  # Step 5: Create BigQuery dataset (idempotent)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-gemini-secret'
+    id: 'setup-bigquery'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "🤖 Setting up Gemini API key..."
+        echo "Setting up BigQuery dataset..."
         
-        if gcloud secrets describe gemini-api-key >/dev/null 2>&1; then
-          current_value=$(gcloud secrets versions access latest --secret="gemini-api-key" 2>/dev/null || echo "")
-          if [ "$current_value" = "REPLACE_WITH_YOUR_GEMINI_API_KEY" ] || [ -z "$current_value" ]; then
-            echo "⚠️  Gemini API key needs to be updated with actual value"
-            echo "   Get your key from: https://aistudio.google.com/"
-            echo "   Run: echo -n 'YOUR_GEMINI_API_KEY' | gcloud secrets versions add gemini-api-key --data-file=-"
-            echo "update_needed" > /workspace/gemini-api-key_status.txt
-          else
-            echo "✅ Gemini API key is configured"
-            echo "configured" > /workspace/gemini-api-key_status.txt
-          fi
-        else
-          echo "Creating Gemini API key secret..."
-          echo -n "REPLACE_WITH_YOUR_GEMINI_API_KEY" | gcloud secrets create gemini-api-key --data-file=- --labels="component=telegram-ai-processor"
-          
-          # Grant access to service accounts
-          gcloud secrets add-iam-policy-binding gemini-api-key \
-            --member="serviceAccount:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-            --role="roles/secretmanager.secretAccessor"
-          
-          gcloud secrets add-iam-policy-binding gemini-api-key \
-            --member="serviceAccount:$PROJECT_ID@appspot.gserviceaccount.com" \
-            --role="roles/secretmanager.secretAccessor"
-          
-          echo "update_needed" > /workspace/gemini-api-key_status.txt
-        fi
-        
-        echo "🤖 Gemini API setup completed"
-    waitFor: ['setup-telegram-secrets']
-
-  # Step 6: Create BigQuery dataset and session storage bucket
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-storage'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "📊 Setting up data storage..."
-        
-        # Create BigQuery dataset
+        # Create dataset if it doesn't exist
         if ! bq show --dataset $PROJECT_ID:telegram_data >/dev/null 2>&1; then
-          bq mk --location=US --description="Telegram AI Processor data storage" telegram_data
-          echo "✅ Created BigQuery dataset: telegram_data"
+          bq mk --location=US --description="Telegram AI Processor data" telegram_data
+          echo "Created BigQuery dataset: telegram_data"
         else
-          echo "✅ BigQuery dataset already exists"
+          echo "BigQuery dataset already exists ✓"
         fi
         
-        # Create Cloud Storage bucket for session storage
-        BUCKET_NAME="${PROJECT_ID}-telegram-sessions"
-        if ! gsutil ls -b gs://$BUCKET_NAME >/dev/null 2>&1; then
-          gsutil mb -l US gs://$BUCKET_NAME
-          echo "✅ Created session storage bucket: $BUCKET_NAME"
+        # Check if table needs to be recreated (due to schema issues)
+        if bq show --schema $PROJECT_ID:telegram_data.processed_messages >/dev/null 2>&1; then
+          echo "Table exists, checking schema..."
+          # If we had schema issues, we might want to recreate
+          echo "Table schema will be validated at runtime"
         else
-          echo "✅ Session storage bucket already exists"
+          echo "Table will be created by application"
         fi
-        
-        echo "📊 Storage setup completed"
-    waitFor: ['setup-gemini-secret']
+    waitFor: ['verify-secrets']
 
-  # Step 7: Deploy to Cloud Run with enhanced configuration
+  # Step 6: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-service'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "🚀 Deploying to Cloud Run..."
+        echo "Deploying to Cloud Run..."
         
         gcloud run deploy telegram-ai-processor \
           --image gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID \
@@ -182,192 +123,166 @@ steps:
           --max-instances 10 \
           --concurrency 80 \
           --timeout 3600 \
-          --execution-environment gen2 \
-          --cpu-boost \
           --service-account cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com \
-          --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,SESSION_BUCKET=$PROJECT_ID-telegram-sessions,ENVIRONMENT=production" \
-          --labels="component=telegram-ai-processor,version=1-0-0,environment=production" \
+          --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages" \
           --quiet
         
-        echo "✅ Cloud Run deployment completed"
-    waitFor: ['push-build-id', 'push-latest', 'setup-storage']
+        echo "Cloud Run deployment completed ✓"
+    waitFor: ['push-build-id', 'push-latest', 'setup-bigquery']
 
-  # Step 8: Test deployment and gather information
+  # Step 7: Get service URL and test
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'test-deployment'
+    id: 'test-service'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "🧪 Testing deployed service..."
+        echo "Testing deployed service..."
         
-        # Get service URL
-        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
+        # Get the actual service URL
+        SERVICE_URL=$$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
           --format='value(status.url)')
         
-        echo "Service URL: $SERVICE_URL"
-        echo "$SERVICE_URL" > /workspace/service_url.txt
+        echo "Service deployed at: $$SERVICE_URL"
         
-        # Wait for service to be ready
-        echo "Waiting for service to start..."
-        sleep 30
+        # Test health endpoint
+        echo "Testing service health..."
+        sleep 15  # Give service time to start
         
-        # Test health endpoints
-        echo "Testing health endpoints..."
-        
-        if curl -f "$SERVICE_URL/health/live" >/dev/null 2>&1; then
-          echo "✅ Liveness check passed"
+        if curl -f "$$SERVICE_URL/health" >/dev/null 2>&1; then
+          echo "Health check passed ✓"
         else
-          echo "⚠️  Liveness check failed"
+          echo "⚠️  Health check failed - service may still be starting"
+          echo "Trying again in 10 seconds..."
+          sleep 10
+          if curl -f "$$SERVICE_URL/health" >/dev/null 2>&1; then
+            echo "Health check passed on retry ✓"
+          else
+            echo "❌ Health check still failing - check service logs"
+          fi
         fi
         
-        if curl -f "$SERVICE_URL/health/ready" >/dev/null 2>&1; then
-          echo "✅ Readiness check passed"
-        else
-          echo "⚠️  Readiness check failed - may need configuration"
-        fi
+        # Store service URL for next step
+        echo "$$SERVICE_URL" > /workspace/service_url.txt
         
-        # Test main health endpoint
-        if curl -f "$SERVICE_URL/health" >/dev/null 2>&1; then
-          echo "✅ Main health check passed"
-        else
-          echo "⚠️  Main health check failed"
-        fi
-        
-        echo "🧪 Service testing completed"
+        echo "Service testing completed ✓"
     waitFor: ['deploy-service']
 
-  # Step 9: Generate deployment summary and next steps
+  # Step 8: Final status and instructions
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deployment-summary'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        SERVICE_URL=$(cat /workspace/service_url.txt)
+        SERVICE_URL=$$(cat /workspace/service_url.txt)
         
         # Check secret status
-        TELEGRAM_API_ID_STATUS=$(cat /workspace/telegram-api-id_status.txt 2>/dev/null || echo "unknown")
-        TELEGRAM_API_HASH_STATUS=$(cat /workspace/telegram-api-hash_status.txt 2>/dev/null || echo "unknown")
-        TELEGRAM_PHONE_STATUS=$(cat /workspace/telegram-phone-number_status.txt 2>/dev/null || echo "unknown")
-        GEMINI_KEY_STATUS=$(cat /workspace/gemini-api-key_status.txt 2>/dev/null || echo "unknown")
+        TELEGRAM_API_ID_STATUS=$$(cat /workspace/telegram-api-id_status.txt 2>/dev/null || echo "unknown")
+        TELEGRAM_API_HASH_STATUS=$$(cat /workspace/telegram-api-hash_status.txt 2>/dev/null || echo "unknown")
+        TELEGRAM_PHONE_STATUS=$$(cat /workspace/telegram-phone-number_status.txt 2>/dev/null || echo "unknown")
+        GEMINI_KEY_STATUS=$$(cat /workspace/gemini-api-key_status.txt 2>/dev/null || echo "unknown")
         
         echo ""
         echo "🎉 DEPLOYMENT COMPLETE!"
         echo "=================================="
-        echo "📍 Service URL: $SERVICE_URL"
-        echo "🔗 Dashboard: $SERVICE_URL"
-        echo "📊 Analytics: $SERVICE_URL/analytics"
-        echo "📱 Channels: $SERVICE_URL/channels"
-        echo "🏥 Health: $SERVICE_URL/health"
-        echo "📈 Metrics: $SERVICE_URL/metrics"
+        echo "📍 Service URL: $$SERVICE_URL"
+        echo "🔗 Dashboard: $$SERVICE_URL"
+        echo "📊 Monitoring Status: $$SERVICE_URL/monitoring/status"
+        echo "🏥 Health Check: $$SERVICE_URL/health"
         echo "=================================="
         echo ""
         
         # Check configuration status
         READY=true
+        CONFIGURED_COUNT=0
         
         echo "📋 CONFIGURATION STATUS:"
         echo "========================"
         
-        if [ "$TELEGRAM_API_ID_STATUS" = "configured" ]; then
+        if [ "$$TELEGRAM_API_ID_STATUS" = "configured" ]; then
           echo "✅ Telegram API ID configured"
+          CONFIGURED_COUNT=$$((CONFIGURED_COUNT + 1))
         else
-          echo "⚠️  Telegram API ID needs configuration:"
-          echo "   Get from: https://my.telegram.org/apps"
-          echo "   Run: echo -n 'YOUR_API_ID' | gcloud secrets versions add telegram-api-id --data-file=-"
+          echo "⚠️  Telegram API ID status: $$TELEGRAM_API_ID_STATUS"
           READY=false
         fi
         
-        if [ "$TELEGRAM_API_HASH_STATUS" = "configured" ]; then
+        if [ "$$TELEGRAM_API_HASH_STATUS" = "configured" ]; then
           echo "✅ Telegram API Hash configured"
+          CONFIGURED_COUNT=$$((CONFIGURED_COUNT + 1))
         else
-          echo "⚠️  Telegram API Hash needs configuration:"
-          echo "   Get from: https://my.telegram.org/apps"
-          echo "   Run: echo -n 'YOUR_API_HASH' | gcloud secrets versions add telegram-api-hash --data-file=-"
+          echo "⚠️  Telegram API Hash status: $$TELEGRAM_API_HASH_STATUS"
           READY=false
         fi
         
-        if [ "$TELEGRAM_PHONE_STATUS" = "configured" ]; then
+        if [ "$$TELEGRAM_PHONE_STATUS" = "configured" ]; then
           echo "✅ Phone number configured"
+          CONFIGURED_COUNT=$$((CONFIGURED_COUNT + 1))
         else
-          echo "⚠️  Phone number needs configuration:"
-          echo "   Run: echo -n '+YOUR_PHONE_NUMBER' | gcloud secrets versions add telegram-phone-number --data-file=-"
+          echo "⚠️  Phone number status: $$TELEGRAM_PHONE_STATUS"
           READY=false
         fi
         
-        if [ "$GEMINI_KEY_STATUS" = "configured" ]; then
+        if [ "$$GEMINI_KEY_STATUS" = "configured" ]; then
           echo "✅ Gemini API key configured"
+          CONFIGURED_COUNT=$$((CONFIGURED_COUNT + 1))
         else
-          echo "⚠️  Gemini API key needs configuration:"
-          echo "   Get from: https://aistudio.google.com/"
-          echo "   Run: echo -n 'YOUR_GEMINI_API_KEY' | gcloud secrets versions add gemini-api-key --data-file=-"
+          echo "⚠️  Gemini API key status: $$GEMINI_KEY_STATUS"
           READY=false
         fi
         
         echo ""
-        if [ "$READY" = "true" ]; then
-          echo "🎯 SYSTEM READY!"
-          echo "Your Telegram AI Processor is fully configured and monitoring will start automatically."
+        echo "Configuration: $$CONFIGURED_COUNT/4 secrets properly configured"
+        
+        if [ "$$READY" = "true" ]; then
+          echo ""
+          echo "🎯 SYSTEM IS READY!"
+          echo "All secrets are configured. Monitoring will start automatically."
           echo "📡 Monitored channels: @bbcbreaking, @cnn, @bitcoin, @ethereum, @techcrunch, @reuters"
+          echo ""
+          echo "Visit $$SERVICE_URL to see the dashboard"
         else
-          echo "🔧 CONFIGURATION REQUIRED"
-          echo "Complete the credential setup above, then restart the service:"
-          echo "   gcloud run services update telegram-ai-processor --region=us-central1"
+          echo ""
+          echo "🔧 CONFIGURATION ISSUES DETECTED"
+          echo "Some secrets may need attention. Check the logs and secret values."
+          echo "The service will still start but monitoring may not be fully functional."
         fi
         
         echo ""
-        echo "🛠️  USEFUL COMMANDS:"
-        echo "==================="
-        echo "• View logs:"
-        echo "  gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=50"
+        echo "🔧 Useful commands:"
+        echo "   • View logs: gcloud logs read \"resource.type=cloud_run_revision AND resource.labels.service_name=telegram-ai-processor\" --limit=20"
+        echo "   • Check service: gcloud run services describe telegram-ai-processor --region=us-central1"
+        echo "   • View BigQuery data: bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
+        echo "   • Check secrets: gcloud secrets list"
         echo ""
-        echo "• Check service status:"
-        echo "  gcloud run services describe telegram-ai-processor --region=us-central1"
-        echo ""
-        echo "• Update secrets:"
-        echo "  echo -n 'YOUR_VALUE' | gcloud secrets versions add SECRET_NAME --data-file=-"
-        echo ""
-        echo "• View BigQuery data:"
-        echo "  bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`$PROJECT_ID.telegram_data.processed_messages\`'"
-        echo ""
-        echo "• Service metrics:"
-        echo "  curl $SERVICE_URL/metrics"
-        echo ""
-        echo "• Restart monitoring:"
-        echo "  curl -X POST $SERVICE_URL/api/monitoring/restart"
-        echo ""
-        echo "✨ Your Telegram Channel Monitor is deployed and ready!"
-        echo "Visit $SERVICE_URL to access the dashboard."
-    waitFor: ['test-deployment']
+        echo "✨ Your Telegram Channel Monitor is deployed!"
+    waitFor: ['test-service']
 
-# Service account and build configuration
+# Service account configuration
 serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com'
 
+# Build options
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: 'E2_HIGHCPU_8'
   substitution_option: 'ALLOW_LOOSE'
   dynamic_substitutions: true
 
-# Extended timeout for comprehensive setup
-timeout: '2400s'
+# Increase timeout for comprehensive deployment
+timeout: '1800s'
 
 # Build tags for organization
 tags:
   - 'telegram-ai-processor'
   - 'cloud-run'
   - 'production'
-  - 'v1-0-0'
+  - 'mtproto-monitoring'
 
-# Substitutions for customization
+# Substitutions
 substitutions:
   _REGION: 'us-central1'
   _SERVICE_NAME: 'telegram-ai-processor'
   _DATASET_ID: 'telegram_data'
   _TABLE_ID: 'processed_messages'
-  _MIN_INSTANCES: '1'
-  _MAX_INSTANCES: '10'
-  _MEMORY: '2Gi'
-  _CPU: '2'
