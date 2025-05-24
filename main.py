@@ -1,10 +1,10 @@
 import os
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
+import asyncio
+from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import logging
 from frontend import router as frontend_router
-from utils import setup_bigquery_tables, setup_telegram_webhook
+from utils import setup_bigquery_tables, start_background_monitoring, stop_background_monitoring
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Starting application...")
+    logger.info("Starting Telegram AI Processor...")
     
     # Initialize BigQuery tables
     try:
@@ -22,22 +22,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize BigQuery: {e}")
     
-    # Setup Telegram webhook
+    # Start Telegram monitoring
     try:
-        await setup_telegram_webhook()
-        logger.info("Telegram webhook configured")
+        await start_background_monitoring()
+        logger.info("Telegram monitoring started")
     except Exception as e:
-        logger.error(f"Failed to setup Telegram webhook: {e}")
+        logger.error(f"Failed to start Telegram monitoring: {e}")
     
     yield
     
     # Shutdown
-    logger.info("Application shutting down...")
+    logger.info("Shutting down Telegram AI Processor...")
+    try:
+        await stop_background_monitoring()
+        logger.info("Telegram monitoring stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop monitoring: {e}")
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Telegram AI Data Processor",
-    description="Process Telegram data with Gemini AI and display insights",
+    title="Telegram AI Channel Monitor",
+    description="Monitor public Telegram channels with Gemini AI analysis and display insights",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -48,7 +53,25 @@ app.include_router(frontend_router)
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "telegram-ai-processor"}
+    return {
+        "status": "healthy", 
+        "service": "telegram-ai-processor",
+        "mode": "mtproto-monitoring"
+    }
+
+# Monitoring status endpoint
+@app.get("/monitoring/status")
+async def monitoring_status():
+    """Get current monitoring status"""
+    from utils import telegram_client, MONITORED_CHANNELS
+    
+    status = {
+        "monitoring_active": telegram_client is not None and telegram_client.is_connected(),
+        "monitored_channels": MONITORED_CHANNELS,
+        "total_channels": len(MONITORED_CHANNELS)
+    }
+    
+    return status
 
 if __name__ == "__main__":
     import uvicorn
