@@ -4,9 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CIPHER - Cybersecurity Intelligence Platform{% endblock %}</title>
+    <meta name="description" content="CIPHER - Advanced cybersecurity threat intelligence monitoring and analysis platform">
+    <meta name="keywords" content="cybersecurity, threat intelligence, real-time monitoring, BigQuery analytics">
+    
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -17,6 +21,9 @@
                         'cipher-purple': '#6366f1',
                         'cipher-dark': '#0f172a',
                         'cipher-darker': '#020617',
+                        'cipher-green': '#00ff00',
+                        'cipher-red': '#ff4444',
+                        'cipher-orange': '#ffaa00',
                     },
                     fontFamily: {
                         'mono': ['JetBrains Mono', 'Fira Code', 'Monaco', 'monospace'],
@@ -27,11 +34,14 @@
                         'slide-up': 'slideUp 0.6s ease-out',
                         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                         'glow': 'glow 2s ease-in-out infinite alternate',
+                        'spin-slow': 'spin 3s linear infinite',
+                        'bounce-subtle': 'bounceSubtle 2s ease-in-out infinite',
                     }
                 }
             }
         }
     </script>
+    
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
         
@@ -50,6 +60,11 @@
             to { box-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5); }
         }
         
+        @keyframes bounceSubtle {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-3px); }
+        }
+        
         .glass-effect {
             backdrop-filter: blur(16px) saturate(180%);
             background-color: rgba(17, 25, 40, 0.8);
@@ -61,11 +76,22 @@
             text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3);
         }
         
+        .neon-green {
+            color: #00ff00;
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.5), 0 0 10px rgba(0, 255, 0, 0.3);
+        }
+        
         .cyber-grid {
             background-image: 
                 linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px);
             background-size: 20px 20px;
+            animation: gridMove 20s linear infinite;
+        }
+        
+        @keyframes gridMove {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(20px, 20px); }
         }
         
         .hover-lift {
@@ -86,32 +112,179 @@
             position: absolute;
             top: 50%;
             left: 50%;
-            width: 100%;
-            height: 100%;
+            width: 120%;
+            height: 120%;
             border-radius: 50%;
             background: inherit;
             transform: translate(-50%, -50%);
             animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+            opacity: 0.7;
+        }
+        
+        .loading-skeleton {
+            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: loading 1.5s infinite;
+        }
+        
+        @keyframes loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        
+        .threat-critical {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+            border: 1px solid #ff4444;
+        }
+        
+        .threat-high {
+            background: rgba(255, 170, 0, 0.2);
+            color: #ffaa00;
+            border: 1px solid #ffaa00;
+        }
+        
+        .threat-medium {
+            background: rgba(255, 255, 0, 0.2);
+            color: #ffff00;
+            border: 1px solid #ffff00;
+        }
+        
+        .threat-low {
+            background: rgba(0, 255, 0, 0.2);
+            color: #00ff00;
+            border: 1px solid #00ff00;
+        }
+        
+        .threat-info {
+            background: rgba(99, 102, 241, 0.2);
+            color: #6366f1;
+            border: 1px solid #6366f1;
+        }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #6366f1;
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #8b5cf6;
+        }
+        
+        /* Error states */
+        .error-state {
+            background: rgba(255, 68, 68, 0.1);
+            border: 1px solid rgba(255, 68, 68, 0.3);
+            color: #ff6b6b;
+        }
+        
+        .empty-state {
+            background: rgba(156, 163, 175, 0.1);
+            border: 1px solid rgba(156, 163, 175, 0.3);
+            color: #9ca3af;
+        }
+        
+        /* Loading animations */
+        .pulse-ring {
+            position: relative;
+        }
+        
+        .pulse-ring::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 2px solid currentColor;
+            transform: translate(-50%, -50%);
+            animation: pulseRing 2s ease-out infinite;
+        }
+        
+        @keyframes pulseRing {
+            0% {
+                transform: translate(-50%, -50%) scale(0.8);
+                opacity: 1;
+            }
+            100% {
+                transform: translate(-50%, -50%) scale(2);
+                opacity: 0;
+            }
+        }
+        
+        /* Real-time data indicators */
+        .data-fresh { color: #00ff00; }
+        .data-stale { color: #ffaa00; }
+        .data-old { color: #ff4444; }
+        
+        /* Accessibility improvements */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+        
+        /* High contrast mode */
+        @media (prefers-contrast: high) {
+            .glass-effect {
+                background-color: rgba(0, 0, 0, 0.9);
+                border: 2px solid #ffffff;
+            }
+        }
+        
+        /* Print styles */
+        @media print {
+            .cyber-grid { display: none; }
+            body { background: white !important; color: black !important; }
+            .glass-effect { background: white !important; border: 1px solid #000 !important; }
+            .neon-text, .neon-green { color: #000 !important; text-shadow: none !important; }
         }
     </style>
+    
+    {% block extra_head %}{% endblock %}
 </head>
-<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans">
+<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans min-h-screen">
     
     <!-- Animated Background -->
     <div class="fixed inset-0 cyber-grid opacity-20 pointer-events-none"></div>
     <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
     
+    <!-- Global Error/Loading Overlay -->
+    <div id="globalOverlay" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden items-center justify-center">
+        <div class="bg-cipher-dark border border-cipher-blue rounded-lg p-6 max-w-md mx-4 text-center">
+            <div id="overlaySpinner" class="w-8 h-8 border-2 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+            <div id="overlayMessage" class="text-white">Loading CIPHER Platform...</div>
+            <button id="overlayRetry" class="mt-4 px-4 py-2 bg-cipher-blue text-white rounded hover:bg-cipher-purple transition-colors hidden">
+                Retry
+            </button>
+        </div>
+    </div>
+    
     <!-- Navigation Header -->
-    <nav class="glass-effect border-b border-white/10 sticky top-0 z-50">
+    <nav class="glass-effect border-b border-white/10 sticky top-0 z-40">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between h-16 items-center">
+                <!-- Logo and Title -->
                 <div class="flex items-center space-x-4">
                     <div class="flex items-center space-x-3">
                         <div class="relative">
                             <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
                                 <i class="fas fa-shield-alt text-white text-lg"></i>
                             </div>
-                            <div class="absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse"></div>
+                            <div id="systemStatusDot" class="absolute -top-1 -right-1 w-4 h-4 bg-gray-400 rounded-full animate-pulse"></div>
                         </div>
                         <div>
                             <h1 class="text-xl font-bold neon-text">CIPHER</h1>
@@ -120,26 +293,36 @@
                     </div>
                 </div>
                 
+                <!-- Navigation Links -->
                 <div class="flex items-center space-x-4">
                     <div class="hidden md:flex items-center space-x-6">
-                        <a href="/" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
+                        <a href="/dashboard" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
                             <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
                         </a>
-                        <a href="/api/stats" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
-                            <i class="fas fa-chart-line mr-2"></i>Analytics
+                        <a href="/api/export/threats?format=json" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
+                            <i class="fas fa-download mr-2"></i>Export
                         </a>
-                        <a href="/status" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium">
-                            <i class="fas fa-heartbeat mr-2"></i>System
+                        <a href="/api/docs" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
+                            <i class="fas fa-code mr-2"></i>API
+                        </a>
+                        <a href="/health" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
+                            <i class="fas fa-heartbeat mr-2"></i>Health
                         </a>
                     </div>
                     
+                    <!-- Real-time Status Display -->
                     <div class="flex items-center space-x-3">
-                        <div class="flex items-center">
-                            <div class="status-indicator w-3 h-3 bg-green-400 rounded-full mr-2"></div>
-                            <span class="text-sm text-gray-400 font-mono" id="current-time"></span>
+                        <div class="flex items-center space-x-2">
+                            <div id="connectionStatus" class="flex items-center">
+                                <div class="status-indicator w-3 h-3 bg-gray-400 rounded-full mr-2"></div>
+                                <span class="text-sm text-gray-400 font-mono" id="connectionText">Connecting...</span>
+                            </div>
                         </div>
                         <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
-                            LIVE
+                            <span id="currentTime"></span>
+                        </div>
+                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
+                            <span id="dataFreshness">INITIALIZING</span>
                         </div>
                     </div>
                 </div>
@@ -155,28 +338,57 @@
     <!-- Footer -->
     <footer class="glass-effect border-t border-white/10 mt-16">
         <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between items-center">
+            <div class="flex justify-between items-center flex-wrap gap-4">
                 <div class="flex items-center space-x-4">
                     <div class="text-sm text-gray-400">
-                        <span class="font-mono">CIPHER</span> v1.0.0 | Powered by 
-                        <span class="text-cipher-blue">Google Cloud</span> & 
+                        <span class="font-mono neon-text">CIPHER</span> v1.0.0 | Real-time Cybersecurity Intelligence
+                    </div>
+                    <div class="text-xs text-gray-500">
+                        Powered by <span class="text-cipher-blue">Google Cloud</span> & 
                         <span class="text-cipher-purple">Gemini AI</span>
                     </div>
                 </div>
                 <div class="flex items-center space-x-4 text-xs text-gray-500">
                     <span class="font-mono">PROJECT: {{ PROJECT_ID or 'primal-chariot-382610' }}</span>
-                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                    <span class="font-mono">SECURE</span>
+                    <div id="systemHealthIndicator" class="flex items-center space-x-2">
+                        <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
+                        <span class="font-mono" id="systemHealthText">SYSTEM CHECK</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Real-time System Information -->
+            <div class="mt-4 pt-4 border-t border-white/5">
+                <div class="flex justify-between items-center text-xs text-gray-600">
+                    <div class="flex items-center space-x-4">
+                        <span>Data Sources: <span id="dataSourcesList">Loading...</span></span>
+                        <span>Last Update: <span id="lastUpdateTime">Checking...</span></span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span>Monitoring:</span>
+                        <span id="monitoringChannels" class="font-mono">@DarkfeedNews, @breachdetector, @secharvester</span>
+                    </div>
                 </div>
             </div>
         </div>
     </footer>
 
+    <!-- Core JavaScript for Real-time Updates -->
     <script>
+        // Global CIPHER application state
+        window.CIPHER = {
+            isConnected: false,
+            lastDataUpdate: null,
+            refreshInterval: 30000, // 30 seconds
+            retryAttempts: 0,
+            maxRetries: 3,
+            currentData: null
+        };
+
         // Update current time
-        function updateTime() {
+        function updateCurrentTime() {
             const now = new Date();
-            const timeElement = document.getElementById('current-time');
+            const timeElement = document.getElementById('currentTime');
             if (timeElement) {
                 timeElement.textContent = now.toLocaleTimeString('en-US', { 
                     hour12: false,
@@ -186,16 +398,240 @@
                 });
             }
         }
-        
-        setInterval(updateTime, 1000);
-        updateTime();
 
-        // Auto-refresh for real-time updates
-        if (window.location.pathname === '/') {
-            setInterval(() => {
-                window.location.reload();
-            }, 30000); // Refresh every 30 seconds
+        // Update system status indicators
+        function updateSystemStatus(isConnected, systemData = null) {
+            const statusDot = document.getElementById('systemStatusDot');
+            const connectionStatus = document.getElementById('connectionStatus');
+            const connectionText = document.getElementById('connectionText');
+            const healthIndicator = document.getElementById('systemHealthIndicator');
+            const healthText = document.getElementById('systemHealthText');
+
+            if (statusDot) {
+                if (isConnected) {
+                    statusDot.className = 'absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse';
+                } else {
+                    statusDot.className = 'absolute -top-1 -right-1 w-4 h-4 bg-red-400 rounded-full animate-pulse';
+                }
+            }
+
+            if (connectionStatus && connectionText) {
+                const indicator = connectionStatus.querySelector('.status-indicator');
+                if (isConnected) {
+                    indicator.className = 'status-indicator w-3 h-3 bg-green-400 rounded-full mr-2';
+                    connectionText.textContent = 'OPERATIONAL';
+                    connectionText.className = 'text-sm text-green-400 font-mono';
+                } else {
+                    indicator.className = 'status-indicator w-3 h-3 bg-red-400 rounded-full mr-2';
+                    connectionText.textContent = 'DISCONNECTED';
+                    connectionText.className = 'text-sm text-red-400 font-mono';
+                }
+            }
+
+            // Update system health
+            if (healthIndicator && healthText && systemData) {
+                const healthDot = healthIndicator.querySelector('div');
+                const systemStatus = systemData.system_status || {};
+                
+                if (systemStatus.operational) {
+                    healthDot.className = 'w-2 h-2 bg-green-400 rounded-full animate-pulse';
+                    healthText.textContent = 'SECURE';
+                    healthText.className = 'font-mono text-green-400';
+                } else {
+                    healthDot.className = 'w-2 h-2 bg-yellow-400 rounded-full animate-pulse';
+                    healthText.textContent = 'STANDBY';
+                    healthText.className = 'font-mono text-yellow-400';
+                }
+            }
+
+            window.CIPHER.isConnected = isConnected;
         }
+
+        // Update data freshness indicator
+        function updateDataFreshness(lastUpdate) {
+            const freshnessElement = document.getElementById('dataFreshness');
+            const lastUpdateElement = document.getElementById('lastUpdateTime');
+            
+            if (!freshnessElement) return;
+
+            if (!lastUpdate) {
+                freshnessElement.textContent = 'NO DATA';
+                freshnessElement.className = 'data-old';
+                return;
+            }
+
+            try {
+                const updateTime = new Date(lastUpdate);
+                const now = new Date();
+                const ageMinutes = (now - updateTime) / (1000 * 60);
+
+                let status, className;
+                if (ageMinutes < 5) {
+                    status = 'LIVE';
+                    className = 'data-fresh';
+                } else if (ageMinutes < 30) {
+                    status = 'RECENT';
+                    className = 'data-fresh';
+                } else if (ageMinutes < 120) {
+                    status = 'STALE';
+                    className = 'data-stale';
+                } else {
+                    status = 'OLD';
+                    className = 'data-old';
+                }
+
+                freshnessElement.textContent = status;
+                freshnessElement.className = className;
+
+                if (lastUpdateElement) {
+                    lastUpdateElement.textContent = updateTime.toLocaleTimeString();
+                }
+
+                window.CIPHER.lastDataUpdate = updateTime;
+            } catch (error) {
+                freshnessElement.textContent = 'ERROR';
+                freshnessElement.className = 'data-old';
+            }
+        }
+
+        // Update data sources list
+        function updateDataSources(sources) {
+            const sourcesElement = document.getElementById('dataSourcesList');
+            if (sourcesElement && sources) {
+                sourcesElement.textContent = sources.join(', ') || 'None';
+            }
+        }
+
+        // Show/hide global overlay
+        function showGlobalOverlay(message, showSpinner = true, showRetry = false) {
+            const overlay = document.getElementById('globalOverlay');
+            const spinner = document.getElementById('overlaySpinner');
+            const messageEl = document.getElementById('overlayMessage');
+            const retryBtn = document.getElementById('overlayRetry');
+
+            if (overlay && messageEl) {
+                messageEl.textContent = message;
+                spinner.style.display = showSpinner ? 'block' : 'none';
+                retryBtn.style.display = showRetry ? 'block' : 'none';
+                overlay.classList.remove('hidden');
+                overlay.classList.add('flex');
+            }
+        }
+
+        function hideGlobalOverlay() {
+            const overlay = document.getElementById('globalOverlay');
+            if (overlay) {
+                overlay.classList.add('hidden');
+                overlay.classList.remove('flex');
+            }
+        }
+
+        // Generic API call with error handling
+        async function apiCall(endpoint, options = {}) {
+            try {
+                const response = await fetch(endpoint, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                window.CIPHER.retryAttempts = 0; // Reset on success
+                return { success: true, data };
+            } catch (error) {
+                console.error(`API call failed for ${endpoint}:`, error);
+                window.CIPHER.retryAttempts++;
+                return { success: false, error: error.message };
+            }
+        }
+
+        // Check system health
+        async function checkSystemHealth() {
+            const result = await apiCall('/health');
+            
+            if (result.success) {
+                const isHealthy = result.data.status === 'healthy';
+                updateSystemStatus(isHealthy, result.data);
+                
+                if (result.data.checks) {
+                    const sources = [];
+                    if (result.data.checks.bigquery === 'connected') sources.push('BigQuery');
+                    if (result.data.checks.telegram === 'connected') sources.push('Telegram');
+                    if (result.data.checks.gemini === 'available') sources.push('Gemini AI');
+                    updateDataSources(sources);
+                }
+                
+                return isHealthy;
+            } else {
+                updateSystemStatus(false);
+                return false;
+            }
+        }
+
+        // Initialize application
+        async function initializeApp() {
+            console.log('🛡️ Initializing CIPHER Platform...');
+            
+            // Start time updates
+            updateCurrentTime();
+            setInterval(updateCurrentTime, 1000);
+
+            // Initial health check
+            showGlobalOverlay('Connecting to CIPHER Platform...', true, false);
+            
+            const isHealthy = await checkSystemHealth();
+            
+            if (isHealthy) {
+                hideGlobalOverlay();
+                console.log('✅ CIPHER Platform initialized successfully');
+                
+                // Start periodic health checks
+                setInterval(checkSystemHealth, 30000); // Every 30 seconds
+            } else {
+                if (window.CIPHER.retryAttempts < window.CIPHER.maxRetries) {
+                    showGlobalOverlay(`Connection failed. Retrying... (${window.CIPHER.retryAttempts}/${window.CIPHER.maxRetries})`, true, false);
+                    setTimeout(initializeApp, 5000);
+                } else {
+                    showGlobalOverlay('Failed to connect to CIPHER Platform. Please check system status.', false, true);
+                }
+            }
+        }
+
+        // Retry functionality
+        document.getElementById('overlayRetry')?.addEventListener('click', () => {
+            window.CIPHER.retryAttempts = 0;
+            initializeApp();
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey || e.metaKey) {
+                switch(e.key) {
+                    case 'r':
+                        e.preventDefault();
+                        window.location.reload();
+                        break;
+                    case 'h':
+                        e.preventDefault();
+                        window.location.href = '/health';
+                        break;
+                    case 'd':
+                        e.preventDefault();
+                        window.location.href = '/api/docs';
+                        break;
+                    case 'e':
+                        e.preventDefault();
+                        window.location.href = '/api/export/threats?format=json';
+                        break;
+                }
+            }
+        });
 
         // Smooth scroll for internal links
         document.addEventListener('DOMContentLoaded', function() {
@@ -211,7 +647,23 @@
                     }
                 });
             });
+
+            // Initialize the application
+            initializeApp();
         });
+
+        // Performance monitoring
+        window.addEventListener('load', function() {
+            const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
+            console.log(`🛡️ CIPHER Platform loaded in ${loadTime}ms`);
+        });
+
+        // Error handling
+        window.addEventListener('error', function(e) {
+            console.error('CIPHER Platform error:', e.error);
+        });
+
+        console.log('🛡️ CIPHER Platform - Advanced Cybersecurity Intelligence Platform Ready');
     </script>
 
     {% block scripts %}{% endblock %}
