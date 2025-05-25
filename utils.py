@@ -589,92 +589,347 @@ async def process_message(message, channel: str):
         logger.error(f"Message: {getattr(message, 'text', 'No text')[:50]}...")
 
 async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]:
-    """Analyze message with Gemini AI for cybersecurity threats with fallback analysis"""
+    """Analyze message with Gemini AI for cybersecurity threats with enhanced data extraction"""
     try:
         if not _gemini_model:
             logger.warning("Gemini AI not available, using fallback analysis")
-            return _get_fallback_analysis(text, channel)
+            return _get_enhanced_fallback_analysis(text, channel)
         
         channel_context = CHANNEL_METADATA.get(channel, {})
         
+        # Enhanced prompt for better structured analysis
         prompt = f"""
-        Analyze this cybersecurity message from {channel} ({channel_context.get('description', '')}):
-        
+        Analyze this cybersecurity message from {channel} and provide a JSON response:
+
         Message: "{text}"
-        
-        Provide analysis in this JSON format:
+
+        Return ONLY valid JSON in this exact format:
         {{
             "threat_level": "critical|high|medium|low|info",
             "category": "apt|malware|ransomware|data_breach|vulnerability|phishing|other",
-            "threat_type": "specific threat type",
-            "urgency_score": 0.0-1.0,
+            "threat_type": "brief description",
+            "urgency_score": 0.9,
             "sentiment": "positive|negative|neutral",
-            "key_topics": ["topic1", "topic2"],
-            "gemini_analysis": "Brief threat analysis summary",
-            "cve_references": ["CVE-XXXX-XXXX"],
-            "iocs_detected": ["indicators"],
-            "malware_families": ["family names"],
-            "threat_actors": ["actor names"]
+            "gemini_analysis": "2-3 sentence professional threat analysis summary without technical jargon",
+            "key_topics": ["topic1", "topic2", "topic3"],
+            "cve_references": ["CVE-2024-1234"],
+            "iocs_detected": ["malicious-domain.com", "192.168.1.1"],
+            "threat_actors": ["actor_name"],
+            "affected_systems": ["Windows", "Linux"],
+            "references": ["https://example.com/report"],
+            "mitigation": "Brief mitigation advice"
         }}
-        
-        Focus on cybersecurity threats, vulnerabilities, and actionable intelligence.
+
+        Focus on actionable cybersecurity intelligence. If no specific threats, mark as "info" level.
         """
         
         try:
             response = await asyncio.to_thread(_gemini_model.generate_content, prompt)
             
             if response and response.text:
-                # Parse JSON response
+                # Clean and parse JSON response
+                response_text = response.text.strip()
+                
+                # Remove markdown code blocks if present
+                if response_text.startswith('```'):
+                    response_text = response_text.split('\n', 1)[1]
+                if response_text.endswith('```'):
+                    response_text = response_text.rsplit('\n', 1)[0]
+                
+                # Remove any "json" prefix
+                if response_text.startswith('json'):
+                    response_text = response_text[4:].strip()
+                
                 try:
-                    analysis = json.loads(response.text.strip())
+                    analysis = json.loads(response_text)
+                    
+                    # Validate and enhance the analysis
+                    analysis = _validate_and_enhance_analysis(analysis, text, channel)
+                    
                     logger.info(f"✅ Gemini analysis: {analysis.get('threat_level', 'unknown')} - {analysis.get('category', 'other')}")
                     return analysis
-                except json.JSONDecodeError:
-                    # Fallback analysis with Gemini text
-                    logger.warning("Gemini response not valid JSON, using text analysis")
-                    return {
-                        "gemini_analysis": response.text[:500],
-                        "threat_level": _detect_threat_level(text, channel),
-                        "category": _detect_category(text, channel),
-                        "urgency_score": _calculate_urgency(text, channel),
-                        "sentiment": "neutral",
-                        "key_topics": _extract_keywords(text, channel)
-                    }
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Gemini response not valid JSON: {e}")
+                    logger.warning(f"Response: {response_text[:200]}...")
+                    
+                    # Extract useful information from text response
+                    return _parse_text_response(response_text, text, channel)
             else:
                 logger.warning("Gemini returned empty response")
-                return _get_fallback_analysis(text, channel)
+                return _get_enhanced_fallback_analysis(text, channel)
                 
         except Exception as api_error:
             logger.error(f"Gemini API call failed: {api_error}")
-            return _get_fallback_analysis(text, channel)
+            return _get_enhanced_fallback_analysis(text, channel)
         
     except Exception as e:
         logger.error(f"Message analysis failed: {e}")
-        return _get_fallback_analysis(text, channel)
+        return _get_enhanced_fallback_analysis(text, channel)
+
+def _validate_and_enhance_analysis(analysis: Dict[str, Any], text: str, channel: str) -> Dict[str, Any]:
+    """Validate and enhance Gemini analysis with extracted data"""
+    
+    # Ensure required fields exist with defaults
+    enhanced = {
+        "threat_level": analysis.get("threat_level", "low"),
+        "category": analysis.get("category", "other"),
+        "threat_type": analysis.get("threat_type", "unknown"),
+        "urgency_score": float(analysis.get("urgency_score", 0.1)),
+        "sentiment": analysis.get("sentiment", "neutral"),
+        "gemini_analysis": analysis.get("gemini_analysis", "Analysis generated by Gemini AI"),
+        "key_topics": analysis.get("key_topics", []),
+        "cve_references": analysis.get("cve_references", []),
+        "iocs_detected": analysis.get("iocs_detected", []),
+        "threat_actors": analysis.get("threat_actors", []),
+        "affected_systems": analysis.get("affected_systems", []),
+        "references": analysis.get("references", []),
+        "mitigation": analysis.get("mitigation", "")
+    }
+    
+    # Enhance with extracted data from text
+    extracted_data = _extract_enhanced_data(text)
+    
+    # Merge extracted data with Gemini analysis
+    if extracted_data["cve_references"] and not enhanced["cve_references"]:
+        enhanced["cve_references"] = extracted_data["cve_references"]
+    
+    if extracted_data["urls"] and not enhanced["references"]:
+        enhanced["references"] = extracted_data["urls"]
+    
+    if extracted_data["iocs"] and not enhanced["iocs_detected"]:
+        enhanced["iocs_detected"] = extracted_data["iocs"]
+    
+    # Add extracted data fields
+    enhanced.update({
+        "urls_extracted": extracted_data["urls"],
+        "domains_extracted": extracted_data["domains"],
+        "ip_addresses": extracted_data["ip_addresses"],
+        "file_hashes": extracted_data["file_hashes"],
+        "malware_families": extracted_data["malware_families"]
+    })
+    
+    # Validate urgency score
+    if enhanced["urgency_score"] > 1.0:
+        enhanced["urgency_score"] = 1.0
+    elif enhanced["urgency_score"] < 0.0:
+        enhanced["urgency_score"] = 0.0
+    
+    return enhanced
+
+def _parse_text_response(response_text: str, text: str, channel: str) -> Dict[str, Any]:
+    """Parse non-JSON Gemini responses and extract useful information"""
+    
+    # Get basic analysis
+    analysis = _get_enhanced_fallback_analysis(text, channel)
+    
+    # Try to extract information from the text response
+    response_lower = response_text.lower()
+    
+    # Extract threat level from text
+    if any(word in response_lower for word in ['critical', 'severe', 'urgent']):
+        analysis["threat_level"] = "critical"
+    elif any(word in response_lower for word in ['high', 'important', 'significant']):
+        analysis["threat_level"] = "high"
+    elif any(word in response_lower for word in ['medium', 'moderate']):
+        analysis["threat_level"] = "medium"
+    
+    # Use text response as analysis
+    analysis["gemini_analysis"] = response_text[:500] + "..." if len(response_text) > 500 else response_text
+    
+    return analysis
+
+def _get_enhanced_fallback_analysis(text: str, channel: str) -> Dict[str, Any]:
+    """Enhanced fallback analysis with comprehensive data extraction"""
+    
+    # Extract comprehensive data
+    extracted_data = _extract_enhanced_data(text)
+    
+    # Generate analysis
+    analysis = {
+        "gemini_analysis": _generate_enhanced_analysis(text, channel, extracted_data),
+        "threat_level": _detect_threat_level(text, channel),
+        "category": _detect_category(text, channel),
+        "threat_type": _detect_threat_type(text, channel),
+        "urgency_score": _calculate_urgency(text, channel),
+        "sentiment": _detect_sentiment(text),
+        "key_topics": _extract_keywords(text, channel),
+        
+        # Enhanced extracted data
+        "cve_references": extracted_data["cve_references"],
+        "iocs_detected": extracted_data["iocs"],
+        "urls_extracted": extracted_data["urls"],
+        "domains_extracted": extracted_data["domains"],
+        "ip_addresses": extracted_data["ip_addresses"],
+        "file_hashes": extracted_data["file_hashes"],
+        "malware_families": extracted_data["malware_families"],
+        "threat_actors": extracted_data["threat_actors"],
+        "affected_systems": extracted_data["affected_systems"],
+        "references": extracted_data["urls"][:3],  # Top 3 URLs as references
+        "mitigation": _generate_mitigation_advice(text, channel)
+    }
+    
+    return analysis
+
+def _extract_enhanced_data(text: str) -> Dict[str, List[str]]:
+    """Extract comprehensive cybersecurity data from text"""
+    import re
+    
+    extracted = {
+        "cve_references": [],
+        "urls": [],
+        "domains": [],
+        "ip_addresses": [],
+        "file_hashes": [],
+        "malware_families": [],
+        "threat_actors": [],
+        "affected_systems": [],
+        "iocs": []
+    }
+    
+    # CVE references
+    cve_pattern = r'CVE-\d{4}-\d{4,7}'
+    extracted["cve_references"] = re.findall(cve_pattern, text, re.IGNORECASE)
+    
+    # URLs
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    extracted["urls"] = re.findall(url_pattern, text)
+    
+    # IP addresses
+    ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+    ips = re.findall(ip_pattern, text)
+    # Filter out obviously invalid IPs
+    extracted["ip_addresses"] = [ip for ip in ips if not ip.startswith(('0.', '255.', '127.'))]
+    
+    # Domain names
+    domain_pattern = r'\b[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.([a-zA-Z]{2,})\b'
+    domains = re.findall(domain_pattern, text)
+    # Filter common legitimate domains
+    excluded_domains = ['google.com', 'microsoft.com', 'apple.com', 'github.com', 'twitter.com', 'facebook.com']
+    extracted["domains"] = ['.'.join(domain) for domain in domains 
+                           if '.'.join(domain) not in excluded_domains][:5]
+    
+    # File hashes (MD5, SHA1, SHA256)
+    hash_patterns = {
+        'md5': r'\b[a-fA-F0-9]{32}\b',
+        'sha1': r'\b[a-fA-F0-9]{40}\b',
+        'sha256': r'\b[a-fA-F0-9]{64}\b'
+    }
+    
+    for hash_type, pattern in hash_patterns.items():
+        hashes = re.findall(pattern, text)
+        extracted["file_hashes"].extend(hashes)
+    
+    # Malware families (common ones)
+    malware_keywords = [
+        'wannacry', 'petya', 'notpetya', 'ryuk', 'maze', 'lockbit', 'conti',
+        'emotet', 'trickbot', 'qakbot', 'danabot', 'formbook', 'remcos',
+        'cobalt strike', 'metasploit', 'mimikatz', 'powershell empire'
+    ]
+    
+    text_lower = text.lower()
+    extracted["malware_families"] = [malware for malware in malware_keywords 
+                                   if malware in text_lower]
+    
+    # Threat actors/groups
+    threat_actor_keywords = [
+        'lazarus', 'apt1', 'apt28', 'apt29', 'apt40', 'carbanak', 'fin7',
+        'sandworm', 'turla', 'kimsuky', 'darkhydrus', 'muddywater'
+    ]
+    
+    extracted["threat_actors"] = [actor for actor in threat_actor_keywords 
+                                if actor in text_lower]
+    
+    # Affected systems
+    system_keywords = [
+        'windows', 'linux', 'macos', 'android', 'ios', 'docker', 'kubernetes',
+        'apache', 'nginx', 'iis', 'mysql', 'postgresql', 'mongodb'
+    ]
+    
+    extracted["affected_systems"] = [system for system in system_keywords 
+                                   if system in text_lower]
+    
+    # Combine IOCs
+    extracted["iocs"] = (extracted["ip_addresses"] + 
+                        extracted["domains"] + 
+                        extracted["file_hashes"][:3])[:10]  # Limit to 10 total
+    
+    return extracted
+
+def _generate_enhanced_analysis(text: str, channel: str, extracted_data: Dict) -> str:
+    """Generate enhanced threat analysis summary"""
+    
+    threat_level = _detect_threat_level(text, channel)
+    category = _detect_category(text, channel)
+    
+    analysis_parts = []
+    
+    # Main threat assessment
+    if threat_level == "critical":
+        analysis_parts.append(f"Critical {category} threat detected requiring immediate attention.")
+    elif threat_level == "high":
+        analysis_parts.append(f"High-priority {category} identified.")
+    else:
+        analysis_parts.append(f"{category.title()} intelligence from {channel}.")
+    
+    # Add specific details based on extracted data
+    if extracted_data["cve_references"]:
+        analysis_parts.append(f"References {len(extracted_data['cve_references'])} CVE vulnerabilities.")
+    
+    if extracted_data["malware_families"]:
+        families = ", ".join(extracted_data["malware_families"][:2])
+        analysis_parts.append(f"Associated with {families} malware.")
+    
+    if extracted_data["threat_actors"]:
+        actors = ", ".join(extracted_data["threat_actors"][:2])
+        analysis_parts.append(f"Linked to {actors} threat groups.")
+    
+    if extracted_data["affected_systems"]:
+        systems = ", ".join(extracted_data["affected_systems"][:3])
+        analysis_parts.append(f"Affects {systems} systems.")
+    
+    # Add context based on content
+    text_lower = text.lower()
+    if any(word in text_lower for word in ['patch', 'update', 'fix']):
+        analysis_parts.append("Remediation information available.")
+    
+    if any(word in text_lower for word in ['exploit', 'proof of concept', 'poc']):
+        analysis_parts.append("Exploitation details present.")
+    
+    if extracted_data["urls"]:
+        analysis_parts.append(f"Includes {len(extracted_data['urls'])} reference links.")
+    
+    return " ".join(analysis_parts)
+
+def _generate_mitigation_advice(text: str, channel: str) -> str:
+    """Generate basic mitigation advice based on content"""
+    
+    text_lower = text.lower()
+    advice = []
+    
+    if 'vulnerability' in text_lower or 'cve-' in text_lower:
+        advice.append("Apply security patches immediately.")
+    
+    if any(word in text_lower for word in ['malware', 'trojan', 'backdoor']):
+        advice.append("Update antivirus signatures and scan systems.")
+    
+    if 'breach' in text_lower or 'leak' in text_lower:
+        advice.append("Monitor for credential exposure and reset passwords.")
+    
+    if 'phishing' in text_lower:
+        advice.append("Increase user awareness and email filtering.")
+    
+    if 'ransomware' in text_lower:
+        advice.append("Verify backup integrity and network segmentation.")
+    
+    if not advice:
+        advice.append("Follow standard security best practices.")
+    
+    return " ".join(advice)
 
 def _get_fallback_analysis(text: str, channel: str) -> Dict[str, Any]:
-    """Provide basic cybersecurity analysis when Gemini AI is unavailable"""
-    try:
-        return {
-            "gemini_analysis": f"Automated analysis: {_generate_basic_analysis(text, channel)}",
-            "threat_level": _detect_threat_level(text, channel),
-            "category": _detect_category(text, channel),
-            "threat_type": _detect_threat_type(text, channel),
-            "urgency_score": _calculate_urgency(text, channel),
-            "sentiment": _detect_sentiment(text),
-            "key_topics": _extract_keywords(text, channel),
-            "cve_references": _extract_cves(text),
-            "iocs_detected": _extract_iocs(text),
-            "malware_families": _extract_malware(text)
-        }
-    except Exception as e:
-        logger.error(f"Fallback analysis failed: {e}")
-        return {
-            "gemini_analysis": "Basic threat analysis performed",
-            "threat_level": "low",
-            "category": "other",
-            "urgency_score": 0.1
-        }
+    """Provide basic cybersecurity analysis when Gemini AI is unavailable (legacy compatibility)"""
+    return _get_enhanced_fallback_analysis(text, channel)
 
 def _detect_threat_level(text: str, channel: str) -> str:
     """Detect threat level based on keywords"""
@@ -810,66 +1065,19 @@ def _extract_keywords(text: str, channel: str) -> List[str]:
     return keywords[:5]  # Return top 5
 
 def _extract_cves(text: str) -> List[str]:
-    """Extract CVE references from text"""
-    import re
-    cve_pattern = r'CVE-\d{4}-\d{4,7}'
-    return re.findall(cve_pattern, text, re.IGNORECASE)
+    """Extract CVE references from text (legacy compatibility)"""
+    return _extract_enhanced_data(text)["cve_references"]
 
 def _extract_iocs(text: str) -> List[str]:
-    """Extract basic Indicators of Compromise"""
-    import re
-    iocs = []
-    
-    # IP addresses
-    ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
-    iocs.extend(re.findall(ip_pattern, text))
-    
-    # Domain patterns (basic)
-    domain_pattern = r'\b[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
-    domains = re.findall(domain_pattern, text)
-    # Filter out common non-malicious domains
-    filtered_domains = [d for d in domains if not any(common in d.lower() for common in ['google', 'microsoft', 'apple', 'amazon'])]
-    iocs.extend(filtered_domains[:3])  # Limit to 3
-    
-    return iocs[:5]  # Return top 5
+    """Extract basic Indicators of Compromise (legacy compatibility)"""
+    return _extract_enhanced_data(text)["iocs"]
 
 def _extract_malware(text: str) -> List[str]:
-    """Extract malware family names"""
-    text_lower = text.lower()
-    
-    malware_families = [
-        'wannacry', 'petya', 'notpetya', 'ryuk', 'maze', 'lockbit',
-        'emotet', 'trickbot', 'qakbot', 'cobalt strike', 'metasploit'
-    ]
-    
-    found_malware = [malware for malware in malware_families if malware in text_lower]
-    return found_malware
-
-def _generate_basic_analysis(text: str, channel: str) -> str:
-    """Generate basic threat analysis summary"""
-    threat_level = _detect_threat_level(text, channel)
-    category = _detect_category(text, channel)
-    
-    analysis_parts = []
-    
-    if threat_level in ['critical', 'high']:
-        analysis_parts.append(f"High-priority {category} detected.")
-    else:
-        analysis_parts.append(f"{category.title()} intelligence from {channel}.")
-    
-    # Add specific insights based on content
-    text_lower = text.lower()
-    if 'cve-' in text_lower:
-        analysis_parts.append("Contains vulnerability references.")
-    if any(word in text_lower for word in ['patch', 'update', 'fix']):
-        analysis_parts.append("Remediation information available.")
-    if any(word in text_lower for word in ['breach', 'leak', 'stolen']):
-        analysis_parts.append("Data compromise indicators present.")
-    
-    return " ".join(analysis_parts)
+    """Extract malware family names (legacy compatibility)"""
+    return _extract_enhanced_data(text)["malware_families"]
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
-    """Store processed message in BigQuery with proper datetime handling and compatible schema"""
+    """Store processed message in BigQuery with enhanced data and proper schema handling"""
     try:
         if not _bigquery_available:
             return
@@ -887,11 +1095,10 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
                 return datetime.fromtimestamp(dt.timestamp()).isoformat()
             return str(dt)
         
-        # Only include fields that exist in the current BigQuery table schema
-        # Get existing schema field names
+        # Get existing schema field names for compatibility
         existing_fields = {field.name for field in table.schema}
         
-        # Base row with fields that definitely exist
+        # Base row with required fields
         row = {
             "message_id": str(message_data.get("message_id", "")),
             "chat_id": str(message_data.get("chat_id", "")),
@@ -903,8 +1110,8 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
             "processed_date": convert_datetime(message_data.get("processed_date")),
         }
         
-        # Add optional fields only if they exist in the schema
-        optional_fields = {
+        # Enhanced analysis fields - only add if they exist in schema
+        enhanced_fields = {
             "gemini_analysis": message_data.get("gemini_analysis", ""),
             "sentiment": message_data.get("sentiment", "neutral"),
             "key_topics": message_data.get("key_topics", []),
@@ -914,11 +1121,14 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
             "threat_type": message_data.get("threat_type", "unknown"),
             "channel_type": message_data.get("channel_type", "unknown"),
             "channel_priority": message_data.get("channel_priority", "medium"),
-            "iocs_detected": message_data.get("iocs_detected", []),
+            
+            # Standard cybersecurity fields
+            "iocs_detected": message_data.get("iocs_detected", message_data.get("iocs", [])),
             "cve_references": message_data.get("cve_references", []),
             "malware_families": message_data.get("malware_families", []),
             "affected_systems": message_data.get("affected_systems", []),
-            # These fields may not exist in the current table:
+            
+            # Extended fields (may not exist in older schemas)
             "attack_vectors": message_data.get("attack_vectors", []),
             "threat_actors": message_data.get("threat_actors", []),
             "campaign_names": message_data.get("campaign_names", []),
@@ -927,20 +1137,43 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
         }
         
         # Only add fields that exist in the table schema
-        for field_name, field_value in optional_fields.items():
+        for field_name, field_value in enhanced_fields.items():
             if field_name in existing_fields:
                 row[field_name] = field_value
+        
+        # Store enhanced extracted data in appropriate fields if they exist
+        if "iocs_detected" in existing_fields and message_data.get("urls_extracted"):
+            # Combine IOCs with URLs if there's room
+            current_iocs = row.get("iocs_detected", [])
+            urls = message_data.get("urls_extracted", [])[:2]  # Add up to 2 URLs
+            row["iocs_detected"] = current_iocs + urls
         
         errors = _bq_client.insert_rows_json(table, [row])
         if errors:
             logger.error(f"BigQuery insert failed: {errors}")
-            logger.error(f"Row data: {row}")
+            logger.error(f"Row data: {[(k, type(v).__name__) for k, v in row.items()]}")
         else:
-            logger.info(f"✅ Stored threat: {row['chat_username']} - {row.get('threat_level', 'unknown')} - {row.get('category', 'other')}")
+            # Enhanced success logging
+            cve_count = len(message_data.get("cve_references", []))
+            ioc_count = len(message_data.get("iocs_detected", []))
+            url_count = len(message_data.get("urls_extracted", []))
+            
+            extra_info = []
+            if cve_count > 0:
+                extra_info.append(f"{cve_count} CVEs")
+            if ioc_count > 0:
+                extra_info.append(f"{ioc_count} IOCs")
+            if url_count > 0:
+                extra_info.append(f"{url_count} URLs")
+            
+            extra_str = f" [{', '.join(extra_info)}]" if extra_info else ""
+            
+            logger.info(f"✅ Stored: {row['chat_username']} - {row.get('threat_level', 'low')} {row.get('category', 'other')}{extra_str}")
             
     except Exception as e:
         logger.error(f"BigQuery storage failed: {e}")
-        logger.error(f"Available schema fields: {[field.name for field in table.schema] if 'table' in locals() else 'unknown'}")
+        logger.error(f"Available fields: {[field.name for field in table.schema] if 'table' in locals() else 'unknown'}")
+        logger.error(f"Message data keys: {list(message_data.keys())}")
 
 async def stop_monitoring_system():
     """Stop the monitoring system"""
