@@ -1,1825 +1,625 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CIPHER - Cybersecurity Intelligence Platform</title>
-    <meta name="description" content="CIPHER - Advanced cybersecurity threat intelligence monitoring and analysis platform">
-    <meta name="keywords" content="cybersecurity, threat intelligence, APT, malware, breach detection, CIPHER">
+{% extends "base.html" %}
+
+{% block title %}CIPHER Dashboard - Real-time Cybersecurity Intelligence{% endblock %}
+
+{% block extra_head %}
+<meta name="refresh" content="30">
+<style>
+    .metric-card {
+        background: linear-gradient(135deg, rgba(17, 25, 40, 0.8) 0%, rgba(0, 0, 0, 0.9) 100%);
+        backdrop-filter: blur(16px);
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        transition: all 0.3s ease;
+    }
     
-    <style>
-        :root {
-            --primary-green: #00ff00;
-            --primary-blue: #6366f1;
-            --primary-purple: #8b5cf6;
-            --danger-red: #ff4444;
-            --warning-orange: #ffaa00;
-            --warning-yellow: #ffff00;
-            --info-cyan: #06b6d4;
-            --bg-dark: #0a0a0a;
-            --bg-darker: #020617;
-            --bg-card: rgba(0, 0, 0, 0.8);
-            --bg-card-hover: rgba(0, 0, 0, 0.9);
-            --border-glow: rgba(0, 255, 0, 0.3);
-            --text-primary: #ffffff;
-            --text-secondary: #e0e0e0;
-            --text-muted: #888888;
-            --shadow-glow: 0 0 20px rgba(0, 255, 0, 0.2);
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Segoe UI', 'Consolas', 'Monaco', monospace;
-            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a2e 25%, #16213e 50%, #0f172a 75%, var(--bg-darker) 100%);
-            color: var(--text-primary);
-            min-height: 100vh;
-            overflow-x: hidden;
-            line-height: 1.6;
-        }
-
-        /* Enhanced animated cyber grid background */
-        .cyber-grid {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: 
-                linear-gradient(rgba(0, 255, 0, 0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(0, 255, 0, 0.03) 1px, transparent 1px),
-                radial-gradient(circle at 25% 25%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 75% 75%, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
-            background-size: 20px 20px, 20px 20px, 200px 200px, 200px 200px;
-            pointer-events: none;
-            z-index: 0;
-            animation: gridPulse 8s ease-in-out infinite, gridMove 20s linear infinite;
-        }
-
-        @keyframes gridPulse {
-            0%, 100% { opacity: 0.3; }
-            50% { opacity: 0.1; }
-        }
-
-        @keyframes gridMove {
-            0% { transform: translate(0, 0); }
-            100% { transform: translate(20px, 20px); }
-        }
-
-        .container {
-            max-width: 1800px;
-            margin: 0 auto;
-            padding: 20px;
-            position: relative;
-            z-index: 1;
-        }
-
-        /* Enhanced header with animations */
-        .header {
-            text-align: center;
-            background: var(--bg-card);
-            border: 2px solid var(--primary-green);
-            border-radius: 20px;
-            padding: 40px;
-            margin-bottom: 30px;
-            box-shadow: var(--shadow-glow);
-            backdrop-filter: blur(15px);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .header::before {
-            content: '';
-            position: absolute;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: conic-gradient(from 0deg, transparent, rgba(0, 255, 0, 0.1), transparent 50%, rgba(99, 102, 241, 0.1), transparent);
-            animation: rotate 8s linear infinite;
-            opacity: 0.3;
-            z-index: -1;
-        }
-
-        @keyframes rotate {
-            100% { transform: rotate(360deg); }
-        }
-
-        .header h1 {
-            font-size: 4em;
-            color: var(--primary-green);
-            text-shadow: 0 0 30px var(--primary-green);
-            margin-bottom: 15px;
-            animation: pulse 3s infinite;
-            font-weight: 700;
-            letter-spacing: 2px;
-        }
-
-        .header .subtitle {
-            font-size: 1.5em;
-            color: var(--text-secondary);
-            margin-bottom: 25px;
-            font-weight: 300;
-        }
-
-        /* Enhanced status bar */
-        .status-bar {
-            display: flex;
-            justify-content: center;
-            gap: 25px;
-            margin-top: 25px;
-            flex-wrap: wrap;
-        }
-
-        .status-item {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 20px;
-            background: rgba(0, 255, 0, 0.1);
-            border: 1px solid var(--primary-green);
-            border-radius: 25px;
-            font-family: monospace;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }
-
-        .status-item:hover {
-            background: rgba(0, 255, 0, 0.2);
-            transform: translateY(-3px);
-            box-shadow: 0 8px 25px rgba(0, 255, 0, 0.3);
-        }
-
-        .status-dot {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            animation: statusBlink 2s infinite;
-            box-shadow: 0 0 10px currentColor;
-            position: relative;
-        }
-
-        .status-dot::before {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            background: inherit;
-            transform: translate(-50%, -50%);
-            animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-            opacity: 0.7;
-        }
-
-        .status-online { background-color: var(--primary-green); }
-        .status-warning { background-color: var(--warning-orange); }
-        .status-critical { background-color: var(--danger-red); }
-        .status-info { background-color: var(--primary-blue); }
-
-        @keyframes statusBlink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-
-        @keyframes ping {
-            75%, 100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
-        }
-
-        /* Enhanced main grid */
-        .main-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 25px;
-            margin-bottom: 40px;
-        }
-
-        /* Enhanced card styles */
-        .card {
-            background: var(--bg-card);
-            border: 1px solid var(--primary-green);
-            border-radius: 15px;
-            padding: 30px;
-            backdrop-filter: blur(15px);
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(0, 255, 0, 0.1), transparent);
-            transition: left 0.6s ease;
-        }
-
-        .card:hover {
-            border-color: var(--primary-blue);
-            transform: translateY(-8px);
-            box-shadow: 0 15px 40px rgba(99, 102, 241, 0.4);
-            background: var(--bg-card-hover);
-        }
-
-        .card:hover::before {
-            left: 100%;
-        }
-
-        .card-header {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            margin-bottom: 25px;
-        }
-
-        .card-icon {
-            font-size: 2.2em;
-            padding: 15px;
-            background: linear-gradient(45deg, var(--primary-blue), var(--primary-purple));
-            border-radius: 12px;
-            box-shadow: 0 0 25px rgba(99, 102, 241, 0.6);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .card-title {
-            font-size: 1.4em;
-            font-weight: 600;
-            color: var(--primary-blue);
-        }
-
-        .metric {
-            font-size: 3.2em;
-            font-weight: 700;
-            color: var(--text-primary);
-            text-shadow: 0 0 15px currentColor;
-            margin: 20px 0;
-            line-height: 1;
-            font-family: 'Consolas', monospace;
-        }
-
-        .metric.critical { color: var(--danger-red); animation: urgentPulse 1.5s infinite; }
-        .metric.warning { color: var(--warning-orange); }
-        .metric.good { color: var(--primary-green); }
-        .metric.info { color: var(--primary-blue); }
-
-        @keyframes urgentPulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-
-        .metric-description {
-            color: var(--text-muted);
-            margin-bottom: 25px;
-            font-size: 1.1em;
-        }
-
-        /* Enhanced sub-metrics */
-        .sub-metrics {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-            gap: 15px;
-            margin-top: 25px;
-        }
-
-        .sub-metric {
-            text-align: center;
-            padding: 15px 10px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 10px;
-            border-left: 3px solid var(--primary-blue);
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }
-
-        .sub-metric:hover {
-            background: rgba(255, 255, 255, 0.1);
-            border-left-color: var(--primary-green);
-            transform: translateY(-2px);
-        }
-
-        .sub-metric-value {
-            font-size: 1.8em;
-            font-weight: 700;
-            color: var(--text-primary);
-            margin-bottom: 8px;
-            font-family: 'Consolas', monospace;
-        }
-
-        .sub-metric-label {
-            font-size: 0.8em;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            font-weight: 500;
-            letter-spacing: 1px;
-        }
-
-        /* Enhanced analytics section */
-        .analytics-section {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 25px;
-            margin: 40px 0;
-        }
-
-        .chart-container {
-            background: var(--bg-card);
-            border: 1px solid var(--primary-blue);
-            border-radius: 15px;
-            padding: 25px;
-            backdrop-filter: blur(15px);
-            transition: all 0.3s ease;
-        }
-
-        .chart-container:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
-        }
-
-        .chart-title {
-            color: var(--primary-blue);
-            font-weight: 600;
-            font-size: 1.3em;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
-        /* Enhanced bar chart */
-        .bar-chart {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-
-        .bar-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .bar-label {
-            min-width: 90px;
-            font-size: 0.9em;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-
-        .bar {
-            flex: 1;
-            height: 28px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 14px;
-            overflow: hidden;
-            position: relative;
-        }
-
-        .bar-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--primary-blue), var(--primary-purple));
-            border-radius: 14px;
-            transition: width 1.2s ease;
-            position: relative;
-        }
-
-        .bar-fill::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-            animation: barShine 3s infinite;
-        }
-
-        @keyframes barShine {
-            0% { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-        }
-
-        .bar-value {
-            min-width: 40px;
-            text-align: right;
-            font-weight: 700;
-            color: var(--text-primary);
-            font-family: 'Consolas', monospace;
-        }
-
-        /* Enhanced intelligence feed section */
-        .insights-section {
-            background: var(--bg-card);
-            border: 1px solid var(--primary-green);
-            border-radius: 20px;
-            margin-top: 40px;
-            overflow: hidden;
-            backdrop-filter: blur(15px);
-        }
-
-        .insights-header {
-            background: linear-gradient(45deg, rgba(0, 255, 0, 0.2), rgba(99, 102, 241, 0.2));
-            padding: 25px 30px;
-            border-bottom: 1px solid var(--primary-green);
-        }
-
-        .insights-header h3 {
-            margin: 0;
-            color: var(--primary-green);
-            font-size: 1.6em;
-            font-weight: 600;
-        }
-
-        .insights-header p {
-            margin: 8px 0 0 0;
-            color: var(--text-muted);
-            font-size: 0.95em;
-        }
-
-        .insights-content {
-            max-height: 1000px;
-            overflow-y: auto;
-            padding: 25px;
-        }
-
-        .insights-content::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .insights-content::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 4px;
-        }
-
-        .insights-content::-webkit-scrollbar-thumb {
-            background: var(--primary-blue);
-            border-radius: 4px;
-        }
-
-        /* Enhanced insight items */
-        .insight {
-            background: rgba(99, 102, 241, 0.1);
-            border-left: 4px solid var(--primary-blue);
-            border-radius: 0 12px 12px 0;
-            padding: 25px;
-            margin-bottom: 20px;
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .insight::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 4px;
-            height: 100%;
-            background: linear-gradient(180deg, var(--primary-blue), var(--primary-green));
-            transition: width 0.3s ease;
-        }
-
-        .insight:hover {
-            border-left-color: var(--primary-green);
-            background: rgba(0, 255, 0, 0.1);
-            transform: translateX(8px);
-        }
-
-        .insight:hover::before {
-            width: 8px;
-        }
-
-        .insight-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 15px;
-            flex-wrap: wrap;
-            gap: 15px;
-        }
-
-        .insight-source-container {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            flex-wrap: wrap;
-        }
-
-        .insight-source {
-            font-weight: 700;
-            color: var(--primary-blue);
-            font-family: 'Consolas', monospace;
-            font-size: 1.1em;
-        }
-
-        .insight-badges {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .threat-badge {
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.75em;
-            font-weight: 700;
-            text-transform: uppercase;
-            font-family: 'Consolas', monospace;
-            transition: all 0.3s ease;
-        }
-
-        .threat-critical {
-            background: rgba(255, 68, 68, 0.2);
-            color: var(--danger-red);
-            border: 1px solid var(--danger-red);
-            animation: criticalBlink 2s infinite;
-        }
-
-        .threat-high {
-            background: rgba(255, 170, 0, 0.2);
-            color: var(--warning-orange);
-            border: 1px solid var(--warning-orange);
-        }
-
-        .threat-medium {
-            background: rgba(255, 255, 0, 0.2);
-            color: var(--warning-yellow);
-            border: 1px solid var(--warning-yellow);
-        }
-
-        .threat-low {
-            background: rgba(0, 255, 0, 0.2);
-            color: var(--primary-green);
-            border: 1px solid var(--primary-green);
-        }
-
-        @keyframes criticalBlink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .insight-controls {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 0.85em;
-            color: var(--text-muted);
-        }
-
-        .control-btn {
-            padding: 4px 10px;
-            background: rgba(99, 102, 241, 0.1);
-            border: 1px solid var(--primary-blue);
-            border-radius: 12px;
-            color: var(--primary-blue);
-            cursor: pointer;
-            font-size: 0.8em;
-            transition: all 0.3s ease;
-            text-decoration: none;
-        }
-
-        .control-btn:hover {
-            background: rgba(99, 102, 241, 0.2);
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(99, 102, 241, 0.3);
-        }
-
-        .expand-btn {
-            background: rgba(0, 255, 0, 0.1);
-            border-color: var(--primary-green);
-            color: var(--primary-green);
-        }
-
-        .copy-btn {
-            background: rgba(6, 182, 212, 0.1);
-            border-color: var(--info-cyan);
-            color: var(--info-cyan);
-        }
-
-        /* Enhanced analysis text */
-        .insight-analysis {
-            line-height: 1.7;
-            margin-bottom: 20px;
-            color: var(--text-secondary);
-            font-size: 1.05em;
-        }
-
-        .analysis-text {
-            line-height: 1.7;
-            margin-bottom: 20px;
-            color: var(--text-secondary);
-            font-size: 1.05em;
-        }
-
-        .analysis-expanded {
-            background: rgba(0, 0, 0, 0.3);
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 3px solid var(--primary-green);
-            margin: 10px 0;
-        }
-
-        /* Enhanced cybersecurity data display */
-        .cybersec-data {
-            margin-top: 20px;
-            padding-top: 20px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            font-size: 0.9em;
-        }
-
-        .cybersec-row {
-            margin: 8px 0;
-            display: flex;
-            flex-wrap: wrap;
-            align-items: flex-start;
-            gap: 8px;
-        }
-
-        .cybersec-label {
-            color: var(--primary-blue);
-            font-weight: 600;
-            min-width: 120px;
-            margin-right: 8px;
-        }
-
-        .cybersec-items {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-
-        .cve-ref {
-            font-family: 'Consolas', monospace;
-            color: var(--danger-red);
-            background: rgba(255, 68, 68, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 68, 68, 0.3);
-            font-size: 0.85em;
-            transition: all 0.3s ease;
-        }
-
-        .cve-ref:hover {
-            background: rgba(255, 68, 68, 0.2);
-            transform: translateY(-1px);
-        }
-
-        .ioc-item {
-            font-family: 'Consolas', monospace;
-            color: var(--warning-orange);
-            background: rgba(255, 170, 0, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 170, 0, 0.3);
-            font-size: 0.85em;
-            transition: all 0.3s ease;
-        }
-
-        .ioc-item:hover {
-            background: rgba(255, 170, 0, 0.2);
-            transform: translateY(-1px);
-        }
-
-        .malware-item {
-            color: var(--danger-red);
-            background: rgba(255, 68, 68, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 68, 68, 0.3);
-            font-size: 0.85em;
-            transition: all 0.3s ease;
-        }
-
-        .malware-item:hover {
-            background: rgba(255, 68, 68, 0.2);
-            transform: translateY(-1px);
-        }
-
-        .actor-item {
-            color: var(--warning-orange);
-            background: rgba(255, 170, 0, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 170, 0, 0.3);
-            font-size: 0.85em;
-            transition: all 0.3s ease;
-        }
-
-        .actor-item:hover {
-            background: rgba(255, 170, 0, 0.2);
-            transform: translateY(-1px);
-        }
-
-        .system-item {
-            color: var(--primary-blue);
-            background: rgba(99, 102, 241, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(99, 102, 241, 0.3);
-            font-size: 0.85em;
-            transition: all 0.3s ease;
-        }
-
-        .system-item:hover {
-            background: rgba(99, 102, 241, 0.2);
-            transform: translateY(-1px);
-        }
-
-        /* Enhanced metadata section */
-        .insight-meta {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.9em;
-            color: var(--text-muted);
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding-top: 15px;
-            flex-wrap: wrap;
-            gap: 15px;
-        }
-
-        .urgency-indicator {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .urgency-bar {
-            width: 120px;
-            height: 8px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 4px;
-            overflow: hidden;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .urgency-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--primary-green), var(--warning-orange), var(--danger-red));
-            border-radius: 4px;
-            transition: width 0.5s ease;
-            position: relative;
-        }
-
-        .urgency-fill::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-            animation: urgencyShine 2s infinite;
-        }
-
-        @keyframes urgencyShine {
-            0% { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-        }
-
-        /* Enhanced channels section */
-        .channels-section {
-            background: var(--bg-card);
-            border: 1px solid var(--primary-blue);
-            border-radius: 20px;
-            padding: 30px;
-            margin: 40px 0;
-            backdrop-filter: blur(15px);
-        }
-
-        .channels-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 25px;
-            margin-top: 25px;
-        }
-
-        .channel-card {
-            background: rgba(99, 102, 241, 0.1);
-            border: 1px solid var(--primary-blue);
-            border-radius: 15px;
-            padding: 25px;
-            text-align: center;
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .channel-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(45deg, transparent, rgba(0, 255, 0, 0.1), transparent);
-            transform: translateX(-100%);
-            transition: transform 0.6s ease;
-        }
-
-        .channel-card:hover {
-            border-color: var(--primary-green);
-            transform: scale(1.05);
-            background: rgba(0, 255, 0, 0.1);
-        }
-
-        .channel-card:hover::before {
-            transform: translateX(100%);
-        }
-
-        .channel-icon {
-            font-size: 2.8em;
-            margin-bottom: 15px;
-        }
-
-        .channel-name {
-            font-weight: 700;
-            color: var(--primary-blue);
-            margin-bottom: 10px;
-            font-size: 1.2em;
-        }
-
-        .channel-desc {
-            font-size: 0.9em;
-            color: var(--text-muted);
-            margin-bottom: 15px;
-            line-height: 1.5;
-        }
-
-        .channel-status {
-            font-size: 0.8em;
-            font-family: 'Consolas', monospace;
-            font-weight: 600;
-            padding: 6px 12px;
-            border-radius: 15px;
-            display: inline-block;
-        }
-
-        .channel-status.active {
-            color: var(--primary-green);
-            background: rgba(0, 255, 0, 0.1);
-            border: 1px solid var(--primary-green);
-        }
-
-        .channel-status.standby {
-            color: var(--warning-orange);
-            background: rgba(255, 170, 0, 0.1);
-            border: 1px solid var(--warning-orange);
-        }
-
-        /* Enhanced footer */
-        .footer {
-            text-align: center;
-            margin-top: 60px;
-            padding: 40px 30px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            background: var(--bg-card);
-            border-radius: 20px;
-            backdrop-filter: blur(15px);
-        }
-
-        .footer-links {
-            display: flex;
-            justify-content: center;
-            gap: 25px;
-            margin-top: 25px;
-            flex-wrap: wrap;
-        }
-
-        .footer-link {
-            color: var(--primary-blue);
-            text-decoration: none;
-            padding: 12px 20px;
-            border: 1px solid var(--primary-blue);
-            border-radius: 25px;
-            transition: all 0.3s ease;
-            font-weight: 500;
-        }
-
-        .footer-link:hover {
-            background: var(--primary-blue);
-            color: var(--text-primary);
-            transform: translateY(-3px);
-            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
-        }
-
-        /* Empty state styling */
-        .empty-state {
-            text-align: center;
-            padding: 80px 20px;
-            color: var(--text-muted);
-        }
-
-        .empty-state-icon {
-            font-size: 5em;
-            margin-bottom: 30px;
-            opacity: 0.5;
-        }
-
-        .empty-state h3 {
-            color: var(--text-secondary);
-            margin-bottom: 20px;
-            font-size: 1.4em;
-        }
-
-        .loading-animation {
-            display: inline-flex;
-            gap: 6px;
-            margin-top: 25px;
-        }
-
-        .loading-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--primary-blue);
-            animation: loadingBounce 1.4s ease-in-out infinite both;
-        }
-
-        .loading-dot:nth-child(1) { animation-delay: -0.32s; }
-        .loading-dot:nth-child(2) { animation-delay: -0.16s; }
-
-        @keyframes loadingBounce {
-            0%, 80%, 100% { transform: scale(0); }
-            40% { transform: scale(1); }
-        }
-
-        /* Enhanced animations */
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(30px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* Enhanced responsive design */
-        @media (max-width: 1200px) {
-            .container { max-width: 100%; padding: 15px; }
-            .main-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-        }
-
-        @media (max-width: 768px) {
-            .header h1 { font-size: 2.5em; }
-            .header .subtitle { font-size: 1.2em; }
-            .main-grid { grid-template-columns: 1fr; }
-            .analytics-section { grid-template-columns: 1fr; }
-            .channels-grid { grid-template-columns: 1fr; }
-            .status-bar { flex-direction: column; align-items: center; }
-            .insights-content { max-height: 600px; }
-            .insight { padding: 20px; }
-            .card { padding: 20px; }
-        }
-
-        @media (max-width: 480px) {
-            .container { padding: 10px; }
-            .header { padding: 25px; }
-            .metric { font-size: 2.5em; }
-            .card-icon { font-size: 1.8em; padding: 12px; }
-            .sub-metrics { grid-template-columns: repeat(2, 1fr); }
-            .cybersec-items { flex-direction: column; align-items: flex-start; }
-        }
-
-        /* Print styles */
-        @media print {
-            .cyber-grid { display: none; }
-            body { background: white !important; color: black !important; }
-            .card, .insight { border: 1px solid #ccc !important; background: white !important; }
-            .control-btn { display: none; }
-        }
-
-        /* Accessibility improvements */
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                animation-duration: 0.01ms !important;
-                animation-iteration-count: 1 !important;
-                transition-duration: 0.01ms !important;
-            }
-        }
-
-        /* High contrast mode */
-        @media (prefers-contrast: high) {
-            :root {
-                --primary-green: #00ff00;
-                --primary-blue: #0066ff;
-                --danger-red: #ff0000;
-                --warning-orange: #ff6600;
-                --text-primary: #ffffff;
-                --text-secondary: #ffffff;
-                --bg-card: rgba(0, 0, 0, 0.9);
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="cyber-grid"></div>
+    .metric-card:hover {
+        border-color: rgba(99, 102, 241, 0.6);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(99, 102, 241, 0.2);
+    }
     
-    <div class="container">
-        <!-- Enhanced Header -->
-        <header class="header">
-            <h1>🛡️ CIPHER</h1>
-            <p class="subtitle">Cybersecurity Intelligence Platform</p>
-            <p style="color: var(--text-muted); margin-bottom: 25px;">
-                Advanced Threat Intelligence • Real-time Monitoring • AI-Powered Analysis
-            </p>
+    .metric-value {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        text-shadow: 0 0 10px currentColor;
+    }
+    
+    .insight-card {
+        background: rgba(17, 25, 40, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(8px);
+        transition: all 0.3s ease;
+    }
+    
+    .insight-card:hover {
+        background: rgba(17, 25, 40, 0.8);
+        border-color: rgba(99, 102, 241, 0.4);
+        transform: translateX(4px);
+    }
+    
+    .loading-shimmer {
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+        background-size: 200% 100%;
+        animation: shimmer 2s infinite;
+    }
+    
+    @keyframes shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+    }
+    
+    .chart-container {
+        background: rgba(17, 25, 40, 0.7);
+        border: 1px solid rgba(99, 102, 241, 0.2);
+        backdrop-filter: blur(12px);
+    }
+    
+    .progress-bar {
+        background: rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+        position: relative;
+    }
+    
+    .progress-fill {
+        background: linear-gradient(90deg, #6366f1, #8b5cf6);
+        height: 100%;
+        transition: width 1s ease;
+        position: relative;
+    }
+    
+    .progress-fill::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        animation: progressShine 2s infinite;
+    }
+    
+    @keyframes progressShine {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+    }
+    
+    .empty-state {
+        background: rgba(156, 163, 175, 0.1);
+        border: 2px dashed rgba(156, 163, 175, 0.3);
+        color: #9ca3af;
+    }
+    
+    .error-state {
+        background: rgba(239, 68, 68, 0.1);
+        border: 2px solid rgba(239, 68, 68, 0.3);
+        color: #f87171;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="dashboardApp" x-data="dashboardController()" x-init="init()" class="container mx-auto px-4 py-6 space-y-6">
+    
+    <!-- Dashboard Header -->
+    <header class="text-center mb-8">
+        <div class="glass-effect rounded-2xl p-8 relative overflow-hidden">
+            <!-- Animated background -->
+            <div class="absolute inset-0 bg-gradient-to-r from-cipher-blue/10 via-cipher-purple/10 to-cipher-green/10 animate-pulse"></div>
             
-            <div class="status-bar" id="statusBar">
-                <div class="status-item" title="System Status">
-                    <div class="status-dot status-online" id="systemStatus"></div>
-                    <span id="systemText">System: OPERATIONAL</span>
-                </div>
-                <div class="status-item" title="BigQuery Connection">
-                    <div class="status-dot status-online" id="bigqueryStatus"></div>
-                    <span id="bigqueryText">BigQuery: CONNECTED</span>
-                </div>
-                <div class="status-item" title="Threat Level">
-                    <div class="status-dot status-warning" id="threatStatus"></div>
-                    <span id="threatText">Threat Level: MEDIUM</span>
-                </div>
-                <div class="status-item" title="Monitored Channels">
-                    <div class="status-dot status-info" id="channelStatus"></div>
-                    <span id="channelText">Channels: 3</span>
-                </div>
-            </div>
-        </header>
-
-        <!-- Main Metrics Grid -->
-        <section class="main-grid">
-            <!-- Intelligence Summary -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon">📊</div>
-                    <div class="card-title">Intelligence Summary</div>
-                </div>
-                <div class="metric good" id="totalMessages">552</div>
-                <p class="metric-description">Total Messages Processed</p>
+            <div class="relative z-10">
+                <h1 class="text-5xl font-bold neon-green mb-4">🛡️ CIPHER</h1>
+                <p class="text-xl text-gray-300 mb-4">Cybersecurity Intelligence Platform</p>
+                <p class="text-gray-400 max-w-2xl mx-auto">
+                    Real-time threat intelligence monitoring and analysis from premium cybersecurity channels
+                </p>
                 
-                <div class="sub-metrics">
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="todayMessages">552</div>
-                        <div class="sub-metric-label">Today</div>
+                <!-- Real-time Status Bar -->
+                <div class="flex justify-center items-center space-x-6 mt-6 flex-wrap gap-4">
+                    <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                        <div :class="systemStatus.operational ? 'bg-green-400' : 'bg-red-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
+                        <span class="text-sm font-mono" x-text="systemStatus.operational ? 'OPERATIONAL' : 'STANDBY'"></span>
                     </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="channelCount">3</div>
-                        <div class="sub-metric-label">Channels</div>
+                    <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                        <div :class="systemStatus.bigquery_connected ? 'bg-green-400' : 'bg-gray-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
+                        <span class="text-sm font-mono">BigQuery</span>
                     </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="avgUrgency">0.13</div>
-                        <div class="sub-metric-label">Avg Urgency</div>
+                    <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                        <div :class="systemStatus.telegram_connected ? 'bg-green-400' : 'bg-gray-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
+                        <span class="text-sm font-mono">Telegram</span>
                     </div>
-                </div>
-            </div>
-
-            <!-- Threat Analysis -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon">🚨</div>
-                    <div class="card-title">Threat Analysis</div>
-                </div>
-                <div class="metric critical" id="highPriorityThreats">406</div>
-                <p class="metric-description">High Priority Threats</p>
-                
-                <div class="sub-metrics">
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" style="color: var(--danger-red);" id="criticalThreats">176</div>
-                        <div class="sub-metric-label">Critical</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" style="color: var(--warning-orange);" id="highThreats">230</div>
-                        <div class="sub-metric-label">High</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="aptActivity">8</div>
-                        <div class="sub-metric-label">APT</div>
+                    <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                        <span class="text-sm font-mono" x-text="'Threat Level: ' + (systemStatus.threat_level || 'UNKNOWN')"></span>
                     </div>
                 </div>
             </div>
+        </div>
+    </header>
 
-            <!-- Security Intelligence -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon">🔍</div>
-                    <div class="card-title">Security Intelligence</div>
-                </div>
-                <div class="metric warning" id="cveReferences">0</div>
-                <p class="metric-description">CVE References</p>
-                
-                <div class="sub-metrics">
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="vulnerabilities">44</div>
-                        <div class="sub-metric-label">Vulnerabilities</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="dataBreaches">104</div>
-                        <div class="sub-metric-label">Breaches</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" id="malwareAlerts">27</div>
-                        <div class="sub-metric-label">Malware</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- System Status -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon">⚡</div>
-                    <div class="card-title">System Status</div>
-                </div>
-                <div class="metric info" id="activeChannels">3/3</div>
-                <p class="metric-description">Channels Active</p>
-                
-                <div class="sub-metrics">
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" style="color: var(--primary-green);" id="bigqueryCheck">✓</div>
-                        <div class="sub-metric-label">BigQuery</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" style="color: var(--primary-green);" id="geminiCheck">✓</div>
-                        <div class="sub-metric-label">Gemini AI</div>
-                    </div>
-                    <div class="sub-metric">
-                        <div class="sub-metric-value" style="color: var(--primary-green);" id="telegramCheck">✓</div>
-                        <div class="sub-metric-label">Telegram</div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Threat Analytics Section -->
-        <section class="analytics-section">
-            <!-- Threat Levels Chart -->
-            <div class="chart-container">
-                <h3 class="chart-title">Threat Level Distribution</h3>
-                <div class="bar-chart" id="threatLevelsChart">
-                    <div class="bar-item">
-                        <div class="bar-label">Critical</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 80%; background: linear-gradient(90deg, #ff4444, #ff6666);"></div>
-                        </div>
-                        <div class="bar-value">36</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">High</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 60%; background: linear-gradient(90deg, #ffaa00, #ffcc44);"></div>
-                        </div>
-                        <div class="bar-value">25</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Medium</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 40%; background: linear-gradient(90deg, #ffff00, #ffff88);"></div>
-                        </div>
-                        <div class="bar-value">15</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Low</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 20%; background: linear-gradient(90deg, #00ff00, #44ff44);"></div>
-                        </div>
-                        <div class="bar-value">8</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Categories Chart -->
-            <div class="chart-container">
-                <h3 class="chart-title">Threat Categories</h3>
-                <div class="bar-chart" id="categoriesChart">
-                    <div class="bar-item">
-                        <div class="bar-label">Breach</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 100%;"></div>
-                        </div>
-                        <div class="bar-value">22</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Vuln</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 80%;"></div>
-                        </div>
-                        <div class="bar-value">18</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Malware</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 60%;"></div>
-                        </div>
-                        <div class="bar-value">12</div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">APT</div>
-                        <div class="bar">
-                            <div class="bar-fill" style="width: 40%;"></div>
-                        </div>
-                        <div class="bar-value">8</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Intelligence Summary -->
-            <div class="chart-container">
-                <h3 class="chart-title">Intelligence Summary</h3>
-                <div style="text-align: center; padding: 25px;">
-                    <div style="font-size: 2.5em; color: var(--primary-blue); margin-bottom: 15px;" id="totalThreatsAnalyzed">
-                        84
-                    </div>
-                    <div style="color: var(--text-muted); margin-bottom: 25px;">Total Threats Analyzed</div>
-                    
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; text-align: center;">
-                        <div>
-                            <div style="font-size: 1.8em; color: var(--danger-red);" id="highPriorityCount">61</div>
-                            <div style="font-size: 0.85em; color: var(--text-muted);">High Priority</div>
-                        </div>
-                        <div>
-                            <div style="font-size: 1.8em; color: var(--warning-orange);" id="avgUrgencyScore">0.57</div>
-                            <div style="font-size: 0.85em; color: var(--text-muted);">Avg Urgency</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Recent Threat Intelligence Feed -->
-        <section class="insights-section">
-            <div class="insights-header">
-                <h3>🔍 Recent Threat Intelligence</h3>
-                <p id="insightsCount">20 intelligence signals processed | Auto-refresh: 30s</p>
-            </div>
-            
-            <div class="insights-content" id="insightsContainer">
-                <!-- Sample threat intelligence entries with enhanced data -->
-                <article class="insight">
-                    <div class="insight-header">
-                        <div class="insight-source-container">
-                            <span class="insight-source">@breachdetector</span>
-                            <div class="insight-badges">
-                                <span class="threat-badge threat-critical">CRITICAL</span>
-                                <span class="threat-badge" style="background: rgba(99, 102, 241, 0.2); color: var(--primary-blue); border: 1px solid var(--primary-blue);">DATA_BREACH</span>
-                            </div>
-                        </div>
-                        <div class="insight-controls">
-                            <span>05/25 07:16</span>
-                            <button class="control-btn copy-btn" onclick="copyInsight(0)">📋 Copy</button>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-analysis">
-                        <div id="analysis-0" class="analysis-text">
-                            Critical data breach threat detected requiring immediate security response. High-priority data_breach identified with significant security implications affecting multiple systems and infrastructure. Contains 3 indicators of compromise for threat hunting. Includes exploitation details requiring immediate defensive measures.
-                        </div>
-                        <div id="full-analysis-0" class="analysis-text analysis-expanded" style="display: none;">
-                            Critical data breach threat detected requiring immediate security response. High-priority data_breach identified with significant security implications affecting multiple systems and infrastructure. The breach involves unauthorized access to sensitive customer data including personal identifiable information (PII) and financial records. Threat actors have been identified as part of a larger campaign targeting financial institutions globally. The attack vector appears to be through compromised third-party vendors with lateral movement observed across multiple network segments. Immediate containment and forensic analysis required. Contains 3 indicators of compromise for threat hunting. Includes exploitation details requiring immediate defensive measures. Organizations should implement additional monitoring for similar attack patterns and review all third-party access controls.
-                        </div>
-                        <button onclick="toggleAnalysis(0)" class="expand-btn">Show Full Analysis</button>
-                    </div>
-
-                    <div class="cybersec-data">
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">IOCs Detected:</span>
-                            <div class="cybersec-items">
-                                <span class="ioc-item">192.168.1.100</span>
-                                <span class="ioc-item">malicious-domain.com</span>
-                                <span class="ioc-item">suspicious-site.net</span>
-                            </div>
-                        </div>
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Threat Actors:</span>
-                            <div class="cybersec-items">
-                                <span class="actor-item">Lazarus Group</span>
-                                <span class="actor-item">APT41</span>
-                            </div>
-                        </div>
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Affected Systems:</span>
-                            <div class="cybersec-items">
-                                <span class="system-item">Windows</span>
-                                <span class="system-item">Linux</span>
-                                <span class="system-item">Cloud Infrastructure</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-meta">
-                        <div class="urgency-indicator">
-                            <span>Urgency:</span>
-                            <div class="urgency-bar">
-                                <div class="urgency-fill" style="width: 90%;"></div>
-                            </div>
-                            <span style="font-family: 'Consolas', monospace;">0.90</span>
-                        </div>
-                        <div>
-                            Type: <span style="color: var(--primary-blue);">Data breach with credential exposure</span>
-                        </div>
-                        <div>
-                            Sentiment: <span style="color: var(--danger-red);">NEGATIVE</span>
-                        </div>
-                    </div>
-                </article>
-
-                <article class="insight">
-                    <div class="insight-header">
-                        <div class="insight-source-container">
-                            <span class="insight-source">@secharvester</span>
-                            <div class="insight-badges">
-                                <span class="threat-badge threat-high">HIGH</span>
-                                <span class="threat-badge" style="background: rgba(255, 170, 0, 0.2); color: var(--warning-orange); border: 1px solid var(--warning-orange);">VULNERABILITY</span>
-                            </div>
-                        </div>
-                        <div class="insight-controls">
-                            <span>05/25 03:00</span>
-                            <button class="control-btn copy-btn" onclick="copyInsight(1)">📋 Copy</button>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-analysis">
-                        <div id="analysis-1" class="analysis-text">
-                            High-priority vulnerability identified with significant security implications affecting Apple XNU kernel systems. The analysis reveals a critical vulnerability (tachy0n) affecting older Apple operating systems. Exploitation leveraged kernel vulnerabilities, specifically within XNU, allowing attackers to gain arbitrary code execution. Immediate patching and system updates required.
-                        </div>
-                        <div id="full-analysis-1" class="analysis-text analysis-expanded" style="display: none;">
-                            High-priority vulnerability identified with significant security implications affecting Apple XNU kernel systems. The analysis reveals a critical vulnerability (tachy0n) affecting older Apple operating systems. Exploitation leveraged kernel vulnerabilities, specifically within XNU, allowing attackers to gain arbitrary code execution. The vulnerability affects OSUnserializeXML functions and mach ports IOSurface setValue operations. The lack of regression testing highlighted by researchers underscores the importance of comprehensive security testing. Organizations running affected Apple systems should immediately apply available patches and implement additional monitoring for signs of exploitation. This represents a significant risk to enterprise environments using Apple devices and requires immediate attention from security teams.
-                        </div>
-                        <button onclick="toggleAnalysis(1)" class="expand-btn">Show Full Analysis</button>
-                    </div>
-
-                    <div class="cybersec-data">
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">CVE References:</span>
-                            <div class="cybersec-items">
-                                <span class="cve-ref">CVE-2024-23296</span>
-                            </div>
-                        </div>
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Affected Systems:</span>
-                            <div class="cybersec-items">
-                                <span class="system-item">macOS</span>
-                                <span class="system-item">iOS</span>
-                                <span class="system-item">iPadOS</span>
-                            </div>
-                        </div>
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Attack Vectors:</span>
-                            <div class="cybersec-items">
-                                <span class="system-item">Kernel Exploitation</span>
-                                <span class="system-item">Privilege Escalation</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-meta">
-                        <div class="urgency-indicator">
-                            <span>Urgency:</span>
-                            <div class="urgency-bar">
-                                <div class="urgency-fill" style="width: 80%;"></div>
-                            </div>
-                            <span style="font-family: 'Consolas', monospace;">0.80</span>
-                        </div>
-                        <div>
-                            Type: <span style="color: var(--primary-blue);">Kernel vulnerability exploitation</span>
-                        </div>
-                        <div>
-                            Sentiment: <span style="color: var(--danger-red);">NEGATIVE</span>
-                        </div>
-                    </div>
-                </article>
-
-                <article class="insight">
-                    <div class="insight-header">
-                        <div class="insight-source-container">
-                            <span class="insight-source">@DarkfeedNews</span>
-                            <div class="insight-badges">
-                                <span class="threat-badge threat-high">HIGH</span>
-                                <span class="threat-badge" style="background: rgba(255, 68, 68, 0.2); color: var(--danger-red); border: 1px solid var(--danger-red);">RANSOMWARE</span>
-                            </div>
-                        </div>
-                        <div class="insight-controls">
-                            <span>05/24 20:57</span>
-                            <button class="control-btn copy-btn" onclick="copyInsight(2)">📋 Copy</button>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-analysis">
-                        <div id="analysis-2" class="analysis-text">
-                            High-priority ransomware identified with significant security implications. A new cybercrime affiliate program, APIPN, associated with the Novas ransomware group has been identified. This indicates a potential increase in ransomware attacks leveraging this program's resources and infrastructure. Organizations should enhance their security posture to mitigate the risk of infection and data encryption.
-                        </div>
-                    </div>
-
-                    <div class="cybersec-data">
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Malware Families:</span>
-                            <div class="cybersec-items">
-                                <span class="malware-item">Novas Ransomware</span>
-                            </div>
-                        </div>
-                        <div class="cybersec-row">
-                            <span class="cybersec-label">Threat Actors:</span>
-                            <div class="cybersec-items">
-                                <span class="actor-item">APIPN Group</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="insight-meta">
-                        <div class="urgency-indicator">
-                            <span>Urgency:</span>
-                            <div class="urgency-bar">
-                                <div class="urgency-fill" style="width: 80%;"></div>
-                            </div>
-                            <span style="font-family: 'Consolas', monospace;">0.80</span>
-                        </div>
-                        <div>
-                            Type: <span style="color: var(--primary-blue);">Ransomware affiliate program</span>
-                        </div>
-                        <div>
-                            Sentiment: <span style="color: var(--danger-red);">NEGATIVE</span>
-                        </div>
-                    </div>
-                </article>
-            </div>
-        </section>
-
-        <!-- Monitored Intelligence Sources -->
-        <section class="channels-section">
-            <h3 style="color: var(--primary-blue); margin-bottom: 15px;">📡 Monitored Intelligence Sources</h3>
-            <p style="color: var(--text-muted); margin-bottom: 20px;">
-                Real-time monitoring of 3 premium cybersecurity intelligence channels with AI-powered threat analysis
-            </p>
-            
-            <div class="channels-grid">
-                <div class="channel-card">
-                    <div class="channel-icon">🔴</div>
-                    <div class="channel-name">@DarkfeedNews</div>
-                    <div class="channel-desc">Advanced Persistent Threats & Zero-day Exploits</div>
-                    <div class="channel-status active">● MONITORING</div>
-                </div>
-                
-                <div class="channel-card">
-                    <div class="channel-icon">🟠</div>
-                    <div class="channel-name">@breachdetector</div>
-                    <div class="channel-desc">Data Breach Monitor & Credential Dumps</div>
-                    <div class="channel-status active">● MONITORING</div>
-                </div>
-                
-                <div class="channel-card">
-                    <div class="channel-icon">🔵</div>
-                    <div class="channel-name">@secharvester</div>
-                    <div class="channel-desc">Security News, CVEs & Patch Information</div>
-                    <div class="channel-status active">● MONITORING</div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Enhanced Footer -->
-        <footer class="footer">
-            <p><strong>CIPHER</strong> v1.0.0 | Powered by Google Cloud & Gemini AI</p>
-            <p style="color: var(--text-muted); margin: 15px 0;">
-                Project: primal-chariot-382610 | Service: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
-            </p>
-            <p style="color: var(--text-muted); font-size: 0.9em;">
-                Advanced Cybersecurity Intelligence Platform • Protecting Digital Assets • Real-time Threat Detection
-            </p>
-            
-            <div class="footer-links">
-                <a href="/api/stats" class="footer-link">📈 Stats API</a>
-                <a href="/health" class="footer-link">🏥 Health Check</a>
-                <a href="/api/monitoring/status" class="footer-link">📡 Monitoring</a>
-                <a href="/api/analytics" class="footer-link">📊 Analytics API</a>
-                <a href="/api/docs" class="footer-link">📚 API Docs</a>
-                <a href="/api/export/threats" class="footer-link">💾 Export Data</a>
-            </div>
-        </footer>
+    <!-- Loading State -->
+    <div x-show="loading" class="flex justify-center items-center py-20">
+        <div class="text-center">
+            <div class="w-16 h-16 border-4 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+            <p class="text-gray-400" x-text="loadingMessage">Loading cybersecurity intelligence...</p>
+        </div>
     </div>
 
-    <script>
-        // Enhanced dashboard functionality
-        class CipherDashboard {
-            constructor() {
-                this.refreshInterval = 30000; // 30 seconds
-                this.autoRefreshTimer = null;
-                this.userActivity = false;
-                this.init();
-            }
+    <!-- Error State -->
+    <div x-show="error && !loading" class="error-state rounded-lg p-8 text-center">
+        <i class="fas fa-exclamation-triangle text-4xl mb-4"></i>
+        <h3 class="text-xl font-semibold mb-2">Unable to Load Dashboard</h3>
+        <p class="mb-4" x-text="errorMessage"></p>
+        <button @click="refreshData()" class="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
+            <i class="fas fa-redo mr-2"></i>Retry
+        </button>
+    </div>
 
-            init() {
-                this.setupAutoRefresh();
-                this.setupUserActivityTracking();
-                this.setupAnimations();
-                this.updateTimestamp();
-                this.loadDashboardData();
-                console.log('🛡️ CIPHER Dashboard initialized successfully');
-            }
-
-            setupAutoRefresh() {
-                this.autoRefreshTimer = setTimeout(() => {
-                    if (!this.userActivity) {
-                        this.refreshDashboard();
-                    }
-                }, this.refreshInterval);
-            }
-
-            setupUserActivityTracking() {
-                const events = ['mousedown', 'keydown', 'scroll', 'touchstart'];
-                events.forEach(event => {
-                    document.addEventListener(event, () => {
-                        this.userActivity = true;
-                        clearTimeout(this.autoRefreshTimer);
-                        setTimeout(() => {
-                            this.userActivity = false;
-                            this.setupAutoRefresh();
-                        }, 5000);
-                    }, { passive: true });
-                });
-            }
-
-            setupAnimations() {
-                // Animate cards on load
-                const cards = document.querySelectorAll('.card, .chart-container, .insight');
-                cards.forEach((card, index) => {
-                    card.style.opacity = '0';
-                    card.style.transform = 'translateY(30px)';
-                    card.style.animation = `fadeIn 0.8s ease-out ${index * 0.1}s forwards`;
-                });
-            }
-
-            updateTimestamp() {
-                const updateTime = () => {
-                    const now = new Date();
-                    const timeStr = now.toLocaleTimeString('en-US', { 
-                        hour12: false,
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit'
-                    });
-                    document.title = `CIPHER Dashboard - ${timeStr}`;
-                };
-                
-                setInterval(updateTime, 1000);
-                updateTime();
-            }
-
-            async loadDashboardData() {
-                try {
-                    // Load stats
-                    const statsResponse = await fetch('/api/stats');
-                    if (statsResponse.ok) {
-                        const stats = await statsResponse.json();
-                        this.updateStatsDisplay(stats);
-                    }
-
-                    // Load insights
-                    const insightsResponse = await fetch('/api/insights');
-                    if (insightsResponse.ok) {
-                        const insights = await insightsResponse.json();
-                        this.updateInsightsDisplay(insights);
-                    }
-
-                    // Load analytics
-                    const analyticsResponse = await fetch('/api/analytics');
-                    if (analyticsResponse.ok) {
-                        const analytics = await analyticsResponse.json();
-                        this.updateAnalyticsDisplay(analytics);
-                    }
-
-                } catch (error) {
-                    console.error('Error loading dashboard data:', error);
-                }
-            }
-
-            updateStatsDisplay(stats) {
-                // Update main metrics
-                const elements = {
-                    'totalMessages': stats.total_messages || 0,
-                    'todayMessages': stats.processed_today || 0,
-                    'channelCount': stats.unique_channels || 3,
-                    'avgUrgency': (stats.avg_urgency || 0).toFixed(2),
-                    'highPriorityThreats': (stats.high_threats || 0) + (stats.critical_threats || 0),
-                    'criticalThreats': stats.critical_threats || 0,
-                    'highThreats': stats.high_threats || 0,
-                    'aptActivity': stats.apt_activity || 0,
-                    'cveReferences': stats.cve_mentions || 0,
-                    'vulnerabilities': stats.vulnerabilities || 0,
-                    'dataBreaches': stats.data_breaches || 0,
-                    'malwareAlerts': stats.malware_alerts || 0
-                };
-
-                Object.entries(elements).forEach(([id, value]) => {
-                    const element = document.getElementById(id);
-                    if (element) {
-                        element.textContent = typeof value === 'number' ? value.toLocaleString() : value;
-                    }
-                });
-
-                // Update status indicators
-                this.updateSystemStatus(stats);
-            }
-
-            updateSystemStatus(stats) {
-                const systemStatus = document.getElementById('systemStatus');
-                const systemText = document.getElementById('systemText');
-                
-                if (stats.monitoring_active) {
-                    systemStatus.className = 'status-dot status-online';
-                    systemText.textContent = 'System: OPERATIONAL';
-                } else {
-                    systemStatus.className = 'status-dot status-warning';
-                    systemText.textContent = 'System: STANDBY';
-                }
-
-                // Update threat level based on urgency
-                const threatStatus = document.getElementById('threatStatus');
-                const threatText = document.getElementById('threatText');
-                const avgUrgency = stats.avg_urgency || 0;
-
-                if (avgUrgency >= 0.8) {
-                    threatStatus.className = 'status-dot status-critical';
-                    threatText.textContent = 'Threat Level: CRITICAL';
-                } else if (avgUrgency >= 0.6) {
-                    threatStatus.className = 'status-dot status-warning';
-                    threatText.textContent = 'Threat Level: HIGH';
-                } else if (avgUrgency >= 0.4) {
-                    threatStatus.className = 'status-dot status-warning';
-                    threatText.textContent = 'Threat Level: MEDIUM';
-                } else {
-                    threatStatus.className = 'status-dot status-online';
-                    threatText.textContent = 'Threat Level: LOW';
-                }
-            }
-
-            updateInsightsDisplay(insights) {
-                const container = document.getElementById('insightsContainer');
-                const countElement = document.getElementById('insightsCount');
-                
-                if (insights.insights && insights.insights.length > 0) {
-                    countElement.textContent = `${insights.insights.length} intelligence signals processed | Auto-refresh: 30s`;
-                    // Insights are already displayed in the static HTML
-                    // In a real implementation, you would dynamically generate these
-                } else {
-                    countElement.textContent = 'No recent intelligence signals | Auto-refresh: 30s';
-                }
-            }
-
-            updateAnalyticsDisplay(analytics) {
-                if (analytics.summary) {
-                    const totalThreatsElement = document.getElementById('totalThreatsAnalyzed');
-                    const highPriorityElement = document.getElementById('highPriorityCount');
-                    const avgUrgencyElement = document.getElementById('avgUrgencyScore');
-
-                    if (totalThreatsElement) {
-                        totalThreatsElement.textContent = analytics.summary.total_threats || 0;
-                    }
-                    if (highPriorityElement) {
-                        highPriorityElement.textContent = analytics.summary.high_priority || 0;
-                    }
-                    if (avgUrgencyElement) {
-                        avgUrgencyElement.textContent = (analytics.summary.avg_urgency || 0).toFixed(2);
-                    }
-                }
-            }
-
-            refreshDashboard() {
-                console.log('🔄 Refreshing dashboard data...');
-                this.loadDashboardData();
-                this.setupAutoRefresh();
-            }
-        }
-
-        // Enhanced interaction functions
-        function toggleAnalysis(index) {
-            const shortAnalysis = document.getElementById(`analysis-${index}`);
-            const fullAnalysis = document.getElementById(`full-analysis-${index}`);
-            const button = event.target;
+    <!-- Main Dashboard Content -->
+    <div x-show="!loading && !error">
+        
+        <!-- Key Metrics Grid -->
+        <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             
-            if (shortAnalysis.style.display === 'none') {
-                // Show truncated, hide full
-                shortAnalysis.style.display = 'block';
-                fullAnalysis.style.display = 'none';
-                button.textContent = 'Show Full Analysis';
-                button.style.background = 'rgba(0, 255, 0, 0.1)';
-                button.style.borderColor = 'var(--primary-green)';
-                button.style.color = 'var(--primary-green)';
+            <!-- Total Messages -->
+            <div class="metric-card rounded-lg p-6 hover-lift">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-cipher-blue/20 rounded-lg">
+                        <i class="fas fa-envelope text-cipher-blue text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-gray-400 text-sm">Messages Processed</p>
+                        <div class="metric-value text-3xl text-white" x-text="formatNumber(stats.total_messages || 0)"></div>
+                    </div>
+                </div>
+                <div class="flex items-center text-sm">
+                    <span class="text-gray-400">Today:</span>
+                    <span class="text-white ml-2 font-mono" x-text="formatNumber(stats.processed_today || 0)"></span>
+                </div>
+            </div>
+
+            <!-- High Priority Threats -->
+            <div class="metric-card rounded-lg p-6 hover-lift">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-red-500/20 rounded-lg">
+                        <i class="fas fa-exclamation-triangle text-red-400 text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-gray-400 text-sm">High Priority Threats</p>
+                        <div class="metric-value text-3xl text-red-400" x-text="formatNumber((stats.critical_threats || 0) + (stats.high_threats || 0))"></div>
+                    </div>
+                </div>
+                <div class="flex items-center text-sm space-x-4">
+                    <div>
+                        <span class="text-gray-400">Critical:</span>
+                        <span class="text-red-400 ml-1 font-mono" x-text="stats.critical_threats || 0"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-400">High:</span>
+                        <span class="text-orange-400 ml-1 font-mono" x-text="stats.high_threats || 0"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Intelligence Coverage -->
+            <div class="metric-card rounded-lg p-6 hover-lift">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-green-500/20 rounded-lg">
+                        <i class="fas fa-search text-green-400 text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-gray-400 text-sm">CVE References</p>
+                        <div class="metric-value text-3xl text-green-400" x-text="formatNumber(stats.cve_mentions || 0)"></div>
+                    </div>
+                </div>
+                <div class="flex items-center text-sm space-x-4">
+                    <div>
+                        <span class="text-gray-400">Vulnerabilities:</span>
+                        <span class="text-green-400 ml-1 font-mono" x-text="stats.vulnerabilities || 0"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Health -->
+            <div class="metric-card rounded-lg p-6 hover-lift">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-cipher-purple/20 rounded-lg">
+                        <i class="fas fa-heartbeat text-cipher-purple text-xl"></i>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-gray-400 text-sm">Channels Active</p>
+                        <div class="metric-value text-3xl text-cipher-purple" x-text="(stats.unique_channels || 3) + '/3'"></div>
+                    </div>
+                </div>
+                <div class="flex items-center text-sm">
+                    <span class="text-gray-400">Avg Urgency:</span>
+                    <span class="text-cipher-purple ml-2 font-mono" x-text="(stats.avg_urgency || 0).toFixed(2)"></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Analytics Section -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            
+            <!-- Threat Level Distribution -->
+            <div class="chart-container rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-cipher-blue mb-4 flex items-center">
+                    <i class="fas fa-chart-bar mr-2"></i>
+                    Threat Level Distribution
+                </h3>
+                <div class="space-y-3">
+                    <template x-for="(value, level) in analytics.threat_levels || {}" :key="level">
+                        <div class="flex items-center">
+                            <div class="w-20 text-sm text-gray-400 capitalize" x-text="level"></div>
+                            <div class="flex-1 mx-3">
+                                <div class="progress-bar h-6 rounded-full">
+                                    <div class="progress-fill rounded-full flex items-center justify-end pr-2" 
+                                         :style="`width: ${getThreatLevelPercentage(level, value)}%`"
+                                         :class="getThreatLevelColor(level)">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="w-12 text-right text-white font-mono text-sm" x-text="value || 0"></div>
+                        </div>
+                    </template>
+                </div>
+                
+                <!-- Empty state for analytics -->
+                <div x-show="!analytics.threat_levels || Object.keys(analytics.threat_levels).length === 0" 
+                     class="empty-state rounded-lg p-8 text-center">
+                    <i class="fas fa-chart-bar text-4xl mb-4 opacity-50"></i>
+                    <p>No threat analytics data available yet</p>
+                    <p class="text-sm mt-2">Data will appear as threats are processed</p>
+                </div>
+            </div>
+
+            <!-- Category Breakdown -->
+            <div class="chart-container rounded-lg p-6">
+                <h3 class="text-lg font-semibold text-cipher-blue mb-4 flex items-center">
+                    <i class="fas fa-tags mr-2"></i>
+                    Threat Categories
+                </h3>
+                <div class="space-y-3">
+                    <template x-for="(value, category) in analytics.categories || {}" :key="category">
+                        <div class="flex items-center">
+                            <div class="w-24 text-sm text-gray-400" x-text="formatCategoryName(category)"></div>
+                            <div class="flex-1 mx-3">
+                                <div class="progress-bar h-6 rounded-full">
+                                    <div class="progress-fill rounded-full" 
+                                         :style="`width: ${getCategoryPercentage(category, value)}%`">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="w-12 text-right text-white font-mono text-sm" x-text="value || 0"></div>
+                        </div>
+                    </template>
+                </div>
+                
+                <!-- Empty state for categories -->
+                <div x-show="!analytics.categories || Object.keys(analytics.categories).length === 0" 
+                     class="empty-state rounded-lg p-8 text-center">
+                    <i class="fas fa-tags text-4xl mb-4 opacity-50"></i>
+                    <p>No category data available yet</p>
+                    <p class="text-sm mt-2">Categories will appear as threats are analyzed</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Threat Intelligence -->
+        <section class="mb-8">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-2xl font-bold text-cipher-blue flex items-center">
+                    <i class="fas fa-shield-alt mr-3"></i>
+                    Recent Threat Intelligence
+                </h2>
+                <div class="flex items-center space-x-4">
+                    <span class="text-sm text-gray-400" x-text="insights.total_count + ' insights processed'"></span>
+                    <button @click="refreshInsights()" class="px-4 py-2 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors text-sm">
+                        <i class="fas fa-sync-alt mr-2"></i>Refresh
+                    </button>
+                </div>
+            </div>
+
+            <!-- Insights Grid -->
+            <div class="space-y-4 max-h-96 overflow-y-auto">
+                <template x-for="insight in insights.data || []" :key="insight.message_id">
+                    <article class="insight-card rounded-lg p-6">
+                        <div class="flex justify-between items-start mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span x-text="insight.channel_icon || '📡'" class="text-2xl"></span>
+                                <div>
+                                    <h4 class="font-semibold text-cipher-blue" x-text="insight.chat_username || '@Unknown'"></h4>
+                                    <p class="text-sm text-gray-400" x-text="insight.time_ago || 'Unknown time'"></p>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-2">
+                                <span :class="insight.threat_badge_class || 'threat-low'" 
+                                      class="px-3 py-1 rounded-full text-xs font-semibold uppercase"
+                                      x-text="insight.threat_level || 'low'"></span>
+                                <span class="text-xs text-gray-400 font-mono" 
+                                      x-text="(insight.urgency_percentage || 0) + '%'"></span>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <p class="text-gray-300 leading-relaxed" x-text="insight.truncated_analysis || 'No analysis available'"></p>
+                            
+                            <!-- Show more button for long analysis -->
+                            <button x-show="insight.has_more_analysis" 
+                                    @click="toggleInsightExpansion(insight.message_id)"
+                                    class="text-cipher-blue text-sm mt-2 hover:underline">
+                                Show full analysis
+                            </button>
+                        </div>
+
+                        <!-- Intelligence Summary -->
+                        <div x-show="insight.intelligence_summary && insight.intelligence_summary.has_intelligence" 
+                             class="flex items-center space-x-4 text-sm border-t border-white/10 pt-4">
+                            <div x-show="insight.intelligence_summary.cve_count > 0" class="flex items-center space-x-1">
+                                <i class="fas fa-bug text-red-400"></i>
+                                <span class="text-red-400" x-text="insight.intelligence_summary.cve_count + ' CVEs'"></span>
+                            </div>
+                            <div x-show="insight.intelligence_summary.ioc_count > 0" class="flex items-center space-x-1">
+                                <i class="fas fa-crosshairs text-orange-400"></i>
+                                <span class="text-orange-400" x-text="insight.intelligence_summary.ioc_count + ' IOCs'"></span>
+                            </div>
+                            <div x-show="insight.intelligence_summary.malware_count > 0" class="flex items-center space-x-1">
+                                <i class="fas fa-virus text-red-400"></i>
+                                <span class="text-red-400" x-text="insight.intelligence_summary.malware_count + ' Malware'"></span>
+                            </div>
+                            <div x-show="insight.intelligence_summary.actor_count > 0" class="flex items-center space-x-1">
+                                <i class="fas fa-user-secret text-purple-400"></i>
+                                <span class="text-purple-400" x-text="insight.intelligence_summary.actor_count + ' Actors'"></span>
+                            </div>
+                        </div>
+                    </article>
+                </template>
+            </div>
+
+            <!-- Empty state for insights -->
+            <div x-show="!insights.data || insights.data.length === 0" 
+                 class="empty-state rounded-lg p-12 text-center">
+                <i class="fas fa-shield-alt text-6xl mb-6 opacity-30"></i>
+                <h3 class="text-xl font-semibold mb-2">No Threat Intelligence Available</h3>
+                <p class="mb-4">No threat intelligence data has been processed yet.</p>
+                <div class="text-sm space-y-1">
+                    <p>• Ensure Telegram monitoring is active</p>
+                    <p>• Check that channels are accessible</p>
+                    <p>• Verify BigQuery connection</p>
+                </div>
+                <button @click="refreshData()" class="mt-6 px-6 py-3 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors">
+                    <i class="fas fa-sync-alt mr-2"></i>Check for New Data
+                </button>
+            </div>
+        </section>
+
+        <!-- Monitoring Status -->
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <template x-for="channel in monitoringChannels" :key="channel.username">
+                <div class="metric-card rounded-lg p-6 text-center hover-lift">
+                    <div class="text-3xl mb-3" x-text="channel.icon"></div>
+                    <h4 class="font-semibold text-white mb-2" x-text="channel.username"></h4>
+                    <p class="text-sm text-gray-400 mb-3" x-text="channel.description"></p>
+                    <div class="flex items-center justify-center space-x-2">
+                        <div :class="channel.status === 'monitoring' ? 'bg-green-400' : 'bg-gray-400'" 
+                             class="w-2 h-2 rounded-full animate-pulse"></div>
+                        <span class="text-xs font-mono uppercase" x-text="channel.status"></span>
+                    </div>
+                </div>
+            </template>
+        </section>
+    </div>
+
+    <!-- Data Source Information -->
+    <div x-show="!loading" class="mt-8 text-center">
+        <div class="glass-effect rounded-lg p-4">
+            <div class="flex justify-center items-center space-x-6 text-sm text-gray-400 flex-wrap gap-2">
+                <span>Data Source: <span class="text-cipher-blue font-mono" x-text="dataSource"></span></span>
+                <span>Last Updated: <span class="text-cipher-green font-mono" x-text="formatTimestamp(lastUpdated)"></span></span>
+                <span>Auto-refresh: <span class="text-cipher-purple font-mono">30s</span></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function dashboardController() {
+    return {
+        // Data properties
+        loading: true,
+        error: false,
+        errorMessage: '',
+        loadingMessage: 'Loading cybersecurity intelligence...',
+        
+        // Dashboard data
+        stats: {},
+        insights: { data: [], total_count: 0 },
+        analytics: { threat_levels: {}, categories: {} },
+        systemStatus: {},
+        monitoring: {},
+        
+        // UI state
+        expandedInsights: new Set(),
+        refreshing: false,
+        dataSource: 'Initializing...',
+        lastUpdated: null,
+        monitoringChannels: [
+            {
+                username: '@DarkfeedNews',
+                icon: '🔴',
+                description: 'Advanced Persistent Threats & Zero-day Exploits',
+                status: 'monitoring'
+            },
+            {
+                username: '@breachdetector', 
+                icon: '🟠',
+                description: 'Data Breach Monitor & Credential Dumps',
+                status: 'monitoring'
+            },
+            {
+                username: '@secharvester',
+                icon: '🔵', 
+                description: 'Security News, CVEs & Patch Information',
+                status: 'monitoring'
+            }
+        ],
+
+        // Initialize dashboard
+        async init() {
+            console.log('🛡️ Initializing CIPHER Dashboard...');
+            await this.loadDashboardData();
+            
+            // Start auto-refresh
+            setInterval(() => {
+                if (!this.refreshing) {
+                    this.refreshData();
+                }
+            }, 30000); // 30 seconds
+        },
+
+        // Load all dashboard data
+        async loadDashboardData() {
+            this.loading = true;
+            this.error = false;
+            
+            try {
+                const response = await fetch('/api/dashboard/data');
+                
+                if (!response.ok) {
+                    if (response.status === 503) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.message || 'Service unavailable');
+                    }
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Update all dashboard sections
+                this.stats = data.stats || {};
+                this.insights = data.insights || { data: [], total_count: 0 };
+                this.analytics = data.analytics || { threat_levels: {}, categories: {} };
+                this.systemStatus = data.system_status || {};
+                this.monitoring = data.monitoring || {};
+                
+                // Update UI state
+                this.dataSource = this.insights.source || 'Unknown';
+                this.lastUpdated = data.timestamp;
+                
+                // Update monitoring channels status
+                if (this.monitoring.channel_details) {
+                    this.monitoringChannels = this.monitoring.channel_details;
+                }
+                
+                // Update parent application state
+                if (window.CIPHER) {
+                    window.updateSystemStatus(this.systemStatus.operational, data);
+                    window.updateDataFreshness(this.lastUpdated);
+                    
+                    const sources = data.meta?.data_sources || [];
+                    window.updateDataSources(sources);
+                }
+                
+                console.log('✅ Dashboard data loaded successfully');
+                this.loading = false;
+                
+            } catch (error) {
+                console.error('❌ Dashboard data loading failed:', error);
+                this.error = true;
+                this.errorMessage = error.message;
+                this.loading = false;
+            }
+        },
+
+        // Refresh data manually
+        async refreshData() {
+            if (this.refreshing) return;
+            
+            this.refreshing = true;
+            console.log('🔄 Refreshing dashboard data...');
+            
+            try {
+                await this.loadDashboardData();
+            } finally {
+                this.refreshing = false;
+            }
+        },
+
+        // Refresh only insights
+        async refreshInsights() {
+            try {
+                const response = await fetch('/api/insights?limit=25');
+                if (response.ok) {
+                    const data = await response.json();
+                    this.insights = data;
+                    console.log('✅ Insights refreshed');
+                }
+            } catch (error) {
+                console.error('❌ Insights refresh failed:', error);
+            }
+        },
+
+        // Toggle insight expansion
+        toggleInsightExpansion(messageId) {
+            if (this.expandedInsights.has(messageId)) {
+                this.expandedInsights.delete(messageId);
             } else {
-                // Show full, hide truncated
-                shortAnalysis.style.display = 'none';
-                fullAnalysis.style.display = 'block';
-                button.textContent = 'Show Less';
-                button.style.background = 'rgba(99, 102, 241, 0.2)';
-                button.style.borderColor = 'var(--primary-blue)';
-                button.style.color = 'var(--primary-blue)';
+                this.expandedInsights.add(messageId);
             }
+        },
+
+        // Utility functions
+        formatNumber(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(1) + 'M';
+            } else if (num >= 1000) {
+                return (num / 1000).toFixed(1) + 'K';
+            }
+            return num.toString();
+        },
+
+        formatTimestamp(timestamp) {
+            if (!timestamp) return 'Unknown';
+            try {
+                return new Date(timestamp).toLocaleTimeString();
+            } catch {
+                return 'Invalid';
+            }
+        },
+
+        formatCategoryName(category) {
+            return category.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        },
+
+        getThreatLevelPercentage(level, value) {
+            const total = Object.values(this.analytics.threat_levels || {}).reduce((sum, v) => sum + (v || 0), 0);
+            return total > 0 ? Math.round((value / total) * 100) : 0;
+        },
+
+        getCategoryPercentage(category, value) {
+            const total = Object.values(this.analytics.categories || {}).reduce((sum, v) => sum + (v || 0), 0);
+            return total > 0 ? Math.round((value / total) * 100) : 0;
+        },
+
+        getThreatLevelColor(level) {
+            const colors = {
+                critical: 'bg-red-500',
+                high: 'bg-orange-500', 
+                medium: 'bg-yellow-500',
+                low: 'bg-green-500',
+                info: 'bg-blue-500'
+            };
+            return colors[level] || 'bg-gray-500';
         }
+    }
+}
+</script>
+{% endblock %}
 
-        function copyInsight(index) {
-            const insight = document.querySelector(`#analysis-${index}`).closest('.insight');
-            const source = insight.querySelector('.insight-source').textContent;
-            const analysis = document.getElementById(`full-analysis-${index}`) && 
-                           document.getElementById(`full-analysis-${index}`).style.display === 'block' 
-                ? document.getElementById(`full-analysis-${index}`).textContent.trim()
-                : document.getElementById(`analysis-${index}`).textContent.trim();
-            
-            const threatLevel = insight.querySelector('.threat-badge').textContent;
-            const urgencyMatch = insight.querySelector('.insight-meta').textContent.match(/([0-9.]+)/);
-            const urgency = urgencyMatch ? urgencyMatch[1] : 'N/A';
-            
-            // Extract cybersecurity data
-            const cybersecData = insight.querySelector('.cybersec-data');
-            let additionalData = '';
-            if (cybersecData) {
-                const iocs = Array.from(cybersecData.querySelectorAll('.ioc-item')).map(el => el.textContent);
-                const cves = Array.from(cybersecData.querySelectorAll('.cve-ref')).map(el => el.textContent);
-                const malware = Array.from(cybersecData.querySelectorAll('.malware-item')).map(el => el.textContent);
-                const actors = Array.from(cybersecData.querySelectorAll('.actor-item')).map(el => el.textContent);
-                
-                if (iocs.length > 0) additionalData += `\nIOCs: ${iocs.join(', ')}`;
-                if (cves.length > 0) additionalData += `\nCVEs: ${cves.join(', ')}`;
-                if (malware.length > 0) additionalData += `\nMalware: ${malware.join(', ')}`;
-                if (actors.length > 0) additionalData += `\nThreat Actors: ${actors.join(', ')}`;
-            }
-            
-            const copyText = `🛡️ CIPHER Threat Intelligence Report
-Source: ${source}
-Threat Level: ${threatLevel}
-Urgency Score: ${urgency}
-
-Threat Analysis:
-${analysis}${additionalData}
-
-Generated by CIPHER Cybersecurity Intelligence Platform
-Timestamp: ${new Date().toISOString()}
-Classification: TLP:GREEN (For authorized personnel)`;
-            
-            navigator.clipboard.writeText(copyText).then(() => {
-                const button = event.target;
-                const originalText = button.textContent;
-                button.textContent = '✅ Copied!';
-                button.style.background = 'rgba(0, 255, 0, 0.2)';
-                button.style.borderColor = 'var(--primary-green)';
-                button.style.color = 'var(--primary-green)';
-                
-                setTimeout(() => {
-                    button.textContent = originalText;
-                    button.style.background = 'rgba(6, 182, 212, 0.1)';
-                    button.style.borderColor = 'var(--info-cyan)';
-                    button.style.color = 'var(--info-cyan)';
-                }, 2000);
-            }).catch(err => {
-                console.error('Copy failed:', err);
-                const button = event.target;
-                button.textContent = '❌ Failed';
-                setTimeout(() => {
-                    button.textContent = '📋 Copy';
-                }, 2000);
-            });
-        }
-
-        // Initialize dashboard when DOM is loaded
-        document.addEventListener('DOMContentLoaded', function() {
-            new CipherDashboard();
-        });
-
-        // Add keyboard shortcuts
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey || e.metaKey) {
-                switch(e.key) {
-                    case 'r':
-                        e.preventDefault();
-                        window.location.reload();
-                        break;
-                    case 'h':
-                        e.preventDefault();
-                        window.location.href = '/health';
-                        break;
-                    case 'd':
-                        e.preventDefault();
-                        window.location.href = '/api/docs';
-                        break;
-                }
-            }
-        });
-
-        // Error handling for failed requests
-        window.addEventListener('error', function(e) {
-            console.error('Dashboard error:', e.error);
-        });
-
-        // Performance monitoring
-        window.addEventListener('load', function() {
-            const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
-            console.log(`🛡️ CIPHER Dashboard loaded in ${loadTime}ms`);
-        });
-
-        console.log('🛡️ CIPHER Dashboard - Advanced Cybersecurity Intelligence Platform Ready');
-    </script>
-</body>
-</html>
+{% block scripts %}
+<script>
+    // Additional dashboard-specific scripts
+    document.addEventListener('DOMContentLoaded', function() {
+        // Add any additional initialization here
+        console.log('🛡️ CIPHER Dashboard loaded and ready');
+    });
+</script>
+{% endblock %}
