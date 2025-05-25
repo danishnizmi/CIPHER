@@ -5,14 +5,59 @@
 {% block extra_head %}
 <meta name="refresh" content="45">
 <style>
-    .threat-card {
-        background: linear-gradient(135deg, rgba(17, 25, 40, 0.8) 0%, rgba(0, 0, 0, 0.9) 100%);
-        backdrop-filter: blur(16px);
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        transition: all 0.3s ease;
+    /* Animated CIPHER Logo */
+    .cipher-logo {
+        position: relative;
+        display: inline-block;
+        font-size: 4rem;
+        font-weight: 900;
+        background: linear-gradient(45deg, #00ff00, #6366f1, #00ff00);
+        background-size: 400% 400%;
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: logoGlow 3s ease-in-out infinite;
     }
     
-    .threat-card:hover {
+    .cipher-logo::before {
+        content: '';
+        position: absolute;
+        top: -2px;
+        left: -2px;
+        right: -2px;
+        bottom: -2px;
+        background: linear-gradient(45deg, #00ff00, #6366f1, #ff0080, #00ff00);
+        background-size: 400% 400%;
+        border-radius: 8px;
+        z-index: -1;
+        animation: pixelMove 2s linear infinite;
+        opacity: 0.3;
+        filter: blur(1px);
+    }
+    
+    @keyframes logoGlow {
+        0%, 100% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+    }
+    
+    @keyframes pixelMove {
+        0% { transform: translate(0, 0); }
+        25% { transform: translate(2px, -2px); }
+        50% { transform: translate(-1px, 2px); }
+        75% { transform: translate(1px, 1px); }
+        100% { transform: translate(0, 0); }
+    }
+    
+    /* Simplified card styles */
+    .metric-card {
+        background: linear-gradient(135deg, rgba(17, 25, 40, 0.9) 0%, rgba(0, 0, 0, 0.95) 100%);
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        transition: all 0.3s ease;
+        border-radius: 16px;
+    }
+    
+    .metric-card:hover {
         border-color: rgba(99, 102, 241, 0.6);
         transform: translateY(-2px);
         box-shadow: 0 8px 25px rgba(99, 102, 241, 0.2);
@@ -21,165 +66,88 @@
     .metric-value {
         font-family: 'JetBrains Mono', monospace;
         font-weight: 700;
-        text-shadow: 0 0 10px currentColor;
         font-size: 2.5rem;
+        text-shadow: 0 0 10px currentColor;
     }
     
-    .metric-card {
-        background: linear-gradient(135deg, rgba(17, 25, 40, 0.9) 0%, rgba(0, 0, 0, 0.95) 100%);
-        backdrop-filter: blur(20px);
+    .threat-card {
+        background: linear-gradient(135deg, rgba(17, 25, 40, 0.8) 0%, rgba(0, 0, 0, 0.9) 100%);
+        backdrop-filter: blur(16px);
         border: 1px solid rgba(99, 102, 241, 0.3);
+        border-radius: 12px;
         transition: all 0.3s ease;
         position: relative;
         overflow: hidden;
     }
     
-    .metric-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 2px;
-        background: linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1);
-        background-size: 200% 100%;
-        animation: shimmer 3s ease-in-out infinite;
-    }
-    
-    @keyframes shimmer {
-        0%, 100% { background-position: 200% 0; }
-        50% { background-position: -200% 0; }
-    }
-    
-    .intelligence-card {
-        background: rgba(17, 25, 40, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(12px);
-        transition: all 0.3s ease;
-        position: relative;
-    }
-    
-    .intelligence-card:hover {
-        background: rgba(17, 25, 40, 0.9);
-        border-color: rgba(99, 102, 241, 0.5);
-        transform: translateX(4px);
-        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
-    }
-    
-    .ai-analysis-section {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        border-radius: 8px;
-        padding: 16px;
-        margin: 12px 0;
-        position: relative;
-    }
-    
-    .ai-analysis-section::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 4px;
-        height: 100%;
-        background: linear-gradient(180deg, #6366f1, #8b5cf6);
-        border-radius: 2px;
-    }
-    
-    .indicator-tag {
-        display: inline-flex;
-        align-items: center;
-        padding: 6px 10px;
-        border-radius: 16px;
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        margin: 3px;
-        font-family: 'JetBrains Mono', monospace;
-        transition: all 0.2s ease;
-        cursor: pointer;
-    }
-    
-    .indicator-tag:hover {
+    .threat-card:hover {
+        border-color: rgba(99, 102, 241, 0.6);
         transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    }
-    
-    .cve-tag {
-        background: rgba(239, 68, 68, 0.2);
-        color: #f87171;
-        border: 1px solid rgba(239, 68, 68, 0.5);
-    }
-    
-    .cve-tag:hover {
-        background: rgba(239, 68, 68, 0.3);
-        color: #fca5a5;
-    }
-    
-    .malware-tag {
-        background: rgba(220, 38, 127, 0.2);
-        color: #f472b6;
-        border: 1px solid rgba(220, 38, 127, 0.5);
-    }
-    
-    .malware-tag:hover {
-        background: rgba(220, 38, 127, 0.3);
-        color: #f9a8d4;
+        box-shadow: 0 8px 25px rgba(99, 102, 241, 0.2);
     }
     
     .threat-critical {
-        background: rgba(239, 68, 68, 0.25);
-        color: #f87171;
-        border: 1px solid #ef4444;
-        animation: criticalPulse 2s infinite;
-        font-weight: 700;
+        border-left: 4px solid #ef4444;
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(0, 0, 0, 0.9));
     }
     
     .threat-high {
-        background: rgba(245, 158, 11, 0.25);
-        color: #fbbf24;
-        border: 1px solid #f59e0b;
-        font-weight: 600;
+        border-left: 4px solid #f59e0b;
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(0, 0, 0, 0.9));
     }
     
     .threat-medium {
-        background: rgba(234, 179, 8, 0.25);
+        border-left: 4px solid #eab308;
+        background: linear-gradient(135deg, rgba(234, 179, 8, 0.15), rgba(0, 0, 0, 0.9));
+    }
+    
+    .threat-low {
+        border-left: 4px solid #22c55e;
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(0, 0, 0, 0.9));
+    }
+    
+    .badge-critical {
+        background: rgba(239, 68, 68, 0.2);
+        color: #f87171;
+        border: 1px solid #ef4444;
+        animation: criticalPulse 2s infinite;
+    }
+    
+    .badge-high {
+        background: rgba(245, 158, 11, 0.2);
+        color: #fbbf24;
+        border: 1px solid #f59e0b;
+    }
+    
+    .badge-medium {
+        background: rgba(234, 179, 8, 0.2);
         color: #facc15;
         border: 1px solid #eab308;
     }
     
-    .threat-low {
-        background: rgba(34, 197, 94, 0.25);
+    .badge-low {
+        background: rgba(34, 197, 94, 0.2);
         color: #4ade80;
         border: 1px solid #22c55e;
     }
     
     @keyframes criticalPulse {
-        0%, 100% { 
-            opacity: 1; 
-            transform: scale(1);
-            box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-        }
-        50% { 
-            opacity: 0.9; 
-            transform: scale(1.02);
-            box-shadow: 0 0 10px 5px rgba(239, 68, 68, 0.3);
-        }
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.8; transform: scale(1.05); }
     }
     
-    .urgency-meter {
-        width: 120px;
-        height: 10px;
+    .urgency-bar {
+        width: 100px;
+        height: 8px;
         background: rgba(255, 255, 255, 0.1);
-        border-radius: 5px;
+        border-radius: 4px;
         overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.2);
         position: relative;
     }
     
     .urgency-fill {
         height: 100%;
-        border-radius: 5px;
+        border-radius: 4px;
         transition: width 0.8s ease;
         position: relative;
     }
@@ -192,212 +160,53 @@
         right: 0;
         bottom: 0;
         background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-        animation: urgencyShine 2s infinite;
+        animation: shine 2s infinite;
     }
     
-    @keyframes urgencyShine {
+    @keyframes shine {
         0% { transform: translateX(-100%); }
         100% { transform: translateX(100%); }
     }
     
-    .progress-bar {
-        background: rgba(255, 255, 255, 0.1);
-        overflow: hidden;
-        position: relative;
-        border-radius: 6px;
-    }
-    
-    .progress-fill {
-        background: linear-gradient(90deg, #6366f1, #8b5cf6);
-        height: 100%;
-        transition: width 1.2s ease;
-        position: relative;
-        border-radius: 6px;
-    }
-    
-    .progress-fill::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-        animation: progressShine 2.5s infinite;
-    }
-    
-    @keyframes progressShine {
-        0% { transform: translateX(-100%); }
-        100% { transform: translateX(100%); }
-    }
-    
-    .empty-state {
-        background: rgba(156, 163, 175, 0.1);
-        border: 2px dashed rgba(156, 163, 175, 0.3);
-        color: #9ca3af;
-        border-radius: 12px;
-    }
-    
-    .loading-shimmer {
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
-        background-size: 200% 100%;
-        animation: shimmer 2s infinite;
+    .ai-analysis {
+        background: rgba(99, 102, 241, 0.1);
+        border: 1px solid rgba(99, 102, 241, 0.3);
         border-radius: 8px;
-    }
-    
-    .chart-container {
-        background: rgba(17, 25, 40, 0.8);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        backdrop-filter: blur(15px);
-        border-radius: 12px;
-    }
-    
-    .source-indicator {
-        position: absolute;
-        top: 12px;
-        right: 12px;
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        animation: pulse 2s infinite;
-    }
-    
-    .source-darkfeed { background: #ef4444; }
-    .source-breach { background: #f59e0b; }
-    .source-harvest { background: #6366f1; }
-    
-    .threat-timeline {
+        padding: 12px;
+        margin: 8px 0;
         position: relative;
-        padding-left: 20px;
-    }
-    
-    .threat-timeline::before {
-        content: '';
-        position: absolute;
-        left: 8px;
-        top: 0;
-        bottom: 0;
-        width: 2px;
-        background: linear-gradient(180deg, #6366f1, rgba(99, 102, 241, 0.3));
-    }
-    
-    .timeline-dot {
-        position: absolute;
-        left: 4px;
-        top: 24px;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        border: 2px solid #6366f1;
-        background: #1f2937;
-    }
-    
-    .ai-badge {
-        display: inline-flex;
-        align-items: center;
-        padding: 4px 8px;
-        background: rgba(99, 102, 241, 0.2);
-        border: 1px solid rgba(99, 102, 241, 0.4);
-        border-radius: 12px;
-        font-size: 10px;
-        font-weight: 600;
-        color: #a5b4fc;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+        border-left: 4px solid #6366f1;
     }
     
     .stats-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
         gap: 1.5rem;
-    }
-    
-    .live-indicator {
-        display: inline-flex;
-        align-items: center;
-        padding: 4px 8px;
-        background: rgba(34, 197, 94, 0.2);
-        border: 1px solid rgba(34, 197, 94, 0.4);
-        border-radius: 20px;
-        font-size: 11px;
-        font-weight: 600;
-        color: #4ade80;
-        animation: livePulse 3s infinite;
-    }
-    
-    @keyframes livePulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.7; }
-    }
-    
-    .threat-severity-high {
-        background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(239, 68, 68, 0.1));
-        border-left: 4px solid #f59e0b;
-    }
-    
-    .threat-severity-critical {
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(220, 38, 127, 0.1));
-        border-left: 4px solid #ef4444;
-    }
-    
-    .intelligence-summary {
-        background: rgba(0, 0, 0, 0.4);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        border-radius: 8px;
-        padding: 12px;
-        margin-top: 12px;
-    }
-    
-    /* Debug styling */
-    .debug-info {
-        background: rgba(255, 255, 0, 0.1);
-        border: 1px solid rgba(255, 255, 0, 0.3);
-        padding: 8px;
-        margin: 8px 0;
-        border-radius: 4px;
-        font-family: monospace;
-        font-size: 12px;
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div id="cipherDashboard" x-data="cipherDashboardController()" x-init="init()" class="container mx-auto px-4 py-6 space-y-8">
+<div id="cipherDashboard" x-data="simplifiedDashboard()" x-init="init()" class="container mx-auto px-4 py-6">
     
-    <!-- Enhanced Header -->
-    <header class="text-center mb-10">
-        <div class="glass-effect rounded-2xl p-8 relative overflow-hidden">
-            <div class="absolute inset-0 bg-gradient-to-r from-cipher-blue/10 via-cipher-purple/10 to-cipher-green/10 animate-pulse"></div>
-            
-            <div class="relative z-10">
-                <h1 class="text-6xl font-bold neon-green mb-4">🛡️ CIPHER</h1>
-                <p class="text-2xl text-gray-300 mb-4">Cybersecurity Intelligence Platform</p>
-                <p class="text-gray-400 max-w-3xl mx-auto mb-6">
-                    Advanced AI-powered threat intelligence monitoring and analysis from premium cybersecurity sources worldwide
-                </p>
-                
-                <!-- Enhanced Status Indicators -->
-                <div class="flex justify-center items-center space-x-8 mt-8 flex-wrap gap-4">
-                    <div class="flex items-center space-x-3 px-6 py-3 bg-white/5 rounded-full border border-white/10">
-                        <div :class="systemStatus === 'operational' ? 'bg-green-400' : 'bg-yellow-400'" class="w-4 h-4 rounded-full animate-pulse"></div>
-                        <span class="text-sm font-mono font-semibold" x-text="systemStatus.toUpperCase()"></span>
-                        <span class="live-indicator">
-                            <i class="fas fa-circle mr-1 text-xs"></i>LIVE
-                        </span>
-                    </div>
-                    <div class="flex items-center space-x-3 px-6 py-3 bg-white/5 rounded-full border border-white/10">
-                        <i class="fas fa-satellite-dish text-cipher-blue"></i>
-                        <span class="text-sm font-mono" x-text="'Sources: ' + channelCount + '/3'"></span>
-                    </div>
-                    <div class="flex items-center space-x-3 px-6 py-3 bg-white/5 rounded-full border border-white/10">
-                        <i class="fas fa-clock text-cipher-purple"></i>
-                        <span class="text-sm font-mono" x-text="'Updated: ' + lastUpdate"></span>
-                    </div>
-                    <div class="flex items-center space-x-3 px-6 py-3 bg-white/5 rounded-full border border-white/10">
-                        <i class="fas fa-brain text-cipher-green"></i>
-                        <span class="text-sm font-mono">AI Analysis Active</span>
-                    </div>
-                </div>
+    <!-- Simplified Header with Animated Logo -->
+    <header class="text-center mb-12">
+        <div class="cipher-logo mb-4">🛡️ CIPHER</div>
+        <p class="text-xl text-gray-400 mb-8">Cybersecurity Intelligence Platform</p>
+        
+        <!-- Status Bar -->
+        <div class="flex justify-center items-center space-x-6 mb-8">
+            <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                <div :class="systemStatus === 'operational' ? 'bg-green-400' : 'bg-yellow-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
+                <span class="text-sm font-mono" x-text="systemStatus.toUpperCase()"></span>
+            </div>
+            <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                <i class="fas fa-satellite-dish text-cipher-blue"></i>
+                <span class="text-sm font-mono">Sources: 3/3</span>
+            </div>
+            <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
+                <i class="fas fa-brain text-cipher-green"></i>
+                <span class="text-sm font-mono">AI Active</span>
             </div>
         </div>
     </header>
@@ -405,639 +214,346 @@
     <!-- Loading State -->
     <div x-show="loading" class="flex justify-center items-center py-24">
         <div class="text-center">
-            <div class="w-20 h-20 border-4 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-6"></div>
-            <p class="text-gray-400 text-lg">Loading cybersecurity intelligence...</p>
-            <p class="text-gray-500 text-sm mt-2">Analyzing threat data from multiple sources</p>
+            <div class="w-16 h-16 border-4 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-6"></div>
+            <p class="text-gray-400">Loading threat intelligence...</p>
         </div>
     </div>
 
     <!-- Error State -->
-    <div x-show="error && !loading" class="bg-red-900/20 border border-red-500/30 rounded-lg p-10 text-center">
-        <i class="fas fa-exclamation-triangle text-5xl mb-6 text-red-400"></i>
-        <h3 class="text-2xl font-semibold mb-4">Intelligence System Unavailable</h3>
+    <div x-show="error && !loading" class="bg-red-900/20 border border-red-500/30 rounded-lg p-8 text-center mb-8">
+        <i class="fas fa-exclamation-triangle text-4xl mb-4 text-red-400"></i>
+        <h3 class="text-xl font-semibold mb-4">System Unavailable</h3>
         <p class="mb-6 text-gray-300" x-text="errorMessage"></p>
-        <button @click="refreshData()" class="px-8 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-semibold">
-            <i class="fas fa-redo mr-2"></i>Retry Connection
+        <button @click="refreshData()" class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
+            <i class="fas fa-redo mr-2"></i>Retry
         </button>
     </div>
 
-    <!-- Main Dashboard -->
+    <!-- Main Content -->
     <div x-show="!loading && !error">
         
-        <!-- Enhanced Key Metrics -->
-        <section class="stats-grid mb-10">
+        <!-- Key Metrics -->
+        <section class="stats-grid mb-12">
             
-            <!-- Total Intelligence -->
-            <div class="metric-card rounded-xl p-8 hover-lift">
-                <div class="flex items-center justify-between mb-6">
-                    <div class="p-4 bg-cipher-blue/20 rounded-xl">
-                        <i class="fas fa-shield-alt text-cipher-blue text-2xl"></i>
+            <!-- Total Messages -->
+            <div class="metric-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-cipher-blue/20 rounded-lg">
+                        <i class="fas fa-shield-alt text-cipher-blue text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <p class="text-gray-400 text-sm font-medium">Intelligence Reports</p>
-                        <div class="metric-value text-cipher-blue" x-text="formatNumber(safeGet(stats, 'total_messages', 0))"></div>
+                        <p class="text-gray-400 text-sm">Intelligence Reports</p>
+                        <div class="metric-value text-cipher-blue" x-text="formatNumber(stats.total_messages || 0)"></div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between text-sm">
-                    <div>
-                        <span class="text-gray-400">Today:</span>
-                        <span class="text-cipher-blue font-mono font-semibold ml-2" x-text="formatNumber(safeGet(stats, 'processed_today', 0))"></span>
-                    </div>
-                    <div class="ai-badge">
-                        <i class="fas fa-brain mr-1"></i>AI Powered
-                    </div>
+                <div class="text-sm text-gray-500">
+                    <span>Today: </span>
+                    <span class="text-cipher-blue font-mono" x-text="formatNumber(stats.processed_today || 0)"></span>
                 </div>
             </div>
 
             <!-- High Priority Threats -->
-            <div class="metric-card rounded-xl p-8 hover-lift">
-                <div class="flex items-center justify-between mb-6">
-                    <div class="p-4 bg-red-500/20 rounded-xl">
-                        <i class="fas fa-exclamation-triangle text-red-400 text-2xl"></i>
+            <div class="metric-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-red-500/20 rounded-lg">
+                        <i class="fas fa-exclamation-triangle text-red-400 text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <p class="text-gray-400 text-sm font-medium">High Priority Threats</p>
-                        <div class="metric-value text-red-400" x-text="formatNumber(safeGet(stats, 'high_priority_threats', 0))"></div>
+                        <p class="text-gray-400 text-sm">High Priority</p>
+                        <div class="metric-value text-red-400" x-text="formatNumber(stats.high_priority_threats || 0)"></div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between text-sm">
-                    <div class="flex space-x-4">
-                        <div>
-                            <span class="text-gray-400">Critical:</span>
-                            <span class="text-red-400 ml-1 font-mono font-semibold" x-text="safeGet(stats, 'critical_threats', 0)"></span>
-                        </div>
-                    </div>
-                    <div class="live-indicator" x-show="safeGet(stats, 'high_priority_threats', 0) > 0">
-                        <i class="fas fa-exclamation-circle mr-1"></i>Active
-                    </div>
+                <div class="text-sm text-gray-500">
+                    <span>Critical: </span>
+                    <span class="text-red-400 font-mono" x-text="stats.critical_threats || 0"></span>
                 </div>
             </div>
 
-            <!-- CVE Intelligence -->
-            <div class="metric-card rounded-xl p-8 hover-lift">
-                <div class="flex items-center justify-between mb-6">
-                    <div class="p-4 bg-orange-500/20 rounded-xl">
-                        <i class="fas fa-bug text-orange-400 text-2xl"></i>
+            <!-- CVE References -->
+            <div class="metric-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-orange-500/20 rounded-lg">
+                        <i class="fas fa-bug text-orange-400 text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <p class="text-gray-400 text-sm font-medium">CVE References</p>
-                        <div class="metric-value text-orange-400" x-text="formatNumber(safeGet(stats, 'cve_references', 0))"></div>
+                        <p class="text-gray-400 text-sm">CVE References</p>
+                        <div class="metric-value text-orange-400" x-text="formatNumber(stats.cve_references || 0)"></div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between text-sm">
-                    <div>
-                        <span class="text-gray-400">Vulnerabilities tracked</span>
-                    </div>
-                    <div class="ai-badge">
-                        <i class="fas fa-search mr-1"></i>Detected
-                    </div>
-                </div>
+                <div class="text-sm text-gray-500">Vulnerabilities tracked</div>
             </div>
 
-            <!-- AI Threat Assessment -->
-            <div class="metric-card rounded-xl p-8 hover-lift">
-                <div class="flex items-center justify-between mb-6">
-                    <div class="p-4 bg-cipher-purple/20 rounded-xl">
-                        <i class="fas fa-brain text-cipher-purple text-2xl"></i>
+            <!-- AI Threat Level -->
+            <div class="metric-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="p-3 bg-cipher-purple/20 rounded-lg">
+                        <i class="fas fa-brain text-cipher-purple text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <p class="text-gray-400 text-sm font-medium">AI Threat Level</p>
-                        <div class="metric-value text-cipher-purple" x-text="(safeGet(stats, 'avg_urgency', 0)).toFixed(2)"></div>
+                        <p class="text-gray-400 text-sm">AI Threat Level</p>
+                        <div class="metric-value text-cipher-purple" x-text="(stats.avg_urgency || 0).toFixed(2)"></div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between text-sm">
-                    <div>
-                        <span class="text-gray-400">Assessment:</span>
-                        <span :class="getThreatLevelColor(safeGet(stats, 'avg_urgency', 0))" class="font-mono font-semibold ml-2" x-text="getThreatLevelText(safeGet(stats, 'avg_urgency', 0))"></span>
-                    </div>
-                    <div class="ai-badge">
-                        <i class="fas fa-robot mr-1"></i>AI Analysis
-                    </div>
+                <div class="text-sm">
+                    <span class="text-gray-500">Assessment: </span>
+                    <span :class="getThreatColor(stats.avg_urgency || 0)" class="font-mono font-semibold" x-text="getThreatText(stats.avg_urgency || 0)"></span>
                 </div>
             </div>
         </section>
 
-        <!-- Enhanced Analytics Charts -->
-        <section class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
-            
-            <!-- Threat Distribution -->
-            <div class="chart-container p-8">
-                <h3 class="text-xl font-semibold text-cipher-blue mb-6 flex items-center">
-                    <i class="fas fa-chart-bar mr-3"></i>
-                    Real-time Threat Distribution
-                    <span class="live-indicator ml-3">
-                        <i class="fas fa-circle mr-1 text-xs"></i>Live
-                    </span>
-                </h3>
-                <div class="space-y-4">
-                    <template x-for="(value, level) in safeGet(analytics, 'threat_distribution', {})" :key="level">
-                        <div class="flex items-center">
-                            <div class="w-24 text-sm text-gray-300 capitalize font-medium" x-text="level || 'unknown'"></div>
-                            <div class="flex-1 mx-4">
-                                <div class="progress-bar h-8 rounded-full">
-                                    <div class="progress-fill rounded-full flex items-center justify-end pr-3" 
-                                         :style="`width: ${getPercentage(level, value)}%`"
-                                         :class="getThreatColor(level || 'low')">
-                                        <span class="text-white text-xs font-semibold" x-show="getPercentage(level, value) > 15" x-text="getPercentage(level, value) + '%'"></span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="w-16 text-right text-white font-mono font-semibold" x-text="formatNumber(value || 0)"></div>
-                        </div>
-                    </template>
-                </div>
-                
-                <div x-show="!analytics || !safeGet(analytics, 'threat_distribution') || Object.keys(safeGet(analytics, 'threat_distribution', {})).length === 0" 
-                     class="empty-state p-10 text-center">
-                    <i class="fas fa-chart-bar text-5xl mb-4 opacity-50"></i>
-                    <p class="text-lg font-medium">No threat distribution data</p>
-                    <p class="text-sm mt-2">Data will appear as threats are analyzed</p>
-                </div>
-            </div>
-
-            <!-- Category Analysis -->
-            <div class="chart-container p-8">
-                <h3 class="text-xl font-semibold text-cipher-blue mb-6 flex items-center">
-                    <i class="fas fa-tags mr-3"></i>
-                    AI Threat Categories
-                    <span class="ai-badge ml-3">
-                        <i class="fas fa-brain mr-1"></i>AI Classified
-                    </span>
-                </h3>
-                <div class="space-y-4">
-                    <template x-for="(value, category) in safeGet(analytics, 'categories', {})" :key="category">
-                        <div class="flex items-center">
-                            <div class="w-28 text-sm text-gray-300 font-medium" x-text="formatCategory(category || 'unknown')"></div>
-                            <div class="flex-1 mx-4">
-                                <div class="progress-bar h-8 rounded-full">
-                                    <div class="progress-fill rounded-full flex items-center justify-end pr-3" 
-                                         :style="`width: ${getCategoryPercentage(category, value)}%`">
-                                        <span class="text-white text-xs font-semibold" x-show="getCategoryPercentage(category, value) > 15" x-text="getCategoryPercentage(category, value) + '%'"></span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="w-16 text-right text-white font-mono font-semibold" x-text="formatNumber(value || 0)"></div>
-                        </div>
-                    </template>
-                </div>
-                
-                <div x-show="!analytics || !safeGet(analytics, 'categories') || Object.keys(safeGet(analytics, 'categories', {})).length === 0" 
-                     class="empty-state p-10 text-center">
-                    <i class="fas fa-tags text-5xl mb-4 opacity-50"></i>
-                    <p class="text-lg font-medium">No category analysis data</p>
-                    <p class="text-sm mt-2">Categories will appear as AI analyzes threats</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- FIXED Enhanced Threat Intelligence Feed -->
-        <section class="mb-10">
+        <!-- Live Threat Intelligence -->
+        <section class="mb-8">
             <div class="flex justify-between items-center mb-8">
-                <h2 class="text-3xl font-bold text-cipher-blue flex items-center">
-                    <i class="fas fa-shield-alt mr-4"></i>
-                    Live Threat Intelligence & AI Analysis
-                    <span class="live-indicator ml-4">
-                        <i class="fas fa-circle mr-1 text-xs"></i>Real-time
+                <h2 class="text-2xl font-bold text-cipher-blue flex items-center">
+                    <i class="fas fa-shield-alt mr-3"></i>
+                    Live Threat Intelligence
+                    <span class="ml-4 px-3 py-1 bg-green-500/20 text-green-400 text-sm rounded-full">
+                        <i class="fas fa-circle mr-1 text-xs animate-pulse"></i>LIVE
                     </span>
                 </h2>
                 <div class="flex items-center space-x-4">
-                    <span class="text-sm text-gray-400 font-medium" x-text="(safeGet(insights, 'count', 0)) + ' active threats detected'"></span>
-                    <button @click="refreshData()" class="px-6 py-3 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors font-semibold shadow-lg">
-                        <i class="fas fa-sync-alt mr-2"></i>Refresh Intelligence
+                    <span class="text-sm text-gray-400" x-text="(insights.count || 0) + ' threats detected'"></span>
+                    <button @click="refreshData()" class="px-4 py-2 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors">
+                        <i class="fas fa-sync-alt mr-2"></i>Refresh
                     </button>
                 </div>
             </div>
 
-            <!-- Debug Information (remove in production) -->
-            <div x-show="debugMode" class="debug-info mb-4">
-                <p><strong>Debug Info:</strong></p>
-                <p>Raw insights count: <span x-text="safeGet(insights, 'data', []).length"></span></p>
-                <p>Insights object: <span x-text="JSON.stringify(insights).substring(0, 200)"></span>...</p>
+            <!-- Debug Info -->
+            <div x-show="debugMode" class="mb-4 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded text-xs font-mono">
+                <p>Debug: Raw insights array length = <span x-text="insights.data ? insights.data.length : 'undefined'"></span></p>
+                <p>Insights object keys: <span x-text="insights ? Object.keys(insights).join(', ') : 'undefined'"></span></p>
+                <p>First insight: <span x-text="insights.data && insights.data[0] ? JSON.stringify(insights.data[0]).substring(0, 100) + '...' : 'none'"></span></p>
             </div>
 
-            <!-- FIXED Threat Intelligence Grid -->
-            <div class="threat-timeline space-y-8 max-h-[900px] overflow-y-auto">
+            <!-- Threat Intelligence Cards -->
+            <div class="space-y-6 max-h-[800px] overflow-y-auto">
                 
-                <!-- Show loading state for threats -->
-                <div x-show="!insights || safeGet(insights, 'data', []).length === 0 && !insightsError" class="text-center py-8">
-                    <div class="w-16 h-16 border-4 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                    <p class="text-gray-400">Loading threat intelligence...</p>
+                <!-- Loading State for Threats -->
+                <div x-show="!insights || !insights.data || insights.data.length === 0" class="text-center py-12">
+                    <div class="w-12 h-12 border-4 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                    <p class="text-gray-400">Loading threat intelligence data...</p>
                 </div>
 
                 <!-- Threat Cards -->
-                <template x-for="(threat, index) in safeGet(insights, 'data', [])" :key="(threat && threat.id) || index">
-                    <article class="intelligence-card rounded-xl p-8 relative" 
-                             :class="getThreatSeverityClass(safeGet(threat, 'threat_level', 'low'))">
+                <template x-for="(threat, index) in (insights.data || [])" :key="threat.id || index">
+                    <div class="threat-card p-6" :class="getThreatCardClass(threat.threat_level)">
                         
-                        <!-- Source Indicator -->
-                        <div class="source-indicator" :class="getSourceIndicatorClass(safeGet(threat, 'source', ''))"></div>
-                        <div class="timeline-dot" :class="getThreatColor(safeGet(threat, 'threat_level', 'low'))"></div>
-                        
-                        <!-- Enhanced Threat Header -->
-                        <div class="flex justify-between items-start mb-6">
-                            <div class="flex items-center space-x-4">
-                                <span x-text="getSourceIcon(safeGet(threat, 'source', ''))" class="text-3xl"></span>
+                        <!-- Threat Header -->
+                        <div class="flex justify-between items-start mb-4">
+                            <div class="flex items-center space-x-3">
+                                <span x-text="getSourceIcon(threat.source)" class="text-2xl"></span>
                                 <div>
-                                    <h4 class="font-bold text-cipher-blue text-lg" x-text="safeGet(threat, 'source', 'Unknown Source')"></h4>
-                                    <div class="flex items-center space-x-3 text-sm text-gray-400 mt-1">
-                                        <span x-text="safeGet(threat, 'time', 'Unknown time')"></span>
+                                    <h4 class="font-bold text-white text-lg" x-text="threat.source || 'Unknown Source'"></h4>
+                                    <div class="text-sm text-gray-400 flex items-center space-x-2">
+                                        <span x-text="threat.time || 'Unknown time'"></span>
                                         <span>•</span>
-                                        <span class="capitalize font-medium" x-text="safeGet(threat, 'category', 'other')"></span>
-                                        <span>•</span>
-                                        <span class="font-mono" x-text="'ID: ' + safeGet(threat, 'id', 'unknown')"></span>
+                                        <span class="capitalize" x-text="threat.category || 'other'"></span>
                                     </div>
                                 </div>
                             </div>
                             <div class="flex items-center space-x-3">
-                                <span :class="getThreatBadgeClass(safeGet(threat, 'threat_level', 'low'))" 
-                                      class="px-4 py-2 rounded-full text-sm font-bold uppercase tracking-wide"
-                                      x-text="safeGet(threat, 'severity', 'Unknown')"></span>
-                                <div class="flex items-center space-x-3">
-                                    <div class="urgency-meter">
+                                <span :class="getThreatBadgeClass(threat.threat_level)" 
+                                      class="px-3 py-1 rounded-full text-sm font-bold uppercase"
+                                      x-text="threat.severity || 'Unknown'"></span>
+                                <div class="text-right">
+                                    <div class="urgency-bar">
                                         <div class="urgency-fill" 
-                                             :style="`width: ${Math.max(safeGet(threat, 'urgency', 0), 5)}%; background: ${getUrgencyColor(safeGet(threat, 'urgency', 0))}`"></div>
+                                             :style="`width: ${Math.max(threat.urgency || 0, 5)}%; background: ${getUrgencyColor(threat.urgency || 0)}`"></div>
                                     </div>
-                                    <span class="text-sm text-gray-300 font-mono font-semibold" x-text="safeGet(threat, 'urgency', 0) + '%'"></span>
+                                    <span class="text-xs text-gray-300 font-mono mt-1" x-text="(threat.urgency || 0) + '%'"></span>
                                 </div>
                             </div>
                         </div>
                         
                         <!-- Threat Summary -->
-                        <div class="mb-6">
-                            <h5 class="text-gray-300 font-medium mb-3">Threat Summary:</h5>
-                            <p class="text-gray-200 leading-relaxed text-base" x-text="safeGet(threat, 'summary', 'No summary available')"></p>
+                        <div class="mb-4">
+                            <h5 class="text-gray-300 font-medium mb-2">Summary:</h5>
+                            <p class="text-gray-200 text-sm leading-relaxed" x-text="threat.summary || 'No summary available'"></p>
                         </div>
                         
-                        <!-- Enhanced AI Analysis -->
-                        <div x-show="safeGet(threat, 'analysis') && safeGet(threat, 'analysis') !== 'Threat analysis pending'" class="ai-analysis-section">
-                            <div class="flex items-center mb-4">
-                                <i class="fas fa-brain text-cipher-purple mr-3 text-lg"></i>
-                                <span class="text-base font-bold text-cipher-purple">Advanced AI Analysis</span>
-                                <span class="ai-badge ml-3">
-                                    <i class="fas fa-robot mr-1"></i>Enhanced AI
-                                </span>
+                        <!-- AI Analysis -->
+                        <div x-show="threat.analysis && threat.analysis !== 'Threat analysis pending'" class="ai-analysis">
+                            <div class="flex items-center mb-2">
+                                <i class="fas fa-brain text-cipher-purple mr-2"></i>
+                                <span class="text-sm font-bold text-cipher-purple">AI Analysis</span>
                             </div>
-                            <div class="bg-black/20 rounded-lg p-4 border-l-4 border-cipher-purple">
-                                <p class="leading-relaxed text-gray-200 text-base" x-text="safeGet(threat, 'analysis', 'Analysis in progress...')"></p>
-                            </div>
+                            <p class="text-gray-200 text-sm leading-relaxed" x-text="threat.analysis || 'Analysis in progress...'"></p>
                         </div>
 
-                        <!-- Enhanced Threat Indicators -->
-                        <div x-show="safeGet(threat, 'indicators') && safeGet(threat, 'indicators.count', 0) > 0" class="mb-6">
-                            <div class="flex items-center mb-4">
-                                <i class="fas fa-crosshairs text-orange-400 mr-3 text-lg"></i>
-                                <span class="text-base font-bold text-orange-400">Threat Indicators</span>
-                                <span class="ai-badge ml-3">
-                                    <i class="fas fa-search mr-1"></i>Auto-detected
-                                </span>
+                        <!-- Threat Indicators -->
+                        <div x-show="threat.indicators && threat.indicators.count > 0" class="mt-4">
+                            <div class="flex items-center mb-2">
+                                <i class="fas fa-crosshairs text-orange-400 mr-2"></i>
+                                <span class="text-sm font-bold text-orange-400">Indicators</span>
+                                <span class="ml-2 px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded" x-text="threat.indicators.count"></span>
                             </div>
-                            <div class="flex flex-wrap gap-3">
-                                <!-- CVE References -->
-                                <template x-for="cve in safeGet(threat, 'indicators.cves', [])" :key="cve">
-                                    <span class="indicator-tag cve-tag">
-                                        <i class="fas fa-bug mr-2"></i>
-                                        <span x-text="cve || 'Unknown CVE'"></span>
+                            <div class="flex flex-wrap gap-2">
+                                <template x-for="cve in (threat.indicators.cves || [])" :key="cve">
+                                    <span class="px-2 py-1 bg-red-500/20 text-red-400 text-xs rounded border border-red-500/30">
+                                        <i class="fas fa-bug mr-1"></i><span x-text="cve"></span>
                                     </span>
                                 </template>
-                                
-                                <!-- Malware Families -->
-                                <template x-for="malware in safeGet(threat, 'indicators.malware', [])" :key="malware">
-                                    <span class="indicator-tag malware-tag">
-                                        <i class="fas fa-virus mr-2"></i>
-                                        <span x-text="malware || 'Unknown Malware'"></span>
+                                <template x-for="malware in (threat.indicators.malware || [])" :key="malware">
+                                    <span class="px-2 py-1 bg-purple-500/20 text-purple-400 text-xs rounded border border-purple-500/30">
+                                        <i class="fas fa-virus mr-1"></i><span x-text="malware"></span>
                                     </span>
                                 </template>
                             </div>
                         </div>
 
-                        <!-- Intelligence Summary -->
-                        <div class="intelligence-summary">
-                            <div class="flex items-center justify-between text-sm">
-                                <div class="flex items-center space-x-6">
-                                    <div class="flex items-center space-x-2">
-                                        <i class="fas fa-shield-alt text-cipher-blue"></i>
-                                        <span class="text-gray-400">Threat Level:</span>
-                                        <span :class="getThreatLevelColor(safeGet(threat, 'urgency', 0))" class="font-mono font-semibold" x-text="safeGet(threat, 'severity', 'Unknown')"></span>
-                                    </div>
-                                    <div x-show="safeGet(threat, 'indicators.count', 0) > 0" class="flex items-center space-x-2">
-                                        <i class="fas fa-crosshairs text-orange-400"></i>
-                                        <span class="text-gray-400">Indicators:</span>
-                                        <span class="text-orange-400 font-mono font-semibold" x-text="safeGet(threat, 'indicators.count', 0)"></span>
-                                    </div>
-                                    <div class="flex items-center space-x-2">
-                                        <i class="fas fa-brain text-cipher-purple"></i>
-                                        <span class="text-gray-400">AI Confidence:</span>
-                                        <span class="text-cipher-purple font-mono font-semibold" x-text="getConfidenceLevel(safeGet(threat, 'urgency', 0))"></span>
-                                    </div>
-                                </div>
-                                <div class="flex items-center space-x-2">
-                                    <span class="text-gray-500 text-xs">Processed:</span>
-                                    <span class="text-gray-400 font-mono text-xs" x-text="safeGet(threat, 'time', 'Unknown')"></span>
-                                </div>
+                        <!-- Footer Info -->
+                        <div class="flex justify-between items-center mt-4 pt-4 border-t border-white/10 text-xs text-gray-500">
+                            <div class="flex items-center space-x-4">
+                                <span>Level: <span :class="getThreatColor(threat.urgency)" x-text="threat.severity"></span></span>
+                                <span x-show="threat.indicators && threat.indicators.count > 0">
+                                    IOCs: <span class="text-orange-400" x-text="threat.indicators.count"></span>
+                                </span>
                             </div>
+                            <span x-text="threat.time"></span>
                         </div>
-                    </article>
+                    </div>
                 </template>
             </div>
-
-            <!-- Enhanced Empty State -->
-            <div x-show="insights && safeGet(insights, 'data', []).length === 0 && !loading" 
-                 class="empty-state rounded-xl p-16 text-center">
-                <i class="fas fa-shield-alt text-8xl mb-8 opacity-30"></i>
-                <h3 class="text-2xl font-semibold mb-4">No Active Threats Detected</h3>
-                <p class="mb-6 text-lg">The AI monitoring system is actively scanning for threats.</p>
-                <div class="text-sm space-y-2 mb-8">
-                    <p>• Monitoring 3 premium intelligence sources</p>
-                    <p>• AI analysis engine operational</p>
-                    <p>• Real-time threat detection active</p>
-                </div>
-                <button @click="refreshData()" class="px-8 py-4 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors font-semibold text-lg">
-                    <i class="fas fa-sync-alt mr-3"></i>Check for New Intelligence
-                </button>
-            </div>
-        </section>
-
-        <!-- Enhanced Intelligence Sources -->
-        <section class="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <template x-for="channel in channels" :key="channel.name">
-                <div class="threat-card rounded-xl p-8 text-center hover-lift">
-                    <div class="text-4xl mb-4" x-text="channel.icon"></div>
-                    <h4 class="font-bold text-white mb-3 text-lg" x-text="channel.name"></h4>
-                    <p class="text-sm text-gray-400 mb-4 font-medium" x-text="channel.type"></p>
-                    <div class="flex items-center justify-center space-x-3">
-                        <div class="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
-                        <span class="text-sm font-mono uppercase text-green-400 font-semibold">Monitoring Active</span>
-                    </div>
-                    <div class="mt-4 text-xs text-gray-500">
-                        <span>Real-time Intelligence Feed</span>
-                    </div>
-                </div>
-            </template>
         </section>
     </div>
 </div>
 
 <script>
-function cipherDashboardController() {
+function simplifiedDashboard() {
     return {
         // State
         loading: true,
         error: false,
         errorMessage: '',
-        insightsError: false,
-        debugMode: false, // Set to true for debugging
+        debugMode: true, // Enable for troubleshooting
         
         // Data
         stats: {},
         insights: { data: [], count: 0 },
-        analytics: { threat_distribution: {}, categories: {} },
-        channels: [],
         systemStatus: 'initializing',
-        channelCount: 3,
-        lastUpdate: 'Initializing...',
 
         // Initialize
         async init() {
-            console.log('🛡️ Initializing Enhanced CIPHER Dashboard...');
-            await this.loadDashboardData();
+            console.log('🛡️ Initializing Simplified CIPHER Dashboard...');
+            await this.loadData();
             
-            // Auto-refresh every 45 seconds for fresh data
+            // Auto-refresh every 30 seconds
             setInterval(() => {
                 this.refreshData();
-            }, 45000);
-            
-            // Update time display every 30 seconds
-            setInterval(() => {
-                this.updateTimeDisplay();
             }, 30000);
         },
 
-        // FIXED Load all dashboard data
-        async loadDashboardData() {
+        // Load data
+        async loadData() {
             this.loading = true;
             this.error = false;
-            this.insightsError = false;
             
             try {
-                console.log('📡 Fetching fresh intelligence data...');
+                console.log('📡 Fetching dashboard data...');
                 const response = await fetch('/api/dashboard/data');
                 
                 if (!response.ok) {
-                    throw new Error(`Failed to load dashboard data: ${response.status}`);
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 
                 const data = await response.json();
+                console.log('📊 Raw data received:', data);
                 
                 if (data.error) {
                     throw new Error(data.message || 'Dashboard data unavailable');
                 }
                 
-                // SAFE data assignment with proper handling
-                this.stats = this.safeAssign(data.stats, {
-                    total_messages: 0,
-                    processed_today: 0,
-                    high_priority_threats: 0,
-                    critical_threats: 0,
-                    cve_references: 0,
-                    avg_urgency: 0.0
-                });
-                
-                this.insights = this.safeAssign(data.insights, { data: [], count: 0 });
-                
-                // CRITICAL: Ensure insights.data is ALWAYS an array
-                if (!this.insights || !Array.isArray(this.insights.data)) {
-                    console.warn('Invalid insights data structure, initializing empty array');
-                    this.insights = { data: [], count: 0 };
-                }
-                
-                this.analytics = this.safeAssign(data.analytics, { 
-                    threat_distribution: {}, 
-                    categories: {} 
-                });
-                
-                this.channels = Array.isArray(data.channels) ? data.channels : [
-                    {"name": "@DarkfeedNews", "icon": "🔴", "type": "Advanced Threats"},
-                    {"name": "@breachdetector", "icon": "🟠", "type": "Data Breaches"},
-                    {"name": "@secharvester", "icon": "🔵", "type": "Security News"}
-                ];
-                
+                // Safe data assignment
+                this.stats = data.stats || {};
+                this.insights = data.insights || { data: [], count: 0 };
                 this.systemStatus = data.status || 'unknown';
-                this.channelCount = this.channels.length || 3;
                 
-                console.log(`✅ Dashboard loaded: ${this.insights.count} threats, ${this.stats.total_messages} total messages`);
-                console.log(`✅ Insights data array length: ${this.insights.data.length}`);
-                
-                if (this.debugMode) {
-                    console.log('Full insights object:', this.insights);
-                    console.log('Sample threat:', this.insights.data[0]);
+                // Ensure insights.data is always an array
+                if (!Array.isArray(this.insights.data)) {
+                    console.warn('Insights data is not array, converting:', this.insights.data);
+                    this.insights.data = [];
                 }
                 
-                this.updateTimeDisplay();
+                console.log(`✅ Data loaded: ${this.insights.count} threats, ${this.stats.total_messages} total messages`);
+                console.log(`✅ Insights array length: ${this.insights.data.length}`);
+                console.log('📋 Sample insight:', this.insights.data[0]);
+                
                 this.loading = false;
                 
             } catch (error) {
-                console.error('❌ Dashboard loading failed:', error);
+                console.error('❌ Data loading failed:', error);
                 this.error = true;
                 this.errorMessage = error.message || 'Unknown error';
                 this.loading = false;
             }
         },
 
-        // ENHANCED safe assignment helper
-        safeAssign(source, defaults) {
-            if (!source || typeof source !== 'object') {
-                return defaults;
-            }
-            
-            const result = { ...defaults };
-            for (const [key, value] of Object.entries(source)) {
-                if (value !== null && value !== undefined) {
-                    result[key] = value;
-                }
-            }
-            return result;
-        },
-
-        // CRITICAL: Safe getter function for nested objects
-        safeGet(obj, path, defaultValue = '') {
-            if (!obj) return defaultValue;
-            
-            const keys = path.split('.');
-            let current = obj;
-            
-            for (const key of keys) {
-                if (current === null || current === undefined || !(key in current)) {
-                    return defaultValue;
-                }
-                current = current[key];
-            }
-            
-            return current !== null && current !== undefined ? current : defaultValue;
-        },
-
         // Refresh data
         async refreshData() {
-            console.log('🔄 Refreshing threat intelligence...');
-            await this.loadDashboardData();
+            console.log('🔄 Refreshing data...');
+            await this.loadData();
         },
 
-        // Update time display
-        updateTimeDisplay() {
-            const now = new Date();
-            this.lastUpdate = now.toLocaleTimeString('en-US', { 
-                hour12: false,
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        },
-
-        // Enhanced utility functions with safe handling
+        // Utility functions
         formatNumber(num) {
-            const safeNum = Number(num) || 0;
-            if (safeNum >= 1000000) {
-                return (safeNum / 1000000).toFixed(1) + 'M';
-            } else if (safeNum >= 1000) {
-                return (safeNum / 1000).toFixed(1) + 'K';
-            }
-            return safeNum.toString();
-        },
-
-        formatCategory(category) {
-            if (!category || typeof category !== 'string') return 'Unknown';
-            return category.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            const n = Number(num) || 0;
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return n.toString();
         },
 
         getSourceIcon(source) {
-            if (!source) return '📡';
             const icons = {
                 '@DarkfeedNews': '🔴',
-                '@breachdetector': '🟠',
+                '@breachdetector': '🟠', 
                 '@secharvester': '🔵'
             };
             return icons[source] || '📡';
         },
 
-        getSourceIndicatorClass(source) {
-            if (!source) return 'source-harvest';
-            const classes = {
-                '@DarkfeedNews': 'source-darkfeed',
-                '@breachdetector': 'source-breach',
-                '@secharvester': 'source-harvest'
-            };
-            return classes[source] || 'source-harvest';
-        },
-
-        getThreatBadgeClass(level) {
-            if (!level) return 'threat-low';
+        getThreatCardClass(level) {
             const classes = {
                 'critical': 'threat-critical',
                 'high': 'threat-high',
                 'medium': 'threat-medium',
                 'low': 'threat-low'
             };
-            return classes[level.toLowerCase()] || 'threat-low';
+            return classes[level] || 'threat-low';
         },
 
-        getThreatSeverityClass(level) {
-            if (!level) return '';
-            if (level.toLowerCase() === 'critical') return 'threat-severity-critical';
-            if (level.toLowerCase() === 'high') return 'threat-severity-high';
-            return '';
-        },
-
-        getThreatColor(level) {
-            if (!level) return 'bg-gray-500';
-            const colors = {
-                'critical': 'bg-red-500',
-                'high': 'bg-orange-500',
-                'medium': 'bg-yellow-500',
-                'low': 'bg-green-500'
+        getThreatBadgeClass(level) {
+            const classes = {
+                'critical': 'badge-critical',
+                'high': 'badge-high',
+                'medium': 'badge-medium',
+                'low': 'badge-low'
             };
-            return colors[level.toLowerCase()] || 'bg-gray-500';
+            return classes[level] || 'badge-low';
         },
 
-        getThreatLevelColor(urgency) {
-            const urgencyNum = parseFloat(urgency) || 0;
-            if (urgencyNum >= 0.8) return 'text-red-400';
-            if (urgencyNum >= 0.6) return 'text-orange-400';
-            if (urgencyNum >= 0.4) return 'text-yellow-400';
+        getThreatColor(urgency) {
+            const u = Number(urgency) || 0;
+            if (u >= 80) return 'text-red-400';
+            if (u >= 60) return 'text-orange-400';
+            if (u >= 40) return 'text-yellow-400';
             return 'text-green-400';
         },
 
-        getThreatLevelText(urgency) {
-            const urgencyNum = parseFloat(urgency) || 0;
-            if (urgencyNum >= 0.8) return 'CRITICAL';
-            if (urgencyNum >= 0.6) return 'HIGH';
-            if (urgencyNum >= 0.4) return 'MEDIUM';
+        getThreatText(urgency) {
+            const u = Number(urgency) || 0;
+            if (u >= 0.8) return 'CRITICAL';
+            if (u >= 0.6) return 'HIGH';
+            if (u >= 0.4) return 'MEDIUM';
             return 'LOW';
         },
 
         getUrgencyColor(urgency) {
-            const urgencyNum = parseFloat(urgency) || 0;
-            if (urgencyNum >= 80) return 'linear-gradient(90deg, #ef4444, #dc2626)';
-            if (urgencyNum >= 60) return 'linear-gradient(90deg, #f59e0b, #d97706)';
-            if (urgencyNum >= 40) return 'linear-gradient(90deg, #eab308, #ca8a04)';
+            const u = Number(urgency) || 0;
+            if (u >= 80) return 'linear-gradient(90deg, #ef4444, #dc2626)';
+            if (u >= 60) return 'linear-gradient(90deg, #f59e0b, #d97706)';
+            if (u >= 40) return 'linear-gradient(90deg, #eab308, #ca8a04)';
             return 'linear-gradient(90deg, #22c55e, #16a34a)';
-        },
-
-        getConfidenceLevel(urgency) {
-            const urgencyNum = parseFloat(urgency) || 0;
-            if (urgencyNum >= 80) return 'Very High';
-            if (urgencyNum >= 60) return 'High';
-            if (urgencyNum >= 40) return 'Medium';
-            return 'Standard';
-        },
-
-        getPercentage(level, value) {
-            if (!this.analytics || !this.analytics.threat_distribution) return 0;
-            const total = Object.values(this.analytics.threat_distribution).reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
-            return total > 0 ? Math.round(((parseFloat(value) || 0) / total) * 100) : 0;
-        },
-
-        getCategoryPercentage(category, value) {
-            if (!this.analytics || !this.analytics.categories) return 0;
-            const total = Object.values(this.analytics.categories).reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
-            return total > 0 ? Math.round(((parseFloat(value) || 0) / total) * 100) : 0;
         }
     }
 }
@@ -1047,7 +563,7 @@ function cipherDashboardController() {
 {% block scripts %}
 <script>
     document.addEventListener('DOMContentLoaded', function() {
-        console.log('🛡️ Enhanced CIPHER Dashboard with FIXED AI Analysis loaded');
+        console.log('🛡️ Simplified CIPHER Dashboard loaded');
     });
 </script>
 {% endblock %}
