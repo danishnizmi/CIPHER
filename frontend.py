@@ -35,7 +35,7 @@ def get_utils():
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def cipher_dashboard(request: Request):
-    """CIPHER Cybersecurity Intelligence Dashboard - Production Version"""
+    """CIPHER Cybersecurity Intelligence Dashboard - Enhanced Production Version"""
     try:
         # Check cache first
         cache_key = "dashboard_full_data"
@@ -78,7 +78,7 @@ async def cipher_dashboard(request: Request):
         return HTMLResponse(content=_generate_error_dashboard(str(e)), status_code=200)
 
 def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, analytics: Dict) -> str:
-    """Generate comprehensive dashboard HTML"""
+    """Generate comprehensive dashboard HTML with enhanced threat intelligence display"""
     
     # Calculate derived metrics
     system_status = "OPERATIONAL" if monitoring.get("active") else "STANDBY"
@@ -119,6 +119,12 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 background-size: 20px 20px;
                 pointer-events: none;
                 z-index: 0;
+                animation: gridPulse 4s ease-in-out infinite;
+            }}
+            
+            @keyframes gridPulse {{
+                0%, 100% {{ opacity: 0.3; }}
+                50% {{ opacity: 0.1; }}
             }}
             
             .container {{
@@ -138,6 +144,25 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 margin-bottom: 30px;
                 box-shadow: 0 0 30px rgba(0, 255, 0, 0.2);
                 backdrop-filter: blur(10px);
+                position: relative;
+                overflow: hidden;
+            }}
+            
+            .header::before {{
+                content: '';
+                position: absolute;
+                top: -50%;
+                left: -50%;
+                width: 200%;
+                height: 200%;
+                background: conic-gradient(from 0deg, transparent, rgba(0, 255, 0, 0.1), transparent);
+                animation: rotate 6s linear infinite;
+                opacity: 0.3;
+                z-index: -1;
+            }}
+            
+            @keyframes rotate {{
+                100% {{ transform: rotate(360deg); }}
             }}
             
             .header h1 {{
@@ -146,6 +171,7 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 text-shadow: 0 0 20px #00ff00;
                 margin-bottom: 10px;
                 animation: pulse 2s infinite;
+                font-weight: 700;
             }}
             
             .status-bar {{
@@ -165,6 +191,12 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 border: 1px solid #00ff00;
                 border-radius: 20px;
                 font-family: monospace;
+                transition: all 0.3s ease;
+            }}
+            
+            .status-item:hover {{
+                background: rgba(0, 255, 0, 0.2);
+                transform: translateY(-2px);
             }}
             
             .status-dot {{
@@ -260,6 +292,12 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 background: rgba(255, 255, 255, 0.05);
                 border-radius: 8px;
                 border-left: 3px solid #6366f1;
+                transition: all 0.3s ease;
+            }}
+            
+            .sub-metric:hover {{
+                background: rgba(255, 255, 255, 0.1);
+                border-left-color: #00ff00;
             }}
             
             .sub-metric-value {{
@@ -290,9 +328,23 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
             }}
             
             .insights-content {{
-                max-height: 600px;
+                max-height: 900px;
                 overflow-y: auto;
                 padding: 20px;
+            }}
+            
+            .insights-content::-webkit-scrollbar {{
+                width: 8px;
+            }}
+            
+            .insights-content::-webkit-scrollbar-track {{
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+            }}
+            
+            .insights-content::-webkit-scrollbar-thumb {{
+                background: #6366f1;
+                border-radius: 4px;
             }}
             
             .insight {{
@@ -313,7 +365,7 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
             
             .insight-header {{
                 display: flex;
-                justify-content: between;
+                justify-content: space-between;
                 align-items: center;
                 margin-bottom: 12px;
                 flex-wrap: wrap;
@@ -366,9 +418,15 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 color: #e0e0e0;
             }}
             
+            .analysis-text {{
+                line-height: 1.6;
+                margin-bottom: 15px;
+                color: #e0e0e0;
+            }}
+            
             .insight-meta {{
                 display: flex;
-                justify-content: between;
+                justify-content: space-between;
                 align-items: center;
                 font-size: 0.85em;
                 color: #888;
@@ -534,6 +592,73 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 transform: translateY(-2px);
             }}
             
+            .expand-btn, .copy-btn {{
+                margin-top: 10px;
+                padding: 5px 12px;
+                background: rgba(99, 102, 241, 0.2);
+                border: 1px solid #6366f1;
+                border-radius: 15px;
+                color: #6366f1;
+                cursor: pointer;
+                font-size: 0.8em;
+                transition: all 0.3s ease;
+                margin-right: 8px;
+            }}
+            
+            .expand-btn:hover, .copy-btn:hover {{
+                transform: translateY(-1px);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            }}
+            
+            .cybersec-data {{
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px solid rgba(255,255,255,0.1);
+                font-size: 0.85em;
+            }}
+            
+            .cybersec-data div {{
+                margin: 5px 0;
+            }}
+            
+            .cybersec-data strong {{
+                color: #6366f1;
+            }}
+            
+            .cve-ref {{
+                font-family: monospace;
+                color: #ff6666;
+                background: rgba(255, 102, 102, 0.1);
+                padding: 2px 6px;
+                border-radius: 4px;
+                margin: 0 3px;
+            }}
+            
+            .ioc-item {{
+                font-family: monospace;
+                color: #ffaa00;
+                background: rgba(255, 170, 0, 0.1);
+                padding: 2px 6px;
+                border-radius: 4px;
+                margin: 0 3px;
+            }}
+            
+            .malware-item {{
+                color: #ff4444;
+                background: rgba(255, 68, 68, 0.1);
+                padding: 2px 6px;
+                border-radius: 4px;
+                margin: 0 3px;
+            }}
+            
+            .actor-item {{
+                color: #ffaa00;
+                background: rgba(255, 170, 0, 0.1);
+                padding: 2px 6px;
+                border-radius: 4px;
+                margin: 0 3px;
+            }}
+            
             @keyframes pulse {{
                 0%, 100% {{ opacity: 1; }}
                 50% {{ opacity: 0.7; }}
@@ -572,6 +697,7 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 .status-bar {{ flex-direction: column; align-items: center; }}
                 .header h1 {{ font-size: 2em; }}
                 .container {{ padding: 10px; }}
+                .insights-content {{ max-height: 600px; }}
             }}
         </style>
     </head>
@@ -722,7 +848,7 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
                 </div>
                 
                 <div class="insights-content">
-                    {_generate_insights_html(insights)}
+                    {_generate_enhanced_insights_html(insights)}
                 </div>
             </div>
             
@@ -748,7 +874,9 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
         
         <script>
             // Auto-refresh dashboard every 30 seconds
-            setTimeout(() => location.reload(), 30000);
+            let refreshTimer = setTimeout(() => {{
+                window.location.reload();
+            }}, 30000);
             
             // Add loading indicators
             document.querySelectorAll('.card').forEach((card, index) => {{
@@ -760,26 +888,205 @@ def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, anal
             function updateTime() {{
                 const now = new Date();
                 const timeStr = now.toLocaleTimeString();
-                const dateStr = now.toLocaleDateString();
                 document.title = `CIPHER Dashboard - ${{timeStr}}`;
             }}
             
             setInterval(updateTime, 1000);
             updateTime();
             
-            // Add CSS for fadeIn animation
-            const style = document.createElement('style');
-            style.textContent = `
-                @keyframes fadeIn {{
-                    from {{ opacity: 0; transform: translateY(20px); }}
-                    to {{ opacity: 1; transform: translateY(0); }}
+            // Toggle analysis expansion
+            function toggleAnalysis(index) {{
+                const shortAnalysis = document.getElementById(`analysis-${{index}}`);
+                const fullAnalysis = document.getElementById(`full-analysis-${{index}}`);
+                const button = event.target;
+                
+                if (shortAnalysis.style.display === 'none') {{
+                    // Show truncated, hide full
+                    shortAnalysis.style.display = 'block';
+                    fullAnalysis.style.display = 'none';
+                    button.textContent = 'Show Full Analysis';
+                    button.style.background = 'rgba(99, 102, 241, 0.2)';
+                    button.style.borderColor = '#6366f1';
+                    button.style.color = '#6366f1';
+                }} else {{
+                    // Show full, hide truncated
+                    shortAnalysis.style.display = 'none';
+                    fullAnalysis.style.display = 'block';
+                    button.textContent = 'Show Less';
+                    button.style.background = 'rgba(0, 255, 0, 0.2)';
+                    button.style.borderColor = '#00ff00';
+                    button.style.color = '#00ff00';
                 }}
-            `;
-            document.head.appendChild(style);
+            }}
+            
+            // Copy threat intelligence to clipboard
+            function copyInsight(index) {{
+                const insight = document.querySelector(`#analysis-${{index}}`).closest('.insight');
+                const source = insight.querySelector('.insight-source').textContent;
+                const analysis = document.getElementById(`full-analysis-${{index}}`).style.display === 'block' 
+                    ? document.getElementById(`full-analysis-${{index}}`).textContent.trim()
+                    : document.getElementById(`analysis-${{index}}`).textContent.trim();
+                const threatLevel = insight.querySelector('.threat-badge').textContent;
+                const urgencyMatch = insight.querySelector('.insight-meta').textContent.match(/([0-9.]+)/);
+                const urgency = urgencyMatch ? urgencyMatch[1] : 'N/A';
+                
+                const copyText = `🛡️ CIPHER Threat Intelligence
+Source: ${{source}}
+Threat Level: ${{threatLevel}}
+Urgency Score: ${{urgency}}
+
+Analysis:
+${{analysis}}
+
+Exported from CIPHER Platform - ${{new Date().toISOString()}}`;
+                
+                navigator.clipboard.writeText(copyText).then(() => {{
+                    event.target.textContent = '✅ Copied!';
+                    event.target.style.background = 'rgba(0, 255, 0, 0.2)';
+                    event.target.style.borderColor = '#00ff00';
+                    event.target.style.color = '#00ff00';
+                    setTimeout(() => {{
+                        event.target.textContent = '📋 Copy';
+                        event.target.style.background = 'rgba(99, 102, 241, 0.1)';
+                        event.target.style.borderColor = '#6366f1';
+                        event.target.style.color = '#6366f1';
+                    }}, 2000);
+                }}).catch(err => {{
+                    console.error('Copy failed:', err);
+                    event.target.textContent = '❌ Failed';
+                    setTimeout(() => {{
+                        event.target.textContent = '📋 Copy';
+                    }}, 2000);
+                }});
+            }}
+            
+            // Pause auto-refresh when user is interacting
+            let userActivity = false;
+            const resetTimer = () => {{
+                clearTimeout(refreshTimer);
+                if (!userActivity) {{
+                    refreshTimer = setTimeout(() => window.location.reload(), 30000);
+                }}
+            }};
+
+            ['mousedown', 'keydown', 'scroll', 'touchstart'].forEach(event => {{
+                document.addEventListener(event, () => {{
+                    userActivity = true;
+                    setTimeout(() => {{ userActivity = false; resetTimer(); }}, 5000);
+                }}, {{ passive: true }});
+            }});
+            
+            console.log('🛡️ CIPHER Dashboard loaded successfully - Enhanced Version');
         </script>
     </body>
     </html>
     """
+
+def _generate_enhanced_insights_html(insights: List) -> str:
+    """Generate enhanced insights HTML with full threat intelligence display"""
+    if not insights:
+        return """
+        <div style="text-align: center; padding: 60px; color: #666;">
+            <div style="font-size: 3em; margin-bottom: 20px; opacity: 0.5;">🔍</div>
+            <h3 style="color: #888; margin-bottom: 15px;">No Recent Threat Intelligence</h3>
+            <p style="margin-bottom: 10px;">CIPHER is monitoring cybersecurity channels for threats.</p>
+            <p style="font-size: 0.9em;">Intelligence data will appear here as it's collected and analyzed.</p>
+            <div style="margin-top: 30px;">
+                <span class="loading"><span></span><span></span><span></span></span>
+                <br><span style="font-size: 0.8em; color: #666;">Monitoring Active</span>
+            </div>
+        </div>
+        """
+    
+    insights_html = ""
+    for i, insight in enumerate(insights):
+        threat_level = insight.get("threat_level", "low")
+        urgency = insight.get("urgency_score", 0.0)
+        full_analysis = insight.get('gemini_analysis', insight.get('message_text', 'No analysis available'))
+        truncated_analysis = _truncate_text(full_analysis, 400)
+        show_expand = len(full_analysis) > 400
+        
+        # Determine threat badge class
+        if threat_level == "critical":
+            badge_class = "threat-critical"
+        elif threat_level == "high":
+            badge_class = "threat-high"
+        elif threat_level == "medium":
+            badge_class = "threat-medium"
+        else:
+            badge_class = "threat-low"
+        
+        # Build cybersecurity data display
+        cybersec_data = ""
+        data_items = []
+        
+        if insight.get('cve_references'):
+            cve_list = ", ".join([f'<span class="cve-ref">{cve}</span>' for cve in insight.get('cve_references', [])[:3]])
+            data_items.append(f"<div><strong>CVE References:</strong> {cve_list}</div>")
+        
+        if insight.get('iocs_detected'):
+            ioc_list = ", ".join([f'<span class="ioc-item">{ioc}</span>' for ioc in insight.get('iocs_detected', [])[:3]])
+            data_items.append(f"<div><strong>IOCs:</strong> {ioc_list}</div>")
+        
+        if insight.get('malware_families'):
+            malware_list = ", ".join([f'<span class="malware-item">{mal}</span>' for mal in insight.get('malware_families', [])[:2]])
+            data_items.append(f"<div><strong>Malware:</strong> {malware_list}</div>")
+        
+        if insight.get('threat_actors'):
+            actor_list = ", ".join([f'<span class="actor-item">{actor}</span>' for actor in insight.get('threat_actors', [])[:2]])
+            data_items.append(f"<div><strong>Threat Actors:</strong> {actor_list}</div>")
+        
+        if data_items:
+            cybersec_data = f'<div class="cybersec-data">{"".join(data_items)}</div>'
+        
+        insights_html += f"""
+        <div class="insight">
+            <div class="insight-header">
+                <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                    <span class="insight-source">{insight.get('chat_username', '@Unknown')}</span>
+                    <span class="threat-badge {badge_class}">{threat_level.upper()}</span>
+                    <span style="font-size: 0.8em; color: #888; font-family: monospace;">
+                        {insight.get('category', 'other').upper()}
+                    </span>
+                </div>
+                <div style="font-size: 0.8em; color: #666; display: flex; align-items: center; gap: 10px;">
+                    {_format_date(insight.get('message_date', ''))}
+                    <button onclick="copyInsight({i})" class="copy-btn">📋 Copy</button>
+                </div>
+            </div>
+            
+            <div class="insight-analysis">
+                <div id="analysis-{i}" class="analysis-text">
+                    {truncated_analysis}
+                </div>
+                <div id="full-analysis-{i}" class="analysis-text" style="display: none;">
+                    {full_analysis}
+                </div>
+                {"<button onclick=\"toggleAnalysis(" + str(i) + ")\" class=\"expand-btn\">Show Full Analysis</button>" if show_expand else ""}
+            </div>
+            
+            <div class="insight-meta">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span>Urgency:</span>
+                    <div class="urgency-bar">
+                        <div class="urgency-fill" style="width: {urgency*100}%;"></div>
+                    </div>
+                    <span style="font-family: monospace;">{urgency:.2f}</span>
+                </div>
+                <div>
+                    Type: <span style="color: #6366f1;">{insight.get('threat_type', 'Unknown')}</span>
+                </div>
+                <div>
+                    Sentiment: <span style="color: {'#00ff00' if insight.get('sentiment') == 'positive' else '#ff4444' if insight.get('sentiment') == 'negative' else '#ffaa00'};">
+                        {insight.get('sentiment', 'neutral').upper()}
+                    </span>
+                </div>
+                {cybersec_data}
+            </div>
+        </div>
+        """
+    
+    return insights_html
 
 def _generate_analytics_section(analytics: Dict) -> str:
     """Generate threat analytics section"""
@@ -903,78 +1210,6 @@ def _generate_analytics_section(analytics: Dict) -> str:
         </div>
     </div>
     """
-
-def _generate_insights_html(insights: List) -> str:
-    """Generate insights HTML"""
-    if not insights:
-        return """
-        <div style="text-align: center; padding: 60px; color: #666;">
-            <div style="font-size: 3em; margin-bottom: 20px; opacity: 0.5;">🔍</div>
-            <h3 style="color: #888; margin-bottom: 15px;">No Recent Threat Intelligence</h3>
-            <p style="margin-bottom: 10px;">CIPHER is monitoring cybersecurity channels for threats.</p>
-            <p style="font-size: 0.9em;">Intelligence data will appear here as it's collected and analyzed.</p>
-            <div style="margin-top: 30px;">
-                <span class="loading"><span></span><span></span><span></span></span>
-                <br><span style="font-size: 0.8em; color: #666;">Monitoring Active</span>
-            </div>
-        </div>
-        """
-    
-    insights_html = ""
-    for insight in insights:
-        threat_level = insight.get("threat_level", "low")
-        urgency = insight.get("urgency_score", 0.0)
-        
-        # Determine threat badge class
-        if threat_level == "critical":
-            badge_class = "threat-critical"
-        elif threat_level == "high":
-            badge_class = "threat-high"
-        elif threat_level == "medium":
-            badge_class = "threat-medium"
-        else:
-            badge_class = "threat-low"
-        
-        insights_html += f"""
-        <div class="insight">
-            <div class="insight-header">
-                <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
-                    <span class="insight-source">{insight.get('chat_username', '@Unknown')}</span>
-                    <span class="threat-badge {badge_class}">{threat_level}</span>
-                    <span style="font-size: 0.8em; color: #888; font-family: monospace;">
-                        {insight.get('category', 'other').upper()}
-                    </span>
-                </div>
-                <div style="font-size: 0.8em; color: #666;">
-                    {_format_date(insight.get('message_date', ''))}
-                </div>
-            </div>
-            
-            <div class="insight-analysis">
-                {_truncate_text(insight.get('gemini_analysis', insight.get('message_text', 'No analysis available')), 300)}
-            </div>
-            
-            <div class="insight-meta">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <span>Urgency:</span>
-                    <div class="urgency-bar">
-                        <div class="urgency-fill" style="width: {urgency*100}%;"></div>
-                    </div>
-                    <span style="font-family: monospace;">{urgency:.2f}</span>
-                </div>
-                <div>
-                    Type: <span style="color: #6366f1;">{insight.get('threat_type', 'Unknown')}</span>
-                </div>
-                <div>
-                    Sentiment: <span style="color: {'#00ff00' if insight.get('sentiment') == 'positive' else '#ff4444' if insight.get('sentiment') == 'negative' else '#ffaa00'};">
-                        {insight.get('sentiment', 'neutral').upper()}
-                    </span>
-                </div>
-            </div>
-        </div>
-        """
-    
-    return insights_html
 
 def _generate_channels_section(monitoring: Dict) -> str:
     """Generate monitored channels section"""
@@ -1174,6 +1409,69 @@ async def get_dashboard_data():
     except Exception as e:
         logger.error(f"Dashboard data error: {e}")
         return {"error": str(e), "status": "error"}
+
+@router.get("/api/insights/full")
+async def get_full_insights(
+    limit: int = Query(20, ge=1, le=100),
+    threat_level: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    include_raw: bool = Query(False, description="Include raw message text")
+):
+    """Get full, untruncated threat intelligence insights"""
+    try:
+        utils = get_utils()
+        if utils:
+            insights_data = await utils.get_threat_insights()
+            insights = insights_data["insights"]
+            
+            # Apply filters
+            if threat_level:
+                insights = [i for i in insights if i.get("threat_level") == threat_level.lower()]
+            if category:
+                insights = [i for i in insights if i.get("category") == category.lower()]
+            
+            # Prepare full insights without truncation
+            full_insights = []
+            for insight in insights[:limit]:
+                full_insight = {
+                    "message_id": insight.get("message_id"),
+                    "source": insight.get("chat_username", "@Unknown"),
+                    "timestamp": insight.get("message_date"),
+                    "processed_date": insight.get("processed_date"),
+                    "threat_level": insight.get("threat_level", "low"),
+                    "category": insight.get("category", "other"),
+                    "threat_type": insight.get("threat_type", "unknown"),
+                    "urgency_score": insight.get("urgency_score", 0.0),
+                    "sentiment": insight.get("sentiment", "neutral"),
+                    "full_analysis": insight.get("gemini_analysis", "No analysis available"),
+                    "cybersecurity_data": {
+                        "cve_references": insight.get("cve_references", []),
+                        "iocs_detected": insight.get("iocs_detected", []),
+                        "malware_families": insight.get("malware_families", []),
+                        "threat_actors": insight.get("threat_actors", []),
+                        "affected_systems": insight.get("affected_systems", []),
+                        "attack_vectors": insight.get("attack_vectors", [])
+                    }
+                }
+                
+                if include_raw:
+                    full_insight["raw_message"] = insight.get("message_text", "")
+                
+                full_insights.append(full_insight)
+            
+            return {
+                "insights": full_insights,
+                "total_returned": len(full_insights),
+                "total_available": len(insights),
+                "filters_applied": {"threat_level": threat_level, "category": category},
+                "timestamp": datetime.now().isoformat(),
+                "source": insights_data.get("source", "bigquery")
+            }
+        else:
+            return {"insights": [], "total_returned": 0, "status": "initializing"}
+    except Exception as e:
+        logger.error(f"Full insights error: {e}")
+        return {"insights": [], "total_returned": 0, "error": str(e)}
 
 @router.get("/api/insights/detailed")
 async def get_detailed_insights(
