@@ -166,7 +166,7 @@ async def readiness_check():
 
 @app.get("/api/stats")
 async def get_stats():
-    """Get cybersecurity statistics with robust fallback"""
+    """Get cybersecurity statistics with robust fallback - FIXED SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
@@ -197,6 +197,7 @@ async def get_stats():
             empty_stats["data_source"] = "bigquery_unavailable"
             return empty_stats
         
+        # FIXED: Use correct field names from schema (processed_date instead of timestamp)
         query = f"""
         SELECT 
             COUNT(*) as total_messages,
@@ -237,13 +238,15 @@ async def get_stats():
                     "data_source": "bigquery",
                     "last_updated": datetime.now(timezone.utc).isoformat()
                 }
+                logger.info(f"✅ BigQuery stats retrieved: {stats['total_messages']} messages, {stats['high_threats']} high threats")
             else:
                 stats = empty_stats
                 
         except Exception as query_error:
-            logger.error(f"BigQuery query failed: {query_error}")
+            logger.error(f"BigQuery stats error: {query_error}")
             stats = empty_stats
             stats["data_source"] = "bigquery_error"
+            stats["error"] = str(query_error)
         
         return stats
 
@@ -254,7 +257,7 @@ async def get_stats():
 
 @app.get("/api/insights")
 async def get_cybersecurity_insights():
-    """Get latest cybersecurity insights"""
+    """Get latest cybersecurity insights - FIXED SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
@@ -272,6 +275,7 @@ async def get_cybersecurity_insights():
             empty_response["data_source"] = "bigquery_unavailable"
             return empty_response
         
+        # FIXED: Use correct field names from schema
         query = f"""
         SELECT 
             message_id,
@@ -321,6 +325,8 @@ async def get_cybersecurity_insights():
             }
             insights.append(insight)
         
+        logger.info(f"✅ Retrieved {len(insights)} cybersecurity insights")
+        
         return {
             "insights": insights,
             "count": len(insights),
@@ -332,6 +338,7 @@ async def get_cybersecurity_insights():
     except Exception as e:
         logger.error(f"Failed to get cybersecurity insights: {e}")
         empty_response["data_source"] = "error"
+        empty_response["error"] = str(e)
         return empty_response
 
 @app.get("/api/monitoring/status")
