@@ -133,52 +133,36 @@ steps:
       '--platform', 'managed',
       '--allow-unauthenticated',
       '--service-account', 'cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
-      
-      # Resource configuration
       '--memory', '4Gi',
       '--cpu', '2',
       '--port', '8080',
       '--timeout', '3600',
       '--concurrency', '80',
-      
-      # Scaling configuration
       '--min-instances', '0',
       '--max-instances', '10',
-      
-      # Environment variables (PORT is automatically set by Cloud Run)
-      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
-      
-      # Labels for organization
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PYTHONUNBUFFERED=1',
       '--labels', 'app=cipher,environment=production,version=$BUILD_ID',
-      
-      # Performance configuration
       '--no-cpu-throttling'
     ]
     id: 'deploy'
     waitFor: ['push-image']
 
-  # Step 6: Configure advanced Cloud Run settings
+  # Step 6: Configure IAM policies
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "⚙️ Configuring advanced Cloud Run settings..."
+        echo "⚙️ Configuring IAM policies..."
         
-        # Apply service.yaml configuration for advanced settings
-        if [ -f "service.yaml" ]; then
-          echo "Applying service.yaml configuration..."
-          gcloud run services replace service.yaml --region=us-central1
-        fi
-        
-        # Set IAM policies
+        # Set IAM policies for public access
         echo "Setting IAM policies for public access..."
         gcloud run services add-iam-policy-binding telegram-ai-processor \
           --region=us-central1 \
           --member="allUsers" \
           --role="roles/run.invoker"
         
-        echo "✅ Advanced configuration applied"
+        echo "✅ IAM configuration applied"
     id: 'configure'
     waitFor: ['deploy']
 
@@ -191,17 +175,17 @@ steps:
         echo "🏥 Running deployment health checks..."
         
         # Get service URL
-        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
+        DEPLOYED_URL=$$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
           --project=$PROJECT_ID \
           --format='value(status.url)')
         
-        if [ -z "$SERVICE_URL" ]; then
+        if [ -z "$$DEPLOYED_URL" ]; then
           echo "❌ Failed to get service URL"
           exit 1
         fi
         
-        echo "Service deployed at: $SERVICE_URL"
+        echo "Service deployed at: $$DEPLOYED_URL"
         
         # Wait for service to be ready
         echo "Waiting for service to initialize..."
@@ -212,48 +196,48 @@ steps:
         
         # Test liveness probe
         echo "Testing /health/live endpoint..."
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health/live" || echo "000")
-        if [ "$HTTP_STATUS" = "200" ]; then
+        HEALTH_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$DEPLOYED_URL/health/live" || echo "000")
+        if [ "$$HEALTH_STATUS" = "200" ]; then
           echo "✅ Liveness check: PASSED"
         else
-          echo "⚠️ Liveness check: HTTP $HTTP_STATUS (may need more time to initialize)"
+          echo "⚠️ Liveness check: HTTP $$HEALTH_STATUS (may need more time to initialize)"
         fi
         
         # Test readiness probe
         echo "Testing /health endpoint..."
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo "000")
-        if [ "$HTTP_STATUS" = "200" ]; then
+        READY_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$DEPLOYED_URL/health" || echo "000")
+        if [ "$$READY_STATUS" = "200" ]; then
           echo "✅ Readiness check: PASSED"
         else
-          echo "⚠️ Readiness check: HTTP $HTTP_STATUS (may need more time to initialize)"
+          echo "⚠️ Readiness check: HTTP $$READY_STATUS (may need more time to initialize)"
         fi
         
         # Test main dashboard
         echo "Testing main dashboard..."
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/" || echo "000")
-        if [ "$HTTP_STATUS" = "200" ]; then
+        DASH_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$DEPLOYED_URL/" || echo "000")
+        if [ "$$DASH_STATUS" = "200" ]; then
           echo "✅ Dashboard: PASSED"
         else
-          echo "⚠️ Dashboard: HTTP $HTTP_STATUS"
+          echo "⚠️ Dashboard: HTTP $$DASH_STATUS"
         fi
         
         # Test API endpoints
         echo "Testing API endpoints..."
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/stats" || echo "000")
-        if [ "$HTTP_STATUS" = "200" ]; then
+        API_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$DEPLOYED_URL/api/stats" || echo "000")
+        if [ "$$API_STATUS" = "200" ]; then
           echo "✅ Stats API: PASSED"
         else
-          echo "⚠️ Stats API: HTTP $HTTP_STATUS"
+          echo "⚠️ Stats API: HTTP $$API_STATUS"
         fi
         
         echo ""
         echo "🎉 CIPHER Platform Deployment Completed!"
         echo "======================================="
-        echo "Service URL: $$SERVICE_URL"
-        echo "Dashboard: $$SERVICE_URL/dashboard"
-        echo "Health Check: $$SERVICE_URL/health"
-        echo "Stats API: $$SERVICE_URL/api/stats"
-        echo "Monitoring: $$SERVICE_URL/api/monitoring/status"
+        echo "Service URL: $$DEPLOYED_URL"
+        echo "Dashboard: $$DEPLOYED_URL/dashboard"
+        echo "Health Check: $$DEPLOYED_URL/health"
+        echo "Stats API: $$DEPLOYED_URL/api/stats"
+        echo "Monitoring: $$DEPLOYED_URL/api/monitoring/status"
         echo ""
         echo "🔧 Technical Details:"
         echo "Project: $PROJECT_ID"
@@ -266,7 +250,7 @@ steps:
         echo ""
         echo "📊 Monitoring Channels:"
         echo "🔴 @DarkfeedNews - Threat Intelligence"
-        echo "🟠 @breachdetector - Data Breach Monitor"
+        echo "🟠 @breachdetector - Data Breach Monitor"  
         echo "🔵 @secharvester - Security News"
         echo ""
         echo "🛡️ CIPHER Platform is now operational!"
@@ -302,14 +286,6 @@ steps:
         echo "📊 BigQuery Status:"
         bq show --format=prettyjson $PROJECT_ID:telegram_data | grep -E '"datasetId"|"location"|"description"' || true
         
-        # Service account permissions
-        echo ""
-        echo "🔑 Service Account Permissions:"
-        gcloud projects get-iam-policy $PROJECT_ID \
-          --flatten="bindings[].members" \
-          --filter="bindings.members:cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com" \
-          --format="table(bindings.role)" | head -10
-        
         echo ""
         echo "✅ Deployment report generated successfully"
         echo "📝 Build completed at: $$(date)"
@@ -319,27 +295,11 @@ steps:
 # Required options for service account builds
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'  # Higher performance for builds
+  machineType: 'E2_HIGHCPU_8'
   diskSizeGb: 100
-  substitution_option: 'ALLOW_LOOSE'  # Allow loose substitutions
-
-# Substitutions for flexibility
-substitutions:
-  _SERVICE_NAME: 'telegram-ai-processor'
-  _REGION: 'us-central1'
-  _MEMORY: '4Gi'
-  _CPU: '2'
-  _MIN_INSTANCES: '0'
-  _MAX_INSTANCES: '10'
+  substitution_option: 'ALLOW_LOOSE'
 
 # Images to be pushed to Container Registry
 images:
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/telegram-ai-processor:latest'
-
-# Artifacts and logs
-artifacts:
-  objects:
-    location: 'gs://$PROJECT_ID-build-artifacts'
-    paths:
-      - 'build-logs/*.log'
