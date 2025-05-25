@@ -515,8 +515,17 @@ async def process_channel_messages(channel: str):
         logger.error(f"Error processing channel {channel}: {e}")
 
 async def process_message(message, channel: str):
-    """Process and analyze a single message"""
+    """Process and analyze a single message with proper datetime handling"""
     try:
+        # Convert Telegram datetime to Python datetime
+        message_date = message.date
+        if hasattr(message_date, 'timestamp'):
+            message_date = datetime.fromtimestamp(message_date.timestamp())
+        elif not isinstance(message_date, datetime):
+            message_date = datetime.now()
+            
+        processed_date = datetime.now()
+        
         # Basic message processing
         message_data = {
             "message_id": str(message.id),
@@ -525,8 +534,8 @@ async def process_message(message, channel: str):
             "user_id": str(message.from_id.user_id if message.from_id else ""),
             "username": "",
             "message_text": message.text,
-            "message_date": message.date,
-            "processed_date": datetime.now(),
+            "message_date": message_date,  # Python datetime object
+            "processed_date": processed_date,  # Python datetime object
             "channel_type": CHANNEL_METADATA.get(channel, {}).get("type", "unknown"),
             "channel_priority": CHANNEL_METADATA.get(channel, {}).get("priority", "medium")
         }
@@ -539,8 +548,11 @@ async def process_message(message, channel: str):
         # Store in BigQuery
         await store_message_in_bigquery(message_data)
         
+        logger.info(f"Processed message from {channel}: {message_data.get('threat_level', 'low')} threat")
+        
     except Exception as e:
         logger.error(f"Error processing message: {e}")
+        logger.error(f"Message: {getattr(message, 'text', 'No text')[:50]}...")
 
 async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]:
     """Analyze message with Gemini AI for cybersecurity threats"""
@@ -596,7 +608,7 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         return {}
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
-    """Store processed message in BigQuery"""
+    """Store processed message in BigQuery with proper datetime handling"""
     try:
         if not _bigquery_available:
             return
@@ -604,20 +616,30 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
         table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
         table = _bq_client.get_table(table_ref)
         
-        # Ensure all required fields are present
+        # Helper function to convert datetime objects
+        def convert_datetime(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, datetime):
+                return dt.isoformat()
+            if hasattr(dt, 'timestamp'):  # Telegram date objects
+                return datetime.fromtimestamp(dt.timestamp()).isoformat()
+            return str(dt)
+        
+        # Ensure all required fields are present with proper datetime conversion
         row = {
-            "message_id": message_data.get("message_id", ""),
-            "chat_id": message_data.get("chat_id", ""),
+            "message_id": str(message_data.get("message_id", "")),
+            "chat_id": str(message_data.get("chat_id", "")),
             "chat_username": message_data.get("chat_username", ""),
-            "user_id": message_data.get("user_id", ""),
+            "user_id": str(message_data.get("user_id", "")),
             "username": message_data.get("username", ""),
             "message_text": message_data.get("message_text", ""),
-            "message_date": message_data.get("message_date"),
-            "processed_date": message_data.get("processed_date"),
+            "message_date": convert_datetime(message_data.get("message_date")),
+            "processed_date": convert_datetime(message_data.get("processed_date")),
             "gemini_analysis": message_data.get("gemini_analysis", ""),
             "sentiment": message_data.get("sentiment", "neutral"),
             "key_topics": message_data.get("key_topics", []),
-            "urgency_score": message_data.get("urgency_score", 0.0),
+            "urgency_score": float(message_data.get("urgency_score", 0.0)),
             "category": message_data.get("category", "other"),
             "threat_level": message_data.get("threat_level", "low"),
             "threat_type": message_data.get("threat_type", "unknown"),
@@ -638,10 +660,11 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
         if errors:
             logger.error(f"BigQuery insert failed: {errors}")
         else:
-            logger.debug("Message stored in BigQuery")
+            logger.info(f"Message stored in BigQuery: {row['chat_username']} - {row['threat_level']}")
             
     except Exception as e:
         logger.error(f"BigQuery storage failed: {e}")
+        logger.error(f"Message data types: {[(k, type(v).__name__) for k, v in message_data.items()]}")
 
 async def stop_monitoring_system():
     """Stop the monitoring system"""
