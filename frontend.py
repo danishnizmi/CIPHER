@@ -1,5 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, Query, BackgroundTasks
-from fastapi.templating import Jinja2Templates
+from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 import logging
 import time
@@ -8,815 +7,1204 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
-# Cache for performance optimization
+# Cache for performance
 _cache = {}
 _cache_ttl = {}
-CACHE_DURATION = 60  # 60 seconds default cache
-
-def is_cache_valid(key: str) -> bool:
-    """Check if cache entry is still valid"""
-    return key in _cache and key in _cache_ttl and time.time() < _cache_ttl[key]
-
-def set_cache(key: str, value: Any, duration: int = CACHE_DURATION):
-    """Set cache entry with TTL"""
-    _cache[key] = value
-    _cache_ttl[key] = time.time() + duration
+CACHE_DURATION = 45  # 45 seconds cache
 
 def get_cache(key: str) -> Any:
-    """Get cache entry if valid"""
-    if is_cache_valid(key):
+    """Get cached value if still valid"""
+    if key in _cache and key in _cache_ttl and time.time() < _cache_ttl[key]:
         return _cache[key]
     return None
 
-def get_safe_utils():
-    """Safely import utils module with error handling"""
+def set_cache(key: str, value: Any, duration: int = CACHE_DURATION):
+    """Set cache with TTL"""
+    _cache[key] = value
+    _cache_ttl[key] = time.time() + duration
+
+def get_utils():
+    """Safely import utils module"""
     try:
-        from utils import (
-            get_recent_insights, 
-            get_message_stats,
-            MONITORED_CHANNELS,
-            CHANNEL_METADATA,
-            telegram_client
-        )
-        return {
-            'get_recent_insights': get_recent_insights,
-            'get_message_stats': get_message_stats,
-            'MONITORED_CHANNELS': MONITORED_CHANNELS,
-            'CHANNEL_METADATA': CHANNEL_METADATA,
-            'telegram_client': telegram_client
-        }
-    except Exception as e:
-        logger.warning(f"Utils module not available: {e}")
+        import utils
+        return utils
+    except ImportError:
+        logger.warning("Utils module not available")
         return None
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/dashboard", response_class=HTMLResponse)
 async def cipher_dashboard(request: Request):
-    """CIPHER main cybersecurity intelligence dashboard"""
+    """CIPHER Cybersecurity Intelligence Dashboard - Production Version"""
     try:
-        # Check cache first for performance
-        cache_key = "dashboard_data"
+        # Check cache first
+        cache_key = "dashboard_full_data"
         cached_data = get_cache(cache_key)
         
         if cached_data:
-            logger.debug("Using cached dashboard data")
-            insights, stats, monitoring_status, threat_analytics = cached_data
+            stats, insights, monitoring, analytics = cached_data
         else:
-            # Get utils safely
-            utils = get_safe_utils()
+            # Get data from utils
+            utils = get_utils()
             
             if utils:
-                # Get cybersecurity insights
                 try:
-                    insights = await utils['get_recent_insights'](limit=25)
+                    stats = await utils.get_comprehensive_stats()
+                    insights_data = await utils.get_threat_insights()
+                    insights = insights_data["insights"][:20]  # Latest 20
+                    monitoring = await utils.get_monitoring_status()
+                    analytics = await utils.get_threat_analytics()
                 except Exception as e:
-                    logger.warning(f"Could not get insights: {e}")
-                    insights = []
-                
-                # Get statistics
-                try:
-                    stats = await utils['get_message_stats']()
-                except Exception as e:
-                    logger.warning(f"Could not get stats: {e}")
+                    logger.error(f"Error getting data: {e}")
                     stats = _get_empty_stats()
-                
-                # Get monitoring status
-                monitoring_status = {
-                    "active": utils['telegram_client'] is not None and utils['telegram_client'].is_connected() if utils['telegram_client'] else False,
-                    "channels": utils['MONITORED_CHANNELS'],
-                    "channel_details": utils['CHANNEL_METADATA'],
-                    "total_channels": len(utils['MONITORED_CHANNELS']),
-                    "last_check": datetime.now().isoformat()
-                }
-                
-                # Calculate threat analytics
-                threat_analytics = calculate_threat_analytics(insights, stats)
+                    insights = []
+                    monitoring = _get_empty_monitoring()
+                    analytics = _get_empty_analytics()
             else:
-                # Fallback when utils not available (during initialization)
-                insights = []
                 stats = _get_empty_stats()
-                monitoring_status = {
-                    "active": False,
-                    "channels": ["@DarkfeedNews", "@breachdetector", "@secharvester"],
-                    "channel_details": _get_fallback_channel_metadata(),
-                    "total_channels": 3,
-                    "last_check": datetime.now().isoformat(),
-                    "status": "initializing"
-                }
-                threat_analytics = _get_empty_threat_analytics()
+                insights = []
+                monitoring = _get_empty_monitoring()
+                analytics = _get_empty_analytics()
             
             # Cache the data
-            set_cache(cache_key, (insights, stats, monitoring_status, threat_analytics))
+            set_cache(cache_key, (stats, insights, monitoring, analytics))
         
-        # Calculate dashboard metrics
-        dashboard_metrics = {
-            "high_priority_threats": len([i for i in insights if i.get("threat_level") in ["critical", "high"]]),
-            "active_campaigns": len(set(i.get("threat_type", "") for i in insights if i.get("threat_type") and i.get("threat_level") in ["critical", "high"])),
-            "recent_cves": len([i for i in insights if i.get("cve_references") and len(i.get("cve_references", [])) > 0]),
-            "iocs_detected": sum(len(i.get("iocs_detected", [])) for i in insights),
-            "malware_families": len(set(family for i in insights for family in i.get("malware_families", []))),
-            "apt_activity": len([i for i in insights if i.get("category") == "apt" or "apt" in i.get("threat_type", "").lower()]),
-            "data_breaches": len([i for i in insights if i.get("category") == "data_breach"]),
-            "ransomware_incidents": len([i for i in insights if i.get("category") == "ransomware"]),
-        }
-        
-        # Determine system status
-        if monitoring_status.get("active"):
-            system_status = "operational"
-        elif monitoring_status.get("status") == "initializing":
-            system_status = "initializing"
-        else:
-            system_status = "degraded"
-        
-        return templates.TemplateResponse(
-            "dashboard.html", 
-            {
-                "request": request,
-                "insights": insights,
-                "stats": stats,
-                "monitoring": monitoring_status,
-                "threat_analytics": threat_analytics,
-                "dashboard_metrics": dashboard_metrics,
-                "system_status": system_status,
-                "current_time": datetime.now().isoformat(),
-                "page_title": "CIPHER - Cybersecurity Intelligence Dashboard",
-                "PROJECT_ID": "primal-chariot-382610"
-            }
-        )
+        # Generate dashboard
+        dashboard_html = _generate_dashboard_html(stats, insights, monitoring, analytics)
+        return HTMLResponse(content=dashboard_html, status_code=200)
         
     except Exception as e:
         logger.error(f"Dashboard error: {e}")
-        return templates.TemplateResponse(
-            "dashboard.html",
-            {
-                "request": request,
-                "insights": [],
-                "stats": _get_empty_stats(),
-                "monitoring": {"active": False, "channels": [], "total_channels": 0, "channel_details": {}, "status": "error"},
-                "threat_analytics": _get_empty_threat_analytics(),
-                "dashboard_metrics": _get_empty_dashboard_metrics(),
-                "system_status": "error",
-                "error": f"Dashboard temporarily unavailable: {str(e)}",
-                "page_title": "CIPHER - System Error",
-                "PROJECT_ID": "primal-chariot-382610"
-            }
-        )
+        return HTMLResponse(content=_generate_error_dashboard(str(e)), status_code=200)
 
-def calculate_threat_analytics(insights: List[Dict], stats: Dict) -> Dict[str, Any]:
-    """Calculate comprehensive cybersecurity threat analytics"""
-    try:
-        analytics = {
-            # Threat level distribution
-            "threat_levels": {
-                "critical": 0,
-                "high": 0,
-                "medium": 0,
-                "low": 0,
-                "info": 0
-            },
+def _generate_dashboard_html(stats: Dict, insights: List, monitoring: Dict, analytics: Dict) -> str:
+    """Generate comprehensive dashboard HTML"""
+    
+    # Calculate derived metrics
+    system_status = "OPERATIONAL" if monitoring.get("active") else "STANDBY"
+    threat_score = analytics.get("summary", {}).get("avg_urgency", 0.0)
+    high_priority = stats.get("high_threats", 0) + stats.get("critical_threats", 0)
+    
+    # Status colors
+    status_color = "#00ff00" if monitoring.get("active") else "#ffaa00"
+    threat_color = "#ff4444" if threat_score > 0.7 else "#ffaa00" if threat_score > 0.4 else "#00ff00"
+    
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>CIPHER - Cybersecurity Intelligence Platform</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
             
-            # Cybersecurity categories
-            "categories": {
-                "threat_intel": 0,
-                "data_breach": 0,
-                "vulnerability": 0,
-                "malware": 0,
-                "ransomware": 0,
-                "apt": 0,
-                "phishing": 0,
-                "other": 0
-            },
+            body {{
+                font-family: 'Segoe UI', 'Consolas', monospace;
+                background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #16213e 100%);
+                color: #ffffff;
+                min-height: 100vh;
+                overflow-x: hidden;
+            }}
             
-            # Channel analysis
-            "channel_activity": {},
+            .cyber-grid {{
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-image: 
+                    linear-gradient(rgba(0, 255, 0, 0.03) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0, 255, 0, 0.03) 1px, transparent 1px);
+                background-size: 20px 20px;
+                pointer-events: none;
+                z-index: 0;
+            }}
             
-            # Time-based metrics
-            "hourly_activity": {str(i): 0 for i in range(24)},
-            "daily_trends": {},
+            .container {{
+                max-width: 1600px;
+                margin: 0 auto;
+                padding: 20px;
+                position: relative;
+                z-index: 1;
+            }}
             
-            # Advanced threat metrics
-            "top_threats": [],
-            "active_campaigns": [],
-            "threat_actors": {},
-            "affected_systems": {},
-            "geographic_indicators": [],
-            "attack_vectors": {},
-            "urgency_distribution": {
-                "critical": 0,  # 0.8-1.0
-                "high": 0,      # 0.6-0.8
-                "medium": 0,    # 0.4-0.6
-                "low": 0        # 0.0-0.4
-            },
+            .header {{
+                text-align: center;
+                background: rgba(0, 0, 0, 0.8);
+                border: 2px solid #00ff00;
+                border-radius: 15px;
+                padding: 30px;
+                margin-bottom: 30px;
+                box-shadow: 0 0 30px rgba(0, 255, 0, 0.2);
+                backdrop-filter: blur(10px);
+            }}
             
-            # IOC tracking
-            "cve_count": 0,
-            "ioc_count": 0,
-            "malware_families_count": 0,
-        }
+            .header h1 {{
+                font-size: 3em;
+                color: #00ff00;
+                text-shadow: 0 0 20px #00ff00;
+                margin-bottom: 10px;
+                animation: pulse 2s infinite;
+            }}
+            
+            .status-bar {{
+                display: flex;
+                justify-content: center;
+                gap: 30px;
+                margin-top: 20px;
+                flex-wrap: wrap;
+            }}
+            
+            .status-item {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 16px;
+                background: rgba(0, 255, 0, 0.1);
+                border: 1px solid #00ff00;
+                border-radius: 20px;
+                font-family: monospace;
+            }}
+            
+            .status-dot {{
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                animation: blink 2s infinite;
+            }}
+            
+            .grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+                gap: 25px;
+                margin-bottom: 30px;
+            }}
+            
+            .card {{
+                background: rgba(0, 0, 0, 0.7);
+                border: 1px solid #00ff00;
+                border-radius: 12px;
+                padding: 25px;
+                backdrop-filter: blur(10px);
+                transition: all 0.3s ease;
+                position: relative;
+                overflow: hidden;
+            }}
+            
+            .card::before {{
+                content: '';
+                position: absolute;
+                top: 0;
+                left: -100%;
+                width: 100%;
+                height: 100%;
+                background: linear-gradient(90deg, transparent, rgba(0, 255, 0, 0.1), transparent);
+                transition: left 0.5s;
+            }}
+            
+            .card:hover {{
+                border-color: #6366f1;
+                transform: translateY(-5px);
+                box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+            }}
+            
+            .card:hover::before {{
+                left: 100%;
+            }}
+            
+            .card-header {{
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 20px;
+            }}
+            
+            .card-icon {{
+                font-size: 1.8em;
+                padding: 12px;
+                background: linear-gradient(45deg, #6366f1, #8b5cf6);
+                border-radius: 10px;
+                box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+            }}
+            
+            .card-title {{
+                font-size: 1.2em;
+                font-weight: 600;
+                color: #6366f1;
+            }}
+            
+            .metric {{
+                font-size: 2.8em;
+                font-weight: bold;
+                color: #ffffff;
+                text-shadow: 0 0 10px currentColor;
+                margin: 15px 0;
+            }}
+            
+            .metric.critical {{ color: #ff4444; }}
+            .metric.warning {{ color: #ffaa00; }}
+            .metric.good {{ color: #00ff00; }}
+            .metric.info {{ color: #6366f1; }}
+            
+            .sub-metrics {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                gap: 15px;
+                margin-top: 20px;
+            }}
+            
+            .sub-metric {{
+                text-align: center;
+                padding: 10px;
+                background: rgba(255, 255, 255, 0.05);
+                border-radius: 8px;
+                border-left: 3px solid #6366f1;
+            }}
+            
+            .sub-metric-value {{
+                font-size: 1.5em;
+                font-weight: bold;
+                color: #ffffff;
+            }}
+            
+            .sub-metric-label {{
+                font-size: 0.8em;
+                color: #888;
+                text-transform: uppercase;
+            }}
+            
+            .insights-section {{
+                background: rgba(0, 0, 0, 0.8);
+                border: 1px solid #00ff00;
+                border-radius: 15px;
+                margin-top: 30px;
+                overflow: hidden;
+                backdrop-filter: blur(10px);
+            }}
+            
+            .insights-header {{
+                background: linear-gradient(45deg, rgba(0, 255, 0, 0.2), rgba(99, 102, 241, 0.2));
+                padding: 20px 25px;
+                border-bottom: 1px solid #00ff00;
+            }}
+            
+            .insights-content {{
+                max-height: 600px;
+                overflow-y: auto;
+                padding: 20px;
+            }}
+            
+            .insight {{
+                background: rgba(99, 102, 241, 0.1);
+                border-left: 4px solid #6366f1;
+                border-radius: 0 8px 8px 0;
+                padding: 20px;
+                margin-bottom: 15px;
+                transition: all 0.3s ease;
+                position: relative;
+            }}
+            
+            .insight:hover {{
+                border-left-color: #00ff00;
+                background: rgba(0, 255, 0, 0.1);
+                transform: translateX(5px);
+            }}
+            
+            .insight-header {{
+                display: flex;
+                justify-content: between;
+                align-items: center;
+                margin-bottom: 12px;
+                flex-wrap: wrap;
+                gap: 10px;
+            }}
+            
+            .insight-source {{
+                font-weight: bold;
+                color: #6366f1;
+                font-family: monospace;
+            }}
+            
+            .threat-badge {{
+                padding: 4px 12px;
+                border-radius: 15px;
+                font-size: 0.75em;
+                font-weight: bold;
+                text-transform: uppercase;
+                font-family: monospace;
+            }}
+            
+            .threat-critical {{
+                background: rgba(255, 68, 68, 0.2);
+                color: #ff4444;
+                border: 1px solid #ff4444;
+                animation: blink 2s infinite;
+            }}
+            
+            .threat-high {{
+                background: rgba(255, 170, 0, 0.2);
+                color: #ffaa00;
+                border: 1px solid #ffaa00;
+            }}
+            
+            .threat-medium {{
+                background: rgba(255, 255, 0, 0.2);
+                color: #ffff00;
+                border: 1px solid #ffff00;
+            }}
+            
+            .threat-low {{
+                background: rgba(0, 255, 0, 0.2);
+                color: #00ff00;
+                border: 1px solid #00ff00;
+            }}
+            
+            .insight-analysis {{
+                line-height: 1.6;
+                margin-bottom: 15px;
+                color: #e0e0e0;
+            }}
+            
+            .insight-meta {{
+                display: flex;
+                justify-content: between;
+                align-items: center;
+                font-size: 0.85em;
+                color: #888;
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                padding-top: 12px;
+                flex-wrap: wrap;
+                gap: 15px;
+            }}
+            
+            .urgency-bar {{
+                width: 100px;
+                height: 6px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 3px;
+                overflow: hidden;
+            }}
+            
+            .urgency-fill {{
+                height: 100%;
+                background: linear-gradient(90deg, #00ff00, #ffaa00, #ff4444);
+                transition: width 0.3s ease;
+            }}
+            
+            .analytics-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 25px;
+                margin: 30px 0;
+            }}
+            
+            .chart-container {{
+                background: rgba(0, 0, 0, 0.7);
+                border: 1px solid #6366f1;
+                border-radius: 12px;
+                padding: 20px;
+                backdrop-filter: blur(10px);
+            }}
+            
+            .chart-title {{
+                color: #6366f1;
+                font-weight: 600;
+                margin-bottom: 15px;
+                text-align: center;
+            }}
+            
+            .bar-chart {{
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }}
+            
+            .bar-item {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }}
+            
+            .bar-label {{
+                min-width: 80px;
+                font-size: 0.8em;
+                text-transform: uppercase;
+                color: #888;
+            }}
+            
+            .bar {{
+                flex: 1;
+                height: 20px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                overflow: hidden;
+                position: relative;
+            }}
+            
+            .bar-fill {{
+                height: 100%;
+                background: linear-gradient(90deg, #6366f1, #8b5cf6);
+                border-radius: 10px;
+                transition: width 0.8s ease;
+            }}
+            
+            .bar-value {{
+                min-width: 30px;
+                text-align: right;
+                font-weight: bold;
+                color: #ffffff;
+            }}
+            
+            .channels-section {{
+                background: rgba(0, 0, 0, 0.7);
+                border: 1px solid #6366f1;
+                border-radius: 15px;
+                padding: 25px;
+                margin: 30px 0;
+                backdrop-filter: blur(10px);
+            }}
+            
+            .channels-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 20px;
+                margin-top: 20px;
+            }}
+            
+            .channel-card {{
+                background: rgba(99, 102, 241, 0.1);
+                border: 1px solid #6366f1;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+                transition: all 0.3s ease;
+            }}
+            
+            .channel-card:hover {{
+                border-color: #00ff00;
+                transform: scale(1.05);
+            }}
+            
+            .channel-icon {{
+                font-size: 2em;
+                margin-bottom: 10px;
+            }}
+            
+            .channel-name {{
+                font-weight: bold;
+                color: #6366f1;
+                margin-bottom: 5px;
+            }}
+            
+            .channel-desc {{
+                font-size: 0.8em;
+                color: #888;
+            }}
+            
+            .footer {{
+                text-align: center;
+                margin-top: 50px;
+                padding: 30px;
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                background: rgba(0, 0, 0, 0.5);
+                border-radius: 15px;
+            }}
+            
+            .footer-links {{
+                display: flex;
+                justify-content: center;
+                gap: 30px;
+                margin-top: 20px;
+                flex-wrap: wrap;
+            }}
+            
+            .footer-link {{
+                color: #6366f1;
+                text-decoration: none;
+                padding: 8px 16px;
+                border: 1px solid #6366f1;
+                border-radius: 20px;
+                transition: all 0.3s ease;
+            }}
+            
+            .footer-link:hover {{
+                background: #6366f1;
+                color: #ffffff;
+                transform: translateY(-2px);
+            }}
+            
+            @keyframes pulse {{
+                0%, 100% {{ opacity: 1; }}
+                50% {{ opacity: 0.7; }}
+            }}
+            
+            @keyframes blink {{
+                0%, 100% {{ opacity: 1; }}
+                50% {{ opacity: 0.3; }}
+            }}
+            
+            .loading {{
+                display: inline-flex;
+                gap: 4px;
+            }}
+            
+            .loading span {{
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #6366f1;
+                animation: loading 1.4s ease-in-out infinite both;
+            }}
+            
+            .loading span:nth-child(1) {{ animation-delay: -0.32s; }}
+            .loading span:nth-child(2) {{ animation-delay: -0.16s; }}
+            
+            @keyframes loading {{
+                0%, 80%, 100% {{ transform: scale(0); }}
+                40% {{ transform: scale(1); }}
+            }}
+            
+            @media (max-width: 768px) {{
+                .grid {{ grid-template-columns: 1fr; }}
+                .analytics-grid {{ grid-template-columns: 1fr; }}
+                .channels-grid {{ grid-template-columns: 1fr; }}
+                .status-bar {{ flex-direction: column; align-items: center; }}
+                .header h1 {{ font-size: 2em; }}
+                .container {{ padding: 10px; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="cyber-grid"></div>
         
-        if not insights:
-            return analytics
+        <div class="container">
+            <!-- Header -->
+            <div class="header">
+                <h1>🛡️ CIPHER</h1>
+                <p style="font-size: 1.3em; color: #888; margin-bottom: 20px;">
+                    Cybersecurity Intelligence Platform
+                </p>
+                
+                <div class="status-bar">
+                    <div class="status-item">
+                        <div class="status-dot" style="background-color: {status_color};"></div>
+                        <span>System: {system_status}</span>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-dot" style="background-color: {'#00ff00' if stats.get('data_source') == 'bigquery' else '#ffaa00'};"></div>
+                        <span>BigQuery: {'CONNECTED' if stats.get('data_source') == 'bigquery' else 'LIMITED'}</span>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-dot" style="background-color: {threat_color};"></div>
+                        <span>Threat Level: {_get_threat_level_text(threat_score)}</span>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-dot" style="background-color: #6366f1;"></div>
+                        <span>Channels: {monitoring.get('channels', {}).get('count', 3)}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Main Metrics Grid -->
+            <div class="grid">
+                <!-- Intelligence Summary -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-icon">📊</div>
+                        <div class="card-title">Intelligence Summary</div>
+                    </div>
+                    <div class="metric {'good' if stats['total_messages'] > 0 else 'warning'}">{stats['total_messages']:,}</div>
+                    <p style="color: #888; margin-bottom: 20px;">Total Messages Processed</p>
+                    
+                    <div class="sub-metrics">
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['processed_today']}</div>
+                            <div class="sub-metric-label">Today</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['unique_channels']}</div>
+                            <div class="sub-metric-label">Channels</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['avg_urgency']:.2f}</div>
+                            <div class="sub-metric-label">Avg Urgency</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Threat Analysis -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-icon">🚨</div>
+                        <div class="card-title">Threat Analysis</div>
+                    </div>
+                    <div class="metric {'critical' if high_priority > 0 else 'good'}">{high_priority}</div>
+                    <p style="color: #888; margin-bottom: 20px;">High Priority Threats</p>
+                    
+                    <div class="sub-metrics">
+                        <div class="sub-metric">
+                            <div class="sub-metric-value" style="color: #ff4444;">{stats['critical_threats']}</div>
+                            <div class="sub-metric-label">Critical</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value" style="color: #ffaa00;">{stats['high_threats']}</div>
+                            <div class="sub-metric-label">High</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['apt_activity']}</div>
+                            <div class="sub-metric-label">APT</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Security Intelligence -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-icon">🔍</div>
+                        <div class="card-title">Security Intelligence</div>
+                    </div>
+                    <div class="metric {'warning' if stats['cve_mentions'] > 0 else 'good'}">{stats['cve_mentions']}</div>
+                    <p style="color: #888; margin-bottom: 20px;">CVE References</p>
+                    
+                    <div class="sub-metrics">
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['vulnerabilities']}</div>
+                            <div class="sub-metric-label">Vulnerabilities</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['data_breaches']}</div>
+                            <div class="sub-metric-label">Breaches</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value">{stats['malware_alerts']}</div>
+                            <div class="sub-metric-label">Malware</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System Status -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-icon">⚡</div>
+                        <div class="card-title">System Status</div>
+                    </div>
+                    <div class="metric info">{monitoring.get('channels', {}).get('count', 3)}/3</div>
+                    <p style="color: #888; margin-bottom: 20px;">Channels Active</p>
+                    
+                    <div class="sub-metrics">
+                        <div class="sub-metric">
+                            <div class="sub-metric-value" style="color: {'#00ff00' if monitoring.get('subsystems', {}).get('bigquery') else '#ffaa00'};">{'✓' if monitoring.get('subsystems', {}).get('bigquery') else '○'}</div>
+                            <div class="sub-metric-label">BigQuery</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value" style="color: {'#00ff00' if monitoring.get('subsystems', {}).get('gemini') else '#ffaa00'};">{'✓' if monitoring.get('subsystems', {}).get('gemini') else '○'}</div>
+                            <div class="sub-metric-label">Gemini AI</div>
+                        </div>
+                        <div class="sub-metric">
+                            <div class="sub-metric-value" style="color: {'#00ff00' if monitoring.get('subsystems', {}).get('telegram') else '#ffaa00'};">{'✓' if monitoring.get('subsystems', {}).get('telegram') else '○'}</div>
+                            <div class="sub-metric-label">Telegram</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Threat Analytics -->
+            {_generate_analytics_section(analytics)}
+            
+            <!-- Recent Intelligence Feed -->
+            <div class="insights-section">
+                <div class="insights-header">
+                    <h3 style="margin: 0; color: #00ff00;">🔍 Recent Threat Intelligence</h3>
+                    <p style="margin: 5px 0 0 0; color: #888;">
+                        {len(insights)} intelligence signals processed | Auto-refresh: 30s
+                    </p>
+                </div>
+                
+                <div class="insights-content">
+                    {_generate_insights_html(insights)}
+                </div>
+            </div>
+            
+            <!-- Monitored Channels -->
+            {_generate_channels_section(monitoring)}
+            
+            <!-- Footer -->
+            <div class="footer">
+                <p><strong>CIPHER</strong> v1.0.0 | Powered by Google Cloud & Gemini AI</p>
+                <p style="color: #666; margin: 10px 0;">
+                    Project: primal-chariot-382610 | Service: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+                </p>
+                
+                <div class="footer-links">
+                    <a href="/api/stats" class="footer-link">📈 Stats API</a>
+                    <a href="/health" class="footer-link">🏥 Health Check</a>
+                    <a href="/api/monitoring/status" class="footer-link">📡 Monitoring</a>
+                    <a href="/api/analytics" class="footer-link">📊 Analytics API</a>
+                    <a href="/api/docs" class="footer-link">📚 API Docs</a>
+                </div>
+            </div>
+        </div>
         
-        # Initialize channel activity
-        channels = ["@DarkfeedNews", "@breachdetector", "@secharvester"]
-        for channel in channels:
-            analytics["channel_activity"][channel] = {
-                "count": 0,
-                "avg_urgency": 0.0,
-                "threat_types": set(),
-                "last_activity": None,
-                "high_priority": 0
-            }
+        <script>
+            // Auto-refresh dashboard every 30 seconds
+            setTimeout(() => location.reload(), 30000);
+            
+            // Add loading indicators
+            document.querySelectorAll('.card').forEach((card, index) => {{
+                card.style.animationDelay = `${{index * 0.1}}s`;
+                card.style.animation = 'fadeIn 0.6s ease-out';
+            }});
+            
+            // Update timestamp
+            function updateTime() {{
+                const now = new Date();
+                const timeStr = now.toLocaleTimeString();
+                const dateStr = now.toLocaleDateString();
+                document.title = `CIPHER Dashboard - ${{timeStr}}`;
+            }}
+            
+            setInterval(updateTime, 1000);
+            updateTime();
+            
+            // Add CSS for fadeIn animation
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes fadeIn {{
+                    from {{ opacity: 0; transform: translateY(20px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+            `;
+            document.head.appendChild(style);
+        </script>
+    </body>
+    </html>
+    """
+
+def _generate_analytics_section(analytics: Dict) -> str:
+    """Generate threat analytics section"""
+    if not analytics or analytics.get("status") == "error":
+        return """
+        <div class="analytics-grid">
+            <div class="chart-container">
+                <div class="chart-title">Threat Analytics Initializing</div>
+                <p style="text-align: center; color: #888; padding: 40px;">
+                    <span class="loading"><span></span><span></span><span></span></span>
+                    <br><br>Analytics will be available after data collection
+                </p>
+            </div>
+        </div>
+        """
+    
+    threat_levels = analytics.get("threat_levels", {})
+    categories = analytics.get("categories", {})
+    max_level = max(threat_levels.values()) if threat_levels.values() else 1
+    max_cat = max(categories.values()) if categories.values() else 1
+    
+    return f"""
+    <div class="analytics-grid">
+        <!-- Threat Levels Chart -->
+        <div class="chart-container">
+            <div class="chart-title">Threat Level Distribution</div>
+            <div class="bar-chart">
+                <div class="bar-item">
+                    <div class="bar-label">Critical</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(threat_levels.get('critical', 0)/max_level*100) if max_level else 0}%; background: linear-gradient(90deg, #ff4444, #ff6666);"></div>
+                    </div>
+                    <div class="bar-value">{threat_levels.get('critical', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">High</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(threat_levels.get('high', 0)/max_level*100) if max_level else 0}%; background: linear-gradient(90deg, #ffaa00, #ffcc44);"></div>
+                    </div>
+                    <div class="bar-value">{threat_levels.get('high', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">Medium</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(threat_levels.get('medium', 0)/max_level*100) if max_level else 0}%; background: linear-gradient(90deg, #ffff00, #ffff88);"></div>
+                    </div>
+                    <div class="bar-value">{threat_levels.get('medium', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">Low</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(threat_levels.get('low', 0)/max_level*100) if max_level else 0}%; background: linear-gradient(90deg, #00ff00, #44ff44);"></div>
+                    </div>
+                    <div class="bar-value">{threat_levels.get('low', 0)}</div>
+                </div>
+            </div>
+        </div>
         
-        # Process insights
-        threat_types = {}
-        urgency_scores = []
+        <!-- Categories Chart -->
+        <div class="chart-container">
+            <div class="chart-title">Threat Categories</div>
+            <div class="bar-chart">
+                <div class="bar-item">
+                    <div class="bar-label">Intel</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(categories.get('threat_intel', 0)/max_cat*100) if max_cat else 0}%;"></div>
+                    </div>
+                    <div class="bar-value">{categories.get('threat_intel', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">Breach</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(categories.get('data_breach', 0)/max_cat*100) if max_cat else 0}%;"></div>
+                    </div>
+                    <div class="bar-value">{categories.get('data_breach', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">Vuln</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(categories.get('vulnerability', 0)/max_cat*100) if max_cat else 0}%;"></div>
+                    </div>
+                    <div class="bar-value">{categories.get('vulnerability', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">Malware</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(categories.get('malware', 0)/max_cat*100) if max_cat else 0}%;"></div>
+                    </div>
+                    <div class="bar-value">{categories.get('malware', 0)}</div>
+                </div>
+                <div class="bar-item">
+                    <div class="bar-label">APT</div>
+                    <div class="bar">
+                        <div class="bar-fill" style="width: {(categories.get('apt', 0)/max_cat*100) if max_cat else 0}%;"></div>
+                    </div>
+                    <div class="bar-value">{categories.get('apt', 0)}</div>
+                </div>
+            </div>
+        </div>
         
-        for insight in insights:
-            try:
-                # Threat level distribution
-                threat_level = insight.get("threat_level", "low")
-                if threat_level in analytics["threat_levels"]:
-                    analytics["threat_levels"][threat_level] += 1
+        <!-- Summary Stats -->
+        <div class="chart-container">
+            <div class="chart-title">Intelligence Summary</div>
+            <div style="text-align: center; padding: 20px;">
+                <div style="font-size: 2em; color: #6366f1; margin-bottom: 10px;">
+                    {analytics.get('summary', {}).get('total_threats', 0)}
+                </div>
+                <div style="color: #888; margin-bottom: 20px;">Total Threats Analyzed</div>
                 
-                # Category distribution
-                category = insight.get("category", "other")
-                if category in analytics["categories"]:
-                    analytics["categories"][category] += 1
-                
-                # Urgency distribution
-                urgency = insight.get("urgency_score", 0.0)
-                urgency_scores.append(urgency)
-                if urgency >= 0.8:
-                    analytics["urgency_distribution"]["critical"] += 1
-                elif urgency >= 0.6:
-                    analytics["urgency_distribution"]["high"] += 1
-                elif urgency >= 0.4:
-                    analytics["urgency_distribution"]["medium"] += 1
-                else:
-                    analytics["urgency_distribution"]["low"] += 1
-                
-                # Channel activity analysis
-                channel = insight.get("chat_username", "Unknown")
-                if channel in analytics["channel_activity"]:
-                    channel_data = analytics["channel_activity"][channel]
-                    channel_data["count"] += 1
-                    channel_data["threat_types"].add(insight.get("threat_type", "unknown"))
-                    channel_data["last_activity"] = insight.get("message_date")
-                    if threat_level in ["critical", "high"]:
-                        channel_data["high_priority"] += 1
-                
-                # Hourly activity pattern
-                if insight.get("message_date"):
-                    try:
-                        dt = datetime.fromisoformat(insight["message_date"].replace("Z", "+00:00"))
-                        hour = str(dt.hour)
-                        analytics["hourly_activity"][hour] += 1
-                    except:
-                        pass
-                
-                # Track threat types
-                threat_type = insight.get("threat_type", "unknown")
-                if threat_type != "unknown":
-                    threat_types[threat_type] = threat_types.get(threat_type, 0) + 1
-                
-                # Track threat actors
-                for actor in insight.get("threat_actors", []):
-                    analytics["threat_actors"][actor] = analytics["threat_actors"].get(actor, 0) + 1
-                
-                # Track affected systems
-                for system in insight.get("affected_systems", []):
-                    analytics["affected_systems"][system] = analytics["affected_systems"].get(system, 0) + 1
-                
-                # Track attack vectors
-                for vector in insight.get("attack_vectors", []):
-                    analytics["attack_vectors"][vector] = analytics["attack_vectors"].get(vector, 0) + 1
-                
-                # Count IOCs
-                analytics["cve_count"] += len(insight.get("cve_references", []))
-                analytics["ioc_count"] += len(insight.get("iocs_detected", []))
-                analytics["malware_families_count"] += len(insight.get("malware_families", []))
-                
-            except Exception as e:
-                logger.warning(f"Error processing insight for analytics: {e}")
-                continue
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: center;">
+                    <div>
+                        <div style="font-size: 1.5em; color: #ff4444;">{analytics.get('summary', {}).get('high_priority', 0)}</div>
+                        <div style="font-size: 0.8em; color: #888;">High Priority</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 1.5em; color: #ffaa00;">{analytics.get('summary', {}).get('avg_urgency', 0):.2f}</div>
+                        <div style="font-size: 0.8em; color: #888;">Avg Urgency</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+
+def _generate_insights_html(insights: List) -> str:
+    """Generate insights HTML"""
+    if not insights:
+        return """
+        <div style="text-align: center; padding: 60px; color: #666;">
+            <div style="font-size: 3em; margin-bottom: 20px; opacity: 0.5;">🔍</div>
+            <h3 style="color: #888; margin-bottom: 15px;">No Recent Threat Intelligence</h3>
+            <p style="margin-bottom: 10px;">CIPHER is monitoring cybersecurity channels for threats.</p>
+            <p style="font-size: 0.9em;">Intelligence data will appear here as it's collected and analyzed.</p>
+            <div style="margin-top: 30px;">
+                <span class="loading"><span></span><span></span><span></span></span>
+                <br><span style="font-size: 0.8em; color: #666;">Monitoring Active</span>
+            </div>
+        </div>
+        """
+    
+    insights_html = ""
+    for insight in insights:
+        threat_level = insight.get("threat_level", "low")
+        urgency = insight.get("urgency_score", 0.0)
         
-        # Calculate channel averages
-        for channel_data in analytics["channel_activity"].values():
-            if channel_data["count"] > 0:
-                # Convert set to list for JSON serialization
-                channel_data["threat_types"] = list(channel_data["threat_types"])
-                # Calculate average urgency for channel
-                channel_urgencies = [i.get("urgency_score", 0) for i in insights if i.get("chat_username") == channel]
-                channel_data["avg_urgency"] = sum(channel_urgencies) / len(channel_urgencies) if channel_urgencies else 0.0
-            else:
-                channel_data["threat_types"] = []
-                channel_data["avg_urgency"] = 0.0
-        
-        # Top threats by frequency
-        analytics["top_threats"] = [
-            {
-                "type": threat_type, 
-                "count": count, 
-                "severity": _assess_threat_severity(threat_type),
-                "percentage": round((count / len(insights)) * 100, 1) if insights else 0
-            }
-            for threat_type, count in sorted(threat_types.items(), key=lambda x: x[1], reverse=True)[:10]
-        ]
-        
-        # Active campaigns (group similar threat types)
-        campaigns = {}
-        for threat_type, count in threat_types.items():
-            campaign_key = _categorize_campaign(threat_type)
-            campaigns[campaign_key] = campaigns.get(campaign_key, 0) + count
-        
-        analytics["active_campaigns"] = [
-            {"campaign": campaign, "incidents": count, "threat_level": _assess_campaign_severity(campaign)}
-            for campaign, count in sorted(campaigns.items(), key=lambda x: x[1], reverse=True)[:5]
-        ]
-        
-        # Calculate overall threat scores
-        if urgency_scores:
-            analytics["overall_threat_score"] = sum(urgency_scores) / len(urgency_scores)
-            analytics["max_threat_score"] = max(urgency_scores)
+        # Determine threat badge class
+        if threat_level == "critical":
+            badge_class = "threat-critical"
+        elif threat_level == "high":
+            badge_class = "threat-high"
+        elif threat_level == "medium":
+            badge_class = "threat-medium"
         else:
-            analytics["overall_threat_score"] = 0.0
-            analytics["max_threat_score"] = 0.0
+            badge_class = "threat-low"
         
-        # Geographic indicators (simplified)
-        geographic_terms = []
-        for insight in insights:
-            geographic_terms.extend(insight.get("geographical_targets", []))
-        analytics["geographic_indicators"] = list(set(geographic_terms))[:10]
-        
-        # Summary statistics
-        analytics["summary"] = {
-            "total_threats": len(insights),
-            "high_priority": analytics["threat_levels"]["critical"] + analytics["threat_levels"]["high"],
-            "avg_urgency": analytics["overall_threat_score"],
-            "channels_active": len([ch for ch in analytics["channel_activity"].values() if ch["count"] > 0]),
-            "threat_categories": len([cat for cat, count in analytics["categories"].items() if count > 0]),
-            "unique_threat_actors": len(analytics["threat_actors"]),
-            "cve_total": analytics["cve_count"],
-            "ioc_total": analytics["ioc_count"]
-        }
-        
-        return analytics
-        
-    except Exception as e:
-        logger.error(f"Error calculating threat analytics: {e}")
-        return _get_empty_threat_analytics()
+        insights_html += f"""
+        <div class="insight">
+            <div class="insight-header">
+                <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                    <span class="insight-source">{insight.get('chat_username', '@Unknown')}</span>
+                    <span class="threat-badge {badge_class}">{threat_level}</span>
+                    <span style="font-size: 0.8em; color: #888; font-family: monospace;">
+                        {insight.get('category', 'other').upper()}
+                    </span>
+                </div>
+                <div style="font-size: 0.8em; color: #666;">
+                    {_format_date(insight.get('message_date', ''))}
+                </div>
+            </div>
+            
+            <div class="insight-analysis">
+                {_truncate_text(insight.get('gemini_analysis', insight.get('message_text', 'No analysis available')), 300)}
+            </div>
+            
+            <div class="insight-meta">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span>Urgency:</span>
+                    <div class="urgency-bar">
+                        <div class="urgency-fill" style="width: {urgency*100}%;"></div>
+                    </div>
+                    <span style="font-family: monospace;">{urgency:.2f}</span>
+                </div>
+                <div>
+                    Type: <span style="color: #6366f1;">{insight.get('threat_type', 'Unknown')}</span>
+                </div>
+                <div>
+                    Sentiment: <span style="color: {'#00ff00' if insight.get('sentiment') == 'positive' else '#ff4444' if insight.get('sentiment') == 'negative' else '#ffaa00'};">
+                        {insight.get('sentiment', 'neutral').upper()}
+                    </span>
+                </div>
+            </div>
+        </div>
+        """
+    
+    return insights_html
 
-def _assess_threat_severity(threat_type: str) -> str:
-    """Assess threat severity based on threat type"""
-    critical_threats = ["zero-day", "0-day", "apt", "ransomware", "critical", "breach"]
-    high_threats = ["malware", "exploit", "backdoor", "trojan", "vulnerability"]
-    medium_threats = ["phishing", "advisory", "patch", "update"]
+def _generate_channels_section(monitoring: Dict) -> str:
+    """Generate monitored channels section"""
+    channels_data = [
+        {"name": "@DarkfeedNews", "icon": "🔴", "desc": "Advanced Persistent Threats", "type": "threat_intel"},
+        {"name": "@breachdetector", "icon": "🟠", "desc": "Data Breach Monitor", "type": "breach_monitor"},
+        {"name": "@secharvester", "icon": "🔵", "desc": "Security News & CVEs", "type": "security_news"}
+    ]
     
-    threat_lower = threat_type.lower()
-    
-    if any(keyword in threat_lower for keyword in critical_threats):
-        return "critical"
-    elif any(keyword in threat_lower for keyword in high_threats):
-        return "high"
-    elif any(keyword in threat_lower for keyword in medium_threats):
-        return "medium"
+    return f"""
+    <div class="channels-section">
+        <h3 style="color: #6366f1; margin-bottom: 10px;">📡 Monitored Intelligence Sources</h3>
+        <p style="color: #888; margin-bottom: 20px;">
+            Real-time monitoring of {len(channels_data)} premium cybersecurity intelligence channels
+        </p>
+        
+        <div class="channels-grid">
+            {''.join([f'''
+            <div class="channel-card">
+                <div class="channel-icon">{channel["icon"]}</div>
+                <div class="channel-name">{channel["name"]}</div>
+                <div class="channel-desc">{channel["desc"]}</div>
+                <div style="margin-top: 10px; font-size: 0.7em; color: {'#00ff00' if monitoring.get('active') else '#ffaa00'};">
+                    ● {'MONITORING' if monitoring.get('active') else 'STANDBY'}
+                </div>
+            </div>
+            ''' for channel in channels_data])}
+        </div>
+    </div>
+    """
+
+def _generate_error_dashboard(error: str) -> str:
+    """Generate error dashboard"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CIPHER Dashboard - Error</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{ 
+                font-family: monospace; 
+                background: linear-gradient(135deg, #0a0a0a, #1a1a2e); 
+                color: #ff4444; 
+                padding: 50px; 
+                text-align: center; 
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .error-container {{
+                background: rgba(0, 0, 0, 0.8);
+                border: 2px solid #ff4444;
+                border-radius: 15px;
+                padding: 40px;
+                max-width: 600px;
+            }}
+            h1 {{ color: #00ff00; text-shadow: 0 0 10px #00ff00; }}
+            .error-details {{ 
+                background: rgba(255, 68, 68, 0.1); 
+                border: 1px solid #ff4444; 
+                border-radius: 8px; 
+                padding: 20px; 
+                margin: 20px 0; 
+                text-align: left;
+            }}
+            .retry-btn {{
+                background: #6366f1;
+                color: white;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 6px;
+                cursor: pointer;
+                margin: 20px 10px;
+                font-size: 16px;
+            }}
+            .retry-btn:hover {{ background: #8b5cf6; }}
+        </style>
+    </head>
+    <body>
+        <div class="error-container">
+            <h1>🛡️ CIPHER Dashboard</h1>
+            <h2>⚠️ System Temporarily Unavailable</h2>
+            <div class="error-details">
+                <strong>Error Details:</strong><br>
+                {error}
+            </div>
+            <p>The CIPHER cybersecurity platform is experiencing a temporary issue.</p>
+            <p>Please try again in a few moments.</p>
+            
+            <button class="retry-btn" onclick="location.reload()">🔄 Retry</button>
+            <button class="retry-btn" onclick="location.href='/health'">🏥 Check Health</button>
+            
+            <script>
+                // Auto-retry every 10 seconds
+                setTimeout(() => location.reload(), 10000);
+            </script>
+        </div>
+    </body>
+    </html>
+    """
+
+# Helper functions
+def _get_threat_level_text(score: float) -> str:
+    """Convert threat score to text"""
+    if score >= 0.8:
+        return "CRITICAL"
+    elif score >= 0.6:
+        return "HIGH"
+    elif score >= 0.4:
+        return "MEDIUM"
     else:
-        return "low"
+        return "LOW"
 
-def _categorize_campaign(threat_type: str) -> str:
-    """Categorize threat types into campaign categories"""
-    threat_lower = threat_type.lower()
-    
-    if "ransomware" in threat_lower:
-        return "Ransomware Operations"
-    elif "apt" in threat_lower or "advanced" in threat_lower:
-        return "APT Campaigns"
-    elif "phishing" in threat_lower:
-        return "Phishing Campaigns"
-    elif "malware" in threat_lower:
-        return "Malware Distribution"
-    elif "vulnerability" in threat_lower or "exploit" in threat_lower:
-        return "Exploit Activity"
-    elif "breach" in threat_lower or "leak" in threat_lower:
-        return "Data Breaches"
-    else:
-        return "Other Threats"
+def _format_date(date_str: str) -> str:
+    """Format date string for display"""
+    if not date_str:
+        return "Unknown"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%m/%d %H:%M")
+    except:
+        return date_str[:16] if date_str else "Unknown"
 
-def _assess_campaign_severity(campaign: str) -> str:
-    """Assess campaign severity"""
-    high_severity = ["Ransomware", "APT", "Breach"]
-    medium_severity = ["Exploit", "Malware"]
-    
-    if any(keyword in campaign for keyword in high_severity):
-        return "high"
-    elif any(keyword in campaign for keyword in medium_severity):
-        return "medium"
-    else:
-        return "low"
+def _truncate_text(text: str, max_length: int) -> str:
+    """Truncate text with ellipsis"""
+    if not text:
+        return "No content available"
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "..."
 
-def _get_empty_stats() -> Dict[str, Any]:
-    """Return empty stats structure"""
+def _get_empty_stats() -> Dict:
+    """Get empty stats structure"""
     return {
         "total_messages": 0,
         "processed_today": 0,
-        "avg_urgency": 0.0,
-        "unique_channels": 3,
-        "unique_users": 0,
         "high_threats": 0,
         "critical_threats": 0,
+        "unique_channels": 3,
+        "avg_urgency": 0.0,
         "data_breaches": 0,
         "malware_alerts": 0,
         "vulnerabilities": 0,
         "cve_mentions": 0,
         "apt_activity": 0,
         "ransomware_alerts": 0,
-        "attributed_threats": 0,
         "monitoring_active": False,
-        "monitored_channels": 3
+        "data_source": "initializing"
     }
 
-def _get_empty_threat_analytics() -> Dict[str, Any]:
-    """Return empty threat analytics structure"""
+def _get_empty_monitoring() -> Dict:
+    """Get empty monitoring structure"""
+    return {
+        "active": False,
+        "subsystems": {"bigquery": False, "gemini": False, "telegram": False},
+        "channels": {"count": 3, "monitored": ["@DarkfeedNews", "@breachdetector", "@secharvester"]}
+    }
+
+def _get_empty_analytics() -> Dict:
+    """Get empty analytics structure"""
     return {
         "threat_levels": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-        "categories": {"threat_intel": 0, "data_breach": 0, "vulnerability": 0, "malware": 0, "ransomware": 0, "apt": 0, "phishing": 0, "other": 0},
-        "channel_activity": {},
-        "hourly_activity": {str(i): 0 for i in range(24)},
-        "top_threats": [],
-        "active_campaigns": [],
-        "threat_actors": {},
-        "affected_systems": {},
-        "geographic_indicators": [],
-        "attack_vectors": {},
-        "urgency_distribution": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-        "overall_threat_score": 0.0,
-        "max_threat_score": 0.0,
-        "cve_count": 0,
-        "ioc_count": 0,
-        "malware_families_count": 0,
-        "summary": {"total_threats": 0, "high_priority": 0, "avg_urgency": 0.0, "channels_active": 0, "threat_categories": 0, "unique_threat_actors": 0, "cve_total": 0, "ioc_total": 0}
+        "categories": {"threat_intel": 0, "data_breach": 0, "vulnerability": 0, "malware": 0, "ransomware": 0, "apt": 0, "other": 0},
+        "summary": {"total_threats": 0, "high_priority": 0, "avg_urgency": 0.0}
     }
 
-def _get_empty_dashboard_metrics() -> Dict[str, Any]:
-    """Return empty dashboard metrics"""
-    return {
-        "high_priority_threats": 0,
-        "active_campaigns": 0,
-        "recent_cves": 0,
-        "iocs_detected": 0,
-        "malware_families": 0,
-        "apt_activity": 0,
-        "data_breaches": 0,
-        "ransomware_incidents": 0
-    }
+# Additional API endpoints
+@router.get("/api/dashboard/data")
+async def get_dashboard_data():
+    """Get dashboard data as JSON"""
+    try:
+        utils = get_utils()
+        if utils:
+            stats = await utils.get_comprehensive_stats()
+            insights_data = await utils.get_threat_insights()
+            monitoring = await utils.get_monitoring_status()
+            analytics = await utils.get_threat_analytics()
+            
+            return {
+                "stats": stats,
+                "insights": insights_data["insights"][:10],
+                "monitoring": monitoring,
+                "analytics": analytics,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "stats": _get_empty_stats(),
+                "insights": [],
+                "monitoring": _get_empty_monitoring(),
+                "analytics": _get_empty_analytics(),
+                "status": "initializing"
+            }
+    except Exception as e:
+        logger.error(f"Dashboard data error: {e}")
+        return {"error": str(e), "status": "error"}
 
-def _get_fallback_channel_metadata() -> Dict[str, Any]:
-    """Return fallback channel metadata when utils not available"""
-    return {
-        "@DarkfeedNews": {
-            "type": "cyber_threat_intelligence",
-            "priority": "critical",
-            "focus": "advanced_persistent_threats",
-            "description": "Premium threat intelligence feed"
-        },
-        "@breachdetector": {
-            "type": "data_breach_monitor", 
-            "priority": "high",
-            "focus": "data_breaches",
-            "description": "Real-time data breach monitoring"
-        },
-        "@secharvester": {
-            "type": "security_news",
-            "priority": "medium", 
-            "focus": "security_updates",
-            "description": "Security news and CVE tracking"
-        }
-    }
-
-@router.get("/api/insights")
-async def get_cybersecurity_insights_api(
-    limit: int = Query(20, ge=1, le=100, description="Number of insights to return"),
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    threat_level: Optional[str] = Query(None, description="Filter by threat level"),
-    category: Optional[str] = Query(None, description="Filter by category"),
-    channel: Optional[str] = Query(None, description="Filter by channel"),
-    min_urgency: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum urgency score"),
-    hours: Optional[int] = Query(None, ge=1, le=168, description="Hours to look back")
+@router.get("/api/insights/detailed")
+async def get_detailed_insights(
+    limit: int = Query(50, ge=1, le=100),
+    threat_level: Optional[str] = Query(None),
+    category: Optional[str] = Query(None)
 ):
-    """API endpoint for cybersecurity insights with advanced filtering"""
+    """Get detailed insights with filtering"""
     try:
-        # Check cache
-        cache_key = f"insights_{limit}_{offset}_{threat_level}_{category}_{channel}_{min_urgency}_{hours}"
-        cached_insights = get_cache(cache_key)
-        
-        if cached_insights:
-            return cached_insights
-        
-        utils = get_safe_utils()
-        
+        utils = get_utils()
         if utils:
-            # Get insights from backend
-            all_insights = await utils['get_recent_insights'](limit=limit*2, offset=offset)
-        else:
-            all_insights = []
-        
-        # Apply filters
-        filtered_insights = all_insights
-        
-        if threat_level:
-            filtered_insights = [i for i in filtered_insights if i.get("threat_level") == threat_level.lower()]
-        
-        if category:
-            filtered_insights = [i for i in filtered_insights if i.get("category") == category.lower()]
-        
-        if channel:
-            filtered_insights = [i for i in filtered_insights if i.get("chat_username") == channel]
-        
-        if min_urgency is not None:
-            filtered_insights = [i for i in filtered_insights if i.get("urgency_score", 0) >= min_urgency]
-        
-        if hours:
-            cutoff = datetime.now() - timedelta(hours=hours)
-            filtered_insights = [
-                i for i in filtered_insights 
-                if i.get("message_date") and datetime.fromisoformat(i["message_date"].replace("Z", "+00:00")) > cutoff
-            ]
-        
-        # Limit results
-        filtered_insights = filtered_insights[:limit]
-        
-        # Add metadata
-        result = {
-            "insights": filtered_insights,
-            "count": len(filtered_insights),
-            "total_available": len(all_insights),
-            "status": "operational" if utils else "initializing",
-            "filters_applied": {
-                "threat_level": threat_level,
-                "category": category,
-                "channel": channel,
-                "min_urgency": min_urgency,
-                "hours": hours
-            },
-            "metadata": {
-                "high_priority": len([i for i in filtered_insights if i.get("threat_level") in ["critical", "high"]]),
-                "avg_urgency": sum(i.get("urgency_score", 0) for i in filtered_insights) / len(filtered_insights) if filtered_insights else 0,
-                "channels_represented": len(set(i.get("chat_username") for i in filtered_insights)),
-                "threat_types": len(set(i.get("threat_type") for i in filtered_insights if i.get("threat_type")))
+            insights_data = await utils.get_threat_insights()
+            insights = insights_data["insights"]
+            
+            # Apply filters
+            if threat_level:
+                insights = [i for i in insights if i.get("threat_level") == threat_level.lower()]
+            if category:
+                insights = [i for i in insights if i.get("category") == category.lower()]
+            
+            return {
+                "insights": insights[:limit],
+                "total": len(insights),
+                "filtered": len(insights) < insights_data["total"],
+                "filters": {"threat_level": threat_level, "category": category}
             }
-        }
-        
-        # Cache result
-        set_cache(cache_key, result, 30)
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Insights API error: {e}")
-        return {
-            "insights": [],
-            "count": 0,
-            "status": "error",
-            "error": str(e),
-            "metadata": {"high_priority": 0, "avg_urgency": 0.0, "channels_represented": 0, "threat_types": 0}
-        }
-
-@router.get("/api/stats")
-async def get_cybersecurity_stats_api():
-    """API endpoint for comprehensive cybersecurity statistics"""
-    try:
-        utils = get_safe_utils()
-        
-        if utils:
-            stats = await utils['get_message_stats']()
         else:
-            stats = _get_empty_stats()
-        
-        # Add enhanced metadata
-        stats["last_updated"] = time.time()
-        stats["system_status"] = "operational" if utils else "initializing"
-        stats["monitored_channels"] = ["@DarkfeedNews", "@breachdetector", "@secharvester"]
-        stats["channel_metadata"] = _get_fallback_channel_metadata()
-        
-        return stats
-        
+            return {"insights": [], "total": 0, "status": "initializing"}
     except Exception as e:
-        logger.error(f"Stats API error: {e}")
-        return {
-            **_get_empty_stats(),
-            "system_status": "error",
-            "error": str(e),
-            "last_updated": time.time()
-        }
-
-@router.get("/api/threat-analytics")
-async def get_threat_analytics_api():
-    """API endpoint for detailed threat analytics"""
-    try:
-        cache_key = "threat_analytics"
-        cached_analytics = get_cache(cache_key)
-        
-        if cached_analytics:
-            return cached_analytics
-        
-        utils = get_safe_utils()
-        
-        if utils:
-            insights = await utils['get_recent_insights'](limit=100)
-            stats = await utils['get_message_stats']()
-        else:
-            insights = []
-            stats = _get_empty_stats()
-        
-        analytics = calculate_threat_analytics(insights, stats)
-        
-        # Cache result
-        set_cache(cache_key, analytics, 120)
-        
-        return analytics
-        
-    except Exception as e:
-        logger.error(f"Threat analytics API error: {e}")
-        return _get_empty_threat_analytics()
-
-@router.get("/api/monitoring/status")
-async def get_monitoring_status():
-    """API endpoint for detailed monitoring status"""
-    try:
-        utils = get_safe_utils()
-        
-        if utils:
-            telegram_connected = utils['telegram_client'] is not None and utils['telegram_client'].is_connected() if utils['telegram_client'] else False
-            channels = utils['MONITORED_CHANNELS']
-            channel_metadata = utils['CHANNEL_METADATA']
-        else:
-            telegram_connected = False
-            channels = ["@DarkfeedNews", "@breachdetector", "@secharvester"]
-            channel_metadata = _get_fallback_channel_metadata()
-        
-        status = {
-            "active": telegram_connected,
-            "telegram_connected": telegram_connected,
-            "channels": channels,
-            "channel_metadata": channel_metadata,
-            "total_channels": len(channels),
-            "last_check": datetime.now().isoformat(),
-            "monitoring_health": "healthy" if telegram_connected else "initializing",
-            "system_info": {
-                "platform": "CIPHER Cybersecurity Intelligence Platform",
-                "version": "1.0.0",
-                "focus": "Threat Intelligence Monitoring",
-                "capabilities": [
-                    "Real-time threat intelligence",
-                    "APT campaign tracking", 
-                    "Data breach monitoring",
-                    "CVE and vulnerability tracking",
-                    "IOC extraction and analysis",
-                    "Threat actor attribution"
-                ]
-            }
-        }
-        
-        # Add per-channel status
-        channel_status = []
-        for channel_username in channels:
-            metadata = channel_metadata.get(channel_username, {})
-            channel_status.append({
-                "username": channel_username,
-                "type": metadata.get("type", "unknown"),
-                "priority": metadata.get("priority", "medium"), 
-                "focus": metadata.get("focus", "general"),
-                "status": "monitoring" if telegram_connected else "disconnected",
-                "threat_multiplier": metadata.get("threat_multiplier", 1.0),
-                "description": metadata.get("description", "Cybersecurity intelligence source")
-            })
-        
-        status["channel_status"] = channel_status
-        
-        return status
-        
-    except Exception as e:
-        logger.error(f"Monitoring status error: {e}")
-        return {
-            "active": False,
-            "error": str(e),
-            "system_info": {"platform": "CIPHER", "status": "error"}
-        }
-
-@router.get("/api/channels")
-async def get_monitored_channels():
-    """API endpoint for cybersecurity channels with metadata"""
-    try:
-        utils = get_safe_utils()
-        
-        if utils:
-            channels = utils['MONITORED_CHANNELS']
-            metadata = utils['CHANNEL_METADATA']
-            monitoring_active = utils['telegram_client'] is not None and utils['telegram_client'].is_connected() if utils['telegram_client'] else False
-        else:
-            channels = ["@DarkfeedNews", "@breachdetector", "@secharvester"]
-            metadata = _get_fallback_channel_metadata()
-            monitoring_active = False
-        
-        channels_info = []
-        for channel_username in channels:
-            channel_meta = metadata.get(channel_username, {})
-            channels_info.append({
-                "username": channel_username,
-                "display_name": channel_username.replace("@", "").title(),
-                "type": channel_meta.get("type", "unknown"),
-                "priority": channel_meta.get("priority", "medium"),
-                "focus": channel_meta.get("focus", "general"),
-                "threat_multiplier": channel_meta.get("threat_multiplier", 1.0),
-                "keywords": channel_meta.get("keywords", []),
-                "description": channel_meta.get("description", "Cybersecurity intelligence source"),
-                "monitoring": True,
-                "status": "active" if monitoring_active else "inactive",
-                "color": _get_channel_color(channel_meta.get("type", "unknown"))
-            })
-        
-        return {
-            "channels": channels_info,
-            "total": len(channels_info),
-            "types": list(set(ch["type"] for ch in channels_info)),
-            "priorities": list(set(ch["priority"] for ch in channels_info)),
-            "monitoring_active": monitoring_active,
-            "capabilities": [
-                "Advanced Persistent Threat (APT) tracking",
-                "Real-time data breach alerts",
-                "CVE and vulnerability monitoring",
-                "Malware family identification",
-                "IOC extraction and correlation",
-                "Threat actor attribution",
-                "Campaign tracking and analysis"
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"Channels API error: {e}")
-        return {
-            "channels": [],
-            "total": 0,
-            "error": str(e),
-            "monitoring_active": False
-        }
-
-def _get_channel_color(channel_type: str) -> str:
-    """Get color scheme for channel type"""
-    color_map = {
-        "cyber_threat_intelligence": "red",
-        "data_breach_monitor": "orange", 
-        "security_news": "blue",
-        "vulnerability": "yellow",
-        "malware": "purple",
-        "unknown": "gray"
-    }
-    return color_map.get(channel_type, "gray")
-
-@router.get("/api/health")
-async def frontend_health_check():
-    """Frontend component health check"""
-    try:
-        utils = get_safe_utils()
-        backend_available = utils is not None
-        
-        if backend_available:
-            try:
-                stats = await utils['get_message_stats']()
-                database_connected = True
-                monitoring_active = stats.get("monitoring_active", False)
-            except Exception as e:
-                database_connected = False
-                monitoring_active = False
-        else:
-            database_connected = False
-            monitoring_active = False
-        
-        return {
-            "status": "healthy",
-            "component": "CIPHER Frontend",
-            "timestamp": time.time(),
-            "backend_available": backend_available,
-            "database_connected": database_connected,
-            "monitoring_active": monitoring_active,
-            "system_phase": "operational" if backend_available else "initializing",
-            "capabilities": {
-                "dashboard": True,
-                "api_endpoints": True,
-                "real_time_updates": backend_available,
-                "threat_analytics": backend_available,
-                "monitoring_status": True
-            }
-        }
-    except Exception as e:
-        return {
-            "status": "degraded", 
-            "component": "CIPHER Frontend",
-            "error": str(e),
-            "timestamp": time.time()
-        }
+        logger.error(f"Detailed insights error: {e}")
+        return {"insights": [], "total": 0, "error": str(e)}
 
 # Export the router
 __all__ = ["router"]
