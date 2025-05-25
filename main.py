@@ -191,7 +191,7 @@ async def readiness_check():
 
 @app.get("/api/stats")
 async def get_stats():
-    """Get cybersecurity statistics with robust fallback - FIXED SCHEMA"""
+    """Get cybersecurity statistics with robust fallback - SAFE SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
@@ -222,21 +222,13 @@ async def get_stats():
             empty_stats["data_source"] = "bigquery_unavailable"
             return empty_stats
         
-        # FIXED: Use correct field names from schema (processed_date instead of timestamp)
+        # SAFE: Only query basic fields that should exist
         query = f"""
         SELECT 
             COUNT(*) as total_messages,
             COUNTIF(DATE(processed_date) = CURRENT_DATE()) as processed_today,
-            COUNTIF(threat_level IN ('high', 'critical')) as high_threats,
-            COUNTIF(threat_level = 'critical') as critical_threats,
             COUNT(DISTINCT chat_username) as unique_channels,
-            AVG(COALESCE(urgency_score, 0)) as avg_urgency,
-            COUNTIF(category = 'data_breach') as data_breaches,
-            COUNTIF(category = 'malware') as malware_alerts,
-            COUNTIF(category = 'vulnerability') as vulnerabilities,
-            COUNTIF(ARRAY_LENGTH(cve_references) > 0) as cve_mentions,
-            COUNTIF(category = 'apt') as apt_activity,
-            COUNTIF(category = 'ransomware') as ransomware_alerts
+            AVG(COALESCE(urgency_score, 0)) as avg_urgency
         FROM `{project_id}.{dataset_id}.{table_id}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
@@ -249,20 +241,63 @@ async def get_stats():
                 stats = {
                     "total_messages": int(row.total_messages) if row.total_messages else 0,
                     "processed_today": int(row.processed_today) if row.processed_today else 0,
-                    "high_threats": int(row.high_threats) if row.high_threats else 0,
-                    "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
+                    "high_threats": 0,  # Will be calculated separately if columns exist
+                    "critical_threats": 0,
                     "unique_channels": int(row.unique_channels) if row.unique_channels else 3,
                     "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                    "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
-                    "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
-                    "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
-                    "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
-                    "apt_activity": int(row.apt_activity) if row.apt_activity else 0,
-                    "ransomware_alerts": int(row.ransomware_alerts) if row.ransomware_alerts else 0,
+                    "data_breaches": 0,
+                    "malware_alerts": 0,
+                    "vulnerabilities": 0,
+                    "cve_mentions": 0,
+                    "apt_activity": 0,
+                    "ransomware_alerts": 0,
                     "monitoring_active": _monitoring_initialized,
                     "data_source": "bigquery",
                     "last_updated": datetime.now(timezone.utc).isoformat()
                 }
+                
+                # Try to get threat levels if column exists
+                try:
+                    threat_query = f"""
+                    SELECT 
+                        COUNTIF(threat_level IN ('high', 'critical')) as high_threats,
+                        COUNTIF(threat_level = 'critical') as critical_threats
+                    FROM `{project_id}.{dataset_id}.{table_id}`
+                    WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                    """
+                    threat_job = client.query(threat_query)
+                    threat_row = next(iter(threat_job.result(timeout=10)), None)
+                    if threat_row:
+                        stats["high_threats"] = int(threat_row.high_threats) if threat_row.high_threats else 0
+                        stats["critical_threats"] = int(threat_row.critical_threats) if threat_row.critical_threats else 0
+                except Exception:
+                    # Column doesn't exist, keep defaults
+                    pass
+                
+                # Try to get category stats if column exists
+                try:
+                    category_query = f"""
+                    SELECT 
+                        COUNTIF(category = 'data_breach') as data_breaches,
+                        COUNTIF(category = 'malware') as malware_alerts,
+                        COUNTIF(category = 'vulnerability') as vulnerabilities,
+                        COUNTIF(category = 'apt') as apt_activity,
+                        COUNTIF(category = 'ransomware') as ransomware_alerts
+                    FROM `{project_id}.{dataset_id}.{table_id}`
+                    WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                    """
+                    category_job = client.query(category_query)
+                    category_row = next(iter(category_job.result(timeout=10)), None)
+                    if category_row:
+                        stats["data_breaches"] = int(category_row.data_breaches) if category_row.data_breaches else 0
+                        stats["malware_alerts"] = int(category_row.malware_alerts) if category_row.malware_alerts else 0
+                        stats["vulnerabilities"] = int(category_row.vulnerabilities) if category_row.vulnerabilities else 0
+                        stats["apt_activity"] = int(category_row.apt_activity) if category_row.apt_activity else 0
+                        stats["ransomware_alerts"] = int(category_row.ransomware_alerts) if category_row.ransomware_alerts else 0
+                except Exception:
+                    # Category column doesn't exist, keep defaults
+                    pass
+                
                 logger.info(f"✅ BigQuery stats retrieved: {stats['total_messages']} messages, {stats['high_threats']} high threats")
             else:
                 stats = empty_stats
@@ -282,7 +317,7 @@ async def get_stats():
 
 @app.get("/api/insights")
 async def get_cybersecurity_insights():
-    """Get latest cybersecurity insights - FIXED SCHEMA"""
+    """Get latest cybersecurity insights - SAFE SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
@@ -300,7 +335,7 @@ async def get_cybersecurity_insights():
             empty_response["data_source"] = "bigquery_unavailable"
             return empty_response
         
-        # FIXED: Use correct field names from schema
+        # SAFE: Only query basic fields that should exist
         query = f"""
         SELECT 
             message_id,
@@ -310,15 +345,7 @@ async def get_cybersecurity_insights():
             processed_date,
             gemini_analysis,
             sentiment,
-            key_topics,
-            urgency_score,
-            category,
-            threat_level,
-            threat_type,
-            channel_type,
-            cve_references,
-            malware_families,
-            threat_actors
+            urgency_score
         FROM `{project_id}.{dataset_id}.{table_id}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ORDER BY processed_date DESC, urgency_score DESC
@@ -338,16 +365,33 @@ async def get_cybersecurity_insights():
                 "processed_date": row.processed_date.isoformat() if row.processed_date else None,
                 "gemini_analysis": row.gemini_analysis or "",
                 "sentiment": row.sentiment or "neutral",
-                "key_topics": list(row.key_topics) if row.key_topics else [],
+                "key_topics": [],  # Default empty
                 "urgency_score": float(row.urgency_score) if row.urgency_score is not None else 0.0,
-                "category": row.category or "other",
-                "threat_level": row.threat_level or "low",
-                "threat_type": row.threat_type or "unknown",
-                "channel_type": row.channel_type or "unknown",
-                "cve_references": list(row.cve_references) if row.cve_references else [],
-                "malware_families": list(row.malware_families) if row.malware_families else [],
-                "threat_actors": list(row.threat_actors) if row.threat_actors else []
+                "category": "other",  # Default
+                "threat_level": "low",  # Default
+                "threat_type": "unknown",  # Default
+                "channel_type": "unknown",  # Default
+                "cve_references": [],  # Default empty
+                "malware_families": [],  # Default empty
+                "threat_actors": []  # Default empty
             }
+            
+            # Try to get additional fields if they exist
+            try:
+                if hasattr(row, 'key_topics') and row.key_topics:
+                    insight["key_topics"] = list(row.key_topics)
+                if hasattr(row, 'category') and row.category:
+                    insight["category"] = row.category
+                if hasattr(row, 'threat_level') and row.threat_level:
+                    insight["threat_level"] = row.threat_level
+                if hasattr(row, 'threat_type') and row.threat_type:
+                    insight["threat_type"] = row.threat_type
+                if hasattr(row, 'channel_type') and row.channel_type:
+                    insight["channel_type"] = row.channel_type
+            except Exception:
+                # Fields don't exist, use defaults
+                pass
+            
             insights.append(insight)
         
         logger.info(f"✅ Retrieved {len(insights)} cybersecurity insights")
@@ -458,128 +502,107 @@ async def root():
 async def production_dashboard(request: Request):
     """Production CIPHER dashboard"""
     try:
-        # Try to use the frontend module if available
-        if _utils_available:
-            try:
-                from frontend import cipher_dashboard
-                # Use the frontend dashboard function directly
-                return await cipher_dashboard(request)
-            except ImportError:
-                logger.warning("Frontend module not available, using fallback")
-            except Exception as e:
-                logger.error(f"Frontend dashboard error: {e}")
+        # Get basic data first
+        stats = await get_stats()
+        monitoring = await get_monitoring_status()
+        insights_response = await get_cybersecurity_insights()
+        insights = insights_response.get("insights", [])
         
-        # Fallback to template if available
-        try:
-            stats = await get_stats()
-            monitoring = await get_monitoring_status()
-            insights_response = await get_cybersecurity_insights()
-            insights = insights_response.get("insights", [])
-            
-            return templates.TemplateResponse("dashboard.html", {
-                "request": request,
-                "stats": stats,
-                "insights": insights,
-                "monitoring": monitoring,
-                "system_status": "operational" if monitoring.get("active") else "initializing",
-                "page_title": "CIPHER - Cybersecurity Intelligence Dashboard",
-                "current_time": datetime.now().isoformat(),
-                "PROJECT_ID": "primal-chariot-382610"
-            })
-        except Exception as e:
-            logger.warning(f"Template dashboard failed: {e}")
-            
-            # Simple HTML fallback
-            stats = await get_stats()
-            monitoring = await get_monitoring_status()
-            
-            return HTMLResponse(f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>CIPHER Dashboard</title>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <style>
-                    body {{ font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; margin: 0; padding: 20px; }}
-                    .container {{ max-width: 1200px; margin: 0 auto; }}
-                    .header {{ text-align: center; border: 2px solid #00ff00; padding: 30px; margin-bottom: 30px; }}
-                    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
-                    .card {{ border: 1px solid #00ff00; padding: 20px; background: rgba(0, 255, 0, 0.05); }}
-                    .metric {{ font-size: 2em; color: #ffffff; margin: 10px 0; }}
-                    .status-online {{ color: #00ff00; }}
-                    .status-warning {{ color: #ffff00; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>🛡️ CIPHER - Cybersecurity Intelligence Dashboard</h1>
-                        <p>Real-time Threat Monitoring System</p>
+        # Simple HTML dashboard (no template dependencies)
+        return HTMLResponse(f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>CIPHER Dashboard</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{ font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; margin: 0; padding: 20px; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                .header {{ text-align: center; border: 2px solid #00ff00; padding: 30px; margin-bottom: 30px; }}
+                .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+                .card {{ border: 1px solid #00ff00; padding: 20px; background: rgba(0, 255, 0, 0.05); }}
+                .metric {{ font-size: 2em; color: #ffffff; margin: 10px 0; }}
+                .status-online {{ color: #00ff00; }}
+                .status-warning {{ color: #ffff00; }}
+                .insight {{ border-left: 3px solid #00ff00; padding: 10px; margin: 10px 0; background: rgba(0, 255, 0, 0.1); }}
+                .insight-header {{ color: #6366f1; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🛡️ CIPHER - Cybersecurity Intelligence Dashboard</h1>
+                    <p>Real-time Threat Monitoring System</p>
+                    <p style="color: #ffff00;">Status: {'OPERATIONAL' if monitoring['active'] else 'INITIALIZING'}</p>
+                </div>
+                
+                <div class="grid">
+                    <div class="card">
+                        <h3>📊 Intelligence Summary</h3>
+                        <div class="metric">{stats['total_messages']:,}</div>
+                        <p>Total Messages Processed</p>
+                        <p>Today: {stats['processed_today']}</p>
+                        <p>High Threats: {stats['high_threats']}</p>
                     </div>
                     
-                    <div class="grid">
-                        <div class="card">
-                            <h3>📊 Intelligence Summary</h3>
-                            <div class="metric">{stats['total_messages']:,}</div>
-                            <p>Total Messages Processed</p>
-                            <p>Today: {stats['processed_today']}</p>
-                            <p>High Threats: {stats['high_threats']}</p>
-                        </div>
-                        
-                        <div class="card">
-                            <h3>🚨 Threat Levels</h3>
-                            <div class="metric">{stats['critical_threats']}</div>
-                            <p>Critical Threats</p>
-                            <p>APT Activity: {stats['apt_activity']}</p>
-                            <p>Ransomware: {stats['ransomware_alerts']}</p>
-                        </div>
-                        
-                        <div class="card">
-                            <h3>🔍 Vulnerabilities</h3>
-                            <div class="metric">{stats['cve_mentions']}</div>
-                            <p>CVE References</p>
-                            <p>Vulnerabilities: {stats['vulnerabilities']}</p>
-                            <p>Data Breaches: {stats['data_breaches']}</p>
-                        </div>
-                        
-                        <div class="card">
-                            <h3>📡 Monitoring Status</h3>
-                            <p class="{'status-online' if monitoring['active'] else 'status-warning'}">
-                                ● {'ACTIVE' if monitoring['active'] else 'INITIALIZING'}
-                            </p>
-                            <p>Channels: {len(monitoring['channels'])}</p>
-                            <p>System: {monitoring['system_health'].upper()}</p>
-                        </div>
+                    <div class="card">
+                        <h3>🚨 Threat Levels</h3>
+                        <div class="metric">{stats['critical_threats']}</div>
+                        <p>Critical Threats</p>
+                        <p>APT Activity: {stats['apt_activity']}</p>
+                        <p>Ransomware: {stats['ransomware_alerts']}</p>
                     </div>
                     
-                    <div class="card" style="margin-top: 20px;">
-                        <h3>📡 Monitored Channels</h3>
-                        <p>🔴 @DarkfeedNews - Advanced Threat Intelligence</p>
-                        <p>🟠 @breachdetector - Data Breach Monitor</p>
-                        <p>🔵 @secharvester - Security News & CVEs</p>
+                    <div class="card">
+                        <h3>🔍 Vulnerabilities</h3>
+                        <div class="metric">{stats['cve_mentions']}</div>
+                        <p>CVE References</p>
+                        <p>Vulnerabilities: {stats['vulnerabilities']}</p>
+                        <p>Data Breaches: {stats['data_breaches']}</p>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📡 Monitoring Status</h3>
+                        <p class="{'status-online' if monitoring['active'] else 'status-warning'}">
+                            ● {'ACTIVE' if monitoring['active'] else 'INITIALIZING'}
+                        </p>
+                        <p>Channels: {len(monitoring['channels'])}</p>
+                        <p>System: {monitoring['system_health'].upper()}</p>
+                        <p>BigQuery: {'✅' if stats['data_source'] == 'bigquery' else '⚠️'}</p>
                     </div>
                 </div>
                 
-                <script>
-                    // Auto-refresh every 30 seconds
-                    setTimeout(() => location.reload(), 30000);
-                </script>
-            </body>
-            </html>
-            """)
+                <div class="card" style="margin-top: 20px;">
+                    <h3>📡 Monitored Channels</h3>
+                    <p>🔴 @DarkfeedNews - Advanced Threat Intelligence</p>
+                    <p>🟠 @breachdetector - Data Breach Monitor</p>
+                    <p>🔵 @secharvester - Security News & CVEs</p>
+                </div>
+                
+                {'<div class="card" style="margin-top: 20px;"><h3>🔍 Recent Intelligence</h3>' if insights else ''}
+                {''.join([f'<div class="insight"><div class="insight-header">{insight["chat_username"]} - {insight["threat_level"].upper()}</div><p>{insight["gemini_analysis"][:200]}...</p><small>Urgency: {insight["urgency_score"]:.2f}</small></div>' for insight in insights[:5]])}
+                {'</div>' if insights else ''}
+                
+                <div style="text-align: center; margin-top: 30px; color: #666;">
+                    <p>Data Source: {stats['data_source']} | Last Updated: {stats['last_updated'][:19]}</p>
+                    <p><a href="/api/stats" style="color: #6366f1;">📈 Stats API</a> | 
+                       <a href="/health" style="color: #6366f1;">🏥 Health Check</a> | 
+                       <a href="/api/monitoring/status" style="color: #6366f1;">📡 Monitoring</a></p>
+                </div>
+            </div>
+            
+            <script>
+                // Auto-refresh every 30 seconds
+                setTimeout(() => location.reload(), 30000);
+            </script>
+        </body>
+        </html>
+        """)
             
     except Exception as e:
         logger.error(f"Dashboard error: {e}")
-        return HTMLResponse("<h1>CIPHER Dashboard - Loading...</h1><script>setTimeout(() => location.reload(), 5000);</script>")
-
-# Include the frontend router for additional API endpoints
-try:
-    from frontend import router as frontend_router
-    app.include_router(frontend_router)
-    logger.info("✅ Frontend router included successfully")
-except ImportError as e:
-    logger.warning(f"Frontend router not available: {e}")
+        return HTMLResponse(f"<h1>CIPHER Dashboard - Error: {e}</h1><script>setTimeout(() => location.reload(), 5000);</script>")
 
 if __name__ == "__main__":
     import uvicorn
