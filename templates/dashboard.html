@@ -1,830 +1,1153 @@
 <!DOCTYPE html>
-<html lang="en" class="scroll-smooth">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CIPHER - Cybersecurity Intelligence Platform</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        'cipher-blue': '#0066ff',
-                        'cipher-purple': '#6366f1',
-                        'cipher-dark': '#0f172a',
-                        'cipher-darker': '#020617',
-                    },
-                    fontFamily: {
-                        'mono': ['JetBrains Mono', 'Fira Code', 'Monaco', 'monospace'],
-                        'sans': ['Inter', 'system-ui', 'sans-serif'],
-                    },
-                    animation: {
-                        'fade-in': 'fadeIn 0.6s ease-out',
-                        'slide-up': 'slideUp 0.6s ease-out',
-                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-                        'glow': 'glow 2s ease-in-out infinite alternate',
-                        'neon-pulse': 'neonPulse 2s ease-in-out infinite',
-                    },
-                }
-            }
-        }
-    </script>
+    <meta name="description" content="Real-time cybersecurity threat intelligence monitoring and analysis platform">
+    <meta name="keywords" content="cybersecurity, threat intelligence, APT, malware, breach detection">
+    
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-        
+        :root {
+            --primary-green: #00ff00;
+            --primary-blue: #6366f1;
+            --primary-purple: #8b5cf6;
+            --danger-red: #ff4444;
+            --warning-orange: #ffaa00;
+            --warning-yellow: #ffff00;
+            --bg-dark: #0a0a0a;
+            --bg-darker: #020617;
+            --bg-card: rgba(0, 0, 0, 0.7);
+            --border-glow: rgba(0, 255, 0, 0.3);
+            --text-primary: #ffffff;
+            --text-secondary: #e0e0e0;
+            --text-muted: #888888;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'Consolas', 'Monaco', monospace;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a2e 50%, #16213e 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+            line-height: 1.6;
+        }
+
+        /* Animated cyber grid background */
+        .cyber-grid {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(0, 255, 0, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 255, 0, 0.03) 1px, transparent 1px);
+            background-size: 20px 20px;
+            pointer-events: none;
+            z-index: 0;
+            animation: gridMove 20s linear infinite;
+        }
+
+        @keyframes gridMove {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(20px, 20px); }
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header Section */
+        .header {
+            text-align: center;
+            background: var(--bg-card);
+            border: 2px solid var(--primary-green);
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 0 30px var(--border-glow);
+            backdrop-filter: blur(15px);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: conic-gradient(from 0deg, transparent, var(--primary-green), transparent);
+            animation: rotate 4s linear infinite;
+            opacity: 0.1;
+            z-index: -1;
+        }
+
+        @keyframes rotate {
+            100% { transform: rotate(360deg); }
+        }
+
+        .header h1 {
+            font-size: 3.5em;
+            color: var(--primary-green);
+            text-shadow: 0 0 20px var(--primary-green);
+            margin-bottom: 10px;
+            animation: pulse 2s infinite;
+            font-weight: 700;
+        }
+
+        .header .subtitle {
+            font-size: 1.4em;
+            color: var(--text-secondary);
+            margin-bottom: 25px;
+            font-weight: 300;
+        }
+
+        /* Status Bar */
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 25px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 20px;
+            background: rgba(0, 255, 0, 0.1);
+            border: 1px solid var(--primary-green);
+            border-radius: 25px;
+            font-family: monospace;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .status-item:hover {
+            background: rgba(0, 255, 0, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: statusBlink 2s infinite;
+            box-shadow: 0 0 10px currentColor;
+        }
+
+        .status-online { background-color: var(--primary-green); }
+        .status-warning { background-color: var(--warning-orange); }
+        .status-critical { background-color: var(--danger-red); }
+        .status-info { background-color: var(--primary-blue); }
+
+        @keyframes statusBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* Main Grid Layout */
+        .main-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        /* Card Styles */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--primary-green);
+            border-radius: 15px;
+            padding: 25px;
+            backdrop-filter: blur(15px);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 255, 0, 0.1), transparent);
+            transition: left 0.6s ease;
+        }
+
+        .card:hover {
+            border-color: var(--primary-blue);
+            transform: translateY(-8px);
+            box-shadow: 0 15px 40px rgba(99, 102, 241, 0.4);
+        }
+
+        .card:hover::before {
+            left: 100%;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .card-icon {
+            font-size: 2em;
+            padding: 15px;
+            background: linear-gradient(45deg, var(--primary-blue), var(--primary-purple));
+            border-radius: 12px;
+            box-shadow: 0 0 25px rgba(99, 102, 241, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .card-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: var(--primary-blue);
+        }
+
+        .metric {
+            font-size: 3em;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-shadow: 0 0 15px currentColor;
+            margin: 15px 0;
+            line-height: 1;
+        }
+
+        .metric.critical { color: var(--danger-red); }
+        .metric.warning { color: var(--warning-orange); }
+        .metric.good { color: var(--primary-green); }
+        .metric.info { color: var(--primary-blue); }
+
+        .metric-description {
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            font-size: 1.1em;
+        }
+
+        /* Sub Metrics Grid */
+        .sub-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .sub-metric {
+            text-align: center;
+            padding: 12px 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            border-left: 3px solid var(--primary-blue);
+            transition: all 0.3s ease;
+        }
+
+        .sub-metric:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-left-color: var(--primary-green);
+        }
+
+        .sub-metric-value {
+            font-size: 1.6em;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 5px;
+        }
+
+        .sub-metric-label {
+            font-size: 0.8em;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+
+        /* Analytics Section */
+        .analytics-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+            margin: 30px 0;
+        }
+
+        .chart-container {
+            background: var(--bg-card);
+            border: 1px solid var(--primary-blue);
+            border-radius: 15px;
+            padding: 25px;
+            backdrop-filter: blur(15px);
+        }
+
+        .chart-title {
+            color: var(--primary-blue);
+            font-weight: 600;
+            font-size: 1.2em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        /* Bar Chart Styles */
+        .bar-chart {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .bar-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .bar-label {
+            min-width: 90px;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .bar {
+            flex: 1;
+            height: 24px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-blue), var(--primary-purple));
+            border-radius: 12px;
+            transition: width 1s ease;
+            position: relative;
+        }
+
+        .bar-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            animation: barShine 2s infinite;
+        }
+
+        @keyframes barShine {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .bar-value {
+            min-width: 40px;
+            text-align: right;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        /* Intelligence Feed Section */
+        .insights-section {
+            background: var(--bg-card);
+            border: 1px solid var(--primary-green);
+            border-radius: 15px;
+            margin-top: 30px;
+            overflow: hidden;
+            backdrop-filter: blur(15px);
+        }
+
+        .insights-header {
+            background: linear-gradient(45deg, rgba(0, 255, 0, 0.2), rgba(99, 102, 241, 0.2));
+            padding: 25px;
+            border-bottom: 1px solid var(--primary-green);
+        }
+
+        .insights-header h3 {
+            margin: 0;
+            color: var(--primary-green);
+            font-size: 1.4em;
+            font-weight: 600;
+        }
+
+        .insights-header p {
+            margin: 8px 0 0 0;
+            color: var(--text-muted);
+            font-size: 0.95em;
+        }
+
+        .insights-content {
+            max-height: 700px;
+            overflow-y: auto;
+            padding: 25px;
+        }
+
+        .insights-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .insights-content::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .insights-content::-webkit-scrollbar-thumb {
+            background: var(--primary-blue);
+            border-radius: 4px;
+        }
+
+        /* Insight Item Styles */
+        .insight {
+            background: rgba(99, 102, 241, 0.1);
+            border-left: 4px solid var(--primary-blue);
+            border-radius: 0 12px 12px 0;
+            padding: 20px;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .insight:hover {
+            border-left-color: var(--primary-green);
+            background: rgba(0, 255, 0, 0.1);
+            transform: translateX(8px);
+        }
+
+        .insight-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .insight-source {
+            font-weight: 700;
+            color: var(--primary-blue);
+            font-family: monospace;
+            font-size: 1.1em;
+        }
+
+        .insight-badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .threat-badge {
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.75em;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-family: monospace;
+        }
+
+        .threat-critical {
+            background: rgba(255, 68, 68, 0.2);
+            color: var(--danger-red);
+            border: 1px solid var(--danger-red);
+            animation: criticalBlink 2s infinite;
+        }
+
+        .threat-high {
+            background: rgba(255, 170, 0, 0.2);
+            color: var(--warning-orange);
+            border: 1px solid var(--warning-orange);
+        }
+
+        .threat-medium {
+            background: rgba(255, 255, 0, 0.2);
+            color: var(--warning-yellow);
+            border: 1px solid var(--warning-yellow);
+        }
+
+        .threat-low {
+            background: rgba(0, 255, 0, 0.2);
+            color: var(--primary-green);
+            border: 1px solid var(--primary-green);
+        }
+
+        @keyframes criticalBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .insight-analysis {
+            line-height: 1.7;
+            margin-bottom: 15px;
+            color: var(--text-secondary);
+            font-size: 1.05em;
+        }
+
+        .insight-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9em;
+            color: var(--text-muted);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding-top: 15px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .urgency-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .urgency-bar {
+            width: 100px;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .urgency-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-green), var(--warning-orange), var(--danger-red));
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+
+        /* Channels Section */
+        .channels-section {
+            background: var(--bg-card);
+            border: 1px solid var(--primary-blue);
+            border-radius: 15px;
+            padding: 30px;
+            margin: 30px 0;
+            backdrop-filter: blur(15px);
+        }
+
+        .channels-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 25px;
+        }
+
+        .channel-card {
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid var(--primary-blue);
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .channel-card:hover {
+            border-color: var(--primary-green);
+            transform: scale(1.05);
+            background: rgba(0, 255, 0, 0.1);
+        }
+
+        .channel-icon {
+            font-size: 2.5em;
+            margin-bottom: 15px;
+        }
+
+        .channel-name {
+            font-weight: 700;
+            color: var(--primary-blue);
+            margin-bottom: 8px;
+            font-size: 1.1em;
+        }
+
+        .channel-desc {
+            font-size: 0.9em;
+            color: var(--text-muted);
+            margin-bottom: 15px;
+        }
+
+        .channel-status {
+            font-size: 0.8em;
+            font-family: monospace;
+            font-weight: 600;
+        }
+
+        .channel-status.active { color: var(--primary-green); }
+        .channel-status.standby { color: var(--warning-orange); }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            margin-top: 50px;
+            padding: 40px 30px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            background: var(--bg-card);
+            border-radius: 15px;
+            backdrop-filter: blur(15px);
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 25px;
+            flex-wrap: wrap;
+        }
+
+        .footer-link {
+            color: var(--primary-blue);
+            text-decoration: none;
+            padding: 10px 20px;
+            border: 1px solid var(--primary-blue);
+            border-radius: 25px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .footer-link:hover {
+            background: var(--primary-blue);
+            color: var(--text-primary);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+        }
+
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 25px;
+            opacity: 0.5;
+        }
+
+        .empty-state h3 {
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .loading-animation {
+            display: inline-flex;
+            gap: 4px;
+            margin-top: 20px;
+        }
+
+        .loading-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--primary-blue);
+            animation: loadingBounce 1.4s ease-in-out infinite both;
+        }
+
+        .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes loadingBounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        /* Animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(20px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(40px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        @keyframes glow {
-            from { box-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3); }
-            to { box-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5); }
-        }
-        
-        @keyframes neonPulse {
-            0%, 100% { text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3), 0 0 15px rgba(99, 102, 241, 0.1); }
-            50% { text-shadow: 0 0 10px rgba(99, 102, 241, 0.8), 0 0 20px rgba(99, 102, 241, 0.5), 0 0 30px rgba(99, 102, 241, 0.3); }
-        }
-        
-        .glass-effect {
-            backdrop-filter: blur(16px) saturate(180%);
-            background-color: rgba(17, 25, 40, 0.8);
-            border: 1px solid rgba(255, 255, 255, 0.125);
-        }
-        
-        .neon-text {
-            color: #6366f1;
-            text-shadow: 0 0 5px rgba(99, 102, 241, 0.5), 0 0 10px rgba(99, 102, 241, 0.3);
-        }
-        
-        .cyber-grid {
-            background-image: 
-                linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px);
-            background-size: 20px 20px;
-        }
-        
-        .hover-lift {
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        
-        .hover-lift:hover {
-            transform: translateY(-4px) scale(1.02);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-        }
-        
-        .status-indicator {
-            position: relative;
-        }
-        
-        .status-indicator::before {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            background: inherit;
-            transform: translate(-50%, -50%);
-            animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .main-grid { grid-template-columns: 1fr; }
+            .analytics-section { grid-template-columns: 1fr; }
+            .channels-grid { grid-template-columns: 1fr; }
+            .status-bar { flex-direction: column; align-items: center; }
+            .header h1 { font-size: 2.5em; }
+            .container { padding: 15px; }
+            .card { padding: 20px; }
+            .insights-content { max-height: 500px; }
         }
 
-        .progress-bar {
-            background: linear-gradient(90deg, #6366f1, #8b5cf6, #06b6d4);
-            background-size: 200% 100%;
-            animation: progressFlow 2s linear infinite;
-        }
-        
-        @keyframes progressFlow {
-            0% { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
+        @media (max-width: 480px) {
+            .header h1 { font-size: 2em; }
+            .metric { font-size: 2.2em; }
+            .card-icon { font-size: 1.5em; padding: 12px; }
+            .sub-metrics { grid-template-columns: repeat(2, 1fr); }
         }
 
-        .terminal-window {
-            background: #0a0a0a;
-            border-radius: 8px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.05);
-        }
-        
-        .terminal-header {
-            background: #1a1a1a;
-            padding: 12px 16px;
-            border-bottom: 1px solid #333;
-            border-radius: 8px 8px 0 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .terminal-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-        }
-
-        .insight-card {
-            transition: all 0.3s ease;
-            border-left: 4px solid transparent;
-        }
-        
-        .insight-card:hover {
-            border-left-color: #6366f1;
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(139, 92, 246, 0.05));
-            transform: translateX(8px);
-        }
-
-        .loading-dots {
-            display: inline-flex;
-            gap: 4px;
-        }
-        
-        .loading-dots span {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: #6366f1;
-            animation: loadingDots 1.4s ease-in-out infinite both;
-        }
-        
-        .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
-        .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
-        
-        @keyframes loadingDots {
-            0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
-            40% { transform: scale(1); opacity: 1; }
+        /* Print Styles */
+        @media print {
+            .cyber-grid { display: none; }
+            body { background: white !important; color: black !important; }
+            .card { border: 1px solid #ccc !important; background: white !important; }
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-cipher-darker via-slate-900 to-cipher-dark text-white font-sans overflow-x-hidden" x-data="cipherDashboard()">
+<body>
+    <div class="cyber-grid"></div>
     
-    <!-- Animated Background -->
-    <div class="fixed inset-0 cyber-grid opacity-20 pointer-events-none"></div>
-    <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
-    
-    <!-- Navigation Header -->
-    <nav class="glass-effect border-b border-white/10 sticky top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between h-16 items-center">
-                <div class="flex items-center space-x-4">
-                    <div class="flex items-center space-x-3">
-                        <div class="relative">
-                            <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
-                                <i class="fas fa-shield-alt text-white text-lg"></i>
-                            </div>
-                            <div class="absolute -top-1 -right-1 w-4 h-4 rounded-full animate-pulse" 
-                                 :class="getSystemStatusColor()"></div>
-                        </div>
-                        <div>
-                            <h1 class="text-xl font-bold neon-text animate-neon-pulse">CIPHER</h1>
-                            <p class="text-xs text-gray-400 font-mono">Cybersecurity Intelligence Platform</p>
-                        </div>
-                    </div>
+    <div class="container">
+        <!-- Header Section -->
+        <header class="header">
+            <h1>🛡️ CIPHER</h1>
+            <p class="subtitle">Cybersecurity Intelligence Platform</p>
+            
+            <div class="status-bar">
+                <div class="status-item">
+                    <div class="status-dot {% if monitoring.active %}status-online{% else %}status-warning{% endif %}"></div>
+                    <span>System: {% if monitoring.active %}OPERATIONAL{% else %}STANDBY{% endif %}</span>
                 </div>
+                <div class="status-item">
+                    <div class="status-dot {% if stats.data_source == 'bigquery' %}status-online{% else %}status-warning{% endif %}"></div>
+                    <span>BigQuery: {% if stats.data_source == 'bigquery' %}CONNECTED{% else %}LIMITED{% endif %}</span>
+                </div>
+                <div class="status-item">
+                    <div class="status-dot {% if threat_analytics.summary.avg_urgency >= 0.8 %}status-critical{% elif threat_analytics.summary.avg_urgency >= 0.6 %}status-warning{% else %}status-online{% endif %}"></div>
+                    <span>Threat Level: {% if threat_analytics.summary.avg_urgency >= 0.8 %}CRITICAL{% elif threat_analytics.summary.avg_urgency >= 0.6 %}HIGH{% elif threat_analytics.summary.avg_urgency >= 0.4 %}MEDIUM{% else %}LOW{% endif %}</span>
+                </div>
+                <div class="status-item">
+                    <div class="status-dot status-info"></div>
+                    <span>Channels: {{ monitoring.channels.count or 3 }}</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Metrics Grid -->
+        <section class="main-grid">
+            <!-- Intelligence Summary Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">📊</div>
+                    <div class="card-title">Intelligence Summary</div>
+                </div>
+                <div class="metric {% if stats.total_messages > 0 %}good{% else %}warning{% endif %}">
+                    {{ "{:,}".format(stats.total_messages) }}
+                </div>
+                <p class="metric-description">Total Messages Processed</p>
                 
-                <div class="flex items-center space-x-4">
-                    <div class="hidden md:flex items-center space-x-6">
-                        <div class="text-gray-300 text-sm font-medium">
-                            <i class="fas fa-chart-line mr-2"></i>
-                            <span x-text="(realStats.total_messages || 0).toLocaleString()"></span> Signals
-                        </div>
-                        <div class="text-gray-300 text-sm font-medium">
-                            <i class="fas fa-exclamation-triangle mr-2"></i>
-                            <span x-text="realStats.high_threats || 0"></span> High Threats
-                        </div>
+                <div class="sub-metrics">
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.processed_today }}</div>
+                        <div class="sub-metric-label">Today</div>
                     </div>
-                    
-                    <div class="flex items-center space-x-3">
-                        <div class="flex items-center">
-                            <div class="status-indicator w-3 h-3 bg-green-400 rounded-full mr-2"></div>
-                            <span class="text-sm text-gray-400 font-mono" x-text="currentTime"></span>
-                        </div>
-                        <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded" 
-                             :class="getSystemStatusTextColor()">
-                            <span x-text="getSystemStatusText()"></span>
-                        </div>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.unique_channels }}</div>
+                        <div class="sub-metric-label">Channels</div>
+                    </div>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ "%.2f"|format(stats.avg_urgency) }}</div>
+                        <div class="sub-metric-label">Avg Urgency</div>
                     </div>
                 </div>
             </div>
-        </div>
-    </nav>
 
-    <!-- Main Content -->
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
-        <!-- Hero Section -->
-        <div class="mb-8 text-center">
-            <h2 class="text-4xl font-bold bg-gradient-to-r from-cipher-blue via-cipher-purple to-cyan-400 bg-clip-text text-transparent mb-4 animate-fade-in">
-                {{ page_title or "Cybersecurity Intelligence Monitor" }}
-            </h2>
-            <p class="text-gray-400 max-w-2xl mx-auto animate-fade-in">
-                Real-time monitoring and AI analysis of cybersecurity threats and intelligence feeds
-            </p>
-        </div>
-
-        <!-- System Status Banner -->
-        <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift animate-slide-up mb-8">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center space-x-4">
-                    <div class="relative">
-                        <div class="w-16 h-16 rounded-full flex items-center justify-center"
-                             :class="getMonitoringStatusClass()">
-                            <i class="fas fa-satellite-dish text-white text-2xl"></i>
-                        </div>
-                        <div class="absolute inset-0 rounded-full animate-ping opacity-20"
-                             :class="getMonitoringPingClass()"></div>
-                    </div>
-                    
-                    <div>
-                        <h3 class="text-xl font-semibold mb-1">
-                            <span :class="getMonitoringTextClass()" 
-                                  x-text="getMonitoringStatusText()"></span>
-                        </h3>
-                        <p class="text-gray-400 mb-2" x-text="getStatusDescription()"></p>
-                        <div class="flex flex-wrap gap-2">
-                            {% for channel in monitoring.channels or ["@DarkfeedNews", "@breachdetector", "@secharvester"] %}
-                            <span class="px-2 py-1 text-xs rounded-full border font-mono {{ getChannelColor(channel) }}">
-                                {{ channel }}
-                            </span>
-                            {% endfor %}
-                        </div>
-                    </div>
+            <!-- Threat Analysis Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">🚨</div>
+                    <div class="card-title">Threat Analysis</div>
                 </div>
+                <div class="metric {% if (stats.high_threats + stats.critical_threats) > 0 %}critical{% else %}good{% endif %}">
+                    {{ stats.high_threats + stats.critical_threats }}
+                </div>
+                <p class="metric-description">High Priority Threats</p>
                 
-                <div class="flex space-x-3">
-                    <button @click="refreshData()" 
-                            class="px-4 py-2 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg hover:from-cipher-purple hover:to-cipher-blue transition-all duration-300 transform hover:scale-105 shadow-lg">
-                        <i class="fas fa-sync-alt mr-2" :class="{'animate-spin': isRefreshing}"></i>
-                        <span x-text="isRefreshing ? 'Refreshing...' : 'Refresh'"></span>
-                    </button>
+                <div class="sub-metrics">
+                    <div class="sub-metric">
+                        <div class="sub-metric-value" style="color: var(--danger-red);">{{ stats.critical_threats }}</div>
+                        <div class="sub-metric-label">Critical</div>
+                    </div>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value" style="color: var(--warning-orange);">{{ stats.high_threats }}</div>
+                        <div class="sub-metric-label">High</div>
+                    </div>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.apt_activity }}</div>
+                        <div class="sub-metric-label">APT</div>
+                    </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Statistics Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            <!-- Total Intelligence -->
-            <div class="glass-effect rounded-xl p-6 hover-lift border border-white/10 animate-fade-in">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-database text-white text-xl"></i>
+            <!-- Security Intelligence Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">🔍</div>
+                    <div class="card-title">Security Intelligence</div>
+                </div>
+                <div class="metric {% if stats.cve_mentions > 0 %}warning{% else %}good{% endif %}">
+                    {{ stats.cve_mentions }}
+                </div>
+                <p class="metric-description">CVE References</p>
+                
+                <div class="sub-metrics">
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.vulnerabilities }}</div>
+                        <div class="sub-metric-label">Vulnerabilities</div>
                     </div>
-                    <div class="text-right">
-                        <div class="text-2xl font-bold neon-text" x-text="(realStats.total_messages || 0).toLocaleString()">
-                            {{ stats.total_messages or 0 }}
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.data_breaches }}</div>
+                        <div class="sub-metric-label">Breaches</div>
+                    </div>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value">{{ stats.malware_alerts }}</div>
+                        <div class="sub-metric-label">Malware</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Status Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">⚡</div>
+                    <div class="card-title">System Status</div>
+                </div>
+                <div class="metric info">{{ monitoring.channels.count or 3 }}/3</div>
+                <p class="metric-description">Channels Active</p>
+                
+                <div class="sub-metrics">
+                    <div class="sub-metric">
+                        <div class="sub-metric-value" style="color: {% if monitoring.subsystems.bigquery %}var(--primary-green){% else %}var(--warning-orange){% endif %};">
+                            {% if monitoring.subsystems.bigquery %}✓{% else %}○{% endif %}
                         </div>
-                        <div class="text-xs text-gray-400 font-mono">TOTAL INTEL</div>
+                        <div class="sub-metric-label">BigQuery</div>
                     </div>
-                </div>
-                <div class="w-full bg-gray-700/30 rounded-full h-2">
-                    <div class="progress-bar h-2 rounded-full" :style="`width: ${getProgressWidth(realStats.total_messages)}%`"></div>
-                </div>
-            </div>
-
-            <!-- High Threats -->
-            <div class="glass-effect rounded-xl p-6 hover-lift border border-white/10 animate-fade-in" style="animation-delay: 0.1s;">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 rounded-lg flex items-center justify-center"
-                         :class="getThreatIconClass()">
-                        <i class="fas fa-exclamation-triangle text-white text-xl"></i>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-2xl font-bold" 
-                             :class="getThreatTextClass()" 
-                             x-text="realStats.high_threats || 0">
-                            {{ stats.high_threats or 0 }}
+                    <div class="sub-metric">
+                        <div class="sub-metric-value" style="color: {% if monitoring.subsystems.gemini %}var(--primary-green){% else %}var(--warning-orange){% endif %};">
+                            {% if monitoring.subsystems.gemini %}✓{% else %}○{% endif %}
                         </div>
-                        <div class="text-xs text-gray-400 font-mono">HIGH THREATS</div>
+                        <div class="sub-metric-label">Gemini AI</div>
                     </div>
-                </div>
-                <div class="flex items-center text-xs" :class="getThreatStatusClass()">
-                    <i :class="getThreatStatusIcon()" class="mr-1"></i>
-                    <span class="font-mono" x-text="getThreatStatusText()"></span>
-                </div>
-            </div>
-
-            <!-- Active Channels -->
-            <div class="glass-effect rounded-xl p-6 hover-lift border border-white/10 animate-fade-in" style="animation-delay: 0.2s;">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r from-purple-500 to-indigo-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-satellite-dish text-white text-xl"></i>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-2xl font-bold text-purple-400">
-                            <span x-text="getActiveChannels()">{{ monitoring.total_channels or 0 }}</span>
-                            <span class="text-gray-500">/3</span>
+                    <div class="sub-metric">
+                        <div class="sub-metric-value" style="color: {% if monitoring.subsystems.telegram %}var(--primary-green){% else %}var(--warning-orange){% endif %};">
+                            {% if monitoring.subsystems.telegram %}✓{% else %}○{% endif %}
                         </div>
-                        <div class="text-xs text-gray-400 font-mono">CHANNELS</div>
+                        <div class="sub-metric-label">Telegram</div>
                     </div>
-                </div>
-                <div class="flex space-x-1">
-                    <div class="flex-1 h-2 rounded-full bg-purple-500 animate-pulse"></div>
-                    <div class="flex-1 h-2 rounded-full bg-purple-500 animate-pulse" style="animation-delay: 0.1s;"></div>
-                    <div class="flex-1 h-2 rounded-full bg-purple-500 animate-pulse" style="animation-delay: 0.2s;"></div>
                 </div>
             </div>
+        </section>
 
-            <!-- Processed Today -->
-            <div class="glass-effect rounded-xl p-6 hover-lift border border-white/10 animate-fade-in" style="animation-delay: 0.3s;">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="w-12 h-12 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-clock text-white text-xl"></i>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-2xl font-bold text-cyan-400" x-text="realStats.processed_today || 0">
-                            {{ stats.processed_today or 0 }}
-                        </div>
-                        <div class="text-xs text-gray-400 font-mono">TODAY</div>
-                    </div>
-                </div>
-                <div class="text-xs text-cyan-400 font-mono">
-                    <i class="fas fa-sync-alt mr-1" :class="realMonitoring.active ? 'animate-spin' : ''"></i>
-                    <span x-text="realMonitoring.active ? 'LIVE MONITORING' : 'STANDBY'"></span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Threat Analytics Section (if available) -->
+        <!-- Threat Analytics Section -->
         {% if threat_analytics and threat_analytics.summary and threat_analytics.summary.total_threats > 0 %}
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            <!-- Threat Levels Distribution -->
-            <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift">
-                <h3 class="text-lg font-semibold mb-4 flex items-center">
-                    <i class="fas fa-chart-pie text-cipher-blue mr-2"></i>
-                    Threat Level Distribution
-                </h3>
-                <div class="space-y-3">
+        <section class="analytics-section">
+            <!-- Threat Levels Chart -->
+            <div class="chart-container">
+                <h3 class="chart-title">Threat Level Distribution</h3>
+                <div class="bar-chart">
+                    {% set max_level = threat_analytics.threat_levels.values() | max %}
                     {% for level, count in threat_analytics.threat_levels.items() %}
-                    <div class="flex items-center justify-between">
-                        <span class="text-sm font-mono capitalize {{ getThreatLevelColor(level) }}">{{ level }}</span>
-                        <div class="flex items-center space-x-2">
-                            <div class="w-20 bg-gray-700 rounded-full h-2">
-                                <div class="h-2 rounded-full {{ getThreatLevelBg(level) }}"
-                                     style="width: {{ (count / threat_analytics.summary.total_threats * 100) if threat_analytics.summary.total_threats > 0 else 0 }}%"></div>
-                            </div>
-                            <span class="text-sm font-mono w-8 text-right">{{ count }}</span>
+                    <div class="bar-item">
+                        <div class="bar-label">{{ level.title() }}</div>
+                        <div class="bar">
+                            <div class="bar-fill" style="width: {{ (count / max_level * 100) if max_level else 0 }}%; 
+                                 {% if level == 'critical' %}background: linear-gradient(90deg, #ff4444, #ff6666);
+                                 {% elif level == 'high' %}background: linear-gradient(90deg, #ffaa00, #ffcc44);
+                                 {% elif level == 'medium' %}background: linear-gradient(90deg, #ffff00, #ffff88);
+                                 {% elif level == 'low' %}background: linear-gradient(90deg, #00ff00, #44ff44);
+                                 {% endif %}"></div>
                         </div>
+                        <div class="bar-value">{{ count }}</div>
                     </div>
                     {% endfor %}
                 </div>
             </div>
 
-            <!-- Active Campaigns -->
-            <div class="glass-effect rounded-xl p-6 border border-white/10 hover-lift">
-                <h3 class="text-lg font-semibold mb-4 flex items-center">
-                    <i class="fas fa-bullseye text-cipher-purple mr-2"></i>
-                    Active Campaigns
-                </h3>
-                <div class="space-y-3">
-                    {% for campaign in threat_analytics.active_campaigns[:5] %}
-                    <div class="flex items-center justify-between p-2 bg-white/5 rounded-lg">
-                        <div>
-                            <span class="text-sm font-medium">{{ campaign.campaign }}</span>
-                            <div class="text-xs text-gray-400">{{ campaign.incidents }} incidents</div>
+            <!-- Categories Chart -->
+            <div class="chart-container">
+                <h3 class="chart-title">Threat Categories</h3>
+                <div class="bar-chart">
+                    {% set max_cat = threat_analytics.categories.values() | max %}
+                    {% for category, count in threat_analytics.categories.items() %}
+                    {% if count > 0 %}
+                    <div class="bar-item">
+                        <div class="bar-label">{{ category.replace('_', ' ').title() }}</div>
+                        <div class="bar">
+                            <div class="bar-fill" style="width: {{ (count / max_cat * 100) if max_cat else 0 }}%;"></div>
                         </div>
-                        <span class="text-xs px-2 py-1 rounded-full font-mono {{ 'bg-red-500/20 text-red-400' if campaign.threat_level == 'high' else 'bg-yellow-500/20 text-yellow-400' }}">
-                            {{ campaign.threat_level.upper() }}
-                        </span>
+                        <div class="bar-value">{{ count }}</div>
                     </div>
+                    {% endif %}
                     {% endfor %}
                 </div>
             </div>
-        </div>
+
+            <!-- Summary Stats -->
+            <div class="chart-container">
+                <h3 class="chart-title">Intelligence Summary</h3>
+                <div style="text-align: center; padding: 20px;">
+                    <div style="font-size: 2.5em; color: var(--primary-blue); margin-bottom: 15px;">
+                        {{ threat_analytics.summary.total_threats }}
+                    </div>
+                    <div style="color: var(--text-muted); margin-bottom: 25px;">Total Threats Analyzed</div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; text-align: center;">
+                        <div>
+                            <div style="font-size: 1.8em; color: var(--danger-red);">{{ threat_analytics.summary.high_priority }}</div>
+                            <div style="font-size: 0.85em; color: var(--text-muted);">High Priority</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 1.8em; color: var(--warning-orange);">{{ "%.2f"|format(threat_analytics.summary.avg_urgency) }}</div>
+                            <div style="font-size: 0.85em; color: var(--text-muted);">Avg Urgency</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        {% else %}
+        <section class="analytics-section">
+            <div class="chart-container">
+                <h3 class="chart-title">Threat Analytics Initializing</h3>
+                <div class="empty-state">
+                    <div class="loading-animation">
+                        <div class="loading-dot"></div>
+                        <div class="loading-dot"></div>
+                        <div class="loading-dot"></div>
+                    </div>
+                    <p style="margin-top: 20px;">Analytics will be available after data collection</p>
+                </div>
+            </div>
+        </section>
         {% endif %}
 
-        <!-- Real-time Intelligence Feed -->
-        <div class="glass-effect rounded-xl border border-white/10 hover-lift">
-            <!-- Header -->
-            <div class="terminal-header">
-                <div class="terminal-dot bg-red-500"></div>
-                <div class="terminal-dot bg-yellow-500"></div>
-                <div class="terminal-dot bg-green-500"></div>
-                <div class="flex-1 flex items-center justify-between ml-4">
-                    <div class="flex items-center space-x-3">
-                        <span class="text-green-400 font-mono text-sm">CIPHER@intelligence:~$</span>
-                        <span class="text-gray-400 text-sm">Real-time Intelligence Feed</span>
-                        <span class="px-2 py-0.5 text-xs rounded border" 
-                              :class="getDataBadgeClass()" 
-                              x-show="realInsights && realInsights.length > 0">
-                            <span x-text="(realInsights || []).length"></span> SIGNALS
-                        </span>
-                    </div>
-                    <div class="flex items-center space-x-3">
-                        <div class="loading-dots" x-show="isLoading">
-                            <span></span>
-                            <span></span>
-                            <span></span>
-                        </div>
-                        <span class="text-xs text-gray-400" x-show="isLoading">Scanning...</span>
-                        <button @click="refreshData()" class="text-cipher-blue hover:text-cipher-purple transition-colors">
-                            <i class="fas fa-sync-alt text-sm" :class="{'animate-spin': isRefreshing}"></i>
-                        </button>
-                    </div>
-                </div>
+        <!-- Recent Intelligence Feed -->
+        <section class="insights-section">
+            <div class="insights-header">
+                <h3>🔍 Recent Threat Intelligence</h3>
+                <p>{{ insights | length }} intelligence signals processed | Auto-refresh: 30s</p>
             </div>
-
-            <!-- Content -->
-            <div class="p-6">
-                <!-- Insights List -->
-                <div class="space-y-4 max-h-96 overflow-y-auto" x-show="realInsights && realInsights.length > 0">
-                    <template x-for="(insight, index) in (realInsights || []).slice(0, 10)" :key="index">
-                        <div class="insight-card glass-effect rounded-lg p-4 animate-fade-in" 
-                             :style="`animation-delay: ${index * 0.1}s`">
-                            <div class="flex items-start space-x-4">
-                                <!-- Threat Indicator -->
-                                <div class="flex-shrink-0 relative">
-                                    <div class="w-12 h-12 rounded-full flex items-center justify-center"
-                                         :class="getThreatIcon(insight)">
-                                        <i :class="getThreatIconClass(insight)" class="text-white"></i>
-                                    </div>
-                                    <div class="absolute inset-0 rounded-full animate-ping opacity-20"
-                                         :class="getThreatIconBg(insight)"
-                                         x-show="insight.urgency_score > 0.7"></div>
-                                </div>
-
-                                <div class="flex-1 min-w-0">
-                                    <!-- Header -->
-                                    <div class="flex items-center justify-between mb-3">
-                                        <div class="flex items-center space-x-3">
-                                            <span class="font-semibold text-cipher-blue font-mono" x-text="insight.chat_username || '@Unknown'"></span>
-                                            
-                                            <!-- Category Badge -->
-                                            <span class="px-2 py-1 text-xs rounded-full border font-mono"
-                                                  :class="getCategoryColor(insight.category)"
-                                                  x-text="(insight.category || 'other').toUpperCase()"></span>
-                                            
-                                            <!-- Threat Level Badge -->
-                                            <span class="px-2 py-1 text-xs rounded-full border font-mono"
-                                                  :class="getThreatLevelBadge(insight.threat_level)"
-                                                  x-show="insight.threat_level && insight.threat_level !== 'low'"
-                                                  x-text="(insight.threat_level || '').toUpperCase()"></span>
-                                        </div>
-                                        <span class="text-xs text-gray-500 font-mono" x-text="formatDate(insight.message_date)"></span>
-                                    </div>
-
-                                    <!-- AI Analysis -->
-                                    <div class="mb-3 p-3 bg-cipher-blue/5 rounded-lg border-l-4 border-cipher-blue" x-show="insight.gemini_analysis">
-                                        <div class="flex items-start space-x-2">
-                                            <i class="fas fa-robot text-cipher-blue mt-0.5"></i>
-                                            <p class="text-gray-300 text-sm leading-relaxed" x-text="insight.gemini_analysis || 'No analysis available'"></p>
-                                        </div>
-                                    </div>
-
-                                    <!-- Content Preview -->
-                                    <div class="mb-3 p-2 bg-white/5 rounded border-l-2 border-gray-600" x-show="insight.message_text">
-                                        <p class="text-gray-300 text-sm" x-text="(insight.message_text || '').substring(0, 200) + (insight.message_text && insight.message_text.length > 200 ? '...' : '')"></p>
-                                    </div>
-
-                                    <!-- Topics -->
-                                    <div class="mb-3 flex flex-wrap gap-2" x-show="insight.key_topics && insight.key_topics.length > 0">
-                                        <template x-for="topic in (insight.key_topics || []).slice(0, 5)">
-                                            <span class="px-2 py-1 bg-white/5 text-gray-300 text-xs rounded border border-white/10 hover:border-cipher-blue/50 transition-colors font-mono"
-                                                  x-text="`#${topic}`"></span>
-                                        </template>
-                                        <span class="text-xs text-gray-500 px-2 py-1" 
-                                              x-show="insight.key_topics && insight.key_topics.length > 5"
-                                              x-text="`+${insight.key_topics.length - 5} more`"></span>
-                                    </div>
-
-                                    <!-- Metrics -->
-                                    <div class="flex items-center justify-between text-xs">
-                                        <div class="flex items-center space-x-4 text-gray-500">
-                                            <span class="font-mono">THREAT: <span x-text="Math.round((insight.urgency_score || 0) * 100)"></span>%</span>
-                                            <span class="font-mono">TYPE: <span x-text="(insight.threat_type || 'unknown').toUpperCase()"></span></span>
-                                            <span class="font-mono">SENTIMENT: <span x-text="(insight.sentiment || 'neutral').toUpperCase()"></span></span>
-                                        </div>
-                                        <div class="flex items-center space-x-2">
-                                            <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                            <span class="text-green-400 font-mono">ANALYZED</span>
-                                        </div>
-                                    </div>
+            
+            <div class="insights-content">
+                {% if insights %}
+                    {% for insight in insights %}
+                    <article class="insight">
+                        <div class="insight-header">
+                            <div>
+                                <div class="insight-source">{{ insight.chat_username or '@Unknown' }}</div>
+                                <div class="insight-badges">
+                                    <span class="threat-badge threat-{{ insight.threat_level or 'low' }}">
+                                        {{ (insight.threat_level or 'low').upper() }}
+                                    </span>
+                                    <span class="threat-badge" style="background: rgba(99, 102, 241, 0.2); color: var(--primary-blue); border: 1px solid var(--primary-blue);">
+                                        {{ (insight.category or 'other').upper().replace('_', ' ') }}
+                                    </span>
                                 </div>
                             </div>
+                            <div style="font-size: 0.85em; color: var(--text-muted);">
+                                {% if insight.message_date %}
+                                    {{ moment(insight.message_date).format('MM/DD HH:mm') if moment else insight.message_date[:16] }}
+                                {% else %}
+                                    Unknown
+                                {% endif %}
+                            </div>
                         </div>
-                    </template>
-                </div>
+                        
+                        <div class="insight-analysis">
+                            {{ (insight.gemini_analysis or insight.message_text or 'No analysis available')[:400] }}{% if (insight.gemini_analysis or insight.message_text or '') | length > 400 %}...{% endif %}
+                        </div>
+                        
+                        <div class="insight-meta">
+                            <div class="urgency-indicator">
+                                <span>Urgency:</span>
+                                <div class="urgency-bar">
+                                    <div class="urgency-fill" style="width: {{ (insight.urgency_score or 0) * 100 }}%;"></div>
+                                </div>
+                                <span style="font-family: monospace;">{{ "%.2f"|format(insight.urgency_score or 0) }}</span>
+                            </div>
+                            <div>
+                                Type: <span style="color: var(--primary-blue);">{{ insight.threat_type or 'Unknown' }}</span>
+                            </div>
+                            <div>
+                                Sentiment: <span style="color: {% if insight.sentiment == 'positive' %}var(--primary-green){% elif insight.sentiment == 'negative' %}var(--danger-red){% else %}var(--warning-orange){% endif %};">
+                                    {{ (insight.sentiment or 'neutral').upper() }}
+                                </span>
+                            </div>
+                        </div>
+                    </article>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <h3>No Recent Threat Intelligence</h3>
+                        <p>CIPHER is monitoring cybersecurity channels for threats.</p>
+                        <p style="font-size: 0.95em;">Intelligence data will appear here as it's collected and analyzed.</p>
+                        <div class="loading-animation">
+                            <div class="loading-dot"></div>
+                            <div class="loading-dot"></div>
+                            <div class="loading-dot"></div>
+                        </div>
+                        <p style="font-size: 0.85em; margin-top: 15px; color: var(--text-muted);">Monitoring Active</p>
+                    </div>
+                {% endif %}
+            </div>
+        </section>
 
-                <!-- Empty State -->
-                <div class="text-center py-12" x-show="!realInsights || realInsights.length === 0">
-                    <div class="w-24 h-24 bg-gradient-to-r from-gray-600 to-slate-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
-                        <i class="fas fa-search text-4xl text-gray-400"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold text-gray-300 mb-3">No Threat Intelligence Data</h3>
-                    <div class="text-gray-500 mb-6 max-w-md mx-auto">
-                        <p x-show="!realMonitoring.active">
-                            CIPHER cybersecurity monitoring system is offline. Real-time threat intelligence will appear here when monitoring is active.
-                        </p>
-                        <p x-show="realMonitoring.active && realStats.total_messages === 0">
-                            CIPHER is monitoring cybersecurity channels. Threat intelligence will appear here as data is collected.
-                        </p>
-                        <p x-show="realMonitoring.active && realStats.total_messages > 0">
-                            No recent threat intelligence in the last 7 days. The system is monitoring <span x-text="getActiveChannels()"></span> channels.
-                        </p>
-                    </div>
-                    <div class="text-xs text-gray-600 font-mono">
-                        <i class="fas fa-shield-alt mr-2"></i>
-                        Status: <span x-text="getSystemStatusText()"></span>
-                        {% if system_status == 'error' and error %}
-                        <div class="mt-2 text-red-400">{{ error }}</div>
-                        {% endif %}
+        <!-- Monitored Channels Section -->
+        <section class="channels-section">
+            <h3 style="color: var(--primary-blue); margin-bottom: 10px;">📡 Monitored Intelligence Sources</h3>
+            <p style="color: var(--text-muted); margin-bottom: 20px;">
+                Real-time monitoring of 3 premium cybersecurity intelligence channels
+            </p>
+            
+            <div class="channels-grid">
+                <div class="channel-card">
+                    <div class="channel-icon">🔴</div>
+                    <div class="channel-name">@DarkfeedNews</div>
+                    <div class="channel-desc">Advanced Persistent Threats & Zero-days</div>
+                    <div class="channel-status {% if monitoring.active %}active{% else %}standby{% endif %}">
+                        ● {% if monitoring.active %}MONITORING{% else %}STANDBY{% endif %}
                     </div>
                 </div>
-
-                <!-- Footer -->
-                <div class="mt-6 pt-4 border-t border-white/10 flex justify-between items-center">
-                    <div class="text-sm text-gray-400 font-mono">
-                        <i class="fas fa-database mr-2"></i>
-                        <span x-text="(realInsights || []).length"></span> intelligence signals processed
-                        <span x-show="realStats.data_source" class="ml-2 text-xs">
-                            (<span x-text="realStats.data_source"></span>)
-                        </span>
+                
+                <div class="channel-card">
+                    <div class="channel-icon">🟠</div>
+                    <div class="channel-name">@breachdetector</div>
+                    <div class="channel-desc">Data Breach Monitor & Credential Dumps</div>
+                    <div class="channel-status {% if monitoring.active %}active{% else %}standby{% endif %}">
+                        ● {% if monitoring.active %}MONITORING{% else %}STANDBY{% endif %}
                     </div>
-                    <div class="text-xs text-gray-500 font-mono">
-                        Last updated: <span x-text="formatDate(realStats.last_updated || '{{ current_time }}')"></span>
+                </div>
+                
+                <div class="channel-card">
+                    <div class="channel-icon">🔵</div>
+                    <div class="channel-name">@secharvester</div>
+                    <div class="channel-desc">Security News, CVEs & Patches</div>
+                    <div class="channel-status {% if monitoring.active %}active{% else %}standby{% endif %}">
+                        ● {% if monitoring.active %}MONITORING{% else %}STANDBY{% endif %}
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
-    </main>
-
-    <!-- Footer -->
-    <footer class="glass-effect border-t border-white/10 mt-16">
-        <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between items-center">
-                <div class="flex items-center space-x-4">
-                    <div class="text-sm text-gray-400">
-                        <span class="font-mono">CIPHER</span> v1.0.0 | Powered by 
-                        <span class="text-cipher-blue">Google Cloud</span> & 
-                        <span class="text-cipher-purple">Gemini AI</span>
-                    </div>
-                </div>
-                <div class="flex items-center space-x-4 text-xs text-gray-500">
-                    <span class="font-mono">{{ PROJECT_ID or 'primal-chariot-382610' }}</span>
-                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                    <span class="font-mono" x-text="getSystemStatusText().toUpperCase()"></span>
-                </div>
+        <!-- Footer -->
+        <footer class="footer">
+            <p><strong>CIPHER</strong> v1.0.0 | Powered by Google Cloud & Gemini AI</p>
+            <p style="color: var(--text-muted); margin: 15px 0;">
+                Project: primal-chariot-382610 | Service: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com
+            </p>
+            
+            <div class="footer-links">
+                <a href="/api/stats" class="footer-link">📈 Stats API</a>
+                <a href="/health" class="footer-link">🏥 Health Check</a>
+                <a href="/api/monitoring/status" class="footer-link">📡 Monitoring</a>
+                <a href="/api/analytics" class="footer-link">📊 Analytics API</a>
+                <a href="/api/docs" class="footer-link">📚 API Docs</a>
             </div>
-        </div>
-    </footer>
+        </footer>
+    </div>
 
     <script>
-        function cipherDashboard() {
-            return {
-                // State
-                isRefreshing: false,
-                isLoading: false,
-                currentTime: '',
-                
-                // Real-time data
-                realStats: {{ stats | tojson | safe }},
-                realInsights: {{ insights | tojson | safe }},
-                realMonitoring: {{ monitoring | tojson | safe }},
-                
-                // Initialize
-                init() {
-                    this.updateTime();
-                    this.loadData();
-                    
-                    // Update time every second
-                    setInterval(() => this.updateTime(), 1000);
-                    
-                    // Auto-refresh every 30 seconds
-                    setInterval(() => this.loadData(), 30000);
-                },
-                
-                // Update current time
-                updateTime() {
-                    const now = new Date();
-                    this.currentTime = now.toLocaleTimeString('en-US', { 
-                        hour12: false,
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit'
+        // Auto-refresh dashboard every 30 seconds
+        let refreshTimer = setTimeout(() => {
+            window.location.reload();
+        }, 30000);
+
+        // Add fade-in animation to cards
+        document.addEventListener('DOMContentLoaded', function() {
+            const cards = document.querySelectorAll('.card, .chart-container, .insight');
+            cards.forEach((card, index) => {
+                card.style.opacity = '0';
+                card.style.transform = 'translateY(20px)';
+                card.style.animation = `fadeIn 0.6s ease-out ${index * 0.1}s forwards`;
+            });
+        });
+
+        // Update page title with current time
+        function updatePageTitle() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-US', { 
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+            document.title = `CIPHER Dashboard - ${timeStr}`;
+        }
+
+        // Update time every second
+        setInterval(updatePageTitle, 1000);
+        updatePageTitle();
+
+        // Add smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
                     });
-                },
-                
-                // Load all data
-                async loadData() {
-                    this.isLoading = true;
-                    
-                    try {
-                        await Promise.all([
-                            this.fetchStats(),
-                            this.fetchInsights(),
-                            this.fetchMonitoring()
-                        ]);
-                        
-                    } catch (error) {
-                        console.error('Error loading data:', error);
-                    }
-                    
-                    this.isLoading = false;
-                },
-                
-                // Fetch statistics
-                async fetchStats() {
-                    try {
-                        const response = await fetch('/api/stats');
-                        if (response.ok) {
-                            this.realStats = await response.json();
-                        }
-                    } catch (error) {
-                        console.error('Error fetching stats:', error);
-                    }
-                },
-                
-                // Fetch insights
-                async fetchInsights() {
-                    try {
-                        const response = await fetch('/api/insights');
-                        if (response.ok) {
-                            const data = await response.json();
-                            this.realInsights = data.insights || [];
-                        }
-                    } catch (error) {
-                        console.error('Error fetching insights:', error);
-                        this.realInsights = [];
-                    }
-                },
-                
-                // Fetch monitoring status
-                async fetchMonitoring() {
-                    try {
-                        const response = await fetch('/api/monitoring/status');
-                        if (response.ok) {
-                            this.realMonitoring = await response.json();
-                        }
-                    } catch (error) {
-                        console.error('Error fetching monitoring:', error);
-                        this.realMonitoring = { active: false };
-                    }
-                },
-                
-                // Refresh data manually
-                async refreshData() {
-                    if (this.isRefreshing) return;
-                    
-                    this.isRefreshing = true;
-                    await this.loadData();
-                    
-                    setTimeout(() => {
-                        this.isRefreshing = false;
-                    }, 1000);
-                },
-                
-                // Status helper functions
-                getSystemStatusColor() {
-                    if (this.realMonitoring.active && this.realStats.total_messages > 0) return 'bg-green-400';
-                    if (this.realMonitoring.active) return 'bg-yellow-400';
-                    return 'bg-red-400';
-                },
-                
-                getSystemStatusText() {
-                    if (this.realMonitoring.active && this.realStats.total_messages > 0) return 'LIVE';
-                    if (this.realMonitoring.active) return 'READY';
-                    return 'OFFLINE';
-                },
-                
-                getSystemStatusTextColor() {
-                    if (this.realMonitoring.active && this.realStats.total_messages > 0) return 'text-green-400';
-                    if (this.realMonitoring.active) return 'text-yellow-400';
-                    return 'text-red-400';
-                },
-                
-                getMonitoringStatusClass() {
-                    if (this.realMonitoring.active) return 'bg-gradient-to-r from-green-400 to-emerald-500 animate-pulse-slow';
-                    return 'bg-gradient-to-r from-yellow-400 to-orange-500';
-                },
-                
-                getMonitoringPingClass() {
-                    return this.realMonitoring.active ? 'bg-green-400' : 'bg-yellow-400';
-                },
-                
-                getMonitoringTextClass() {
-                    return this.realMonitoring.active ? 'text-green-400' : 'text-yellow-400';
-                },
-                
-                getMonitoringStatusText() {
-                    if (this.realMonitoring.active && this.realStats.total_messages > 0) return '🟢 CIPHER OPERATIONAL';
-                    if (this.realMonitoring.active) return '🟡 CIPHER MONITORING';
-                    return '🔴 CIPHER OFFLINE';
-                },
-                
-                getStatusDescription() {
-                    if (this.realMonitoring.active && this.realStats.total_messages > 0) {
-                        return `Processing cybersecurity intelligence from ${this.getActiveChannels()} channels`;
-                    }
-                    if (this.realMonitoring.active) {
-                        return `Monitoring ${this.getActiveChannels()} cybersecurity intelligence channels`;
-                    }
-                    return 'Monitoring system offline';
-                },
-                
-                getActiveChannels() {
-                    return this.realMonitoring.active ? 3 : 0;
-                },
-                
-                getProgressWidth(value) {
-                    if (!value) return 0;
-                    return Math.min(100, (value / 1000) * 100);
-                },
-                
-                getThreatIconClass() {
-                    const threats = this.realStats.high_threats || 0;
-                    if (threats > 0) return 'bg-gradient-to-r from-red-500 to-orange-500 animate-pulse';
-                    return 'bg-gradient-to-r from-green-500 to-emerald-500';
-                },
-                
-                getThreatTextClass() {
-                    const threats = this.realStats.high_threats || 0;
-                    return threats > 0 ? 'text-red-400' : 'text-green-400';
-                },
-                
-                getThreatStatusClass() {
-                    const threats = this.realStats.high_threats || 0;
-                    return threats > 0 ? 'text-red-400' : 'text-green-400';
-                },
-                
-                getThreatStatusIcon() {
-                    const threats = this.realStats.high_threats || 0;
-                    return threats > 0 ? 'fas fa-shield-alt' : 'fas fa-check-circle';
-                },
-                
-                getThreatStatusText() {
-                    const threats = this.realStats.high_threats || 0;
-                    return threats > 0 ? 'ACTIVE THREATS' : 'SECURE';
-                },
-                
-                getDataBadgeClass() {
-                    if ((this.realInsights || []).length > 0) return 'bg-green-500/20 text-green-400 border-green-500/30';
-                    return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
-                },
-                
-                // Insight styling functions
-                getThreatIcon(insight) {
-                    if (insight.urgency_score > 0.7) return 'bg-gradient-to-r from-red-500 to-orange-500 animate-pulse';
-                    if (insight.urgency_score > 0.4) return 'bg-gradient-to-r from-yellow-500 to-orange-500';
-                    return 'bg-gradient-to-r from-blue-500 to-cyan-500';
-                },
-                
-                getThreatIconClass(insight) {
-                    if (insight.urgency_score > 0.7) return 'fas fa-exclamation-triangle';
-                    if (insight.urgency_score > 0.4) return 'fas fa-eye';
-                    return 'fas fa-info-circle';
-                },
-                
-                getThreatIconBg(insight) {
-                    if (insight.urgency_score > 0.7) return 'bg-red-500';
-                    return 'bg-yellow-500';
-                },
-                
-                getCategoryColor(category) {
-                    const colors = {
-                        'threat_intel': 'bg-red-500/20 text-red-400 border-red-500/30',
-                        'data_breach': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-                        'vulnerability': 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
-                        'malware': 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-                        'apt': 'bg-red-600/20 text-red-300 border-red-600/30',
-                        'ransomware': 'bg-red-700/20 text-red-300 border-red-700/30'
-                    };
-                    return colors[category] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
-                },
-                
-                getThreatLevelBadge(level) {
-                    const colors = {
-                        'critical': 'bg-red-600/30 text-red-300 border-red-600/50 animate-pulse',
-                        'high': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-                        'medium': 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
-                    };
-                    return colors[level] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
-                },
-                
-                formatDate(dateString) {
-                    if (!dateString) return '';
-                    try {
-                        return new Date(dateString).toLocaleString('en-US', {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                        });
-                    } catch {
-                        return dateString.substring(0, 19).replace('T', ' ');
-                    }
+                }
+            });
+        });
+
+        // Pause auto-refresh when user is interacting
+        let userActivity = false;
+        const resetTimer = () => {
+            clearTimeout(refreshTimer);
+            if (!userActivity) {
+                refreshTimer = setTimeout(() => window.location.reload(), 30000);
+            }
+        };
+
+        ['mousedown', 'keydown', 'scroll', 'touchstart'].forEach(event => {
+            document.addEventListener(event, () => {
+                userActivity = true;
+                setTimeout(() => { userActivity = false; resetTimer(); }, 5000);
+            }, { passive: true });
+        });
+
+        // Enhanced error handling
+        window.addEventListener('error', function(e) {
+            console.error('Dashboard error:', e.error);
+        });
+
+        // Performance monitoring
+        window.addEventListener('load', function() {
+            const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
+            console.log(`Dashboard loaded in ${loadTime}ms`);
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey || e.metaKey) {
+                switch(e.key) {
+                    case 'r':
+                        e.preventDefault();
+                        window.location.reload();
+                        break;
+                    case 'h':
+                        e.preventDefault();
+                        window.location.href = '/health';
+                        break;
                 }
             }
-        }
+        });
+
+        console.log('🛡️ CIPHER Dashboard loaded successfully');
     </script>
 </body>
 </html>
