@@ -869,7 +869,7 @@ def extract_cybersecurity_data(text: str) -> Dict[str, List[str]]:
     return extracted
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
-    """Store processed message in BigQuery"""
+    """Store processed message in BigQuery - DEFENSIVE VERSION"""
     try:
         if not _bigquery_available:
             logger.warning("BigQuery not available")
@@ -877,6 +877,10 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
         
         table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
         table = _bq_client.get_table(table_ref)
+        
+        # Get existing schema fields
+        existing_fields = {field.name for field in table.schema}
+        logger.info(f"Available fields for storage: {sorted(existing_fields)}")
         
         # Convert datetime objects
         def convert_datetime(dt):
@@ -888,27 +892,50 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
                 return datetime.fromtimestamp(dt.timestamp()).isoformat()
             return str(dt)
         
-        # Build row data
+        # Build row data with ONLY existing fields
         row = {}
         for field_name, field_value in message_data.items():
-            if field_name.endswith('_date'):
-                row[field_name] = convert_datetime(field_value)
-            elif isinstance(field_value, list):
-                row[field_name] = [str(item) for item in field_value if item]
-            elif isinstance(field_value, (int, float)):
-                row[field_name] = field_value
+            # Only include fields that exist in the schema
+            if field_name in existing_fields:
+                if field_name.endswith('_date'):
+                    row[field_name] = convert_datetime(field_value)
+                elif isinstance(field_value, list):
+                    row[field_name] = [str(item) for item in field_value if item]
+                elif isinstance(field_value, (int, float)):
+                    row[field_name] = field_value
+                else:
+                    row[field_name] = str(field_value) if field_value is not None else ""
             else:
-                row[field_name] = str(field_value) if field_value is not None else ""
+                logger.debug(f"Skipping field not in schema: {field_name}")
+        
+        # Ensure required core fields exist
+        core_fields = {
+            "message_id": str(message_data.get("message_id", "")),
+            "chat_id": str(message_data.get("chat_id", "")),
+            "processed_date": convert_datetime(message_data.get("processed_date", datetime.now()))
+        }
+        
+        for field, value in core_fields.items():
+            if field in existing_fields:
+                row[field] = value
         
         # Insert row
-        errors = _bq_client.insert_rows_json(table, [row])
-        if errors:
-            logger.error(f"BigQuery insert failed: {errors}")
+        if row:  # Only insert if we have data
+            errors = _bq_client.insert_rows_json(table, [row])
+            if errors:
+                logger.error(f"BigQuery insert failed: {errors}")
+                logger.error(f"Attempted to insert fields: {list(row.keys())}")
+            else:
+                stored_fields = len(row)
+                threat_level = row.get('threat_level', 'unknown')
+                category = row.get('category', 'unknown')
+                logger.info(f"✅ Stored message: {row.get('chat_username')} - {threat_level}/{category} ({stored_fields} fields)")
         else:
-            logger.info(f"✅ Stored message: {row.get('chat_username')} - {row.get('threat_level')}")
+            logger.warning("No valid fields to store in BigQuery")
             
     except Exception as e:
         logger.error(f"BigQuery storage failed: {e}")
+        logger.error(f"Available schema fields: {len(existing_fields) if 'existing_fields' in locals() else 'unknown'}")
 
 async def stop_monitoring_system():
     """Stop monitoring system"""
