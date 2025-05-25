@@ -70,6 +70,7 @@ _gemini_available = False
 _telegram_connected = False
 _monitoring_active = False
 _initialization_lock = asyncio.Lock()
+_session_string = None
 
 async def initialize_all_systems():
     """Initialize all Google Cloud and external systems"""
@@ -244,6 +245,53 @@ async def get_secret(secret_id: str) -> Optional[str]:
         logger.error(f"Failed to get secret {secret_id}: {e}")
         return None
 
+async def get_telegram_session_from_storage() -> Optional[str]:
+    """Retrieve Telegram session from Cloud Storage"""
+    global _session_string
+    
+    if _session_string:
+        return _session_string
+    
+    try:
+        if not _storage_client:
+            logger.error("Storage client not available")
+            return None
+        
+        bucket = _storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob("cipher_session.session")
+        
+        if not blob.exists():
+            logger.error("Telegram session not found in Cloud Storage")
+            logger.error("Please run the authentication script first: python local_auth.py")
+            return None
+        
+        session_data = blob.download_as_bytes()
+        if not session_data:
+            logger.error("Empty session data in Cloud Storage")
+            return None
+        
+        # Convert bytes to string if needed
+        if isinstance(session_data, bytes):
+            try:
+                _session_string = session_data.decode('utf-8')
+            except UnicodeDecodeError:
+                # If it's binary data, treat as base64 or raw bytes
+                import base64
+                try:
+                    _session_string = base64.b64encode(session_data).decode('utf-8')
+                except:
+                    logger.error("Unable to decode session data")
+                    return None
+        else:
+            _session_string = str(session_data)
+        
+        logger.info(f"Retrieved Telegram session from Cloud Storage ({len(_session_string)} chars)")
+        return _session_string
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve Telegram session: {e}")
+        return None
+
 async def initialize_gemini_ai():
     """Initialize Gemini AI for cybersecurity analysis"""
     global _gemini_model, _gemini_available
@@ -285,23 +333,103 @@ async def initialize_gemini_ai():
         return False
 
 async def initialize_telegram_client():
-    """Initialize Telegram client (optional)"""
+    """Initialize Telegram client with proper session handling"""
     global _telegram_client, _telegram_connected
     
     try:
         logger.info("📱 Initializing Telegram client...")
         
-        # For production, we'll set this up later when secrets are properly configured
-        # This is a placeholder for the full Telegram integration
-        _telegram_connected = False
-        logger.info("⚠️ Telegram client setup deferred (secrets configuration needed)")
+        # Get credentials from Secret Manager
+        api_id = await get_secret("telegram-api-id")
+        api_hash = await get_secret("telegram-api-hash")
+        phone = await get_secret("telegram-phone-number")
         
-        return False
+        if not all([api_id, api_hash, phone]):
+            logger.error("Telegram credentials not available in Secret Manager")
+            logger.error("Required secrets: telegram-api-id, telegram-api-hash, telegram-phone-number")
+            logger.error("Please run authentication script: python local_auth.py")
+            _telegram_connected = False
+            return False
         
+        # Get session from Cloud Storage
+        session_data = await get_telegram_session_from_storage()
+        if not session_data:
+            logger.error("No Telegram session available")
+            logger.error("Please run authentication script to create session")
+            _telegram_connected = False
+            return False
+        
+        # Initialize Telethon client
+        try:
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+            
+            # Create client with session string
+            session = StringSession(session_data)
+            _telegram_client = TelegramClient(
+                session,
+                int(api_id),
+                api_hash,
+                system_version="CIPHER v1.0.0",
+                device_model="CIPHER Intelligence Platform",
+                app_version="1.0.0"
+            )
+            
+            # Connect and verify
+            await _telegram_client.connect()
+            
+            if await _telegram_client.is_user_authorized():
+                # Get user info
+                me = await _telegram_client.get_me()
+                logger.info(f"✅ Telegram authenticated as: {me.first_name} (@{me.username or 'no_username'})")
+                
+                # Test channel access
+                accessible_channels = await test_channel_access()
+                
+                if accessible_channels:
+                    _telegram_connected = True
+                    logger.info(f"✅ Telegram client ready - {len(accessible_channels)}/{len(MONITORED_CHANNELS)} channels accessible")
+                    return True
+                else:
+                    logger.warning("⚠️ Telegram connected but no channels accessible")
+                    _telegram_connected = False
+                    return False
+            else:
+                logger.error("Telegram session is not authorized")
+                _telegram_connected = False
+                return False
+                
+        except ImportError:
+            logger.error("Telethon not installed. Install with: pip install telethon")
+            _telegram_connected = False
+            return False
+        except Exception as e:
+            logger.error(f"Telegram client initialization failed: {e}")
+            _telegram_connected = False
+            return False
+            
     except Exception as e:
         logger.error(f"Telegram initialization failed: {e}")
         _telegram_connected = False
         return False
+
+async def test_channel_access() -> List[str]:
+    """Test access to monitored channels"""
+    if not _telegram_client:
+        return []
+    
+    accessible = []
+    for channel in MONITORED_CHANNELS:
+        try:
+            entity = await _telegram_client.get_entity(channel)
+            # Try to get recent messages to test read access
+            messages = await _telegram_client.get_messages(entity, limit=1)
+            accessible.append(channel)
+            logger.info(f"✅ Channel access confirmed: {channel}")
+        except Exception as e:
+            logger.warning(f"⚠️ Channel access limited: {channel} - {str(e)[:50]}...")
+    
+    return accessible
 
 async def start_monitoring_system():
     """Start the cybersecurity monitoring system"""
@@ -313,14 +441,20 @@ async def start_monitoring_system():
         if not _clients_initialized:
             await initialize_all_systems()
         
-        # For now, we'll run in data-only mode
-        # Full monitoring requires Telegram authentication
-        _monitoring_active = _bigquery_available
-        
-        if _monitoring_active:
+        # Determine monitoring mode
+        if _telegram_connected and _bigquery_available:
+            _monitoring_active = True
+            logger.info("✅ CIPHER monitoring active (full mode)")
+            
+            # Start background monitoring task
+            asyncio.create_task(monitoring_loop())
+            
+        elif _bigquery_available:
+            _monitoring_active = True
             logger.info("✅ CIPHER monitoring active (data-only mode)")
         else:
-            logger.warning("⚠️ CIPHER monitoring limited (BigQuery unavailable)")
+            _monitoring_active = False
+            logger.warning("⚠️ CIPHER monitoring limited (no data storage)")
         
         return _monitoring_active
         
@@ -329,16 +463,198 @@ async def start_monitoring_system():
         _monitoring_active = False
         return False
 
+async def monitoring_loop():
+    """Main monitoring loop for processing messages"""
+    if not _telegram_client or not _bigquery_available:
+        logger.warning("Monitoring loop disabled - missing required components")
+        return
+    
+    logger.info("📡 Starting message monitoring loop...")
+    
+    try:
+        # This is a basic monitoring loop - in production you'd want more sophisticated handling
+        while _monitoring_active and _telegram_connected:
+            try:
+                # Process messages from each channel
+                for channel in MONITORED_CHANNELS:
+                    try:
+                        await process_channel_messages(channel)
+                    except Exception as e:
+                        logger.error(f"Error processing {channel}: {e}")
+                
+                # Wait before next iteration
+                await asyncio.sleep(60)  # Check every minute
+                
+            except Exception as e:
+                logger.error(f"Monitoring loop error: {e}")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+                
+    except Exception as e:
+        logger.error(f"Monitoring loop failed: {e}")
+
+async def process_channel_messages(channel: str):
+    """Process messages from a specific channel"""
+    try:
+        if not _telegram_client:
+            return
+        
+        entity = await _telegram_client.get_entity(channel)
+        
+        # Get recent messages (last hour)
+        messages = await _telegram_client.get_messages(
+            entity, 
+            limit=10,
+            offset_date=datetime.now() - timedelta(hours=1)
+        )
+        
+        for message in messages:
+            if message.text:
+                await process_message(message, channel)
+                
+    except Exception as e:
+        logger.error(f"Error processing channel {channel}: {e}")
+
+async def process_message(message, channel: str):
+    """Process and analyze a single message"""
+    try:
+        # Basic message processing
+        message_data = {
+            "message_id": str(message.id),
+            "chat_id": str(message.peer_id.channel_id if hasattr(message.peer_id, 'channel_id') else message.chat_id),
+            "chat_username": channel,
+            "user_id": str(message.from_id.user_id if message.from_id else ""),
+            "username": "",
+            "message_text": message.text,
+            "message_date": message.date,
+            "processed_date": datetime.now(),
+            "channel_type": CHANNEL_METADATA.get(channel, {}).get("type", "unknown"),
+            "channel_priority": CHANNEL_METADATA.get(channel, {}).get("priority", "medium")
+        }
+        
+        # AI Analysis (if Gemini available)
+        if _gemini_available:
+            analysis = await analyze_message_with_gemini(message.text, channel)
+            message_data.update(analysis)
+        
+        # Store in BigQuery
+        await store_message_in_bigquery(message_data)
+        
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+
+async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]:
+    """Analyze message with Gemini AI for cybersecurity threats"""
+    try:
+        if not _gemini_model:
+            return {}
+        
+        channel_context = CHANNEL_METADATA.get(channel, {})
+        
+        prompt = f"""
+        Analyze this cybersecurity message from {channel} ({channel_context.get('description', '')}):
+        
+        Message: "{text}"
+        
+        Provide analysis in this JSON format:
+        {{
+            "threat_level": "critical|high|medium|low|info",
+            "category": "apt|malware|ransomware|data_breach|vulnerability|phishing|other",
+            "threat_type": "specific threat type",
+            "urgency_score": 0.0-1.0,
+            "sentiment": "positive|negative|neutral",
+            "key_topics": ["topic1", "topic2"],
+            "gemini_analysis": "Brief threat analysis summary",
+            "cve_references": ["CVE-XXXX-XXXX"],
+            "iocs_detected": ["indicators"],
+            "malware_families": ["family names"],
+            "threat_actors": ["actor names"]
+        }}
+        
+        Focus on cybersecurity threats, vulnerabilities, and actionable intelligence.
+        """
+        
+        response = await asyncio.to_thread(_gemini_model.generate_content, prompt)
+        
+        if response.text:
+            # Parse JSON response
+            try:
+                analysis = json.loads(response.text.strip())
+                return analysis
+            except json.JSONDecodeError:
+                # Fallback analysis
+                return {
+                    "gemini_analysis": response.text[:500],
+                    "threat_level": "low",
+                    "category": "other",
+                    "urgency_score": 0.1
+                }
+        
+        return {}
+        
+    except Exception as e:
+        logger.error(f"Gemini analysis failed: {e}")
+        return {}
+
+async def store_message_in_bigquery(message_data: Dict[str, Any]):
+    """Store processed message in BigQuery"""
+    try:
+        if not _bigquery_available:
+            return
+        
+        table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = _bq_client.get_table(table_ref)
+        
+        # Ensure all required fields are present
+        row = {
+            "message_id": message_data.get("message_id", ""),
+            "chat_id": message_data.get("chat_id", ""),
+            "chat_username": message_data.get("chat_username", ""),
+            "user_id": message_data.get("user_id", ""),
+            "username": message_data.get("username", ""),
+            "message_text": message_data.get("message_text", ""),
+            "message_date": message_data.get("message_date"),
+            "processed_date": message_data.get("processed_date"),
+            "gemini_analysis": message_data.get("gemini_analysis", ""),
+            "sentiment": message_data.get("sentiment", "neutral"),
+            "key_topics": message_data.get("key_topics", []),
+            "urgency_score": message_data.get("urgency_score", 0.0),
+            "category": message_data.get("category", "other"),
+            "threat_level": message_data.get("threat_level", "low"),
+            "threat_type": message_data.get("threat_type", "unknown"),
+            "channel_type": message_data.get("channel_type", "unknown"),
+            "channel_priority": message_data.get("channel_priority", "medium"),
+            "iocs_detected": message_data.get("iocs_detected", []),
+            "cve_references": message_data.get("cve_references", []),
+            "malware_families": message_data.get("malware_families", []),
+            "affected_systems": message_data.get("affected_systems", []),
+            "attack_vectors": message_data.get("attack_vectors", []),
+            "threat_actors": message_data.get("threat_actors", []),
+            "campaign_names": message_data.get("campaign_names", []),
+            "geographical_targets": message_data.get("geographical_targets", []),
+            "industry_targets": message_data.get("industry_targets", []),
+        }
+        
+        errors = _bq_client.insert_rows_json(table, [row])
+        if errors:
+            logger.error(f"BigQuery insert failed: {errors}")
+        else:
+            logger.debug("Message stored in BigQuery")
+            
+    except Exception as e:
+        logger.error(f"BigQuery storage failed: {e}")
+
 async def stop_monitoring_system():
     """Stop the monitoring system"""
     global _monitoring_active, _telegram_client
     
     try:
+        _monitoring_active = False
+        
         if _telegram_client:
             await _telegram_client.disconnect()
             _telegram_client = None
+            _telegram_connected = False
         
-        _monitoring_active = False
         logger.info("🛑 CIPHER monitoring stopped")
         
     except Exception as e:
@@ -524,6 +840,12 @@ async def get_monitoring_status() -> Dict[str, Any]:
             })
         
         status["channel_status"] = channel_status
+        
+        # Add authentication status
+        if not _telegram_connected:
+            status["authentication_required"] = True
+            status["auth_message"] = "Run authentication script: python local_auth.py"
+        
         return status
         
     except Exception as e:
