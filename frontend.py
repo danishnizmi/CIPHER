@@ -88,7 +88,7 @@ async def public_dashboard(request: Request):
 
 @router.get("/api/dashboard/data")
 async def get_public_dashboard_data():
-    """Get clean dashboard data for public display - ENHANCED VERSION"""
+    """Get clean dashboard data for public display - FIXED VERSION"""
     cache_key = "public_dashboard_data"
     cached_data = get_cache(cache_key)
     
@@ -112,14 +112,14 @@ async def get_public_dashboard_data():
         insights_data = await utils.get_threat_insights()
         analytics_data = await utils.get_threat_analytics()
         
-        logger.info(f"Raw insights count: {len(insights_data.get('insights', []))}")
+        logger.info(f"Raw insights retrieved: {len(insights_data.get('insights', []))}")
         
         # Clean and sanitize data for public display
         public_stats = sanitize_stats(stats_data)
-        public_insights = sanitize_insights_enhanced(insights_data)
+        public_insights = sanitize_insights_fixed(insights_data)  # FIXED FUNCTION
         public_analytics = sanitize_analytics(analytics_data)
         
-        logger.info(f"Public insights after sanitization: {len(public_insights.get('data', []))}")
+        logger.info(f"Public insights after processing: {len(public_insights.get('data', []))}")
         
         dashboard_data = {
             "stats": public_stats,
@@ -169,8 +169,8 @@ def sanitize_stats(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         "status": "active" if raw_stats.get("monitoring_active") else "standby"
     }
 
-def sanitize_insights_enhanced(raw_insights: Dict[str, Any]) -> Dict[str, Any]:
-    """Enhanced insights sanitization - FIXED TO SHOW REAL DATA"""
+def sanitize_insights_fixed(raw_insights: Dict[str, Any]) -> Dict[str, Any]:
+    """FIXED insights sanitization - Show actual data with minimal filtering"""
     if not raw_insights or not raw_insights.get("insights"):
         logger.warning("No raw insights available")
         return {"data": [], "count": 0}
@@ -186,37 +186,41 @@ def sanitize_insights_enhanced(raw_insights: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Could not sort insights: {e}")
     
-    for i, insight in enumerate(insights_list[:50]):  # Process up to 50 most recent
+    for i, insight in enumerate(insights_list[:100]):  # Process up to 100 most recent
         try:
             # Get basic message info
             message_text = insight.get("message_text", "")
             message_id = insight.get("message_id", f"unknown_{i}")
             source = insight.get("chat_username", "@Unknown")
             
-            # Skip if no meaningful content
-            if not message_text or len(message_text.strip()) < 20:
+            # Skip if no meaningful content (very minimal filtering)
+            if not message_text or len(message_text.strip()) < 10:
                 logger.debug(f"Skipping insight {i}: insufficient content")
                 continue
             
-            # Get threat data with fallbacks
+            # Get threat data with real-time enhancement
             threat_level = insight.get("threat_level", "").lower()
-            if not threat_level or threat_level in ["", "unknown", "null"]:
-                threat_level = determine_threat_level_from_content(message_text, source)
-            
-            # Get urgency score with fallback
             urgency_score = insight.get("urgency_score", 0.0)
-            if urgency_score == 0.0:
-                urgency_score = calculate_urgency_from_content(message_text, threat_level)
-            
-            # Get category with fallback
             category = insight.get("category", "")
-            if not category or category in ["", "other", "unknown"]:
-                category = determine_category_from_content(message_text)
-            
-            # Get analysis with enhancement
             analysis = insight.get("gemini_analysis", "")
-            if not analysis or analysis in ["", "Analysis not available", "No analysis available"]:
-                analysis = generate_analysis_from_content(message_text, source, threat_level, category)
+            
+            # ENHANCED REAL-TIME ANALYSIS FOR POOR DATA
+            if (threat_level in ["", "low", "unknown"] or 
+                urgency_score == 0.0 or 
+                category in ["", "other", "unknown"] or
+                not analysis or analysis == "Analysis not available"):
+                
+                logger.info(f"Enhancing poor analysis for insight {i}")
+                enhanced = enhance_threat_analysis(message_text, source)
+                
+                # Use enhanced data
+                threat_level = enhanced["threat_level"]
+                urgency_score = enhanced["urgency_score"]
+                category = enhanced["category"]
+                analysis = enhanced["analysis"]
+            
+            # Get indicators (enhanced extraction)
+            indicators = extract_indicators_enhanced(insight, message_text)
             
             # Create clean public insight
             clean_insight = {
@@ -224,36 +228,30 @@ def sanitize_insights_enhanced(raw_insights: Dict[str, Any]) -> Dict[str, Any]:
                 "source": source,
                 "threat_level": threat_level,
                 "category": category,
-                "urgency": round(urgency_score * 100),
+                "urgency": int(urgency_score * 100) if urgency_score else 0,
                 "time": format_time_ago(insight.get("message_date")),
                 "summary": clean_message_text(message_text),
                 "analysis": clean_analysis(analysis),
-                "indicators": extract_public_indicators_enhanced(insight, message_text),
+                "indicators": indicators,
                 "severity": map_threat_severity(threat_level),
                 "sentiment": insight.get("sentiment", "neutral") or "neutral",
                 "raw_date": insight.get("message_date"),
                 "processed_date": insight.get("processed_date")
             }
             
-            # LESS STRICT FILTERING - Show more threats
+            # MINIMAL FILTERING - Show most threats
             should_include = (
-                # Include if any of these conditions are met:
-                clean_insight["urgency"] > 5 or  # Lower threshold 
-                clean_insight["threat_level"] in ["medium", "high", "critical"] or
-                clean_insight["indicators"]["count"] > 0 or
-                len(clean_insight["summary"]) > 30 or  # Has substantial content
-                any(keyword in message_text.lower() for keyword in [
-                    "ransomware", "malware", "breach", "exploit", "vulnerability", 
-                    "cve-", "apt", "attack", "threat", "hack", "compromise"
-                ]) or
-                source in ["@DarkfeedNews", "@breachdetector"]  # Always include from key sources
+                len(clean_insight["summary"]) >= 10 or  # Has some content
+                clean_insight["urgency"] >= 1 or        # Any urgency
+                clean_insight["indicators"]["count"] > 0 or  # Has indicators
+                source in ["@DarkfeedNews", "@breachdetector", "@secharvester"]  # From our sources
             )
             
             if should_include:
                 public_insights.append(clean_insight)
                 logger.info(f"Added insight {i}: {source} - {threat_level}/{category} - urgency: {clean_insight['urgency']}%")
             else:
-                logger.debug(f"Filtered out insight {i}: low relevance")
+                logger.debug(f"Filtered out insight {i}: minimal content")
         
         except Exception as e:
             logger.error(f"Error processing insight {i}: {e}")
@@ -266,139 +264,134 @@ def sanitize_insights_enhanced(raw_insights: Dict[str, Any]) -> Dict[str, Any]:
         "count": len(public_insights)
     }
 
-def determine_threat_level_from_content(text: str, source: str) -> str:
-    """Determine threat level from message content"""
+def enhance_threat_analysis(text: str, source: str) -> Dict[str, Any]:
+    """Enhanced real-time threat analysis for poor BigQuery data"""
     text_lower = text.lower()
     
-    # Critical indicators
-    if any(word in text_lower for word in ["critical", "zero-day", "0day", "urgent", "emergency", "lockbit", "maze", "ryuk"]):
-        return "critical"
+    # Initialize with defaults
+    threat_level = "low"
+    urgency_score = 0.1
+    category = "other"
     
-    # High indicators  
-    if any(word in text_lower for word in ["high", "ransomware", "breach", "exploit", "apt", "malware", "compromise"]):
-        return "high"
+    # Enhanced threat scoring with cybersecurity context
+    threat_score = 0.0
     
-    # Medium indicators
-    if any(word in text_lower for word in ["vulnerability", "cve-", "patch", "security", "threat", "attack"]):
-        return "medium"
-    
-    # Source-based assessment
-    if source == "@DarkfeedNews":
-        return "high"  # DarkfeedNews typically has high-threat content
-    elif source == "@breachdetector":
-        return "medium"  # Breach detector usually medium threats
-    
-    return "low"
-
-def calculate_urgency_from_content(text: str, threat_level: str) -> float:
-    """Calculate urgency score from content and threat level"""
-    base_scores = {
-        "critical": 0.9,
-        "high": 0.7,
-        "medium": 0.5,
-        "low": 0.3
+    # Critical cybersecurity indicators
+    critical_indicators = {
+        "zero-day": 0.8, "0day": 0.8, "exploit": 0.6, "ransomware": 0.7,
+        "apt": 0.6, "breach": 0.6, "compromise": 0.5, "attack": 0.4,
+        "malware": 0.5, "trojan": 0.5, "backdoor": 0.5, "phishing": 0.4,
+        "vulnerability": 0.4, "cve-": 0.4, "critical": 0.5, "urgent": 0.4,
+        "lockbit": 0.7, "maze": 0.7, "conti": 0.7, "ryuk": 0.7,
+        "darkfeed": 0.5, "threat": 0.3, "security": 0.2, "hack": 0.4
     }
     
-    base_score = base_scores.get(threat_level, 0.3)
+    # Score based on keywords
+    for keyword, weight in critical_indicators.items():
+        if keyword in text_lower:
+            threat_score += weight
     
-    # Adjust based on content
-    text_lower = text.lower()
-    
-    if any(word in text_lower for word in ["urgent", "immediate", "emergency", "critical"]):
-        base_score += 0.1
-    
-    if any(word in text_lower for word in ["zero-day", "0day", "active", "ongoing"]):
-        base_score += 0.15
-    
-    if any(word in text_lower for word in ["widespread", "global", "massive"]):
-        base_score += 0.1
-    
-    return min(base_score, 1.0)
-
-def determine_category_from_content(text: str) -> str:
-    """Determine category from message content"""
-    text_lower = text.lower()
-    
-    category_keywords = {
-        "ransomware": ["ransomware", "encrypt", "lockbit", "maze", "ryuk", "conti"],
-        "data_breach": ["breach", "leak", "stolen", "database", "credential", "dump", "exposed"],
-        "malware": ["malware", "trojan", "virus", "backdoor", "rat", "stealer"],
-        "vulnerability": ["vulnerability", "cve-", "patch", "exploit", "rce"],
-        "apt": ["apt", "advanced persistent", "nation state", "lazarus", "kimsuky"],
-        "phishing": ["phishing", "scam", "social engineering"]
+    # Source-based multipliers
+    source_multipliers = {
+        "@DarkfeedNews": 1.5,    # Premium threat intel
+        "@breachdetector": 1.3,   # Data breach focus
+        "@secharvester": 1.0      # General security news
     }
     
-    for category, keywords in category_keywords.items():
-        if any(keyword in text_lower for keyword in keywords):
-            return category
+    multiplier = source_multipliers.get(source, 1.0)
+    threat_score *= multiplier
     
-    return "other"
-
-def generate_analysis_from_content(text: str, source: str, threat_level: str, category: str) -> str:
-    """Generate analysis when Gemini analysis is missing"""
+    # Determine threat level and urgency
+    if threat_score >= 1.0:
+        threat_level = "critical"
+        urgency_score = min(0.95, threat_score * 0.5 + 0.4)
+    elif threat_score >= 0.6:
+        threat_level = "high"
+        urgency_score = min(0.8, threat_score * 0.5 + 0.3)
+    elif threat_score >= 0.3:
+        threat_level = "medium"
+        urgency_score = min(0.6, threat_score * 0.5 + 0.2)
+    else:
+        threat_level = "low"
+        urgency_score = max(0.1, threat_score * 0.5 + 0.1)
     
-    # Extract key elements from the message
-    text_lower = text.lower()
+    # Enhanced category detection
+    if any(word in text_lower for word in ["ransomware", "lockbit", "maze", "conti", "ryuk"]):
+        category = "ransomware"
+    elif any(word in text_lower for word in ["breach", "leak", "stolen", "database", "dump"]):
+        category = "data_breach"
+    elif any(word in text_lower for word in ["apt", "advanced persistent", "nation state"]):
+        category = "apt"
+    elif any(word in text_lower for word in ["malware", "trojan", "virus", "backdoor"]):
+        category = "malware"
+    elif any(word in text_lower for word in ["vulnerability", "cve-", "patch", "exploit"]):
+        category = "vulnerability"
+    elif any(word in text_lower for word in ["phishing", "scam", "social engineering"]):
+        category = "phishing"
+    elif any(word in text_lower for word in ["ddos", "dos", "attack"]):
+        category = "ddos"
     
+    # Generate enhanced analysis
     analysis_parts = []
     
-    # Main threat assessment
     if threat_level == "critical":
-        analysis_parts.append(f"Critical {category} threat detected from {source} requiring immediate security response.")
+        analysis_parts.append(f"Critical {category} threat detected from {source}.")
     elif threat_level == "high":
-        analysis_parts.append(f"High-priority {category} identified from {source} with significant security implications.")
+        analysis_parts.append(f"High-priority {category} identified from {source}.")
     elif threat_level == "medium":
-        analysis_parts.append(f"Medium-level {category} from {source} requiring monitoring and assessment.")
+        analysis_parts.append(f"Medium-level {category} alert from {source}.")
     else:
-        analysis_parts.append(f"{category.title()} intelligence from {source} for situational awareness.")
+        analysis_parts.append(f"{category.title()} intelligence from {source}.")
     
-    # Add specific details based on content
-    if any(word in text_lower for word in ["cve-", "vulnerability"]):
-        analysis_parts.append("Contains vulnerability information requiring patch management attention.")
+    # Add context based on content
+    if "cve-" in text_lower:
+        analysis_parts.append("Contains vulnerability information requiring attention.")
+    if any(word in text_lower for word in ["exploit", "poc", "proof of concept"]):
+        analysis_parts.append("Includes exploitation details.")
+    if any(word in text_lower for word in ["ioc", "indicator", "hash"]):
+        analysis_parts.append("Contains threat indicators.")
     
-    if any(word in text_lower for word in ["exploit", "proof of concept", "poc"]):
-        analysis_parts.append("Includes exploitation details requiring immediate defensive measures.")
+    analysis = " ".join(analysis_parts) or "Threat intelligence processed for security monitoring."
     
-    if any(word in text_lower for word in ["ransomware", "encrypt", "lockbit"]):
-        analysis_parts.append("Ransomware activity detected requiring backup verification and endpoint protection.")
-    
-    if any(word in text_lower for word in ["breach", "leak", "stolen", "dump"]):
-        analysis_parts.append("Data exposure incident requiring impact assessment and user notification.")
-    
-    return " ".join(analysis_parts)
+    return {
+        "threat_level": threat_level,
+        "urgency_score": urgency_score,
+        "category": category,
+        "analysis": analysis
+    }
 
-def extract_public_indicators_enhanced(insight: Dict[str, Any], message_text: str) -> Dict[str, Any]:
-    """Enhanced indicator extraction with fallbacks"""
+def extract_indicators_enhanced(insight: Dict[str, Any], message_text: str) -> Dict[str, Any]:
+    """Enhanced indicator extraction"""
     indicators = {
         "cves": [],
         "malware": [],
         "count": 0
     }
     
-    # Get indicators from insight data
+    # Get from insight data first
     cve_refs = insight.get("cve_references", []) or []
     malware_families = insight.get("malware_families", []) or []
     
-    # If no indicators in data, extract from text
+    # If empty, extract from text
     if not cve_refs and not malware_families:
         import re
         
-        # Extract CVEs from text
+        # Extract CVEs
         cve_pattern = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)
         cve_matches = cve_pattern.findall(message_text)
-        cve_refs = list(set(cve_matches))[:3]  # Max 3 CVEs
+        cve_refs = list(set(cve_matches))[:3]
         
-        # Extract known malware families from text
-        known_malware = [
-            "lockbit", "maze", "ryuk", "conti", "emotet", "trickbot", 
-            "qakbot", "cobalt strike", "ransomware"
+        # Extract malware families
+        malware_keywords = [
+            "lockbit", "maze", "ryuk", "conti", "emotet", "trickbot",
+            "qakbot", "cobalt strike", "ransomware", "malware", "trojan"
         ]
         
         text_lower = message_text.lower()
-        malware_families = [malware for malware in known_malware if malware in text_lower][:2]
+        malware_families = [malware for malware in malware_keywords if malware in text_lower][:3]
     
     indicators["cves"] = cve_refs[:3] if cve_refs else []
-    indicators["malware"] = malware_families[:2] if malware_families else []
+    indicators["malware"] = malware_families[:3] if malware_families else []
     indicators["count"] = len(indicators["cves"]) + len(indicators["malware"])
     
     return indicators
@@ -495,6 +488,7 @@ def format_time_ago(timestamp) -> str:
     except Exception:
         return "Unknown"
 
+# API endpoints remain the same
 @router.get("/api/stats")
 async def get_public_stats():
     """Get basic public statistics"""
@@ -518,7 +512,7 @@ async def get_public_insights(limit: int = Query(20, ge=1, le=50)):
     
     try:
         raw_insights = await utils.get_threat_insights()
-        public_insights = sanitize_insights_enhanced(raw_insights)
+        public_insights = sanitize_insights_fixed(raw_insights)  # Use fixed function
         
         # Apply limit
         public_insights["data"] = public_insights["data"][:limit]
