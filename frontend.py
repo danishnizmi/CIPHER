@@ -15,10 +15,10 @@ router = APIRouter()
 # Initialize templates
 templates = Jinja2Templates(directory="templates")
 
-# Simple in-memory cache for performance
+# Optimized cache settings for real data
 _cache = {}
 _cache_ttl = {}
-CACHE_DURATION = 30  # 30 seconds cache
+CACHE_DURATION = 10  # Reduced for real-time data updates
 
 def get_cache(key: str) -> Any:
     """Get cached value if still valid"""
@@ -30,6 +30,13 @@ def set_cache(key: str, value: Any, duration: int = CACHE_DURATION):
     """Set cache with TTL"""
     _cache[key] = value
     _cache_ttl[key] = time.time() + duration
+
+def clear_cache():
+    """Clear all cached data"""
+    global _cache, _cache_ttl
+    _cache.clear()
+    _cache_ttl.clear()
+    logger.info("Cache cleared")
 
 def get_utils():
     """Safely import utils module"""
@@ -136,12 +143,12 @@ async def get_dashboard_data():
                 "error": "System initializing",
                 "message": "CIPHER platform is starting up. Please wait...",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "retry_after": 30
+                "retry_after": 15
             }
         )
     
     try:
-        # Get real system status first
+        # Check system readiness
         system_ready = (
             utils.is_bigquery_available() and 
             utils._clients_initialized
@@ -159,13 +166,13 @@ async def get_dashboard_data():
                         "monitoring": utils.is_monitoring_active()
                     },
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "retry_after": 15
+                    "retry_after": 10
                 }
             )
         
         logger.info("Fetching real dashboard data from all subsystems")
         
-        # Fetch all real data in parallel
+        # Fetch all real data
         stats_task = utils.get_comprehensive_stats()
         insights_task = utils.get_threat_insights()
         monitoring_task = utils.get_monitoring_status()
@@ -177,10 +184,10 @@ async def get_dashboard_data():
         monitoring = await monitoring_task
         analytics = await analytics_task
         
-        # Process insights for frontend
+        # Process insights for frontend - INCREASED LIMIT
         processed_insights = []
         if insights_raw and "insights" in insights_raw:
-            for insight in insights_raw["insights"][:25]:  # Limit to 25 most recent
+            for insight in insights_raw["insights"][:75]:  # Increased from 25 to 75
                 processed_insight = {
                     **insight,
                     "formatted_date": format_message_date(insight.get("message_date")),
@@ -218,13 +225,13 @@ async def get_dashboard_data():
                 "platform": "CIPHER Cybersecurity Intelligence Platform",
                 "version": "1.0.0",
                 "data_sources": get_active_data_sources(utils),
-                "refresh_interval": 30,
+                "refresh_interval": 15,  # Faster refresh for real data
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         }
         
-        # Cache successful response
-        set_cache(cache_key, dashboard_data, CACHE_DURATION)
+        # Cache successful response with shorter duration for real-time updates
+        set_cache(cache_key, dashboard_data, 5)  # 5 seconds only
         
         logger.info(f"Dashboard data assembled: {len(processed_insights)} insights, {stats.get('total_messages', 0)} total messages")
         return dashboard_data
@@ -237,7 +244,7 @@ async def get_dashboard_data():
                 "error": "Data retrieval failed",
                 "message": f"Unable to fetch dashboard data: {str(e)}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "retry_after": 30
+                "retry_after": 15
             }
         )
 
@@ -293,10 +300,10 @@ async def get_system_stats():
 
 @router.get("/api/insights")
 async def get_threat_insights(
-    limit: int = Query(50, ge=1, le=200, description="Number of insights to return"),
+    limit: int = Query(75, ge=1, le=200, description="Number of insights to return"),  # Increased default
     threat_level: Optional[str] = Query(None, description="Filter by threat level"),
     category: Optional[str] = Query(None, description="Filter by category"),
-    hours_back: int = Query(24, ge=1, le=168, description="Hours back to look for insights")
+    hours_back: int = Query(48, ge=1, le=168, description="Hours back to look for insights")  # Increased default
 ):
     """Get real threat insights with filtering"""
     utils = get_utils()
@@ -331,7 +338,7 @@ async def get_threat_insights(
         insights = insights_data["insights"]
         original_count = len(insights)
         
-        # Apply real-time filters
+        # Apply filters
         if threat_level:
             insights = [i for i in insights if i.get("threat_level", "").lower() == threat_level.lower()]
         
@@ -471,7 +478,6 @@ async def get_insight_detail(insight_id: str):
         raise HTTPException(status_code=503, detail="Insight service unavailable")
     
     try:
-        # This would require a dedicated query - for now return from cached insights
         insights_data = await utils.get_threat_insights()
         
         if not insights_data or "insights" not in insights_data:
@@ -506,7 +512,7 @@ async def export_threats(
     limit: int = Query(1000, ge=1, le=5000),
     threat_level: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
-    hours_back: int = Query(24, ge=1, le=720)
+    hours_back: int = Query(48, ge=1, le=720)  # Increased default
 ):
     """Export real threat intelligence data"""
     utils = get_utils()
@@ -574,6 +580,23 @@ async def export_threats(
                 "details": str(e),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
+        )
+
+# Clear cache endpoint for debugging
+@router.post("/api/cache/clear")
+async def clear_dashboard_cache():
+    """Clear dashboard cache (for debugging)"""
+    try:
+        clear_cache()
+        return {
+            "message": "Cache cleared successfully",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Cache clear error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to clear cache", "details": str(e)}
         )
 
 # === UTILITY FUNCTIONS FOR REAL DATA PROCESSING ===
@@ -662,7 +685,13 @@ def create_intelligence_summary(insight: Dict[str, Any]) -> Dict[str, Any]:
         "malware_count": len(insight.get("malware_families", [])),
         "has_actors": len(insight.get("threat_actors", [])) > 0,
         "actor_count": len(insight.get("threat_actors", [])),
-        "intelligence_score": calculate_intelligence_score(insight)
+        "intelligence_score": calculate_intelligence_score(insight),
+        "has_intelligence": any([
+            len(insight.get("cve_references", [])) > 0,
+            len(insight.get("iocs_detected", [])) > 0,
+            len(insight.get("malware_families", [])) > 0,
+            len(insight.get("threat_actors", [])) > 0
+        ])
     }
 
 def calculate_intelligence_score(insight: Dict[str, Any]) -> float:
