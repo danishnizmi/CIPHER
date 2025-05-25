@@ -9,216 +9,195 @@ import time
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-import json
 
-# Configure logging for production
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI app with fast startup
-app = FastAPI(
-    title="CIPHER - Cybersecurity Intelligence Platform",
-    description="Real-time cybersecurity threat monitoring and analysis",
-    version="1.0.0"
-)
+app = FastAPI(title="CIPHER - Cybersecurity Intelligence Platform")
 
-# Global state - designed for fast startup
-_system_startup_time = datetime.now(timezone.utc)
-_app_status = {
-    "startup_complete": False,
-    "bigquery_available": False,
-    "monitoring_active": False,
-    "utils_available": False,
-    "initialization_started": False,
-    "last_check": None
-}
+# Templates
+templates = Jinja2Templates(directory="templates")
 
-# Lightweight clients for fast startup
+# Global state variables
 _bigquery_client = None
-_templates = None
+_bigquery_available = False
+_last_bigquery_check = None
+_system_startup_time = datetime.now(timezone.utc)
+_monitoring_initialized = False
+_utils_available = False
+_initialization_task = None
 
-def get_app_status() -> Dict[str, Any]:
-    """Get current application status"""
-    return {
-        **_app_status,
-        "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds()),
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-def init_templates():
-    """Initialize templates if directory exists"""
-    global _templates
-    try:
-        if os.path.exists("templates"):
-            _templates = Jinja2Templates(directory="templates")
-            logger.info("Templates initialized")
-        else:
-            logger.warning("Templates directory not found")
-    except Exception as e:
-        logger.warning(f"Template initialization failed: {e}")
-
-def init_bigquery_client() -> Optional[bigquery.Client]:
-    """Initialize BigQuery client with quick timeout"""
-    global _bigquery_client, _app_status
+def get_bigquery_client() -> Optional[bigquery.Client]:
+    """Get BigQuery client with proper error handling and caching"""
+    global _bigquery_client, _bigquery_available, _last_bigquery_check
     
-    try:
-        if _bigquery_client is None:
+    # Check every 5 minutes to avoid constant retries
+    now = datetime.now(timezone.utc)
+    if _last_bigquery_check and (now - _last_bigquery_check).seconds < 300:
+        return _bigquery_client if _bigquery_available else None
+    
+    _last_bigquery_check = now
+    
+    if _bigquery_client is None:
+        try:
             credentials, project = default()
             _bigquery_client = bigquery.Client(project=project, credentials=credentials)
             
-            # Quick test with short timeout
+            # Test with a simple query
             test_query = "SELECT 1 as test"
             query_job = _bigquery_client.query(test_query)
-            query_job.result(timeout=5)  # Short timeout for startup
+            query_job.result(timeout=10)
             
-            _app_status["bigquery_available"] = True
-            logger.info("✅ BigQuery client initialized")
+            _bigquery_available = True
+            logger.info("BigQuery client initialized successfully")
             
-        return _bigquery_client
-    except Exception as e:
-        logger.warning(f"BigQuery initialization failed (will retry later): {e}")
-        _app_status["bigquery_available"] = False
-        return None
+        except Exception as e:
+            logger.warning(f"BigQuery initialization failed: {e}")
+            _bigquery_available = False
+            _bigquery_client = None
+    
+    return _bigquery_client if _bigquery_available else None
 
-async def background_initialization():
-    """Initialize heavy components in background after startup"""
-    global _app_status
-    
-    if _app_status["initialization_started"]:
-        return
-    
-    _app_status["initialization_started"] = True
-    logger.info("🚀 Starting background initialization...")
+async def initialize_system_background():
+    """Initialize system components in background after HTTP server starts"""
+    global _monitoring_initialized, _utils_available
     
     try:
-        # Give the HTTP server time to start
-        await asyncio.sleep(2)
+        logger.info("🛡️ Starting CIPHER Platform background initialization...")
         
-        # Initialize BigQuery with retries
-        if not _app_status["bigquery_available"]:
-            init_bigquery_client()
+        # Give HTTP server time to start first
+        await asyncio.sleep(3)
         
-        # Try to initialize monitoring system
+        # Initialize BigQuery client
+        get_bigquery_client()
+        
+        # Try to initialize utils module and monitoring system
         try:
-            logger.info("🔍 Attempting to initialize monitoring system...")
             import utils
-            _app_status["utils_available"] = True
+            _utils_available = True
+            logger.info("✅ Utils module available")
             
-            # Setup BigQuery tables
+            # Initialize BigQuery tables
             await utils.setup_bigquery_tables()
             logger.info("✅ BigQuery tables initialized")
             
-            # Start monitoring (non-blocking)
-            asyncio.create_task(start_monitoring_system())
-            
+            # Start background monitoring
+            monitoring_success = await utils.start_background_monitoring()
+            if monitoring_success:
+                logger.info("✅ CIPHER monitoring system started successfully")
+                _monitoring_initialized = True
+            else:
+                logger.warning("⚠️ CIPHER monitoring system failed to start - running in data-only mode")
+                _monitoring_initialized = False
+                
         except ImportError as e:
             logger.warning(f"Utils module not available: {e}")
-            _app_status["utils_available"] = False
+            _utils_available = False
+            _monitoring_initialized = False
         except Exception as e:
             logger.error(f"Monitoring initialization failed: {e}")
+            _monitoring_initialized = False
         
-        _app_status["startup_complete"] = True
-        logger.info("🎉 Background initialization completed")
+        logger.info("🎉 CIPHER Platform initialization completed")
         
     except Exception as e:
         logger.error(f"Background initialization error: {e}")
-        # Don't fail the service, just log the error
-
-async def start_monitoring_system():
-    """Start monitoring system in background"""
-    try:
-        import utils
-        monitoring_success = await utils.start_background_monitoring()
-        if monitoring_success:
-            _app_status["monitoring_active"] = True
-            logger.info("✅ CIPHER monitoring system started")
-        else:
-            logger.warning("⚠️ Monitoring system failed to start")
-    except Exception as e:
-        logger.error(f"Monitoring system error: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    """Fast startup - only essential components"""
+    """Fast startup - defer heavy initialization to background"""
+    global _initialization_task
+    
     try:
-        logger.info("🛡️ CIPHER Platform - Fast Startup Initiated")
+        logger.info("🛡️ CIPHER Platform HTTP server starting...")
         
-        # Initialize templates
-        init_templates()
-        
-        # Start background initialization (non-blocking)
-        asyncio.create_task(background_initialization())
+        # Start background initialization without waiting
+        _initialization_task = asyncio.create_task(initialize_system_background())
         
         logger.info("✅ CIPHER Platform HTTP server ready")
         
     except Exception as e:
         logger.error(f"Startup error: {e}")
-        # Don't fail startup, log and continue
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Graceful shutdown"""
+    """Cleanup on shutdown"""
     try:
-        logger.info("🛑 CIPHER Platform shutting down...")
+        logger.info("🛑 Shutting down CIPHER Platform...")
         
-        if _app_status["utils_available"]:
+        # Cancel background initialization if still running
+        if _initialization_task and not _initialization_task.done():
+            _initialization_task.cancel()
+        
+        if _utils_available:
             try:
                 import utils
                 await utils.stop_background_monitoring()
-            except:
-                pass
+                logger.info("✅ CIPHER monitoring stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping monitoring: {e}")
                 
     except Exception as e:
         logger.error(f"Shutdown error: {e}")
 
-# FAST HEALTH CHECKS - Always respond quickly
 @app.get("/health/live")
 async def liveness_check():
-    """Lightweight liveness check - always returns quickly"""
+    """Lightweight liveness check - confirms service is running"""
     return JSONResponse(
         status_code=200,
         content={
             "status": "alive",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "service": "cipher-intelligence",
-            "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds())
+            "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds()),
+            "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com"
         }
     )
 
 @app.get("/health")
 async def readiness_check():
-    """Fast readiness check"""
-    status = get_app_status()
-    
+    """Readiness check with graceful BigQuery handling"""
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "cipher-intelligence",
         "version": "1.0.0",
-        "uptime_seconds": status["uptime_seconds"],
+        "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds()),
+        "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com",
         "checks": {
-            "http_server": "ready",
-            "bigquery": "connected" if status["bigquery_available"] else "initializing",
-            "monitoring": "active" if status["monitoring_active"] else "starting",
-            "background_init": "complete" if status["startup_complete"] else "running"
-        },
-        "app_status": status
+            "bigquery": "unknown",
+            "monitoring": "active" if _monitoring_initialized else "initializing",
+            "api_endpoints": "ready",
+            "utils_available": _utils_available,
+            "initialization": "complete" if _initialization_task and _initialization_task.done() else "running"
+        }
     }
+    
+    # Non-blocking BigQuery check
+    try:
+        client = get_bigquery_client()
+        if client and _bigquery_available:
+            health_status["checks"]["bigquery"] = "connected"
+        else:
+            health_status["checks"]["bigquery"] = "unavailable"
+            health_status["status"] = "degraded"
+    except Exception as e:
+        logger.warning(f"BigQuery health check error: {e}")
+        health_status["checks"]["bigquery"] = "error"
+        health_status["status"] = "degraded"
     
     return JSONResponse(status_code=200, content=health_status)
 
 @app.get("/api/stats")
 async def get_stats():
-    """Get cybersecurity statistics with graceful fallback"""
+    """Get cybersecurity statistics with robust fallback - FIXED SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
     
-    # Default stats for fast response
-    default_stats = {
+    # Default empty stats
+    empty_stats = {
         "total_messages": 0,
         "processed_today": 0,
         "high_threats": 0,
@@ -231,19 +210,19 @@ async def get_stats():
         "cve_mentions": 0,
         "apt_activity": 0,
         "ransomware_alerts": 0,
-        "monitoring_active": _app_status["monitoring_active"],
-        "data_source": "initializing",
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-        "system_status": get_app_status()
+        "monitoring_active": _monitoring_initialized,
+        "data_source": "bigquery_empty",
+        "last_updated": datetime.now(timezone.utc).isoformat()
     }
     
-    # Quick return if BigQuery not ready
-    if not _app_status["bigquery_available"] or not _bigquery_client:
-        default_stats["data_source"] = "bigquery_initializing"
-        return default_stats
-    
     try:
-        # Fast query with timeout
+        client = get_bigquery_client()
+        if not client or not _bigquery_available:
+            logger.info("BigQuery unavailable, returning empty stats")
+            empty_stats["data_source"] = "bigquery_unavailable"
+            return empty_stats
+        
+        # FIXED: Use correct field names from schema (processed_date instead of timestamp)
         query = f"""
         SELECT 
             COUNT(*) as total_messages,
@@ -262,59 +241,66 @@ async def get_stats():
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
         
-        query_job = _bigquery_client.query(query)
-        row = next(iter(query_job.result(timeout=10)), None)  # 10 second timeout
-        
-        if row:
-            stats = {
-                "total_messages": int(row.total_messages) if row.total_messages else 0,
-                "processed_today": int(row.processed_today) if row.processed_today else 0,
-                "high_threats": int(row.high_threats) if row.high_threats else 0,
-                "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
-                "unique_channels": int(row.unique_channels) if row.unique_channels else 3,
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
-                "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
-                "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
-                "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
-                "apt_activity": int(row.apt_activity) if row.apt_activity else 0,
-                "ransomware_alerts": int(row.ransomware_alerts) if row.ransomware_alerts else 0,
-                "monitoring_active": _app_status["monitoring_active"],
-                "data_source": "bigquery",
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "system_status": get_app_status()
-            }
-            logger.info(f"✅ Stats retrieved: {stats['total_messages']} messages")
-            return stats
-        else:
-            default_stats["data_source"] = "bigquery_empty"
-            return default_stats
+        try:
+            query_job = client.query(query)
+            row = next(iter(query_job.result(timeout=30)), None)
             
+            if row:
+                stats = {
+                    "total_messages": int(row.total_messages) if row.total_messages else 0,
+                    "processed_today": int(row.processed_today) if row.processed_today else 0,
+                    "high_threats": int(row.high_threats) if row.high_threats else 0,
+                    "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
+                    "unique_channels": int(row.unique_channels) if row.unique_channels else 3,
+                    "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
+                    "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
+                    "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
+                    "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
+                    "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
+                    "apt_activity": int(row.apt_activity) if row.apt_activity else 0,
+                    "ransomware_alerts": int(row.ransomware_alerts) if row.ransomware_alerts else 0,
+                    "monitoring_active": _monitoring_initialized,
+                    "data_source": "bigquery",
+                    "last_updated": datetime.now(timezone.utc).isoformat()
+                }
+                logger.info(f"✅ BigQuery stats retrieved: {stats['total_messages']} messages, {stats['high_threats']} high threats")
+            else:
+                stats = empty_stats
+                
+        except Exception as query_error:
+            logger.error(f"BigQuery stats error: {query_error}")
+            stats = empty_stats
+            stats["data_source"] = "bigquery_error"
+            stats["error"] = str(query_error)
+        
+        return stats
+
     except Exception as e:
-        logger.warning(f"Stats query failed: {e}")
-        default_stats["data_source"] = "bigquery_error"
-        default_stats["error"] = str(e)
-        return default_stats
+        logger.error(f"Failed to get cybersecurity stats: {e}")
+        empty_stats["data_source"] = "error"
+        return empty_stats
 
 @app.get("/api/insights")
 async def get_cybersecurity_insights():
-    """Get latest cybersecurity insights with fast fallback"""
+    """Get latest cybersecurity insights - FIXED SCHEMA"""
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610')
     dataset_id = os.getenv('DATASET_ID', 'telegram_data')
     table_id = os.getenv('TABLE_ID', 'processed_messages')
     
-    default_response = {
+    empty_response = {
         "insights": [],
         "count": 0,
-        "status": "initializing",
-        "data_source": "bigquery_initializing",
-        "system_status": get_app_status()
+        "status": "no_data",
+        "data_source": "bigquery_empty"
     }
     
-    if not _app_status["bigquery_available"] or not _bigquery_client:
-        return default_response
-    
     try:
+        client = get_bigquery_client()
+        if not client or not _bigquery_available:
+            empty_response["data_source"] = "bigquery_unavailable"
+            return empty_response
+        
+        # FIXED: Use correct field names from schema
         query = f"""
         SELECT 
             message_id,
@@ -339,8 +325,8 @@ async def get_cybersecurity_insights():
         LIMIT 50
         """
         
-        query_job = _bigquery_client.query(query)
-        results = query_job.result(timeout=15)  # 15 second timeout
+        query_job = client.query(query)
+        results = query_job.result(timeout=30)
         
         insights = []
         for row in results:
@@ -364,68 +350,75 @@ async def get_cybersecurity_insights():
             }
             insights.append(insight)
         
+        logger.info(f"✅ Retrieved {len(insights)} cybersecurity insights")
+        
         return {
             "insights": insights,
             "count": len(insights),
-            "status": "operational" if _app_status["monitoring_active"] and insights else "data_available",
+            "status": "operational" if _monitoring_initialized and insights else "data_only",
             "data_source": "bigquery",
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-            "system_status": get_app_status()
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
-        logger.warning(f"Insights query failed: {e}")
-        default_response["data_source"] = "bigquery_error"
-        default_response["error"] = str(e)
-        return default_response
+        logger.error(f"Failed to get cybersecurity insights: {e}")
+        empty_response["data_source"] = "error"
+        empty_response["error"] = str(e)
+        return empty_response
 
 @app.get("/api/monitoring/status")
 async def get_monitoring_status():
-    """Get monitoring status - always fast response"""
-    status = get_app_status()
-    
+    """Get monitoring status"""
     return {
-        "active": status["monitoring_active"],
+        "active": _monitoring_initialized,
         "channels": [
-            {"name": "@DarkfeedNews", "status": "active" if status["monitoring_active"] else "initializing", "type": "threat_intelligence"},
-            {"name": "@breachdetector", "status": "active" if status["monitoring_active"] else "initializing", "type": "breach_monitor"},
-            {"name": "@secharvester", "status": "active" if status["monitoring_active"] else "initializing", "type": "security_news"}
+            {"name": "@DarkfeedNews", "status": "active" if _monitoring_initialized else "inactive", "type": "threat_intelligence"},
+            {"name": "@breachdetector", "status": "active" if _monitoring_initialized else "inactive", "type": "breach_monitor"},
+            {"name": "@secharvester", "status": "active" if _monitoring_initialized else "inactive", "type": "security_news"}
         ],
         "last_update": datetime.now(timezone.utc).isoformat(),
-        "system_health": "operational" if status["startup_complete"] else "initializing",
-        "utils_available": status["utils_available"],
-        "bigquery_available": status["bigquery_available"],
-        "initialization_phase": "complete" if status["startup_complete"] else "running",
-        "telegram_session": "authenticated" if status["utils_available"] else "checking"
+        "system_health": "operational" if _monitoring_initialized else "data_only",
+        "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com",
+        "utils_available": _utils_available,
+        "bigquery_available": _bigquery_available,
+        "telegram_session": "authenticated" if _utils_available else "checking"
     }
 
-@app.get("/api/system/status")
-async def get_system_status():
-    """Detailed system status for debugging"""
-    return {
-        "cipher_platform": "active",
-        "app_status": get_app_status(),
-        "environment": {
-            "project_id": os.getenv('GOOGLE_CLOUD_PROJECT', 'primal-chariot-382610'),
-            "dataset_id": os.getenv('DATASET_ID', 'telegram_data'),
-            "table_id": os.getenv('TABLE_ID', 'processed_messages'),
-            "port": os.getenv('PORT', '8080')
-        },
-        "capabilities": {
-            "bigquery_integration": _app_status["bigquery_available"],
-            "telegram_monitoring": _app_status["monitoring_active"],
-            "ai_analysis": _app_status["utils_available"],
-            "real_time_dashboard": True,
-            "threat_intelligence": _app_status["monitoring_active"]
+@app.get("/api/threat-analytics")
+async def get_threat_analytics():
+    """Get threat analytics summary"""
+    try:
+        if _utils_available:
+            import utils
+            insights = await utils.get_recent_insights(limit=100)
+            stats = await get_stats()
+            
+            # Use frontend.py analytics if available
+            try:
+                from frontend import calculate_threat_analytics
+                analytics = calculate_threat_analytics(insights, stats)
+                return analytics
+            except ImportError:
+                pass
+        
+        # Fallback empty analytics
+        return {
+            "threat_levels": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            "categories": {"threat_intel": 0, "data_breach": 0, "vulnerability": 0, "malware": 0, "ransomware": 0, "apt": 0, "phishing": 0, "other": 0},
+            "channel_activity": {},
+            "top_threats": [],
+            "active_campaigns": [],
+            "summary": {"total_threats": 0, "high_priority": 0, "avg_urgency": 0.0}
         }
-    }
+        
+    except Exception as e:
+        logger.error(f"Threat analytics error: {e}")
+        return {"error": "Analytics unavailable"}
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Fast-loading root page"""
-    status = get_app_status()
-    
-    return f"""
+    """Serve the main dashboard"""
+    return """
     <!DOCTYPE html>
     <html>
     <head>
@@ -433,197 +426,152 @@ async def root():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body {{ font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; margin: 0; padding: 20px; }}
-            .container {{ max-width: 1000px; margin: 0 auto; }}
-            .header {{ text-align: center; border: 2px solid #00ff00; padding: 30px; margin-bottom: 30px; }}
-            .logo {{ font-size: 4em; margin-bottom: 10px; }}
-            .status {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 30px 0; }}
-            .card {{ border: 1px solid #00ff00; padding: 20px; background: rgba(0, 255, 0, 0.05); }}
-            .online {{ color: #00ff00; }}
-            .warning {{ color: #ffff00; }}
-            .links a {{ color: #00ff00; text-decoration: none; margin: 0 15px; font-size: 1.1em; }}
-            .links a:hover {{ background: #00ff00; color: #000; padding: 5px; }}
-            .progress {{ background: #333; height: 20px; margin: 10px 0; }}
-            .progress-bar {{ background: #00ff00; height: 100%; transition: width 2s; }}
+            body { font-family: Arial, sans-serif; background: #0f1419; color: white; text-align: center; padding: 50px; }
+            .logo { font-size: 3em; color: #6366f1; margin-bottom: 20px; }
+            .subtitle { color: #888; margin-bottom: 30px; }
+            .links a { color: #6366f1; text-decoration: none; margin: 0 20px; font-size: 1.2em; }
+            .status { background: rgba(99, 102, 241, 0.1); padding: 20px; border-radius: 10px; margin: 20px 0; }
+            .service-info { background: rgba(0, 255, 0, 0.1); padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.8em; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="header">
-                <div class="logo">🛡️ CIPHER</div>
-                <h1>Cybersecurity Intelligence Platform</h1>
-                <p>Real-time Threat Monitoring & Analysis System</p>
-            </div>
-            
-            <div class="status">
-                <div class="card">
-                    <h3>🚀 System Status</h3>
-                    <p class="{'online' if status['startup_complete'] else 'warning'}">
-                        ● {'OPERATIONAL' if status['startup_complete'] else 'INITIALIZING'}
-                    </p>
-                    <p>Uptime: {status['uptime_seconds']} seconds</p>
-                </div>
-                
-                <div class="card">
-                    <h3>📊 Data Pipeline</h3>
-                    <p class="{'online' if status['bigquery_available'] else 'warning'}">
-                        ● BigQuery: {'CONNECTED' if status['bigquery_available'] else 'CONNECTING'}
-                    </p>
-                    <p>Dataset: telegram_data</p>
-                </div>
-                
-                <div class="card">
-                    <h3>📡 Monitoring</h3>
-                    <p class="{'online' if status['monitoring_active'] else 'warning'}">
-                        ● Telegram: {'ACTIVE' if status['monitoring_active'] else 'STARTING'}
-                    </p>
-                    <p>Channels: 3 cybersecurity feeds</p>
-                </div>
-                
-                <div class="card">
-                    <h3>🤖 AI Analysis</h3>
-                    <p class="{'online' if status['utils_available'] else 'warning'}">
-                        ● Gemini AI: {'READY' if status['utils_available'] else 'LOADING'}
-                    </p>
-                    <p>Threat Intelligence Processing</p>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h3>🔗 Quick Access</h3>
-                <div class="links">
-                    <a href="/dashboard">📊 Dashboard</a>
-                    <a href="/api/stats">📈 Statistics</a>
-                    <a href="/api/monitoring/status">📡 Monitoring</a>
-                    <a href="/api/system/status">🔧 System Status</a>
-                    <a href="/health">🏥 Health Check</a>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h3>📡 Monitored Channels</h3>
-                <p>🔴 @DarkfeedNews - Advanced Threat Intelligence</p>
-                <p>🟠 @breachdetector - Data Breach Monitoring</p>
-                <p>🔵 @secharvester - Security News & CVEs</p>
-            </div>
+        <div class="logo">🛡️ CIPHER</div>
+        <div class="subtitle">Cybersecurity Intelligence Platform</div>
+        <div class="status">
+            <p>✅ System Operational</p>
+            <p>🔍 Monitoring Active</p>
         </div>
-        
-        <script>
-            // Auto-refresh every 10 seconds during initialization
-            if (document.body.innerHTML.includes('INITIALIZING') || document.body.innerHTML.includes('CONNECTING')) {{
-                setTimeout(() => location.reload(), 10000);
-            }}
-        </script>
+        <div class="service-info">
+            <p>🔧 Service Account: cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com</p>
+            <p>📊 BigQuery Dataset: telegram_data</p>
+        </div>
+        <div class="links">
+            <a href="/dashboard">📊 Dashboard</a>
+            <a href="/api/stats">📈 Stats API</a>
+            <a href="/health">🏥 Health Check</a>
+        </div>
     </body>
     </html>
     """
 
-@app.get("/dashboard")
-async def dashboard():
-    """Dashboard endpoint with template fallback"""
+@app.get("/dashboard", response_class=HTMLResponse)
+async def production_dashboard(request: Request):
+    """Production CIPHER dashboard"""
     try:
-        if _templates and os.path.exists("templates/dashboard.html"):
-            # Use template if available
+        # Try to use the frontend module if available
+        if _utils_available:
+            try:
+                from frontend import router as frontend_router
+                # Use the frontend dashboard
+                return await frontend_router.cipher_dashboard(request)
+            except ImportError:
+                pass
+        
+        # Fallback to template if available
+        try:
             stats = await get_stats()
             monitoring = await get_monitoring_status()
-            insights_data = await get_cybersecurity_insights()
+            insights_response = await get_cybersecurity_insights()
+            insights = insights_response.get("insights", [])
             
-            return _templates.TemplateResponse("dashboard.html", {
-                "request": {"url": {"path": "/dashboard"}},
+            return templates.TemplateResponse("dashboard.html", {
+                "request": request,
                 "stats": stats,
-                "insights": insights_data.get("insights", []),
+                "insights": insights,
                 "monitoring": monitoring,
                 "system_status": "operational" if monitoring.get("active") else "initializing",
-                "page_title": "CIPHER - Cybersecurity Intelligence Dashboard"
+                "page_title": "CIPHER - Cybersecurity Intelligence Dashboard",
+                "current_time": datetime.now().isoformat(),
+                "PROJECT_ID": "primal-chariot-382610"
             })
-        else:
-            # Fallback dashboard
-            return HTMLResponse(await get_simple_dashboard())
+        except Exception as e:
+            logger.warning(f"Template dashboard failed: {e}")
+            
+            # Simple HTML fallback
+            stats = await get_stats()
+            monitoring = await get_monitoring_status()
+            
+            return HTMLResponse(f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>CIPHER Dashboard</title>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {{ font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; margin: 0; padding: 20px; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
+                    .header {{ text-align: center; border: 2px solid #00ff00; padding: 30px; margin-bottom: 30px; }}
+                    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+                    .card {{ border: 1px solid #00ff00; padding: 20px; background: rgba(0, 255, 0, 0.05); }}
+                    .metric {{ font-size: 2em; color: #ffffff; margin: 10px 0; }}
+                    .status-online {{ color: #00ff00; }}
+                    .status-warning {{ color: #ffff00; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>🛡️ CIPHER - Cybersecurity Intelligence Dashboard</h1>
+                        <p>Real-time Threat Monitoring System</p>
+                    </div>
+                    
+                    <div class="grid">
+                        <div class="card">
+                            <h3>📊 Intelligence Summary</h3>
+                            <div class="metric">{stats['total_messages']:,}</div>
+                            <p>Total Messages Processed</p>
+                            <p>Today: {stats['processed_today']}</p>
+                            <p>High Threats: {stats['high_threats']}</p>
+                        </div>
+                        
+                        <div class="card">
+                            <h3>🚨 Threat Levels</h3>
+                            <div class="metric">{stats['critical_threats']}</div>
+                            <p>Critical Threats</p>
+                            <p>APT Activity: {stats['apt_activity']}</p>
+                            <p>Ransomware: {stats['ransomware_alerts']}</p>
+                        </div>
+                        
+                        <div class="card">
+                            <h3>🔍 Vulnerabilities</h3>
+                            <div class="metric">{stats['cve_mentions']}</div>
+                            <p>CVE References</p>
+                            <p>Vulnerabilities: {stats['vulnerabilities']}</p>
+                            <p>Data Breaches: {stats['data_breaches']}</p>
+                        </div>
+                        
+                        <div class="card">
+                            <h3>📡 Monitoring Status</h3>
+                            <p class="{'status-online' if monitoring['active'] else 'status-warning'}">
+                                ● {'ACTIVE' if monitoring['active'] else 'INITIALIZING'}
+                            </p>
+                            <p>Channels: {len(monitoring['channels'])}</p>
+                            <p>System: {monitoring['system_health'].upper()}</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card" style="margin-top: 20px;">
+                        <h3>📡 Monitored Channels</h3>
+                        <p>🔴 @DarkfeedNews - Advanced Threat Intelligence</p>
+                        <p>🟠 @breachdetector - Data Breach Monitor</p>
+                        <p>🔵 @secharvester - Security News & CVEs</p>
+                    </div>
+                </div>
+                
+                <script>
+                    // Auto-refresh every 30 seconds
+                    setTimeout(() => location.reload(), 30000);
+                </script>
+            </body>
+            </html>
+            """)
+            
     except Exception as e:
         logger.error(f"Dashboard error: {e}")
-        return HTMLResponse(await get_simple_dashboard())
-
-async def get_simple_dashboard():
-    """Simple dashboard fallback"""
-    stats = await get_stats()
-    monitoring = await get_monitoring_status()
-    
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>CIPHER Dashboard</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body {{ font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; }}
-            .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
-            .header {{ text-align: center; border: 2px solid #00ff00; padding: 20px; margin-bottom: 20px; }}
-            .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
-            .card {{ border: 1px solid #00ff00; padding: 20px; background: rgba(0, 255, 0, 0.05); }}
-            .metric {{ font-size: 2em; color: #ffffff; margin: 10px 0; }}
-            .status-online {{ color: #00ff00; }}
-            .status-warning {{ color: #ffff00; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🛡️ CIPHER - Cybersecurity Intelligence Dashboard</h1>
-                <p>Real-time Threat Monitoring System</p>
-            </div>
-            
-            <div class="grid">
-                <div class="card">
-                    <h3>📊 Intelligence Summary</h3>
-                    <div class="metric">{stats['total_messages']:,}</div>
-                    <p>Total Messages Processed</p>
-                    <p>Today: {stats['processed_today']}</p>
-                    <p>High Threats: {stats['high_threats']}</p>
-                </div>
-                
-                <div class="card">
-                    <h3>🚨 Threat Levels</h3>
-                    <div class="metric">{stats['critical_threats']}</div>
-                    <p>Critical Threats</p>
-                    <p>APT Activity: {stats['apt_activity']}</p>
-                    <p>Ransomware: {stats['ransomware_alerts']}</p>
-                </div>
-                
-                <div class="card">
-                    <h3>🔍 Vulnerabilities</h3>
-                    <div class="metric">{stats['cve_mentions']}</div>
-                    <p>CVE References</p>
-                    <p>Vulnerabilities: {stats['vulnerabilities']}</p>
-                    <p>Data Breaches: {stats['data_breaches']}</p>
-                </div>
-                
-                <div class="card">
-                    <h3>📡 Monitoring Status</h3>
-                    <p class="{'status-online' if monitoring['active'] else 'status-warning'}">
-                        ● {'ACTIVE' if monitoring['active'] else 'INITIALIZING'}
-                    </p>
-                    <p>Channels: {len(monitoring['channels'])}</p>
-                    <p>System: {monitoring['system_health'].upper()}</p>
-                </div>
-            </div>
-            
-            <div class="card" style="margin-top: 20px;">
-                <h3>📡 Monitored Channels</h3>
-                {' '.join([f'<p>● {ch["name"]} - {ch["type"].replace("_", " ").title()}</p>' for ch in monitoring['channels']])}
-            </div>
-        </div>
-        
-        <script>
-            // Auto-refresh every 30 seconds
-            setTimeout(() => location.reload(), 30000);
-        </script>
-    </body>
-    </html>
-    """
+        return HTMLResponse("<h1>CIPHER Dashboard - Loading...</h1><script>setTimeout(() => location.reload(), 5000);</script>")
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))
-    logger.info(f"🚀 Starting CIPHER Platform on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
