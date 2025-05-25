@@ -413,7 +413,7 @@
     <!-- Main Dashboard -->
     <div x-show="!loading && !error">
         
-        <!-- Enhanced Key Metrics -->
+        <!-- Enhanced Key Metrics - FIXED NULL HANDLING -->
         <section class="stats-grid mb-10">
             
             <!-- Total Intelligence -->
@@ -424,13 +424,13 @@
                     </div>
                     <div class="text-right">
                         <p class="text-gray-400 text-sm font-medium">Intelligence Reports</p>
-                        <div class="metric-value text-cipher-blue" x-text="formatNumber(stats.total_messages || 0)"></div>
+                        <div class="metric-value text-cipher-blue" x-text="formatNumber((stats && stats.total_messages) || 0)"></div>
                     </div>
                 </div>
                 <div class="flex items-center justify-between text-sm">
                     <div>
                         <span class="text-gray-400">Today:</span>
-                        <span class="text-cipher-blue font-mono font-semibold ml-2" x-text="formatNumber(stats.processed_today || 0)"></span>
+                        <span class="text-cipher-blue font-mono font-semibold ml-2" x-text="formatNumber((stats && stats.processed_today) || 0)"></span>
                     </div>
                     <div class="ai-badge">
                         <i class="fas fa-brain mr-1"></i>AI Powered
@@ -446,17 +446,17 @@
                     </div>
                     <div class="text-right">
                         <p class="text-gray-400 text-sm font-medium">High Priority Threats</p>
-                        <div class="metric-value text-red-400" x-text="formatNumber(stats.high_priority_threats || 0)"></div>
+                        <div class="metric-value text-red-400" x-text="formatNumber((stats && stats.high_priority_threats) || 0)"></div>
                     </div>
                 </div>
                 <div class="flex items-center justify-between text-sm">
                     <div class="flex space-x-4">
                         <div>
                             <span class="text-gray-400">Critical:</span>
-                            <span class="text-red-400 ml-1 font-mono font-semibold" x-text="stats.critical_threats || 0"></span>
+                            <span class="text-red-400 ml-1 font-mono font-semibold" x-text="(stats && stats.critical_threats) || 0"></span>
                         </div>
                     </div>
-                    <div class="live-indicator" x-show="stats.high_priority_threats > 0">
+                    <div class="live-indicator" x-show="(stats && stats.high_priority_threats || 0) > 0">
                         <i class="fas fa-exclamation-circle mr-1"></i>Active
                     </div>
                 </div>
@@ -470,7 +470,7 @@
                     </div>
                     <div class="text-right">
                         <p class="text-gray-400 text-sm font-medium">CVE References</p>
-                        <div class="metric-value text-orange-400" x-text="formatNumber(stats.cve_references || 0)"></div>
+                        <div class="metric-value text-orange-400" x-text="formatNumber((stats && stats.cve_references) || 0)"></div>
                     </div>
                 </div>
                 <div class="flex items-center justify-between text-sm">
@@ -491,13 +491,13 @@
                     </div>
                     <div class="text-right">
                         <p class="text-gray-400 text-sm font-medium">AI Threat Level</p>
-                        <div class="metric-value text-cipher-purple" x-text="(stats.avg_urgency || 0).toFixed(2)"></div>
+                        <div class="metric-value text-cipher-purple" x-text="((stats && stats.avg_urgency) || 0).toFixed(2)"></div>
                     </div>
                 </div>
                 <div class="flex items-center justify-between text-sm">
                     <div>
                         <span class="text-gray-400">Assessment:</span>
-                        <span :class="getThreatLevelColor(stats.avg_urgency)" class="font-mono font-semibold ml-2" x-text="getThreatLevelText(stats.avg_urgency)"></span>
+                        <span :class="getThreatLevelColor((stats && stats.avg_urgency) || 0)" class="font-mono font-semibold ml-2" x-text="getThreatLevelText((stats && stats.avg_urgency) || 0)"></span>
                     </div>
                     <div class="ai-badge">
                         <i class="fas fa-robot mr-1"></i>AI Analysis
@@ -519,14 +519,14 @@
                     </span>
                 </h3>
                 <div class="space-y-4">
-                    <template x-for="(value, level) in analytics.threat_distribution || {}" :key="level">
+                    <template x-for="(value, level) in ((analytics && analytics.threat_distribution) || {})" :key="level">
                         <div class="flex items-center">
-                            <div class="w-24 text-sm text-gray-300 capitalize font-medium" x-text="level"></div>
+                            <div class="w-24 text-sm text-gray-300 capitalize font-medium" x-text="level || 'unknown'"></div>
                             <div class="flex-1 mx-4">
                                 <div class="progress-bar h-8 rounded-full">
                                     <div class="progress-fill rounded-full flex items-center justify-end pr-3" 
                                          :style="`width: ${getPercentage(level, value)}%`"
-                                         :class="getThreatColor(level)">
+                                         :class="getThreatColor(level || 'low')">
                                         <span class="text-white text-xs font-semibold" x-show="getPercentage(level, value) > 15" x-text="getPercentage(level, value) + '%'"></span>
                                     </div>
                                 </div>
@@ -536,7 +536,7 @@
                     </template>
                 </div>
                 
-                <div x-show="!analytics.threat_distribution || Object.keys(analytics.threat_distribution).length === 0" 
+                <div x-show="!analytics || !analytics.threat_distribution || Object.keys(analytics.threat_distribution || {}).length === 0" 
                      class="empty-state p-10 text-center">
                     <i class="fas fa-chart-bar text-5xl mb-4 opacity-50"></i>
                     <p class="text-lg font-medium">No threat distribution data</p>
@@ -554,9 +554,9 @@
                     </span>
                 </h3>
                 <div class="space-y-4">
-                    <template x-for="(value, category) in analytics.categories || {}" :key="category">
+                    <template x-for="(value, category) in ((analytics && analytics.categories) || {})" :key="category">
                         <div class="flex items-center">
-                            <div class="w-28 text-sm text-gray-300 font-medium" x-text="formatCategory(category)"></div>
+                            <div class="w-28 text-sm text-gray-300 font-medium" x-text="formatCategory(category || 'unknown')"></div>
                             <div class="flex-1 mx-4">
                                 <div class="progress-bar h-8 rounded-full">
                                     <div class="progress-fill rounded-full flex items-center justify-end pr-3" 
@@ -570,7 +570,7 @@
                     </template>
                 </div>
                 
-                <div x-show="!analytics.categories || Object.keys(analytics.categories).length === 0" 
+                <div x-show="!analytics || !analytics.categories || Object.keys(analytics.categories || {}).length === 0" 
                      class="empty-state p-10 text-center">
                     <i class="fas fa-tags text-5xl mb-4 opacity-50"></i>
                     <p class="text-lg font-medium">No category analysis data</p>
@@ -590,48 +590,48 @@
                     </span>
                 </h2>
                 <div class="flex items-center space-x-4">
-                    <span class="text-sm text-gray-400 font-medium" x-text="insights.count + ' active threats detected'"></span>
+                    <span class="text-sm text-gray-400 font-medium" x-text="((insights && insights.count) || 0) + ' active threats detected'"></span>
                     <button @click="refreshData()" class="px-6 py-3 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors font-semibold shadow-lg">
                         <i class="fas fa-sync-alt mr-2"></i>Refresh Intelligence
                     </button>
                 </div>
             </div>
 
-            <!-- Enhanced Threat Intelligence Grid -->
+            <!-- Enhanced Threat Intelligence Grid - FIXED NULL HANDLING -->
             <div class="threat-timeline space-y-8 max-h-[900px] overflow-y-auto">
-                <template x-for="(threat, index) in insights.data || []" :key="threat.id">
+                <template x-for="(threat, index) in (insights.data || [])" :key="threat.id || index">
                     <article class="intelligence-card rounded-xl p-8 relative" 
-                             :class="getThreatSeverityClass(threat.threat_level)">
+                             :class="getThreatSeverityClass(threat.threat_level || 'low')">
                         
                         <!-- Source Indicator -->
-                        <div class="source-indicator" :class="getSourceIndicatorClass(threat.source)"></div>
-                        <div class="timeline-dot" :class="getThreatColor(threat.threat_level)"></div>
+                        <div class="source-indicator" :class="getSourceIndicatorClass(threat.source || '')"></div>
+                        <div class="timeline-dot" :class="getThreatColor(threat.threat_level || 'low')"></div>
                         
                         <!-- Enhanced Threat Header -->
                         <div class="flex justify-between items-start mb-6">
                             <div class="flex items-center space-x-4">
-                                <span x-text="getSourceIcon(threat.source)" class="text-3xl"></span>
+                                <span x-text="getSourceIcon(threat.source || '')" class="text-3xl"></span>
                                 <div>
-                                    <h4 class="font-bold text-cipher-blue text-lg" x-text="threat.source"></h4>
+                                    <h4 class="font-bold text-cipher-blue text-lg" x-text="threat.source || 'Unknown Source'"></h4>
                                     <div class="flex items-center space-x-3 text-sm text-gray-400 mt-1">
-                                        <span x-text="threat.time"></span>
+                                        <span x-text="threat.time || 'Unknown time'"></span>
                                         <span>•</span>
-                                        <span class="capitalize font-medium" x-text="threat.category"></span>
+                                        <span class="capitalize font-medium" x-text="threat.category || 'other'"></span>
                                         <span>•</span>
-                                        <span class="font-mono" x-text="'ID: ' + threat.id"></span>
+                                        <span class="font-mono" x-text="'ID: ' + (threat.id || 'unknown')"></span>
                                     </div>
                                 </div>
                             </div>
                             <div class="flex items-center space-x-3">
-                                <span :class="getThreatBadgeClass(threat.threat_level)" 
+                                <span :class="getThreatBadgeClass(threat.threat_level || 'low')" 
                                       class="px-4 py-2 rounded-full text-sm font-bold uppercase tracking-wide"
-                                      x-text="threat.severity"></span>
+                                      x-text="threat.severity || 'Unknown'"></span>
                                 <div class="flex items-center space-x-3">
                                     <div class="urgency-meter">
                                         <div class="urgency-fill" 
-                                             :style="`width: ${threat.urgency}%; background: ${getUrgencyColor(threat.urgency)}`"></div>
+                                             :style="`width: ${threat.urgency || 0}%; background: ${getUrgencyColor(threat.urgency || 0)}`"></div>
                                     </div>
-                                    <span class="text-sm text-gray-300 font-mono font-semibold" x-text="threat.urgency + '%'"></span>
+                                    <span class="text-sm text-gray-300 font-mono font-semibold" x-text="(threat.urgency || 0) + '%'"></span>
                                 </div>
                             </div>
                         </div>
@@ -639,7 +639,7 @@
                         <!-- Threat Summary -->
                         <div class="mb-6">
                             <h5 class="text-gray-300 font-medium mb-3">Threat Summary:</h5>
-                            <p class="text-gray-200 leading-relaxed text-base" x-text="threat.summary"></p>
+                            <p class="text-gray-200 leading-relaxed text-base" x-text="threat.summary || 'No summary available'"></p>
                         </div>
                         
                         <!-- Enhanced AI Analysis -->
@@ -652,12 +652,12 @@
                                 </span>
                             </div>
                             <div class="bg-black/20 rounded-lg p-4 border-l-4 border-cipher-purple">
-                                <p class="leading-relaxed text-gray-200 text-base" x-text="threat.analysis"></p>
+                                <p class="leading-relaxed text-gray-200 text-base" x-text="threat.analysis || 'Analysis in progress...'"></p>
                             </div>
                         </div>
 
                         <!-- Enhanced Threat Indicators -->
-                        <div x-show="threat.indicators && threat.indicators.count > 0" class="mb-6">
+                        <div x-show="threat.indicators && (threat.indicators.count || 0) > 0" class="mb-6">
                             <div class="flex items-center mb-4">
                                 <i class="fas fa-crosshairs text-orange-400 mr-3 text-lg"></i>
                                 <span class="text-base font-bold text-orange-400">Threat Indicators</span>
@@ -667,18 +667,18 @@
                             </div>
                             <div class="flex flex-wrap gap-3">
                                 <!-- CVE References -->
-                                <template x-for="cve in (threat.indicators.cves || [])" :key="cve">
+                                <template x-for="cve in ((threat.indicators && threat.indicators.cves) || [])" :key="cve">
                                     <span class="indicator-tag cve-tag">
                                         <i class="fas fa-bug mr-2"></i>
-                                        <span x-text="cve"></span>
+                                        <span x-text="cve || 'Unknown CVE'"></span>
                                     </span>
                                 </template>
                                 
                                 <!-- Malware Families -->
-                                <template x-for="malware in (threat.indicators.malware || [])" :key="malware">
+                                <template x-for="malware in ((threat.indicators && threat.indicators.malware) || [])" :key="malware">
                                     <span class="indicator-tag malware-tag">
                                         <i class="fas fa-virus mr-2"></i>
-                                        <span x-text="malware"></span>
+                                        <span x-text="malware || 'Unknown Malware'"></span>
                                     </span>
                                 </template>
                             </div>
@@ -691,22 +691,22 @@
                                     <div class="flex items-center space-x-2">
                                         <i class="fas fa-shield-alt text-cipher-blue"></i>
                                         <span class="text-gray-400">Threat Level:</span>
-                                        <span :class="getThreatLevelColor(threat.urgency)" class="font-mono font-semibold" x-text="threat.severity"></span>
+                                        <span :class="getThreatLevelColor(threat.urgency || 0)" class="font-mono font-semibold" x-text="threat.severity || 'Unknown'"></span>
                                     </div>
-                                    <div class="flex items-center space-x-2" x-show="threat.indicators.count > 0">
+                                    <div class="flex items-center space-x-2" x-show="(threat.indicators && threat.indicators.count || 0) > 0">
                                         <i class="fas fa-crosshairs text-orange-400"></i>
                                         <span class="text-gray-400">Indicators:</span>
-                                        <span class="text-orange-400 font-mono font-semibold" x-text="threat.indicators.count"></span>
+                                        <span class="text-orange-400 font-mono font-semibold" x-text="(threat.indicators && threat.indicators.count) || 0"></span>
                                     </div>
                                     <div class="flex items-center space-x-2">
                                         <i class="fas fa-brain text-cipher-purple"></i>
                                         <span class="text-gray-400">AI Confidence:</span>
-                                        <span class="text-cipher-purple font-mono font-semibold" x-text="getConfidenceLevel(threat.urgency)"></span>
+                                        <span class="text-cipher-purple font-mono font-semibold" x-text="getConfidenceLevel(threat.urgency || 0)"></span>
                                     </div>
                                 </div>
                                 <div class="flex items-center space-x-2">
                                     <span class="text-gray-500 text-xs">Processed:</span>
-                                    <span class="text-gray-400 font-mono text-xs" x-text="threat.time"></span>
+                                    <span class="text-gray-400 font-mono text-xs" x-text="threat.time || 'Unknown'"></span>
                                 </div>
                             </div>
                         </div>
@@ -715,7 +715,7 @@
             </div>
 
             <!-- Enhanced Empty State -->
-            <div x-show="!insights.data || insights.data.length === 0" 
+            <div x-show="!insights || !insights.data || insights.data.length === 0" 
                  class="empty-state rounded-xl p-16 text-center">
                 <i class="fas fa-shield-alt text-8xl mb-8 opacity-30"></i>
                 <h3 class="text-2xl font-semibold mb-4">No Active Threats Detected</h3>
@@ -784,7 +784,7 @@ function cipherDashboardController() {
             }, 30000);
         },
 
-        // Load all dashboard data
+        // Load all dashboard data - FIXED NULL HANDLING
         async loadDashboardData() {
             this.loading = true;
             this.error = false;
@@ -803,15 +803,34 @@ function cipherDashboardController() {
                     throw new Error(data.message || 'Dashboard data unavailable');
                 }
                 
-                // Update dashboard state
-                this.stats = data.stats || {};
-                this.insights = data.insights || { data: [], count: 0 };
-                this.analytics = data.analytics || { threat_distribution: {}, categories: {} };
-                this.channels = data.channels || [];
+                // SAFE data assignment with null checks
+                this.stats = this.safeAssign(data.stats, {
+                    total_messages: 0,
+                    processed_today: 0,
+                    high_priority_threats: 0,
+                    critical_threats: 0,
+                    cve_references: 0,
+                    avg_urgency: 0.0
+                });
+                
+                this.insights = this.safeAssign(data.insights, { data: [], count: 0 });
+                
+                // Ensure insights.data is always an array
+                if (!Array.isArray(this.insights.data)) {
+                    this.insights.data = [];
+                }
+                
+                this.analytics = this.safeAssign(data.analytics, { 
+                    threat_distribution: {}, 
+                    categories: {} 
+                });
+                
+                this.channels = Array.isArray(data.channels) ? data.channels : [];
                 this.systemStatus = data.status || 'unknown';
-                this.channelCount = this.channels.length;
+                this.channelCount = this.channels.length || 3;
                 
                 console.log(`✅ Dashboard loaded: ${this.insights.count} threats, ${this.stats.total_messages} total messages`);
+                console.log(`✅ Insights data: `, this.insights.data);
                 
                 this.updateTimeDisplay();
                 this.loading = false;
@@ -819,9 +838,24 @@ function cipherDashboardController() {
             } catch (error) {
                 console.error('❌ Dashboard loading failed:', error);
                 this.error = true;
-                this.errorMessage = error.message;
+                this.errorMessage = error.message || 'Unknown error';
                 this.loading = false;
             }
+        },
+
+        // SAFE assignment helper
+        safeAssign(source, defaults) {
+            if (!source || typeof source !== 'object') {
+                return defaults;
+            }
+            
+            const result = { ...defaults };
+            for (const [key, value] of Object.entries(source)) {
+                if (value !== null && value !== undefined) {
+                    result[key] = value;
+                }
+            }
+            return result;
         },
 
         // Refresh data
@@ -840,8 +874,9 @@ function cipherDashboardController() {
             });
         },
 
-        // Enhanced utility functions
+        // Enhanced utility functions - FIXED NULL HANDLING
         formatNumber(num) {
+            if (!num || isNaN(num)) return '0';
             if (num >= 1000000) {
                 return (num / 1000000).toFixed(1) + 'M';
             } else if (num >= 1000) {
@@ -851,10 +886,12 @@ function cipherDashboardController() {
         },
 
         formatCategory(category) {
+            if (!category || typeof category !== 'string') return 'Unknown';
             return category.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
         },
 
         getSourceIcon(source) {
+            if (!source) return '📡';
             const icons = {
                 '@DarkfeedNews': '🔴',
                 '@breachdetector': '🟠',
@@ -864,6 +901,7 @@ function cipherDashboardController() {
         },
 
         getSourceIndicatorClass(source) {
+            if (!source) return 'source-harvest';
             const classes = {
                 '@DarkfeedNews': 'source-darkfeed',
                 '@breachdetector': 'source-breach',
@@ -873,67 +911,76 @@ function cipherDashboardController() {
         },
 
         getThreatBadgeClass(level) {
+            if (!level) return 'threat-low';
             const classes = {
                 'critical': 'threat-critical',
                 'high': 'threat-high',
                 'medium': 'threat-medium',
                 'low': 'threat-low'
             };
-            return classes[level] || 'threat-low';
+            return classes[level.toLowerCase()] || 'threat-low';
         },
 
         getThreatSeverityClass(level) {
-            if (level === 'critical') return 'threat-severity-critical';
-            if (level === 'high') return 'threat-severity-high';
+            if (!level) return '';
+            if (level.toLowerCase() === 'critical') return 'threat-severity-critical';
+            if (level.toLowerCase() === 'high') return 'threat-severity-high';
             return '';
         },
 
         getThreatColor(level) {
+            if (!level) return 'bg-gray-500';
             const colors = {
                 'critical': 'bg-red-500',
                 'high': 'bg-orange-500',
                 'medium': 'bg-yellow-500',
                 'low': 'bg-green-500'
             };
-            return colors[level] || 'bg-gray-500';
+            return colors[level.toLowerCase()] || 'bg-gray-500';
         },
 
         getThreatLevelColor(urgency) {
-            if (urgency >= 80) return 'text-red-400';
-            if (urgency >= 60) return 'text-orange-400';
-            if (urgency >= 40) return 'text-yellow-400';
+            const urgencyNum = parseFloat(urgency) || 0;
+            if (urgencyNum >= 80) return 'text-red-400';
+            if (urgencyNum >= 60) return 'text-orange-400';
+            if (urgencyNum >= 40) return 'text-yellow-400';
             return 'text-green-400';
         },
 
         getThreatLevelText(urgency) {
-            if (urgency >= 0.8) return 'CRITICAL';
-            if (urgency >= 0.6) return 'HIGH';
-            if (urgency >= 0.4) return 'MEDIUM';
+            const urgencyNum = parseFloat(urgency) || 0;
+            if (urgencyNum >= 0.8) return 'CRITICAL';
+            if (urgencyNum >= 0.6) return 'HIGH';
+            if (urgencyNum >= 0.4) return 'MEDIUM';
             return 'LOW';
         },
 
         getUrgencyColor(urgency) {
-            if (urgency >= 80) return 'linear-gradient(90deg, #ef4444, #dc2626)';
-            if (urgency >= 60) return 'linear-gradient(90deg, #f59e0b, #d97706)';
-            if (urgency >= 40) return 'linear-gradient(90deg, #eab308, #ca8a04)';
+            const urgencyNum = parseFloat(urgency) || 0;
+            if (urgencyNum >= 80) return 'linear-gradient(90deg, #ef4444, #dc2626)';
+            if (urgencyNum >= 60) return 'linear-gradient(90deg, #f59e0b, #d97706)';
+            if (urgencyNum >= 40) return 'linear-gradient(90deg, #eab308, #ca8a04)';
             return 'linear-gradient(90deg, #22c55e, #16a34a)';
         },
 
         getConfidenceLevel(urgency) {
-            if (urgency >= 80) return 'Very High';
-            if (urgency >= 60) return 'High';
-            if (urgency >= 40) return 'Medium';
+            const urgencyNum = parseFloat(urgency) || 0;
+            if (urgencyNum >= 80) return 'Very High';
+            if (urgencyNum >= 60) return 'High';
+            if (urgencyNum >= 40) return 'Medium';
             return 'Standard';
         },
 
         getPercentage(level, value) {
-            const total = Object.values(this.analytics.threat_distribution || {}).reduce((sum, v) => sum + (v || 0), 0);
-            return total > 0 ? Math.round((value / total) * 100) : 0;
+            if (!this.analytics || !this.analytics.threat_distribution) return 0;
+            const total = Object.values(this.analytics.threat_distribution).reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
+            return total > 0 ? Math.round(((parseFloat(value) || 0) / total) * 100) : 0;
         },
 
         getCategoryPercentage(category, value) {
-            const total = Object.values(this.analytics.categories || {}).reduce((sum, v) => sum + (v || 0), 0);
-            return total > 0 ? Math.round((value / total) * 100) : 0;
+            if (!this.analytics || !this.analytics.categories) return 0;
+            const total = Object.values(this.analytics.categories).reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
+            return total > 0 ? Math.round(((parseFloat(value) || 0) / total) * 100) : 0;
         }
     }
 }
