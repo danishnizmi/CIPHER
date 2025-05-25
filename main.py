@@ -8,14 +8,18 @@ import traceback
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-# Configure logging with more detail
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Create FastAPI app with enhanced metadata
+# Configuration - centralized in main.py
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "primal-chariot-382610")
+SERVICE_ACCOUNT = f"cloud-build-service@{PROJECT_ID}.iam.gserviceaccount.com"
+
+# Create FastAPI app
 app = FastAPI(
     title="CIPHER - Cybersecurity Intelligence Platform",
     description="Real-time cybersecurity threat intelligence monitoring and analysis platform",
@@ -25,10 +29,10 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# Add CORS middleware for API access
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
@@ -40,11 +44,33 @@ _initialization_task = None
 _utils_available = False
 _monitoring_active = False
 _initialization_error = None
-_last_health_check = None
 _system_status = "starting"
 
+# Standard response templates
+def create_success_response(data: Any, message: str = "Success") -> Dict[str, Any]:
+    """Create standardized success response"""
+    return {
+        "status": "success",
+        "message": message,
+        "data": data,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "platform": "CIPHER Cybersecurity Intelligence Platform"
+    }
+
+def create_error_response(error: str, details: str = None, status: str = "error") -> Dict[str, Any]:
+    """Create standardized error response"""
+    response = {
+        "error": error,
+        "status": status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "platform": "CIPHER Cybersecurity Intelligence Platform"
+    }
+    if details:
+        response["details"] = details
+    return response
+
 async def initialize_system_background():
-    """Initialize all system components in background with enhanced error handling"""
+    """Initialize all system components in background"""
     global _utils_available, _monitoring_active, _initialization_error, _system_status
     
     try:
@@ -54,7 +80,7 @@ async def initialize_system_background():
         # Wait for HTTP server to start
         await asyncio.sleep(2)
         
-        # Initialize utils module with detailed error tracking
+        # Initialize utils module
         try:
             logger.info("📦 Importing utils module...")
             import utils
@@ -112,24 +138,14 @@ async def initialize_system_background():
 
 @app.on_event("startup")
 async def startup_event():
-    """Fast startup with background initialization and enhanced logging"""
+    """Fast startup with background initialization"""
     global _initialization_task
     
     try:
         logger.info("🛡️ CIPHER Platform starting up...")
         logger.info(f"Python version: {os.sys.version}")
         logger.info(f"Working directory: {os.getcwd()}")
-        logger.info(f"Environment: {os.environ.get('GOOGLE_CLOUD_PROJECT', 'local')}")
-        
-        # Log environment variables (without sensitive data)
-        env_vars = {
-            'GOOGLE_CLOUD_PROJECT': os.environ.get('GOOGLE_CLOUD_PROJECT', 'not_set'),
-            'LOG_LEVEL': os.environ.get('LOG_LEVEL', 'not_set'),
-            'PORT': os.environ.get('PORT', 'not_set'),
-            'DATASET_ID': os.environ.get('DATASET_ID', 'not_set'),
-            'TABLE_ID': os.environ.get('TABLE_ID', 'not_set')
-        }
-        logger.info(f"Environment configuration: {env_vars}")
+        logger.info(f"Project: {PROJECT_ID}")
         
         # Start background initialization
         _initialization_task = asyncio.create_task(initialize_system_background())
@@ -143,7 +159,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Graceful shutdown with enhanced cleanup"""
+    """Graceful shutdown"""
     try:
         logger.info("🛑 Shutting down CIPHER Platform...")
         
@@ -176,35 +192,29 @@ async def root():
 
 @app.get("/health/live")
 async def liveness_check():
-    """Lightweight liveness check - just confirms the server is running"""
-    global _last_health_check
-    _last_health_check = datetime.now(timezone.utc)
-    
+    """Lightweight liveness check"""
     return JSONResponse(
         status_code=200,
         content={
             "status": "alive",
-            "service": "cipher-intelligence",
-            "timestamp": _last_health_check.isoformat(),
-            "uptime_seconds": int((_last_health_check - _system_startup_time).total_seconds()),
-            "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com",
+            "service": "cipher-intelligence", 
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds()),
+            "service_account": SERVICE_ACCOUNT,
             "system_status": _system_status
         }
     )
 
 @app.get("/health")
 async def readiness_check():
-    """Comprehensive health check with detailed system status"""
-    global _last_health_check
-    _last_health_check = datetime.now(timezone.utc)
-    
+    """Comprehensive health check"""
     health_status = {
         "status": "healthy" if _system_status in ["operational", "limited"] else "unhealthy",
         "service": "cipher-intelligence",
         "version": "1.0.0",
-        "timestamp": _last_health_check.isoformat(),
-        "uptime_seconds": int((_last_health_check - _system_startup_time).total_seconds()),
-        "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": int((datetime.now(timezone.utc) - _system_startup_time).total_seconds()),
+        "service_account": SERVICE_ACCOUNT,
         "system_status": _system_status,
         "checks": {
             "utils_available": _utils_available,
@@ -224,38 +234,18 @@ async def readiness_check():
             health_status["checks"]["bigquery"] = "connected" if utils.is_bigquery_available() else "unavailable"
             health_status["checks"]["telegram"] = "connected" if utils.is_telegram_connected() else "disconnected"
             health_status["checks"]["gemini"] = "available" if utils.is_gemini_available() else "unavailable"
-            
-            # Get detailed monitoring status
-            if hasattr(utils, 'get_monitoring_status'):
-                try:
-                    monitoring_status = await utils.get_monitoring_status()
-                    health_status["monitoring_details"] = monitoring_status
-                except Exception as e:
-                    health_status["monitoring_error"] = str(e)
-                    
         except Exception as e:
             logger.warning(f"Health check subsystem error: {e}")
             health_status["checks"]["subsystems"] = "error"
-            health_status["subsystem_error"] = str(e)
-            if health_status["status"] == "healthy":
-                health_status["status"] = "degraded"
-    else:
-        health_status["checks"]["bigquery"] = "initializing"
-        health_status["checks"]["telegram"] = "initializing"
-        health_status["checks"]["gemini"] = "initializing"
     
     # Determine HTTP status code
-    status_code = 200
-    if health_status["status"] == "unhealthy":
-        status_code = 503
-    elif health_status["status"] == "degraded":
-        status_code = 200  # Still functional
+    status_code = 200 if health_status["status"] in ["healthy"] else 503
     
     return JSONResponse(status_code=status_code, content=health_status)
 
 @app.get("/api/stats")
 async def get_system_stats():
-    """Get comprehensive system statistics with enhanced error handling"""
+    """Get comprehensive system statistics"""
     try:
         if _utils_available:
             import utils
@@ -282,20 +272,17 @@ async def get_system_stats():
         
     except Exception as e:
         logger.error(f"Stats API error: {e}")
-        error_response = {
-            "error": "Stats temporarily unavailable",
-            "error_detail": str(e),
-            "system_status": _system_status,
-            "last_updated": datetime.now(timezone.utc).isoformat()
-        }
-        
-        # Return 503 if system is in error state, 200 if just temporarily unavailable
-        status_code = 503 if _system_status == "error" else 200
-        return JSONResponse(status_code=status_code, content=error_response)
+        return JSONResponse(
+            status_code=503,
+            content=create_error_response(
+                "Stats temporarily unavailable",
+                str(e)
+            )
+        )
 
 @app.get("/api/insights")
 async def get_threat_insights():
-    """Get latest threat intelligence insights with enhanced error handling"""
+    """Get latest threat intelligence insights"""
     try:
         if _utils_available:
             import utils
@@ -320,18 +307,15 @@ async def get_threat_insights():
         logger.error(f"Insights API error: {e}")
         return JSONResponse(
             status_code=503,
-            content={
-                "insights": [],
-                "count": 0,
-                "status": "error",
-                "error": str(e),
-                "error_detail": "Threat insights temporarily unavailable"
-            }
+            content=create_error_response(
+                "Threat insights temporarily unavailable",
+                str(e)
+            )
         )
 
 @app.get("/api/monitoring/status")
 async def get_monitoring_status():
-    """Get detailed monitoring system status with enhanced error handling"""
+    """Get detailed monitoring system status"""
     try:
         if _utils_available:
             import utils
@@ -349,8 +333,8 @@ async def get_monitoring_status():
         status["service_info"] = {
             "platform": "CIPHER Cybersecurity Intelligence Platform",
             "version": "1.0.0",
-            "project": "primal-chariot-382610",
-            "service_account": "cloud-build-service@primal-chariot-382610.iam.gserviceaccount.com",
+            "project": PROJECT_ID,
+            "service_account": SERVICE_ACCOUNT,
             "startup_time": _system_startup_time.isoformat(),
             "system_status": _system_status,
             "utils_available": _utils_available
@@ -362,17 +346,15 @@ async def get_monitoring_status():
         logger.error(f"Monitoring status error: {e}")
         return JSONResponse(
             status_code=503,
-            content={
-                "active": False,
-                "status": "error",
-                "error": str(e),
-                "error_detail": "Monitoring status temporarily unavailable"
-            }
+            content=create_error_response(
+                "Monitoring status temporarily unavailable",
+                str(e)
+            )
         )
 
 @app.get("/api/analytics")
 async def get_threat_analytics():
-    """Get comprehensive threat analytics with enhanced error handling"""
+    """Get comprehensive threat analytics"""
     try:
         if _utils_available:
             import utils
@@ -394,203 +376,91 @@ async def get_threat_analytics():
         logger.error(f"Analytics error: {e}")
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "error", 
-                "error": str(e),
-                "error_detail": "Analytics temporarily unavailable"
-            }
+            content=create_error_response(
+                "Analytics temporarily unavailable", 
+                str(e)
+            )
         )
 
-@app.get("/api/export/threats")
-async def export_threats(
-    format: str = "json",
-    limit: int = 100,
-    threat_level: Optional[str] = None,
-    category: Optional[str] = None
-):
-    """Export threat intelligence data in various formats"""
-    try:
-        if not _utils_available:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "Export service unavailable", "status": _system_status}
-            )
-        
-        import utils
-        insights_data = await utils.get_threat_insights()
-        insights = insights_data["insights"]
-        
-        # Apply filters
-        if threat_level:
-            insights = [i for i in insights if i.get("threat_level") == threat_level.lower()]
-        if category:
-            insights = [i for i in insights if i.get("category") == category.lower()]
-        
-        # Limit results
-        insights = insights[:limit]
-        
-        if format.lower() == "json":
-            return {
-                "export_info": {
-                    "generated": datetime.now(timezone.utc).isoformat(),
-                    "platform": "CIPHER Cybersecurity Intelligence Platform",
-                    "total_records": len(insights),
-                    "filters": {"threat_level": threat_level, "category": category}
-                },
-                "threat_intelligence": insights
-            }
-        elif format.lower() == "csv":
-            # For CSV format, flatten the data
-            import csv
-            import io
-            
-            output = io.StringIO()
-            if insights:
-                fieldnames = [
-                    'message_id', 'source', 'timestamp', 'threat_level', 'category', 
-                    'threat_type', 'urgency_score', 'sentiment', 'analysis'
-                ]
-                writer = csv.DictWriter(output, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for insight in insights:
-                    writer.writerow({
-                        'message_id': insight.get('message_id', ''),
-                        'source': insight.get('chat_username', ''),
-                        'timestamp': insight.get('message_date', ''),
-                        'threat_level': insight.get('threat_level', ''),
-                        'category': insight.get('category', ''),
-                        'threat_type': insight.get('threat_type', ''),
-                        'urgency_score': insight.get('urgency_score', ''),
-                        'sentiment': insight.get('sentiment', ''),
-                        'analysis': insight.get('gemini_analysis', '')
-                    })
-            
-            from fastapi.responses import StreamingResponse
-            output.seek(0)
-            return StreamingResponse(
-                io.StringIO(output.getvalue()),
-                media_type="text/csv",
-                headers={"Content-Disposition": f"attachment; filename=cipher_threats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
-            )
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Unsupported format", "supported_formats": ["json", "csv"]}
-            )
-            
-    except Exception as e:
-        logger.error(f"Export error: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Export failed", "details": str(e)}
-        )
-
-@app.get("/api/system/debug")
-async def get_debug_info():
-    """Debug endpoint for troubleshooting (only in development)"""
-    try:
-        debug_info = {
-            "system_status": _system_status,
-            "utils_available": _utils_available,
-            "monitoring_active": _monitoring_active,
-            "initialization_error": _initialization_error,
-            "startup_time": _system_startup_time.isoformat(),
-            "last_health_check": _last_health_check.isoformat() if _last_health_check else None,
-            "initialization_task": {
-                "done": _initialization_task.done() if _initialization_task else None,
-                "cancelled": _initialization_task.cancelled() if _initialization_task else None,
-                "exception": str(_initialization_task.exception()) if _initialization_task and _initialization_task.done() and _initialization_task.exception() else None
-            },
-            "environment": {
-                "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT"),
-                "LOG_LEVEL": os.environ.get("LOG_LEVEL"),
-                "PORT": os.environ.get("PORT"),
-                "DATASET_ID": os.environ.get("DATASET_ID"),
-                "TABLE_ID": os.environ.get("TABLE_ID")
-            },
-            "python_path": os.sys.path[:5],  # First 5 entries
-            "working_directory": os.getcwd()
-        }
-        
-        # Add utils module information if available
-        if _utils_available:
-            try:
-                import utils
-                debug_info["utils_info"] = {
-                    "bigquery_available": utils.is_bigquery_available(),
-                    "gemini_available": utils.is_gemini_available(),
-                    "telegram_connected": utils.is_telegram_connected(),
-                    "monitoring_active": utils.is_monitoring_active()
-                }
-            except Exception as e:
-                debug_info["utils_error"] = str(e)
-        
-        return debug_info
-        
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
-
-# Include frontend router with error handling
+# Include frontend router - THIS IS THE KEY FIX
 try:
     from frontend import router as frontend_router
     app.include_router(frontend_router)
-    logger.info("✅ Frontend router included")
+    logger.info("✅ Frontend router included successfully")
 except ImportError as e:
     logger.error(f"Frontend router not available: {e}")
     
     # Provide a basic fallback dashboard endpoint
     @app.get("/dashboard", response_class=HTMLResponse)
     async def fallback_dashboard():
-        return HTMLResponse("""
+        return HTMLResponse(content=f"""
         <!DOCTYPE html>
         <html>
         <head>
             <title>CIPHER Platform - Initializing</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
-                body { 
-                    font-family: monospace; 
-                    background: #0a0a0a; 
+                body {{ 
+                    font-family: 'Segoe UI', monospace;
+                    background: linear-gradient(135deg, #0a0a0a, #1a1a2e, #16213e);
                     color: #00ff00; 
                     text-align: center; 
-                    padding: 50px; 
-                }
-                .status { color: #ffaa00; }
-                .error { color: #ff4444; }
-                .loading {
+                    padding: 50px;
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .container {{
+                    background: rgba(0, 0, 0, 0.8);
+                    border: 2px solid #00ff00;
+                    border-radius: 15px;
+                    padding: 40px;
+                    max-width: 600px;
+                    box-shadow: 0 0 30px rgba(0, 255, 0, 0.3);
+                }}
+                h1 {{ color: #00ff00; text-shadow: 0 0 10px #00ff00; }}
+                .status {{ color: #ffaa00; }}
+                .loading {{
                     display: inline-flex;
                     gap: 4px;
                     margin: 20px 0;
-                }
-                .loading span {
+                }}
+                .loading span {{
                     width: 8px;
                     height: 8px;
                     border-radius: 50%;
                     background: #6366f1;
                     animation: loading 1.4s ease-in-out infinite both;
-                }
-                .loading span:nth-child(1) { animation-delay: -0.32s; }
-                .loading span:nth-child(2) { animation-delay: -0.16s; }
-                @keyframes loading {
-                    0%, 80%, 100% { transform: scale(0); }
-                    40% { transform: scale(1); }
-                }
+                }}
+                .loading span:nth-child(1) {{ animation-delay: -0.32s; }}
+                .loading span:nth-child(2) {{ animation-delay: -0.16s; }}
+                @keyframes loading {{
+                    0%, 80%, 100% {{ transform: scale(0); }}
+                    40% {{ transform: scale(1); }}
+                }}
+                a {{ color: #6366f1; text-decoration: none; }}
+                a:hover {{ color: #00ff00; }}
             </style>
         </head>
         <body>
-            <h1>🛡️ CIPHER Platform</h1>
-            <h2 class="status">System Initializing...</h2>
-            <div class="loading"><span></span><span></span><span></span></div>
-            <p>Frontend module unavailable. Basic API endpoints are functional.</p>
-            <p><a href="/api/docs" style="color: #6366f1;">API Documentation</a></p>
-            <p><a href="/health" style="color: #6366f1;">Health Check</a></p>
-            <p><a href="/api/stats" style="color: #6366f1;">System Stats</a></p>
-            <script>
-                setTimeout(() => location.reload(), 10000);
-            </script>
+            <div class="container">
+                <h1>🛡️ CIPHER Platform</h1>
+                <h2 class="status">System Status: {_system_status.upper()}</h2>
+                <div class="loading"><span></span><span></span><span></span></div>
+                <p>Frontend module is loading. Core API endpoints are functional.</p>
+                <p><a href="/api/docs">📚 API Documentation</a></p>
+                <p><a href="/health">🏥 Health Check</a></p>
+                <p><a href="/api/stats">📊 System Stats</a></p>
+                <script>
+                    // Auto-refresh every 10 seconds until frontend loads
+                    setTimeout(() => location.reload(), 10000);
+                </script>
+            </div>
         </body>
         </html>
-        """)
+        """, status_code=200)
         
 except Exception as e:
     logger.error(f"Frontend router error: {e}")
@@ -605,19 +475,16 @@ async def global_exception_handler(request: Request, exc: Exception):
     
     return JSONResponse(
         status_code=500,
-        content={
-            "error": "Internal server error",
-            "message": "An unexpected error occurred in CIPHER platform",
-            "system_status": _system_status,
-            "request_id": str(datetime.now().timestamp()),
-            "platform": "CIPHER Cybersecurity Intelligence Platform"
-        }
+        content=create_error_response(
+            "Internal server error",
+            "An unexpected error occurred in CIPHER platform"
+        )
     )
 
 # Custom 404 handler
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc: HTTPException):
-    """Custom 404 handler"""
+    """Custom 404 handler with helpful information"""
     return JSONResponse(
         status_code=404,
         content={
