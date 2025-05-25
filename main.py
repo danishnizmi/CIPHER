@@ -401,6 +401,91 @@ async def get_threat_analytics():
             }
         )
 
+@app.get("/api/export/threats")
+async def export_threats(
+    format: str = "json",
+    limit: int = 100,
+    threat_level: Optional[str] = None,
+    category: Optional[str] = None
+):
+    """Export threat intelligence data in various formats"""
+    try:
+        if not _utils_available:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Export service unavailable", "status": _system_status}
+            )
+        
+        import utils
+        insights_data = await utils.get_threat_insights()
+        insights = insights_data["insights"]
+        
+        # Apply filters
+        if threat_level:
+            insights = [i for i in insights if i.get("threat_level") == threat_level.lower()]
+        if category:
+            insights = [i for i in insights if i.get("category") == category.lower()]
+        
+        # Limit results
+        insights = insights[:limit]
+        
+        if format.lower() == "json":
+            return {
+                "export_info": {
+                    "generated": datetime.now(timezone.utc).isoformat(),
+                    "platform": "CIPHER Cybersecurity Intelligence Platform",
+                    "total_records": len(insights),
+                    "filters": {"threat_level": threat_level, "category": category}
+                },
+                "threat_intelligence": insights
+            }
+        elif format.lower() == "csv":
+            # For CSV format, flatten the data
+            import csv
+            import io
+            
+            output = io.StringIO()
+            if insights:
+                fieldnames = [
+                    'message_id', 'source', 'timestamp', 'threat_level', 'category', 
+                    'threat_type', 'urgency_score', 'sentiment', 'analysis'
+                ]
+                writer = csv.DictWriter(output, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for insight in insights:
+                    writer.writerow({
+                        'message_id': insight.get('message_id', ''),
+                        'source': insight.get('chat_username', ''),
+                        'timestamp': insight.get('message_date', ''),
+                        'threat_level': insight.get('threat_level', ''),
+                        'category': insight.get('category', ''),
+                        'threat_type': insight.get('threat_type', ''),
+                        'urgency_score': insight.get('urgency_score', ''),
+                        'sentiment': insight.get('sentiment', ''),
+                        'analysis': insight.get('gemini_analysis', '')
+                    })
+            
+            from fastapi.responses import StreamingResponse
+            output.seek(0)
+            return StreamingResponse(
+                io.StringIO(output.getvalue()),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename=cipher_threats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+            )
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unsupported format", "supported_formats": ["json", "csv"]}
+            )
+            
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Export failed", "details": str(e)}
+        )
+
 @app.get("/api/system/debug")
 async def get_debug_info():
     """Debug endpoint for troubleshooting (only in development)"""
@@ -472,14 +557,34 @@ except ImportError as e:
                 }
                 .status { color: #ffaa00; }
                 .error { color: #ff4444; }
+                .loading {
+                    display: inline-flex;
+                    gap: 4px;
+                    margin: 20px 0;
+                }
+                .loading span {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background: #6366f1;
+                    animation: loading 1.4s ease-in-out infinite both;
+                }
+                .loading span:nth-child(1) { animation-delay: -0.32s; }
+                .loading span:nth-child(2) { animation-delay: -0.16s; }
+                @keyframes loading {
+                    0%, 80%, 100% { transform: scale(0); }
+                    40% { transform: scale(1); }
+                }
             </style>
         </head>
         <body>
             <h1>🛡️ CIPHER Platform</h1>
             <h2 class="status">System Initializing...</h2>
+            <div class="loading"><span></span><span></span><span></span></div>
             <p>Frontend module unavailable. Basic API endpoints are functional.</p>
             <p><a href="/api/docs" style="color: #6366f1;">API Documentation</a></p>
             <p><a href="/health" style="color: #6366f1;">Health Check</a></p>
+            <p><a href="/api/stats" style="color: #6366f1;">System Stats</a></p>
             <script>
                 setTimeout(() => location.reload(), 10000);
             </script>
@@ -502,9 +607,28 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={
             "error": "Internal server error",
-            "message": "An unexpected error occurred",
+            "message": "An unexpected error occurred in CIPHER platform",
             "system_status": _system_status,
-            "request_id": str(datetime.now().timestamp())
+            "request_id": str(datetime.now().timestamp()),
+            "platform": "CIPHER Cybersecurity Intelligence Platform"
+        }
+    )
+
+# Custom 404 handler
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    """Custom 404 handler"""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Endpoint not found",
+            "message": f"The requested endpoint {request.url.path} does not exist",
+            "available_endpoints": [
+                "/", "/dashboard", "/health", "/health/live",
+                "/api/stats", "/api/insights", "/api/analytics", 
+                "/api/monitoring/status", "/api/docs"
+            ],
+            "platform": "CIPHER Cybersecurity Intelligence Platform"
         }
     )
 
