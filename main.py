@@ -461,11 +461,13 @@ async def production_dashboard(request: Request):
         # Try to use the frontend module if available
         if _utils_available:
             try:
-                from frontend import router as frontend_router
-                # Use the frontend dashboard
-                return await frontend_router.cipher_dashboard(request)
+                from frontend import cipher_dashboard
+                # Use the frontend dashboard function directly
+                return await cipher_dashboard(request)
             except ImportError:
-                pass
+                logger.warning("Frontend module not available, using fallback")
+            except Exception as e:
+                logger.error(f"Frontend dashboard error: {e}")
         
         # Fallback to template if available
         try:
@@ -570,6 +572,14 @@ async def production_dashboard(request: Request):
     except Exception as e:
         logger.error(f"Dashboard error: {e}")
         return HTMLResponse("<h1>CIPHER Dashboard - Loading...</h1><script>setTimeout(() => location.reload(), 5000);</script>")
+
+# Include the frontend router for additional API endpoints
+try:
+    from frontend import router as frontend_router
+    app.include_router(frontend_router)
+    logger.info("✅ Frontend router included successfully")
+except ImportError as e:
+    logger.warning(f"Frontend router not available: {e}")
 
 if __name__ == "__main__":
     import uvicorn
