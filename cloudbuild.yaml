@@ -145,15 +145,14 @@ steps:
       '--min-instances', '0',
       '--max-instances', '10',
       
-      # Environment variables
-      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PORT=8080,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
+      # Environment variables (PORT is automatically set by Cloud Run)
+      '--set-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LOG_LEVEL=INFO,DATASET_ID=telegram_data,TABLE_ID=processed_messages,PYTHONUNBUFFERED=1,SERVICE_ACCOUNT=cloud-build-service@$PROJECT_ID.iam.gserviceaccount.com',
       
       # Labels for organization
       '--labels', 'app=cipher,environment=production,version=$BUILD_ID',
       
-      # Health check configuration
-      '--cpu-throttling',
-      '--no-cpu-boost'
+      # Performance configuration
+      '--no-cpu-throttling'
     ]
     id: 'deploy'
     waitFor: ['push-image']
@@ -192,17 +191,17 @@ steps:
         echo "🏥 Running deployment health checks..."
         
         # Get service URL
-        SERVICE_URL=$$(gcloud run services describe telegram-ai-processor \
+        SERVICE_URL=$(gcloud run services describe telegram-ai-processor \
           --region=us-central1 \
           --project=$PROJECT_ID \
           --format='value(status.url)')
         
-        if [ -z "$$SERVICE_URL" ]; then
+        if [ -z "$SERVICE_URL" ]; then
           echo "❌ Failed to get service URL"
           exit 1
         fi
         
-        echo "Service deployed at: $$SERVICE_URL"
+        echo "Service deployed at: $SERVICE_URL"
         
         # Wait for service to be ready
         echo "Waiting for service to initialize..."
@@ -213,38 +212,38 @@ steps:
         
         # Test liveness probe
         echo "Testing /health/live endpoint..."
-        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/health/live" || echo "000")
-        if [ "$$HTTP_STATUS" = "200" ]; then
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health/live" || echo "000")
+        if [ "$HTTP_STATUS" = "200" ]; then
           echo "✅ Liveness check: PASSED"
         else
-          echo "⚠️ Liveness check: HTTP $$HTTP_STATUS (may need more time to initialize)"
+          echo "⚠️ Liveness check: HTTP $HTTP_STATUS (may need more time to initialize)"
         fi
         
         # Test readiness probe
         echo "Testing /health endpoint..."
-        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/health" || echo "000")
-        if [ "$$HTTP_STATUS" = "200" ]; then
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo "000")
+        if [ "$HTTP_STATUS" = "200" ]; then
           echo "✅ Readiness check: PASSED"
         else
-          echo "⚠️ Readiness check: HTTP $$HTTP_STATUS (may need more time to initialize)"
+          echo "⚠️ Readiness check: HTTP $HTTP_STATUS (may need more time to initialize)"
         fi
         
         # Test main dashboard
         echo "Testing main dashboard..."
-        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/" || echo "000")
-        if [ "$$HTTP_STATUS" = "200" ]; then
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/" || echo "000")
+        if [ "$HTTP_STATUS" = "200" ]; then
           echo "✅ Dashboard: PASSED"
         else
-          echo "⚠️ Dashboard: HTTP $$HTTP_STATUS"
+          echo "⚠️ Dashboard: HTTP $HTTP_STATUS"
         fi
         
         # Test API endpoints
         echo "Testing API endpoints..."
-        HTTP_STATUS=$$(curl -s -o /dev/null -w "%{http_code}" "$$SERVICE_URL/api/stats" || echo "000")
-        if [ "$$HTTP_STATUS" = "200" ]; then
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/stats" || echo "000")
+        if [ "$HTTP_STATUS" = "200" ]; then
           echo "✅ Stats API: PASSED"
         else
-          echo "⚠️ Stats API: HTTP $$HTTP_STATUS"
+          echo "⚠️ Stats API: HTTP $HTTP_STATUS"
         fi
         
         echo ""
