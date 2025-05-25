@@ -293,7 +293,7 @@ async def get_telegram_session_from_storage() -> Optional[str]:
         return None
 
 async def initialize_gemini_ai():
-    """Initialize Gemini AI for cybersecurity analysis"""
+    """Initialize Gemini AI for cybersecurity analysis with enhanced error handling"""
     global _gemini_model, _gemini_available
     
     try:
@@ -301,31 +301,65 @@ async def initialize_gemini_ai():
         
         api_key = await get_secret("gemini-api-key")
         if not api_key:
-            logger.warning("Gemini API key not available")
+            logger.error("Gemini API key not available in Secret Manager")
+            logger.error("Please set up Gemini API key at: https://makersuite.google.com/app/apikey")
             return False
         
-        genai.configure(api_key=api_key)
-        _gemini_model = genai.GenerativeModel(
-            'gemini-1.5-flash',
-            generation_config=genai.GenerationConfig(
-                temperature=0.1,
-                top_p=0.8,
-                max_output_tokens=1000
+        # Validate API key format
+        if len(api_key) < 20:
+            logger.error(f"Gemini API key appears invalid (length: {len(api_key)})")
+            return False
+        
+        logger.info(f"Found Gemini API key (length: {len(api_key)} chars)")
+        
+        try:
+            genai.configure(api_key=api_key)
+            
+            _gemini_model = genai.GenerativeModel(
+                'gemini-1.5-flash',
+                generation_config=genai.GenerationConfig(
+                    temperature=0.1,
+                    top_p=0.8,
+                    max_output_tokens=1000
+                )
             )
-        )
-        
-        # Test the model
-        test_response = await asyncio.to_thread(
-            _gemini_model.generate_content, 
-            "Analyze this test message for cybersecurity threats: 'This is a test message.'"
-        )
-        
-        if test_response.text:
-            _gemini_available = True
-            logger.info("✅ Gemini AI initialized and tested")
-            return True
-        else:
-            raise Exception("Gemini test failed")
+            
+            # Test the model with a simple cybersecurity prompt
+            test_prompt = "Analyze this cybersecurity message for threats: 'New critical vulnerability CVE-2024-0001 discovered in Apache servers. Immediate patching required.'"
+            
+            logger.info("Testing Gemini AI with cybersecurity prompt...")
+            test_response = await asyncio.to_thread(
+                _gemini_model.generate_content, 
+                test_prompt
+            )
+            
+            if test_response and test_response.text:
+                _gemini_available = True
+                logger.info("✅ Gemini AI initialized and tested successfully")
+                logger.info(f"Test response preview: {test_response.text[:100]}...")
+                return True
+            else:
+                logger.error("Gemini test failed - no response generated")
+                return False
+                
+        except Exception as api_error:
+            logger.error(f"Gemini API configuration failed: {api_error}")
+            
+            # Check for common API errors
+            error_str = str(api_error).lower()
+            if "api key" in error_str or "authentication" in error_str:
+                logger.error("❌ Gemini API key is invalid or expired")
+                logger.error("🔑 Get a new API key from: https://makersuite.google.com/app/apikey")
+            elif "quota" in error_str or "limit" in error_str:
+                logger.error("❌ Gemini API quota exceeded or billing issue")
+                logger.error("💳 Check your Google AI Studio billing and quotas")
+            elif "permission" in error_str:
+                logger.error("❌ Gemini API access denied")
+                logger.error("🔐 Ensure the API key has proper permissions")
+            else:
+                logger.error(f"❌ Unknown Gemini API error: {api_error}")
+            
+            return False
             
     except Exception as e:
         logger.error(f"Gemini AI initialization failed: {e}")
@@ -555,10 +589,11 @@ async def process_message(message, channel: str):
         logger.error(f"Message: {getattr(message, 'text', 'No text')[:50]}...")
 
 async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]:
-    """Analyze message with Gemini AI for cybersecurity threats"""
+    """Analyze message with Gemini AI for cybersecurity threats with fallback analysis"""
     try:
         if not _gemini_model:
-            return {}
+            logger.warning("Gemini AI not available, using fallback analysis")
+            return _get_fallback_analysis(text, channel)
         
         channel_context = CHANNEL_METADATA.get(channel, {})
         
@@ -585,27 +620,253 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         Focus on cybersecurity threats, vulnerabilities, and actionable intelligence.
         """
         
-        response = await asyncio.to_thread(_gemini_model.generate_content, prompt)
-        
-        if response.text:
-            # Parse JSON response
-            try:
-                analysis = json.loads(response.text.strip())
-                return analysis
-            except json.JSONDecodeError:
-                # Fallback analysis
-                return {
-                    "gemini_analysis": response.text[:500],
-                    "threat_level": "low",
-                    "category": "other",
-                    "urgency_score": 0.1
-                }
-        
-        return {}
+        try:
+            response = await asyncio.to_thread(_gemini_model.generate_content, prompt)
+            
+            if response and response.text:
+                # Parse JSON response
+                try:
+                    analysis = json.loads(response.text.strip())
+                    logger.info(f"✅ Gemini analysis: {analysis.get('threat_level', 'unknown')} - {analysis.get('category', 'other')}")
+                    return analysis
+                except json.JSONDecodeError:
+                    # Fallback analysis with Gemini text
+                    logger.warning("Gemini response not valid JSON, using text analysis")
+                    return {
+                        "gemini_analysis": response.text[:500],
+                        "threat_level": _detect_threat_level(text, channel),
+                        "category": _detect_category(text, channel),
+                        "urgency_score": _calculate_urgency(text, channel),
+                        "sentiment": "neutral",
+                        "key_topics": _extract_keywords(text, channel)
+                    }
+            else:
+                logger.warning("Gemini returned empty response")
+                return _get_fallback_analysis(text, channel)
+                
+        except Exception as api_error:
+            logger.error(f"Gemini API call failed: {api_error}")
+            return _get_fallback_analysis(text, channel)
         
     except Exception as e:
-        logger.error(f"Gemini analysis failed: {e}")
-        return {}
+        logger.error(f"Message analysis failed: {e}")
+        return _get_fallback_analysis(text, channel)
+
+def _get_fallback_analysis(text: str, channel: str) -> Dict[str, Any]:
+    """Provide basic cybersecurity analysis when Gemini AI is unavailable"""
+    try:
+        return {
+            "gemini_analysis": f"Automated analysis: {_generate_basic_analysis(text, channel)}",
+            "threat_level": _detect_threat_level(text, channel),
+            "category": _detect_category(text, channel),
+            "threat_type": _detect_threat_type(text, channel),
+            "urgency_score": _calculate_urgency(text, channel),
+            "sentiment": _detect_sentiment(text),
+            "key_topics": _extract_keywords(text, channel),
+            "cve_references": _extract_cves(text),
+            "iocs_detected": _extract_iocs(text),
+            "malware_families": _extract_malware(text)
+        }
+    except Exception as e:
+        logger.error(f"Fallback analysis failed: {e}")
+        return {
+            "gemini_analysis": "Basic threat analysis performed",
+            "threat_level": "low",
+            "category": "other",
+            "urgency_score": 0.1
+        }
+
+def _detect_threat_level(text: str, channel: str) -> str:
+    """Detect threat level based on keywords"""
+    text_lower = text.lower()
+    
+    # Critical indicators
+    critical_words = ['critical', 'urgent', 'immediate', 'emergency', 'zero-day', 'exploit', 'ransomware', 'breach']
+    if any(word in text_lower for word in critical_words):
+        return "critical"
+    
+    # High indicators
+    high_words = ['high', 'severe', 'important', 'vulnerability', 'malware', 'attack', 'compromise']
+    if any(word in text_lower for word in high_words):
+        return "high"
+    
+    # Medium indicators
+    medium_words = ['medium', 'moderate', 'warning', 'advisory', 'patch', 'update']
+    if any(word in text_lower for word in medium_words):
+        return "medium"
+    
+    return "low"
+
+def _detect_category(text: str, channel: str) -> str:
+    """Detect threat category based on content and channel"""
+    text_lower = text.lower()
+    
+    # Category detection based on keywords
+    if any(word in text_lower for word in ['apt', 'advanced persistent', 'nation state']):
+        return "apt"
+    elif any(word in text_lower for word in ['ransomware', 'crypto', 'encrypt']):
+        return "ransomware"
+    elif any(word in text_lower for word in ['breach', 'leak', 'stolen', 'database', 'credential']):
+        return "data_breach"
+    elif any(word in text_lower for word in ['malware', 'trojan', 'virus', 'backdoor']):
+        return "malware"
+    elif any(word in text_lower for word in ['vulnerability', 'cve-', 'patch', 'exploit']):
+        return "vulnerability"
+    elif any(word in text_lower for word in ['phishing', 'scam', 'social engineering']):
+        return "phishing"
+    
+    # Category based on channel
+    channel_meta = CHANNEL_METADATA.get(channel, {})
+    if channel_meta.get('focus') == 'data_breaches':
+        return "data_breach"
+    elif channel_meta.get('focus') == 'advanced_persistent_threats':
+        return "apt"
+    elif channel_meta.get('focus') == 'security_updates':
+        return "vulnerability"
+    
+    return "other"
+
+def _detect_threat_type(text: str, channel: str) -> str:
+    """Detect specific threat type"""
+    text_lower = text.lower()
+    
+    threat_types = {
+        'ransomware': ['ransomware', 'crypto locker', 'encrypt'],
+        'apt': ['apt', 'advanced persistent', 'nation state'],
+        'malware': ['malware', 'trojan', 'virus', 'backdoor'],
+        'phishing': ['phishing', 'spear phishing', 'social engineering'],
+        'ddos': ['ddos', 'denial of service', 'botnet'],
+        'data_breach': ['data breach', 'data leak', 'stolen database'],
+        'vulnerability': ['vulnerability', 'exploit', 'zero-day']
+    }
+    
+    for threat_type, keywords in threat_types.items():
+        if any(keyword in text_lower for keyword in keywords):
+            return threat_type
+    
+    return "unknown"
+
+def _calculate_urgency(text: str, channel: str) -> float:
+    """Calculate urgency score based on content and channel"""
+    score = 0.1  # Base score
+    
+    text_lower = text.lower()
+    
+    # Urgency keywords
+    urgency_multipliers = {
+        'critical': 0.4,
+        'urgent': 0.3,
+        'immediate': 0.3,
+        'emergency': 0.4,
+        'zero-day': 0.5,
+        'exploit': 0.3,
+        'active': 0.2,
+        'widespread': 0.2,
+        'severe': 0.2
+    }
+    
+    for word, multiplier in urgency_multipliers.items():
+        if word in text_lower:
+            score += multiplier
+    
+    # Channel multiplier
+    channel_meta = CHANNEL_METADATA.get(channel, {})
+    channel_multiplier = channel_meta.get('threat_multiplier', 1.0)
+    score *= channel_multiplier
+    
+    return min(score, 1.0)  # Cap at 1.0
+
+def _detect_sentiment(text: str) -> str:
+    """Basic sentiment detection"""
+    text_lower = text.lower()
+    
+    negative_words = ['critical', 'severe', 'dangerous', 'urgent', 'threat', 'attack', 'breach']
+    positive_words = ['fixed', 'patched', 'resolved', 'secured', 'protected']
+    
+    negative_count = sum(1 for word in negative_words if word in text_lower)
+    positive_count = sum(1 for word in positive_words if word in text_lower)
+    
+    if negative_count > positive_count:
+        return "negative"
+    elif positive_count > negative_count:
+        return "positive"
+    
+    return "neutral"
+
+def _extract_keywords(text: str, channel: str) -> List[str]:
+    """Extract cybersecurity keywords"""
+    keywords = []
+    text_lower = text.lower()
+    
+    cyber_keywords = [
+        'vulnerability', 'exploit', 'malware', 'ransomware', 'phishing',
+        'apt', 'breach', 'leak', 'patch', 'update', 'threat', 'attack'
+    ]
+    
+    for keyword in cyber_keywords:
+        if keyword in text_lower:
+            keywords.append(keyword)
+    
+    return keywords[:5]  # Return top 5
+
+def _extract_cves(text: str) -> List[str]:
+    """Extract CVE references from text"""
+    import re
+    cve_pattern = r'CVE-\d{4}-\d{4,7}'
+    return re.findall(cve_pattern, text, re.IGNORECASE)
+
+def _extract_iocs(text: str) -> List[str]:
+    """Extract basic Indicators of Compromise"""
+    import re
+    iocs = []
+    
+    # IP addresses
+    ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    iocs.extend(re.findall(ip_pattern, text))
+    
+    # Domain patterns (basic)
+    domain_pattern = r'\b[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
+    domains = re.findall(domain_pattern, text)
+    # Filter out common non-malicious domains
+    filtered_domains = [d for d in domains if not any(common in d.lower() for common in ['google', 'microsoft', 'apple', 'amazon'])]
+    iocs.extend(filtered_domains[:3])  # Limit to 3
+    
+    return iocs[:5]  # Return top 5
+
+def _extract_malware(text: str) -> List[str]:
+    """Extract malware family names"""
+    text_lower = text.lower()
+    
+    malware_families = [
+        'wannacry', 'petya', 'notpetya', 'ryuk', 'maze', 'lockbit',
+        'emotet', 'trickbot', 'qakbot', 'cobalt strike', 'metasploit'
+    ]
+    
+    found_malware = [malware for malware in malware_families if malware in text_lower]
+    return found_malware
+
+def _generate_basic_analysis(text: str, channel: str) -> str:
+    """Generate basic threat analysis summary"""
+    threat_level = _detect_threat_level(text, channel)
+    category = _detect_category(text, channel)
+    
+    analysis_parts = []
+    
+    if threat_level in ['critical', 'high']:
+        analysis_parts.append(f"High-priority {category} detected.")
+    else:
+        analysis_parts.append(f"{category.title()} intelligence from {channel}.")
+    
+    # Add specific insights based on content
+    text_lower = text.lower()
+    if 'cve-' in text_lower:
+        analysis_parts.append("Contains vulnerability references.")
+    if any(word in text_lower for word in ['patch', 'update', 'fix']):
+        analysis_parts.append("Remediation information available.")
+    if any(word in text_lower for word in ['breach', 'leak', 'stolen']):
+        analysis_parts.append("Data compromise indicators present.")
+    
+    return " ".join(analysis_parts)
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
     """Store processed message in BigQuery with proper datetime handling and compatible schema"""
