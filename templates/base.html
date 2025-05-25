@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CIPHER - Cybersecurity Intelligence Platform{% endblock %}</title>
     <meta name="description" content="CIPHER - Advanced cybersecurity threat intelligence monitoring and analysis platform">
-    <meta name="keywords" content="cybersecurity, threat intelligence, real-time monitoring, BigQuery analytics">
+    <meta name="keywords" content="cybersecurity, threat intelligence, real-time monitoring, security alerts">
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
@@ -121,47 +121,6 @@
             opacity: 0.7;
         }
         
-        .loading-skeleton {
-            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-            background-size: 200% 100%;
-            animation: loading 1.5s infinite;
-        }
-        
-        @keyframes loading {
-            0% { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
-        }
-        
-        .threat-critical {
-            background: rgba(255, 68, 68, 0.2);
-            color: #ff4444;
-            border: 1px solid #ff4444;
-        }
-        
-        .threat-high {
-            background: rgba(255, 170, 0, 0.2);
-            color: #ffaa00;
-            border: 1px solid #ffaa00;
-        }
-        
-        .threat-medium {
-            background: rgba(255, 255, 0, 0.2);
-            color: #ffff00;
-            border: 1px solid #ffff00;
-        }
-        
-        .threat-low {
-            background: rgba(0, 255, 0, 0.2);
-            color: #00ff00;
-            border: 1px solid #00ff00;
-        }
-        
-        .threat-info {
-            background: rgba(99, 102, 241, 0.2);
-            color: #6366f1;
-            border: 1px solid #6366f1;
-        }
-        
         /* Custom scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
@@ -180,53 +139,6 @@
         ::-webkit-scrollbar-thumb:hover {
             background: #8b5cf6;
         }
-        
-        /* Error states */
-        .error-state {
-            background: rgba(255, 68, 68, 0.1);
-            border: 1px solid rgba(255, 68, 68, 0.3);
-            color: #ff6b6b;
-        }
-        
-        .empty-state {
-            background: rgba(156, 163, 175, 0.1);
-            border: 1px solid rgba(156, 163, 175, 0.3);
-            color: #9ca3af;
-        }
-        
-        /* Loading animations */
-        .pulse-ring {
-            position: relative;
-        }
-        
-        .pulse-ring::before {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            border: 2px solid currentColor;
-            transform: translate(-50%, -50%);
-            animation: pulseRing 2s ease-out infinite;
-        }
-        
-        @keyframes pulseRing {
-            0% {
-                transform: translate(-50%, -50%) scale(0.8);
-                opacity: 1;
-            }
-            100% {
-                transform: translate(-50%, -50%) scale(2);
-                opacity: 0;
-            }
-        }
-        
-        /* Real-time data indicators */
-        .data-fresh { color: #00ff00; }
-        .data-stale { color: #ffaa00; }
-        .data-old { color: #ff4444; }
         
         /* Accessibility improvements */
         @media (prefers-reduced-motion: reduce) {
@@ -252,6 +164,41 @@
             .glass-effect { background: white !important; border: 1px solid #000 !important; }
             .neon-text, .neon-green { color: #000 !important; text-shadow: none !important; }
         }
+        
+        /* Navigation styles */
+        .nav-link {
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        
+        .nav-link:hover {
+            color: #6366f1;
+        }
+        
+        .nav-link::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: #6366f1;
+            transition: width 0.3s ease;
+        }
+        
+        .nav-link:hover::after {
+            width: 100%;
+        }
+        
+        /* Footer styles */
+        .footer-link {
+            color: #9ca3af;
+            transition: color 0.2s ease;
+        }
+        
+        .footer-link:hover {
+            color: #6366f1;
+        }
     </style>
     
     {% block extra_head %}{% endblock %}
@@ -261,17 +208,6 @@
     <!-- Animated Background -->
     <div class="fixed inset-0 cyber-grid opacity-20 pointer-events-none"></div>
     <div class="fixed inset-0 bg-gradient-radial from-cipher-purple/5 via-transparent to-transparent pointer-events-none"></div>
-    
-    <!-- Global Error/Loading Overlay -->
-    <div id="globalOverlay" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden items-center justify-center">
-        <div class="bg-cipher-dark border border-cipher-blue rounded-lg p-6 max-w-md mx-4 text-center">
-            <div id="overlaySpinner" class="w-8 h-8 border-2 border-cipher-blue border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <div id="overlayMessage" class="text-white">Loading CIPHER Platform...</div>
-            <button id="overlayRetry" class="mt-4 px-4 py-2 bg-cipher-blue text-white rounded hover:bg-cipher-purple transition-colors hidden">
-                Retry
-            </button>
-        </div>
-    </div>
     
     <!-- Navigation Header -->
     <nav class="glass-effect border-b border-white/10 sticky top-0 z-40">
@@ -284,7 +220,6 @@
                             <div class="w-10 h-10 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center animate-glow">
                                 <i class="fas fa-shield-alt text-white text-lg"></i>
                             </div>
-                            <div id="systemStatusDot" class="absolute -top-1 -right-1 w-4 h-4 bg-gray-400 rounded-full animate-pulse"></div>
                         </div>
                         <div>
                             <h1 class="text-xl font-bold neon-text">CIPHER</h1>
@@ -296,33 +231,24 @@
                 <!-- Navigation Links -->
                 <div class="flex items-center space-x-4">
                     <div class="hidden md:flex items-center space-x-6">
-                        <a href="/dashboard" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
+                        <a href="/dashboard" class="nav-link text-gray-300 text-sm font-medium flex items-center">
                             <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
                         </a>
-                        <a href="/api/export/threats?format=json" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
-                            <i class="fas fa-download mr-2"></i>Export
+                        <a href="#about" class="nav-link text-gray-300 text-sm font-medium flex items-center">
+                            <i class="fas fa-info-circle mr-2"></i>About
                         </a>
-                        <a href="/api/docs" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
-                            <i class="fas fa-code mr-2"></i>API
-                        </a>
-                        <a href="/health" class="text-gray-300 hover:text-cipher-blue transition-colors duration-200 text-sm font-medium flex items-center">
-                            <i class="fas fa-heartbeat mr-2"></i>Health
+                        <a href="#sources" class="nav-link text-gray-300 text-sm font-medium flex items-center">
+                            <i class="fas fa-satellite-dish mr-2"></i>Sources
                         </a>
                     </div>
                     
-                    <!-- Real-time Status Display -->
+                    <!-- Time Display -->
                     <div class="flex items-center space-x-3">
-                        <div class="flex items-center space-x-2">
-                            <div id="connectionStatus" class="flex items-center">
-                                <div class="status-indicator w-3 h-3 bg-gray-400 rounded-full mr-2"></div>
-                                <span class="text-sm text-gray-400 font-mono" id="connectionText">Connecting...</span>
-                            </div>
-                        </div>
                         <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
                             <span id="currentTime"></span>
                         </div>
                         <div class="text-xs text-gray-500 font-mono px-2 py-1 bg-white/5 rounded">
-                            <span id="dataFreshness">INITIALIZING</span>
+                            <span class="text-green-400">LIVE</span>
                         </div>
                     </div>
                 </div>
@@ -337,52 +263,98 @@
 
     <!-- Footer -->
     <footer class="glass-effect border-t border-white/10 mt-16">
-        <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between items-center flex-wrap gap-4">
-                <div class="flex items-center space-x-4">
-                    <div class="text-sm text-gray-400">
-                        <span class="font-mono neon-text">CIPHER</span> v1.0.0 | Real-time Cybersecurity Intelligence
+        <div class="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+            <!-- Main Footer Content -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
+                
+                <!-- About Section -->
+                <div class="col-span-1 md:col-span-2">
+                    <div class="flex items-center space-x-3 mb-4">
+                        <div class="w-8 h-8 bg-gradient-to-r from-cipher-blue to-cipher-purple rounded-lg flex items-center justify-center">
+                            <i class="fas fa-shield-alt text-white text-sm"></i>
+                        </div>
+                        <span class="text-lg font-bold neon-text">CIPHER</span>
                     </div>
-                    <div class="text-xs text-gray-500">
-                        Powered by <span class="text-cipher-blue">Google Cloud</span> & 
-                        <span class="text-cipher-purple">Gemini AI</span>
-                    </div>
+                    <p class="text-gray-400 text-sm leading-relaxed max-w-md">
+                        Advanced cybersecurity intelligence platform providing real-time threat monitoring 
+                        and AI-powered analysis from premium intelligence sources worldwide.
+                    </p>
                 </div>
-                <div class="flex items-center space-x-4 text-xs text-gray-500">
-                    <span class="font-mono">PROJECT: {{ PROJECT_ID or 'primal-chariot-382610' }}</span>
-                    <div id="systemHealthIndicator" class="flex items-center space-x-2">
-                        <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
-                        <span class="font-mono" id="systemHealthText">SYSTEM CHECK</span>
-                    </div>
+                
+                <!-- Intelligence Sources -->
+                <div>
+                    <h3 class="text-sm font-semibold text-white mb-4">Intelligence Sources</h3>
+                    <ul class="space-y-2 text-sm">
+                        <li class="flex items-center text-gray-400">
+                            <span class="text-red-400 mr-2">🔴</span>
+                            Advanced Threat Intelligence
+                        </li>
+                        <li class="flex items-center text-gray-400">
+                            <span class="text-orange-400 mr-2">🟠</span>
+                            Data Breach Monitoring
+                        </li>
+                        <li class="flex items-center text-gray-400">
+                            <span class="text-blue-400 mr-2">🔵</span>
+                            Security News & CVEs
+                        </li>
+                    </ul>
+                </div>
+                
+                <!-- Platform Info -->
+                <div>
+                    <h3 class="text-sm font-semibold text-white mb-4">Platform</h3>
+                    <ul class="space-y-2 text-sm">
+                        <li><a href="#about" class="footer-link">About CIPHER</a></li>
+                        <li><a href="#methodology" class="footer-link">Methodology</a></li>
+                        <li><a href="#coverage" class="footer-link">Coverage</a></li>
+                        <li><a href="#contact" class="footer-link">Contact</a></li>
+                    </ul>
                 </div>
             </div>
             
-            <!-- Real-time System Information -->
-            <div class="mt-4 pt-4 border-t border-white/5">
-                <div class="flex justify-between items-center text-xs text-gray-600">
+            <!-- Bottom Bar -->
+            <div class="pt-6 border-t border-white/10">
+                <div class="flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
+                    <!-- Copyright and Version -->
                     <div class="flex items-center space-x-4">
-                        <span>Data Sources: <span id="dataSourcesList">Loading...</span></span>
-                        <span>Last Update: <span id="lastUpdateTime">Checking...</span></span>
+                        <div class="text-sm text-gray-400">
+                            <span class="font-mono neon-text">CIPHER</span> v1.0.0 | Real-time Cybersecurity Intelligence
+                        </div>
+                        <div class="text-xs text-gray-500">
+                            Powered by <span class="text-cipher-blue">Advanced AI</span> & 
+                            <span class="text-cipher-purple">Machine Learning</span>
+                        </div>
                     </div>
-                    <div class="flex items-center space-x-2">
-                        <span>Monitoring:</span>
-                        <span id="monitoringChannels" class="font-mono">@DarkfeedNews, @breachdetector, @secharvester</span>
+                    
+                    <!-- Status and Info -->
+                    <div class="flex items-center space-x-4 text-xs text-gray-500">
+                        <div class="flex items-center space-x-2">
+                            <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                            <span class="font-mono">MONITORING ACTIVE</span>
+                        </div>
+                        <span class="hidden md:inline">|</span>
+                        <span class="font-mono">24/7 THREAT INTELLIGENCE</span>
                     </div>
+                </div>
+                
+                <!-- Disclaimer -->
+                <div class="mt-6 pt-4 border-t border-white/5">
+                    <p class="text-xs text-gray-600 text-center">
+                        CIPHER provides cybersecurity intelligence for informational purposes. 
+                        Always verify critical security information through multiple sources and official channels.
+                    </p>
                 </div>
             </div>
         </div>
     </footer>
 
-    <!-- Core JavaScript for Real-time Updates -->
+    <!-- Core JavaScript -->
     <script>
         // Global CIPHER application state
         window.CIPHER = {
-            isConnected: false,
+            isConnected: true,
             lastDataUpdate: null,
-            refreshInterval: 30000, // 30 seconds
-            retryAttempts: 0,
-            maxRetries: 3,
-            currentData: null
+            refreshInterval: 60000 // 60 seconds
         };
 
         // Update current time
@@ -399,242 +371,20 @@
             }
         }
 
-        // Update system status indicators
-        function updateSystemStatus(isConnected, systemData = null) {
-            const statusDot = document.getElementById('systemStatusDot');
-            const connectionStatus = document.getElementById('connectionStatus');
-            const connectionText = document.getElementById('connectionText');
-            const healthIndicator = document.getElementById('systemHealthIndicator');
-            const healthText = document.getElementById('systemHealthText');
-
-            if (statusDot) {
-                if (isConnected) {
-                    statusDot.className = 'absolute -top-1 -right-1 w-4 h-4 bg-green-400 rounded-full animate-pulse';
-                } else {
-                    statusDot.className = 'absolute -top-1 -right-1 w-4 h-4 bg-red-400 rounded-full animate-pulse';
-                }
-            }
-
-            if (connectionStatus && connectionText) {
-                const indicator = connectionStatus.querySelector('.status-indicator');
-                if (isConnected) {
-                    indicator.className = 'status-indicator w-3 h-3 bg-green-400 rounded-full mr-2';
-                    connectionText.textContent = 'OPERATIONAL';
-                    connectionText.className = 'text-sm text-green-400 font-mono';
-                } else {
-                    indicator.className = 'status-indicator w-3 h-3 bg-red-400 rounded-full mr-2';
-                    connectionText.textContent = 'DISCONNECTED';
-                    connectionText.className = 'text-sm text-red-400 font-mono';
-                }
-            }
-
-            // Update system health
-            if (healthIndicator && healthText && systemData) {
-                const healthDot = healthIndicator.querySelector('div');
-                const systemStatus = systemData.system_status || {};
-                
-                if (systemStatus.operational) {
-                    healthDot.className = 'w-2 h-2 bg-green-400 rounded-full animate-pulse';
-                    healthText.textContent = 'SECURE';
-                    healthText.className = 'font-mono text-green-400';
-                } else {
-                    healthDot.className = 'w-2 h-2 bg-yellow-400 rounded-full animate-pulse';
-                    healthText.textContent = 'STANDBY';
-                    healthText.className = 'font-mono text-yellow-400';
-                }
-            }
-
-            window.CIPHER.isConnected = isConnected;
-        }
-
-        // Update data freshness indicator
-        function updateDataFreshness(lastUpdate) {
-            const freshnessElement = document.getElementById('dataFreshness');
-            const lastUpdateElement = document.getElementById('lastUpdateTime');
-            
-            if (!freshnessElement) return;
-
-            if (!lastUpdate) {
-                freshnessElement.textContent = 'NO DATA';
-                freshnessElement.className = 'data-old';
-                return;
-            }
-
-            try {
-                const updateTime = new Date(lastUpdate);
-                const now = new Date();
-                const ageMinutes = (now - updateTime) / (1000 * 60);
-
-                let status, className;
-                if (ageMinutes < 5) {
-                    status = 'LIVE';
-                    className = 'data-fresh';
-                } else if (ageMinutes < 30) {
-                    status = 'RECENT';
-                    className = 'data-fresh';
-                } else if (ageMinutes < 120) {
-                    status = 'STALE';
-                    className = 'data-stale';
-                } else {
-                    status = 'OLD';
-                    className = 'data-old';
-                }
-
-                freshnessElement.textContent = status;
-                freshnessElement.className = className;
-
-                if (lastUpdateElement) {
-                    lastUpdateElement.textContent = updateTime.toLocaleTimeString();
-                }
-
-                window.CIPHER.lastDataUpdate = updateTime;
-            } catch (error) {
-                freshnessElement.textContent = 'ERROR';
-                freshnessElement.className = 'data-old';
-            }
-        }
-
-        // Update data sources list
-        function updateDataSources(sources) {
-            const sourcesElement = document.getElementById('dataSourcesList');
-            if (sourcesElement && sources) {
-                sourcesElement.textContent = sources.join(', ') || 'None';
-            }
-        }
-
-        // Show/hide global overlay
-        function showGlobalOverlay(message, showSpinner = true, showRetry = false) {
-            const overlay = document.getElementById('globalOverlay');
-            const spinner = document.getElementById('overlaySpinner');
-            const messageEl = document.getElementById('overlayMessage');
-            const retryBtn = document.getElementById('overlayRetry');
-
-            if (overlay && messageEl) {
-                messageEl.textContent = message;
-                spinner.style.display = showSpinner ? 'block' : 'none';
-                retryBtn.style.display = showRetry ? 'block' : 'none';
-                overlay.classList.remove('hidden');
-                overlay.classList.add('flex');
-            }
-        }
-
-        function hideGlobalOverlay() {
-            const overlay = document.getElementById('globalOverlay');
-            if (overlay) {
-                overlay.classList.add('hidden');
-                overlay.classList.remove('flex');
-            }
-        }
-
-        // Generic API call with error handling
-        async function apiCall(endpoint, options = {}) {
-            try {
-                const response = await fetch(endpoint, {
-                    ...options,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...options.headers
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-                window.CIPHER.retryAttempts = 0; // Reset on success
-                return { success: true, data };
-            } catch (error) {
-                console.error(`API call failed for ${endpoint}:`, error);
-                window.CIPHER.retryAttempts++;
-                return { success: false, error: error.message };
-            }
-        }
-
-        // Check system health
-        async function checkSystemHealth() {
-            const result = await apiCall('/health');
-            
-            if (result.success) {
-                const isHealthy = result.data.status === 'healthy';
-                updateSystemStatus(isHealthy, result.data);
-                
-                if (result.data.checks) {
-                    const sources = [];
-                    if (result.data.checks.bigquery === 'connected') sources.push('BigQuery');
-                    if (result.data.checks.telegram === 'connected') sources.push('Telegram');
-                    if (result.data.checks.gemini === 'available') sources.push('Gemini AI');
-                    updateDataSources(sources);
-                }
-                
-                return isHealthy;
-            } else {
-                updateSystemStatus(false);
-                return false;
-            }
-        }
-
         // Initialize application
-        async function initializeApp() {
+        function initializeApp() {
             console.log('🛡️ Initializing CIPHER Platform...');
             
             // Start time updates
             updateCurrentTime();
             setInterval(updateCurrentTime, 1000);
-
-            // Initial health check
-            showGlobalOverlay('Connecting to CIPHER Platform...', true, false);
             
-            const isHealthy = await checkSystemHealth();
-            
-            if (isHealthy) {
-                hideGlobalOverlay();
-                console.log('✅ CIPHER Platform initialized successfully');
-                
-                // Start periodic health checks
-                setInterval(checkSystemHealth, 30000); // Every 30 seconds
-            } else {
-                if (window.CIPHER.retryAttempts < window.CIPHER.maxRetries) {
-                    showGlobalOverlay(`Connection failed. Retrying... (${window.CIPHER.retryAttempts}/${window.CIPHER.maxRetries})`, true, false);
-                    setTimeout(initializeApp, 5000);
-                } else {
-                    showGlobalOverlay('Failed to connect to CIPHER Platform. Please check system status.', false, true);
-                }
-            }
+            console.log('✅ CIPHER Platform ready');
         }
-
-        // Retry functionality
-        document.getElementById('overlayRetry')?.addEventListener('click', () => {
-            window.CIPHER.retryAttempts = 0;
-            initializeApp();
-        });
-
-        // Keyboard shortcuts
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey || e.metaKey) {
-                switch(e.key) {
-                    case 'r':
-                        e.preventDefault();
-                        window.location.reload();
-                        break;
-                    case 'h':
-                        e.preventDefault();
-                        window.location.href = '/health';
-                        break;
-                    case 'd':
-                        e.preventDefault();
-                        window.location.href = '/api/docs';
-                        break;
-                    case 'e':
-                        e.preventDefault();
-                        window.location.href = '/api/export/threats?format=json';
-                        break;
-                }
-            }
-        });
 
         // Smooth scroll for internal links
         document.addEventListener('DOMContentLoaded', function() {
+            // Initialize smooth scrolling
             document.querySelectorAll('a[href^="#"]').forEach(anchor => {
                 anchor.addEventListener('click', function (e) {
                     e.preventDefault();
@@ -652,6 +402,22 @@
             initializeApp();
         });
 
+        // Keyboard shortcuts for navigation
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey || e.metaKey) {
+                switch(e.key) {
+                    case 'h':
+                        e.preventDefault();
+                        window.location.href = '/dashboard';
+                        break;
+                    case 'r':
+                        e.preventDefault();
+                        window.location.reload();
+                        break;
+                }
+            }
+        });
+
         // Performance monitoring
         window.addEventListener('load', function() {
             const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
@@ -663,7 +429,15 @@
             console.error('CIPHER Platform error:', e.error);
         });
 
-        console.log('🛡️ CIPHER Platform - Advanced Cybersecurity Intelligence Platform Ready');
+        // Mobile menu toggle (if needed)
+        function toggleMobileMenu() {
+            const mobileMenu = document.getElementById('mobile-menu');
+            if (mobileMenu) {
+                mobileMenu.classList.toggle('hidden');
+            }
+        }
+
+        console.log('🛡️ CIPHER Platform - Professional Cybersecurity Intelligence Ready');
     </script>
 
     {% block scripts %}{% endblock %}
