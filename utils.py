@@ -654,72 +654,144 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         return analyze_message_content(text, channel)
 
 def analyze_message_content(text: str, channel: str) -> Dict[str, Any]:
-    """Analyze message content without AI"""
+    """Analyze message content without AI - ENHANCED VERSION"""
     text_lower = text.lower()
     
-    # Detect threat level
+    # Enhanced threat level detection
     threat_level = "low"
     urgency_score = 0.1
     
-    critical_keywords = ["critical", "urgent", "zero-day", "0day", "exploit", "ransomware", "breach", "apt"]
-    high_keywords = ["high", "severe", "vulnerability", "malware", "attack", "compromise"]
-    medium_keywords = ["medium", "warning", "advisory", "patch", "update"]
+    # Critical indicators with weighted scoring
+    critical_keywords = {
+        "zero-day": 0.5, "0day": 0.5, "critical": 0.4, "urgent": 0.3, "emergency": 0.4,
+        "exploit": 0.3, "ransomware": 0.4, "breach": 0.4, "apt": 0.3, "compromise": 0.3,
+        "lockbit": 0.4, "maze": 0.4, "conti": 0.4, "ryuk": 0.4
+    }
     
-    critical_count = sum(1 for word in critical_keywords if word in text_lower)
-    high_count = sum(1 for word in high_keywords if word in text_lower)
-    medium_count = sum(1 for word in medium_keywords if word in text_lower)
+    high_keywords = {
+        "high": 0.2, "severe": 0.2, "vulnerability": 0.2, "malware": 0.2, "attack": 0.2,
+        "suspicious": 0.2, "trojan": 0.2, "backdoor": 0.2, "phishing": 0.2, "ddos": 0.2
+    }
     
-    if critical_count >= 2:
+    medium_keywords = {
+        "medium": 0.1, "warning": 0.1, "advisory": 0.1, "patch": 0.1, "update": 0.1,
+        "security": 0.1, "alert": 0.1, "notice": 0.1
+    }
+    
+    # Calculate weighted threat score
+    threat_score = 0.0
+    for keyword, weight in critical_keywords.items():
+        if keyword in text_lower:
+            threat_score += weight
+    
+    for keyword, weight in high_keywords.items():
+        if keyword in text_lower:
+            threat_score += weight
+    
+    for keyword, weight in medium_keywords.items():
+        if keyword in text_lower:
+            threat_score += weight
+    
+    # Apply channel multiplier
+    channel_meta = CHANNEL_METADATA.get(channel, {})
+    multiplier = channel_meta.get('threat_multiplier', 1.0)
+    threat_score *= multiplier
+    
+    # Determine threat level and urgency
+    if threat_score >= 0.7:
         threat_level = "critical"
-        urgency_score = 0.9
-    elif critical_count >= 1 or high_count >= 2:
+        urgency_score = min(0.9, threat_score)
+    elif threat_score >= 0.4:
         threat_level = "high"
-        urgency_score = 0.7
-    elif high_count >= 1 or medium_count >= 2:
+        urgency_score = min(0.7, threat_score)
+    elif threat_score >= 0.2:
         threat_level = "medium"
-        urgency_score = 0.5
-    elif medium_count >= 1:
-        threat_level = "medium"
-        urgency_score = 0.3
+        urgency_score = min(0.5, threat_score)
+    else:
+        threat_level = "low"
+        urgency_score = max(0.1, threat_score)
     
-    # Detect category
+    # Enhanced category detection
     category = "other"
-    if any(word in text_lower for word in ["apt", "advanced persistent", "nation state"]):
-        category = "apt"
-    elif any(word in text_lower for word in ["ransomware", "crypto", "encrypt", "lockbit", "maze"]):
-        category = "ransomware"
-    elif any(word in text_lower for word in ["breach", "leak", "stolen", "database", "credential"]):
-        category = "data_breach"
-    elif any(word in text_lower for word in ["malware", "trojan", "virus", "backdoor"]):
-        category = "malware"
-    elif any(word in text_lower for word in ["vulnerability", "cve-", "patch", "exploit"]):
-        category = "vulnerability"
-    elif any(word in text_lower for word in ["phishing", "scam", "social engineering"]):
-        category = "phishing"
+    category_keywords = {
+        "apt": ["apt", "advanced persistent", "nation state", "lazarus", "kimsuky", "turla"],
+        "ransomware": ["ransomware", "crypto", "encrypt", "lockbit", "maze", "ryuk", "conti", "novas"],
+        "data_breach": ["breach", "leak", "stolen", "database", "credential", "dump", "exposed"],
+        "malware": ["malware", "trojan", "virus", "backdoor", "rat", "stealer", "loader"],
+        "vulnerability": ["vulnerability", "cve-", "patch", "exploit", "rce", "privilege escalation"],
+        "phishing": ["phishing", "scam", "social engineering", "credential harvesting"]
+    }
     
-    # Detect sentiment
+    # Score each category
+    category_scores = {}
+    for cat, keywords in category_keywords.items():
+        score = sum(1 for keyword in keywords if keyword in text_lower)
+        if score > 0:
+            category_scores[cat] = score
+    
+    # Channel-specific category bias
+    channel_focus = channel_meta.get('focus', '')
+    if channel_focus == 'data_breaches' and 'data_breach' in category_scores:
+        category_scores['data_breach'] += 1
+    elif channel_focus == 'advanced_persistent_threats' and 'apt' in category_scores:
+        category_scores['apt'] += 1
+    
+    if category_scores:
+        category = max(category_scores, key=category_scores.get)
+    
+    # Enhanced sentiment detection
     sentiment = "neutral"
-    negative_indicators = ["critical", "severe", "dangerous", "threat", "attack", "breach", "compromised"]
-    positive_indicators = ["fixed", "patched", "resolved", "secured", "mitigated"]
+    negative_indicators = ["critical", "severe", "dangerous", "urgent", "threat", "attack", "breach", "compromised", "exploit", "malicious"]
+    positive_indicators = ["fixed", "patched", "resolved", "secured", "protected", "mitigated", "blocked", "prevented"]
     
     negative_count = sum(1 for word in negative_indicators if word in text_lower)
     positive_count = sum(1 for word in positive_indicators if word in text_lower)
     
-    if negative_count > positive_count:
+    if negative_count > positive_count and negative_count > 0:
         sentiment = "negative"
-    elif positive_count > negative_count:
+    elif positive_count > negative_count and positive_count > 0:
         sentiment = "positive"
     
-    # Generate analysis
-    analysis_text = f"Threat intelligence from {channel} analyzed. "
-    if threat_level in ["critical", "high"]:
-        analysis_text += f"Identified as {threat_level} priority {category} requiring security attention. "
+    # Generate enhanced analysis based on content
+    analysis_parts = []
+    
+    # Main threat assessment
+    if threat_level == "critical":
+        analysis_parts.append(f"Critical {category} threat detected from {channel} requiring immediate security response.")
+    elif threat_level == "high":
+        analysis_parts.append(f"High-priority {category} identified from {channel} with significant security implications.")
+    elif threat_level == "medium":
+        analysis_parts.append(f"Medium-level {category} from {channel} requiring monitoring and assessment.")
     else:
-        analysis_text += f"Categorized as {category} for monitoring and assessment. "
+        analysis_parts.append(f"{category.title()} intelligence from {channel} for situational awareness.")
+    
+    # Add specific threat details based on content
+    if any(word in text_lower for word in ["cve-", "vulnerability"]):
+        analysis_parts.append("Contains vulnerability information requiring patch management attention.")
+    
+    if any(word in text_lower for word in ["exploit", "proof of concept", "poc"]):
+        analysis_parts.append("Includes exploitation details requiring immediate defensive measures.")
+    
+    if any(word in text_lower for word in ["ioc", "indicator", "hash", "domain", "ip"]):
+        analysis_parts.append("Contains indicators of compromise for threat hunting operations.")
+    
+    # Extract basic intelligence data
+    intelligence_data = extract_cybersecurity_data(text)
+    
+    # Add intelligence context to analysis
+    if intelligence_data["cve_references"]:
+        cve_count = len(intelligence_data["cve_references"])
+        analysis_parts.append(f"References {cve_count} CVE vulnerabilities requiring security attention.")
+    
+    if intelligence_data["iocs_detected"]:
+        ioc_count = len(intelligence_data["iocs_detected"])
+        analysis_parts.append(f"Contains {ioc_count} indicators of compromise for defensive implementation.")
+    
+    analysis_text = " ".join(analysis_parts)
     
     # Extract key topics
     key_topics = []
-    topic_keywords = ["vulnerability", "exploit", "malware", "ransomware", "breach", "apt", "phishing", "patch"]
+    topic_keywords = ["vulnerability", "exploit", "malware", "ransomware", "breach", "apt", "phishing", "patch", "zero-day", "trojan"]
     for keyword in topic_keywords:
         if keyword in text_lower:
             key_topics.append(keyword)
@@ -732,9 +804,9 @@ def analyze_message_content(text: str, channel: str) -> Dict[str, Any]:
         "sentiment": sentiment,
         "gemini_analysis": analysis_text,
         "key_topics": key_topics[:5],
-        "mitre_techniques": [],
-        "affected_systems": [],
-        "vulnerabilities": [],
+        "mitre_techniques": intelligence_data.get("mitre_techniques", []),
+        "affected_systems": intelligence_data.get("affected_systems", []),
+        "vulnerabilities": [],  # Will be populated by extract_cybersecurity_data
         "attack_vectors": [],
         "geographical_targets": [],
         "industry_targets": []
@@ -864,7 +936,7 @@ async def stop_monitoring_system():
 # API Functions
 
 async def get_comprehensive_stats() -> Dict[str, Any]:
-    """Get real system statistics from BigQuery"""
+    """Get real system statistics from BigQuery - DEFENSIVE VERSION"""
     try:
         if not _bigquery_available:
             return {
@@ -876,24 +948,68 @@ async def get_comprehensive_stats() -> Dict[str, Any]:
                 "data_source": "bigquery_unavailable"
             }
         
-        # Real data query - remove limits and get actual data
+        # Check available fields first
+        table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = _bq_client.get_table(table_ref)
+        existing_fields = {field.name for field in table.schema}
+        
+        logger.info(f"Available fields for stats: {sorted(existing_fields)}")
+        
+        # Build defensive query based on available fields
+        base_stats = [
+            "COUNT(*) as total_messages",
+            "COUNTIF(DATE(processed_date) = CURRENT_DATE()) as processed_today",
+            "COUNT(DISTINCT chat_username) as unique_channels"
+        ]
+        
+        # Add conditional fields
+        additional_stats = []
+        
+        if 'urgency_score' in existing_fields:
+            additional_stats.append("AVG(COALESCE(urgency_score, 0)) as avg_urgency")
+        else:
+            additional_stats.append("0.0 as avg_urgency")
+            
+        if 'threat_level' in existing_fields:
+            additional_stats.extend([
+                "COUNTIF(threat_level IN ('high', 'critical')) as high_threats",
+                "COUNTIF(threat_level = 'critical') as critical_threats"
+            ])
+        else:
+            additional_stats.extend([
+                "0 as high_threats",
+                "0 as critical_threats"
+            ])
+            
+        if 'category' in existing_fields:
+            additional_stats.extend([
+                "COUNTIF(category = 'data_breach') as data_breaches",
+                "COUNTIF(category = 'malware') as malware_alerts",
+                "COUNTIF(category = 'vulnerability') as vulnerabilities",
+                "COUNTIF(category = 'apt') as apt_activity"
+            ])
+        else:
+            additional_stats.extend([
+                "0 as data_breaches",
+                "0 as malware_alerts", 
+                "0 as vulnerabilities",
+                "0 as apt_activity"
+            ])
+            
+        if 'cve_references' in existing_fields:
+            additional_stats.append("COUNTIF(ARRAY_LENGTH(cve_references) > 0) as cve_mentions")
+        else:
+            additional_stats.append("0 as cve_mentions")
+        
+        all_stats = base_stats + additional_stats
+        
         stats_query = f"""
-        SELECT 
-            COUNT(*) as total_messages,
-            COUNTIF(DATE(processed_date) = CURRENT_DATE()) as processed_today,
-            COUNT(DISTINCT chat_username) as unique_channels,
-            COUNTIF(threat_level IN ('high', 'critical')) as high_threats,
-            COUNTIF(threat_level = 'critical') as critical_threats,
-            COUNTIF(ARRAY_LENGTH(cve_references) > 0) as cve_mentions,
-            AVG(COALESCE(urgency_score, 0)) as avg_urgency,
-            COUNTIF(category = 'data_breach') as data_breaches,
-            COUNTIF(category = 'malware') as malware_alerts,
-            COUNTIF(category = 'vulnerability') as vulnerabilities,
-            COUNTIF(category = 'apt') as apt_activity
+        SELECT {', '.join(all_stats)}
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
         
+        logger.info("Executing defensive stats query")
         query_job = _bq_client.query(stats_query)
         row = next(iter(query_job.result(timeout=30)), None)
         
@@ -902,16 +1018,17 @@ async def get_comprehensive_stats() -> Dict[str, Any]:
                 "total_messages": int(row.total_messages) if row.total_messages else 0,
                 "processed_today": int(row.processed_today) if row.processed_today else 0,
                 "unique_channels": int(row.unique_channels) if row.unique_channels else 3,
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                "high_threats": int(row.high_threats) if row.high_threats else 0,
-                "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
-                "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
-                "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
-                "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
-                "apt_activity": int(row.apt_activity) if row.apt_activity else 0,
-                "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
+                "avg_urgency": float(row.avg_urgency) if hasattr(row, 'avg_urgency') and row.avg_urgency else 0.0,
+                "high_threats": int(row.high_threats) if hasattr(row, 'high_threats') and row.high_threats else 0,
+                "critical_threats": int(row.critical_threats) if hasattr(row, 'critical_threats') and row.critical_threats else 0,
+                "data_breaches": int(row.data_breaches) if hasattr(row, 'data_breaches') and row.data_breaches else 0,
+                "malware_alerts": int(row.malware_alerts) if hasattr(row, 'malware_alerts') and row.malware_alerts else 0,
+                "vulnerabilities": int(row.vulnerabilities) if hasattr(row, 'vulnerabilities') and row.vulnerabilities else 0,
+                "apt_activity": int(row.apt_activity) if hasattr(row, 'apt_activity') and row.apt_activity else 0,
+                "cve_mentions": int(row.cve_mentions) if hasattr(row, 'cve_mentions') and row.cve_mentions else 0,
                 "monitoring_active": _monitoring_active,
-                "data_source": "bigquery",
+                "data_source": "bigquery_defensive",
+                "available_fields": sorted(existing_fields),
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
         else:
@@ -933,68 +1050,107 @@ async def get_comprehensive_stats() -> Dict[str, Any]:
         }
 
 async def get_threat_insights() -> Dict[str, Any]:
-    """Get real threat intelligence insights"""
+    """Get real threat intelligence insights - DEFENSIVE VERSION"""
     try:
         if not _bigquery_available:
             return {"insights": [], "total": 0, "source": "bigquery_unavailable"}
         
-        # Query for recent real insights - increased limit and better time range
+        # First, check what fields actually exist in the table
+        table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = _bq_client.get_table(table_ref)
+        existing_fields = {field.name for field in table.schema}
+        
+        logger.info(f"Available BigQuery fields: {sorted(existing_fields)}")
+        
+        # Build query with only existing fields
+        core_fields = ["message_id", "chat_username", "message_text", "message_date", "processed_date"]
+        optional_fields = ["gemini_analysis", "sentiment", "urgency_score", "threat_level", "category", 
+                          "threat_type", "key_topics", "cve_references", "iocs_detected", 
+                          "malware_families", "threat_actors", "affected_systems"]
+        
+        # Only select fields that exist
+        select_fields = []
+        for field in core_fields:
+            if field in existing_fields:
+                select_fields.append(field)
+        
+        for field in optional_fields:
+            if field in existing_fields:
+                select_fields.append(field)
+        
+        if not select_fields:
+            logger.error("No valid fields found in BigQuery table")
+            return {"insights": [], "total": 0, "source": "schema_error"}
+        
+        # Build defensive query
         insights_query = f"""
-        SELECT 
-            message_id,
-            chat_username,
-            message_text,
-            message_date,
-            processed_date,
-            gemini_analysis,
-            sentiment,
-            urgency_score,
-            threat_level,
-            category,
-            threat_type,
-            key_topics,
-            cve_references,
-            iocs_detected,
-            malware_families,
-            threat_actors,
-            affected_systems
+        SELECT {', '.join(select_fields)}
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ORDER BY processed_date DESC
         LIMIT 100
         """
         
+        logger.info(f"Executing defensive query with {len(select_fields)} fields")
         query_job = _bq_client.query(insights_query)
         results = query_job.result(timeout=30)
         
         insights = []
         for row in results:
+            # Build insight with defensive field access
             insight = {
-                "message_id": row.message_id,
-                "chat_username": row.chat_username or "@Unknown",
-                "message_text": (row.message_text or "")[:1000],
-                "message_date": row.message_date.isoformat() if row.message_date else None,
-                "processed_date": row.processed_date.isoformat() if row.processed_date else None,
-                "gemini_analysis": row.gemini_analysis or "No analysis available",
-                "sentiment": row.sentiment or "neutral",
-                "urgency_score": float(row.urgency_score) if row.urgency_score else 0.0,
-                "threat_level": row.threat_level or "low",
-                "category": row.category or "other",
-                "threat_type": row.threat_type or "unknown",
-                "key_topics": row.key_topics or [],
-                "cve_references": row.cve_references or [],
-                "iocs_detected": row.iocs_detected or [],
-                "malware_families": row.malware_families or [],
-                "threat_actors": row.threat_actors or [],
-                "affected_systems": row.affected_systems or []
+                "message_id": getattr(row, 'message_id', 'unknown'),
+                "chat_username": getattr(row, 'chat_username', '@Unknown'),
+                "message_text": (getattr(row, 'message_text', '') or '')[:1000],
+                "message_date": getattr(row, 'message_date', None),
+                "processed_date": getattr(row, 'processed_date', None),
+                "gemini_analysis": getattr(row, 'gemini_analysis', None) or "Analysis not available",
+                "sentiment": getattr(row, 'sentiment', None) or "neutral",
+                "urgency_score": float(getattr(row, 'urgency_score', 0) or 0),
+                "threat_level": getattr(row, 'threat_level', None) or "low",
+                "category": getattr(row, 'category', None) or "other",
+                "threat_type": getattr(row, 'threat_type', None) or "unknown",
+                "key_topics": getattr(row, 'key_topics', []) or [],
+                "cve_references": getattr(row, 'cve_references', []) or [],
+                "iocs_detected": getattr(row, 'iocs_detected', []) or [],
+                "malware_families": getattr(row, 'malware_families', []) or [],
+                "threat_actors": getattr(row, 'threat_actors', []) or [],
+                "affected_systems": getattr(row, 'affected_systems', []) or []
             }
+            
+            # Convert dates to ISO format
+            if insight["message_date"]:
+                if hasattr(insight["message_date"], 'isoformat'):
+                    insight["message_date"] = insight["message_date"].isoformat()
+                else:
+                    insight["message_date"] = str(insight["message_date"])
+            
+            if insight["processed_date"]:
+                if hasattr(insight["processed_date"], 'isoformat'):
+                    insight["processed_date"] = insight["processed_date"].isoformat()
+                else:
+                    insight["processed_date"] = str(insight["processed_date"])
+            
+            # If we have real message text but poor analysis, do real-time analysis
+            if (insight["message_text"] and len(insight["message_text"]) > 20 and 
+                (not insight["gemini_analysis"] or insight["gemini_analysis"] == "Analysis not available" or
+                 insight["urgency_score"] == 0.0)):
+                
+                logger.info(f"Re-analyzing message {insight['message_id']} with poor analysis")
+                enhanced_analysis = analyze_message_content(insight["message_text"], insight["chat_username"])
+                
+                # Update with better analysis
+                insight.update(enhanced_analysis)
+                insight["gemini_analysis"] = enhanced_analysis.get("gemini_analysis", insight["gemini_analysis"])
+            
             insights.append(insight)
         
-        logger.info(f"Retrieved {len(insights)} real threat insights")
+        logger.info(f"Retrieved {len(insights)} real threat insights (defensive mode)")
         return {
             "insights": insights,
             "total": len(insights),
-            "source": "bigquery",
+            "source": "bigquery_defensive",
+            "available_fields": sorted(existing_fields),
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
@@ -1027,7 +1183,7 @@ async def get_monitoring_status() -> Dict[str, Any]:
         return {"active": False, "error": str(e)}
 
 async def get_threat_analytics() -> Dict[str, Any]:
-    """Get real threat analytics"""
+    """Get real threat analytics - DEFENSIVE VERSION"""
     try:
         if not _bigquery_available:
             return {
@@ -1036,24 +1192,62 @@ async def get_threat_analytics() -> Dict[str, Any]:
                 "summary": {"total_threats": 0, "high_priority": 0}
             }
         
+        # Check available fields first
+        table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = _bq_client.get_table(table_ref)
+        existing_fields = {field.name for field in table.schema}
+        
+        # Build defensive analytics query
+        base_analytics = ["COUNT(*) as total_threats"]
+        
+        threat_level_fields = []
+        if 'threat_level' in existing_fields:
+            threat_level_fields = [
+                "COUNTIF(threat_level = 'critical') as critical_count",
+                "COUNTIF(threat_level = 'high') as high_count", 
+                "COUNTIF(threat_level = 'medium') as medium_count",
+                "COUNTIF(threat_level = 'low') as low_count"
+            ]
+        else:
+            threat_level_fields = [
+                "0 as critical_count",
+                "0 as high_count",
+                "0 as medium_count", 
+                "0 as low_count"
+            ]
+            
+        category_fields = []
+        if 'category' in existing_fields:
+            category_fields = [
+                "COUNTIF(category = 'apt') as apt_count",
+                "COUNTIF(category = 'malware') as malware_count",
+                "COUNTIF(category = 'data_breach') as breach_count",
+                "COUNTIF(category = 'vulnerability') as vuln_count",
+                "COUNTIF(category = 'ransomware') as ransomware_count",
+                "COUNTIF(category = 'phishing') as phishing_count"
+            ]
+        else:
+            category_fields = [
+                "0 as apt_count",
+                "0 as malware_count", 
+                "0 as breach_count",
+                "0 as vuln_count",
+                "0 as ransomware_count",
+                "0 as phishing_count"
+            ]
+        
+        urgency_field = "AVG(COALESCE(urgency_score, 0))" if 'urgency_score' in existing_fields else "0.0"
+        urgency_field += " as avg_urgency"
+        
+        all_analytics = base_analytics + threat_level_fields + category_fields + [urgency_field]
+        
         analytics_query = f"""
-        SELECT 
-            COUNTIF(threat_level = 'critical') as critical_count,
-            COUNTIF(threat_level = 'high') as high_count,
-            COUNTIF(threat_level = 'medium') as medium_count,
-            COUNTIF(threat_level = 'low') as low_count,
-            COUNTIF(category = 'apt') as apt_count,
-            COUNTIF(category = 'malware') as malware_count,
-            COUNTIF(category = 'data_breach') as breach_count,
-            COUNTIF(category = 'vulnerability') as vuln_count,
-            COUNTIF(category = 'ransomware') as ransomware_count,
-            COUNTIF(category = 'phishing') as phishing_count,
-            AVG(urgency_score) as avg_urgency,
-            COUNT(*) as total_threats
+        SELECT {', '.join(all_analytics)}
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
         
+        logger.info("Executing defensive analytics query")
         query_job = _bq_client.query(analytics_query)
         row = next(iter(query_job.result(timeout=30)), None)
         
@@ -1066,25 +1260,26 @@ async def get_threat_analytics() -> Dict[str, Any]:
         
         return {
             "threat_levels": {
-                "critical": int(row.critical_count) if row.critical_count else 0,
-                "high": int(row.high_count) if row.high_count else 0,
-                "medium": int(row.medium_count) if row.medium_count else 0,
-                "low": int(row.low_count) if row.low_count else 0
+                "critical": int(getattr(row, 'critical_count', 0)) if hasattr(row, 'critical_count') else 0,
+                "high": int(getattr(row, 'high_count', 0)) if hasattr(row, 'high_count') else 0,
+                "medium": int(getattr(row, 'medium_count', 0)) if hasattr(row, 'medium_count') else 0,
+                "low": int(getattr(row, 'low_count', 0)) if hasattr(row, 'low_count') else 0
             },
             "categories": {
-                "apt": int(row.apt_count) if row.apt_count else 0,
-                "malware": int(row.malware_count) if row.malware_count else 0,
-                "data_breach": int(row.breach_count) if row.breach_count else 0,
-                "vulnerability": int(row.vuln_count) if row.vuln_count else 0,
-                "ransomware": int(row.ransomware_count) if row.ransomware_count else 0,
-                "phishing": int(row.phishing_count) if row.phishing_count else 0
+                "apt": int(getattr(row, 'apt_count', 0)) if hasattr(row, 'apt_count') else 0,
+                "malware": int(getattr(row, 'malware_count', 0)) if hasattr(row, 'malware_count') else 0,
+                "data_breach": int(getattr(row, 'breach_count', 0)) if hasattr(row, 'breach_count') else 0,
+                "vulnerability": int(getattr(row, 'vuln_count', 0)) if hasattr(row, 'vuln_count') else 0,
+                "ransomware": int(getattr(row, 'ransomware_count', 0)) if hasattr(row, 'ransomware_count') else 0,
+                "phishing": int(getattr(row, 'phishing_count', 0)) if hasattr(row, 'phishing_count') else 0
             },
             "summary": {
-                "total_threats": int(row.total_threats) if row.total_threats else 0,
-                "high_priority": (int(row.critical_count) if row.critical_count else 0) + 
-                               (int(row.high_count) if row.high_count else 0),
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0
+                "total_threats": int(getattr(row, 'total_threats', 0)) if hasattr(row, 'total_threats') else 0,
+                "high_priority": (int(getattr(row, 'critical_count', 0)) if hasattr(row, 'critical_count') else 0) + 
+                               (int(getattr(row, 'high_count', 0)) if hasattr(row, 'high_count') else 0),
+                "avg_urgency": float(getattr(row, 'avg_urgency', 0.0)) if hasattr(row, 'avg_urgency') else 0.0
             },
+            "available_fields": sorted(existing_fields),
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
