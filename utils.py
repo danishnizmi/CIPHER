@@ -608,7 +608,7 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         return {}
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
-    """Store processed message in BigQuery with proper datetime handling"""
+    """Store processed message in BigQuery with proper datetime handling and compatible schema"""
     try:
         if not _bigquery_available:
             return
@@ -626,7 +626,11 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
                 return datetime.fromtimestamp(dt.timestamp()).isoformat()
             return str(dt)
         
-        # Ensure all required fields are present with proper datetime conversion
+        # Only include fields that exist in the current BigQuery table schema
+        # Get existing schema field names
+        existing_fields = {field.name for field in table.schema}
+        
+        # Base row with fields that definitely exist
         row = {
             "message_id": str(message_data.get("message_id", "")),
             "chat_id": str(message_data.get("chat_id", "")),
@@ -636,6 +640,10 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
             "message_text": message_data.get("message_text", ""),
             "message_date": convert_datetime(message_data.get("message_date")),
             "processed_date": convert_datetime(message_data.get("processed_date")),
+        }
+        
+        # Add optional fields only if they exist in the schema
+        optional_fields = {
             "gemini_analysis": message_data.get("gemini_analysis", ""),
             "sentiment": message_data.get("sentiment", "neutral"),
             "key_topics": message_data.get("key_topics", []),
@@ -649,6 +657,7 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
             "cve_references": message_data.get("cve_references", []),
             "malware_families": message_data.get("malware_families", []),
             "affected_systems": message_data.get("affected_systems", []),
+            # These fields may not exist in the current table:
             "attack_vectors": message_data.get("attack_vectors", []),
             "threat_actors": message_data.get("threat_actors", []),
             "campaign_names": message_data.get("campaign_names", []),
@@ -656,15 +665,21 @@ async def store_message_in_bigquery(message_data: Dict[str, Any]):
             "industry_targets": message_data.get("industry_targets", []),
         }
         
+        # Only add fields that exist in the table schema
+        for field_name, field_value in optional_fields.items():
+            if field_name in existing_fields:
+                row[field_name] = field_value
+        
         errors = _bq_client.insert_rows_json(table, [row])
         if errors:
             logger.error(f"BigQuery insert failed: {errors}")
+            logger.error(f"Row data: {row}")
         else:
-            logger.info(f"Message stored in BigQuery: {row['chat_username']} - {row['threat_level']}")
+            logger.info(f"✅ Stored threat: {row['chat_username']} - {row.get('threat_level', 'unknown')} - {row.get('category', 'other')}")
             
     except Exception as e:
         logger.error(f"BigQuery storage failed: {e}")
-        logger.error(f"Message data types: {[(k, type(v).__name__) for k, v in message_data.items()]}")
+        logger.error(f"Available schema fields: {[field.name for field in table.schema] if 'table' in locals() else 'unknown'}")
 
 async def stop_monitoring_system():
     """Stop the monitoring system"""
