@@ -33,8 +33,8 @@ CHANNEL_METADATA = {
         "type": "cyber_threat_intelligence",
         "priority": "critical",
         "focus": "advanced_persistent_threats",
-        "threat_multiplier": 1.5,
-        "keywords": ["apt", "malware", "ransomware", "zero-day", "exploit", "breach", "attack", "darkfeed", "leak"],
+        "threat_multiplier": 1.8,
+        "keywords": ["apt", "malware", "ransomware", "zero-day", "exploit", "breach", "attack", "darkfeed", "leak", "campaign", "threat actor"],
         "description": "Premium threat intelligence focusing on APTs and zero-day exploits",
         "color": "#ff4444",
         "icon": "🔴"
@@ -43,8 +43,8 @@ CHANNEL_METADATA = {
         "type": "data_breach_monitor", 
         "priority": "high",
         "focus": "data_breaches",
-        "threat_multiplier": 1.3,
-        "keywords": ["breach", "leak", "database", "stolen", "credentials", "dump", "hacked", "compromised"],
+        "threat_multiplier": 1.5,
+        "keywords": ["breach", "leak", "database", "stolen", "credentials", "dump", "hacked", "compromised", "exposed", "data"],
         "description": "Real-time data breach and credential leak monitoring",
         "color": "#ffaa00",
         "icon": "🟠"
@@ -53,8 +53,8 @@ CHANNEL_METADATA = {
         "type": "security_news",
         "priority": "medium", 
         "focus": "security_updates",
-        "threat_multiplier": 1.0,
-        "keywords": ["vulnerability", "cve", "patch", "security", "advisory", "update", "fix"],
+        "threat_multiplier": 1.2,
+        "keywords": ["vulnerability", "cve", "patch", "security", "advisory", "update", "fix", "exploit"],
         "description": "Security news, CVE tracking, and patch information",
         "color": "#6366f1",
         "icon": "🔵"
@@ -77,13 +77,13 @@ CYBERSEC_PATTERNS = {
     "mitre_technique": re.compile(r'T\d{4}(?:\.\d{3})?', re.IGNORECASE),
 }
 
-# Real threat intelligence keywords
+# Enhanced threat intelligence databases
 THREAT_ACTORS = [
     "lazarus", "apt1", "apt28", "apt29", "apt30", "apt32", "apt34", "apt40", "apt41",
     "carbanak", "fin7", "fin8", "sandworm", "turla", "kimsuky", "darkhydrus", "muddywater",
     "oceanlotus", "machete", "gallmaker", "leafy", "scarlet mimic", "naikon", "lotus blossom",
     "comment crew", "elderwood", "aurora", "nitro", "shady rat", "ghostnet", "red october",
-    "imncrew", "secp0", "apipn"
+    "imncrew", "secp0", "apipn", "blacktech", "winnti", "bronze butler", "stone panda"
 ]
 
 MALWARE_FAMILIES = [
@@ -91,13 +91,21 @@ MALWARE_FAMILIES = [
     "emotet", "trickbot", "qakbot", "danabot", "formbook", "remcos", "njrat", "darkcomet",
     "cobalt strike", "metasploit", "mimikatz", "powershell empire", "covenant", "sliver",
     "stuxnet", "duqu", "flame", "gauss", "miniflame", "regin", "equation", "carbanak",
-    "novas", "blackcat", "alphv", "revil", "sodinokibi", "darkside", "babuk"
+    "novas", "blackcat", "alphv", "revil", "sodinokibi", "darkside", "babuk", "hive",
+    "blackmatter", "grief", "egregor", "netwalker", "dharma", "phobos", "stop", "djvu"
 ]
 
 VULNERABILITY_KEYWORDS = [
     "zero-day", "0day", "rce", "remote code execution", "privilege escalation", "buffer overflow",
     "sql injection", "xss", "csrf", "directory traversal", "file inclusion", "deserialization",
-    "use after free", "double free", "heap overflow", "stack overflow", "format string"
+    "use after free", "double free", "heap overflow", "stack overflow", "format string",
+    "authentication bypass", "authorization bypass", "session hijacking", "clickjacking"
+]
+
+ATTACK_VECTORS = [
+    "email", "phishing", "spearphishing", "web", "browser", "javascript", "network",
+    "lateral movement", "smb", "rdp", "ssh", "usb", "removable media", "supply chain",
+    "third party", "vendor", "social engineering", "watering hole", "drive by"
 ]
 
 # Private/internal IP ranges to exclude
@@ -118,7 +126,8 @@ PRIVATE_IP_RANGES = [
 EXCLUDED_DOMAINS = {
     'google.com', 'microsoft.com', 'apple.com', 'github.com', 'twitter.com', 'facebook.com',
     'linkedin.com', 'youtube.com', 'amazon.com', 'cloudflare.com', 'telegram.org', 't.me',
-    'blackhatworld.com', 'reddit.com', 'stackoverflow.com', 'medium.com'
+    'blackhatworld.com', 'reddit.com', 'stackoverflow.com', 'medium.com', 'wordpress.com',
+    'blogger.com', 'tumblr.com', 'instagram.com', 'tiktok.com', 'snapchat.com'
 }
 
 # Global clients
@@ -548,12 +557,12 @@ async def process_message(message, channel: str):
             ai_analysis = await analyze_message_with_gemini(message.text, channel)
             message_data.update(ai_analysis)
         else:
-            # Real analysis without Gemini
-            analysis = analyze_message_content(message.text, channel)
+            # Enhanced analysis without Gemini
+            analysis = analyze_message_content_enhanced(message.text, channel)
             message_data.update(analysis)
         
         # Extract cybersecurity data
-        cybersec_data = extract_cybersecurity_data(message.text)
+        cybersec_data = extract_cybersecurity_data_enhanced(message.text)
         message_data.update(cybersec_data)
         
         # Calculate metrics
@@ -573,7 +582,7 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
     try:
         if not _gemini_model:
             logger.warning("Gemini AI not available")
-            return analyze_message_content(text, channel)
+            return analyze_message_content_enhanced(text, channel)
         
         channel_context = CHANNEL_METADATA.get(channel, {})
         
@@ -581,6 +590,7 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         Analyze this cybersecurity threat intelligence from {channel} and respond with valid JSON only:
 
         Channel Focus: {channel_context.get('focus', 'general')}
+        Channel Type: {channel_context.get('type', 'security')}
         Message: "{text[:2000]}"
 
         Respond with this exact JSON structure (no other text):
@@ -601,9 +611,10 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
         }}
 
         Guidelines:
-        - Be precise about threat levels
+        - Be precise about threat levels based on actual content
         - Extract real technical details only
         - No speculation or fake IOCs
+        - Consider channel context and reputation
         - Return only valid JSON
         """
         
@@ -640,233 +651,578 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
                     
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON from Gemini: {e}")
-                    return analyze_message_content(text, channel)
+                    return analyze_message_content_enhanced(text, channel)
             else:
                 logger.warning("Empty Gemini response")
-                return analyze_message_content(text, channel)
+                return analyze_message_content_enhanced(text, channel)
                 
         except Exception as api_error:
             logger.error(f"Gemini API error: {api_error}")
-            return analyze_message_content(text, channel)
+            return analyze_message_content_enhanced(text, channel)
         
     except Exception as e:
         logger.error(f"Gemini analysis failed: {e}")
-        return analyze_message_content(text, channel)
+        return analyze_message_content_enhanced(text, channel)
 
-def analyze_message_content(text: str, channel: str) -> Dict[str, Any]:
-    """Analyze message content without AI - ENHANCED VERSION"""
+def analyze_message_content_enhanced(text: str, channel: str) -> Dict[str, Any]:
+    """ENHANCED analyze message content without AI - PRODUCTION VERSION"""
     text_lower = text.lower()
     
-    # Enhanced threat level detection
+    # Enhanced threat level detection with proper scoring
     threat_level = "low"
     urgency_score = 0.1
     
-    # Critical indicators with weighted scoring
+    # COMPREHENSIVE cybersecurity threat scoring
+    threat_score = 0.0
+    
+    # Critical cybersecurity indicators with realistic weights
     critical_keywords = {
-        "zero-day": 0.5, "0day": 0.5, "critical": 0.4, "urgent": 0.3, "emergency": 0.4,
-        "exploit": 0.3, "ransomware": 0.4, "breach": 0.4, "apt": 0.3, "compromise": 0.3,
-        "lockbit": 0.4, "maze": 0.4, "conti": 0.4, "ryuk": 0.4
+        # Zero-day and critical exploits
+        "zero-day": 1.0, "0day": 1.0, "zero day": 1.0,
+        "critical": 0.8, "urgent": 0.7, "emergency": 0.8,
+        
+        # Active threats and attacks
+        "exploit": 0.9, "attack": 0.7, "compromise": 0.8,
+        "breach": 0.9, "hacked": 0.8, "compromised": 0.8,
+        
+        # Ransomware and malware families
+        "ransomware": 0.9, "lockbit": 0.9, "maze": 0.9, "conti": 0.9, "ryuk": 0.9,
+        "blackcat": 0.9, "alphv": 0.9, "revil": 0.9, "darkside": 0.9,
+        
+        # APT and nation-state threats
+        "apt": 0.8, "advanced persistent": 0.8, "nation state": 0.8,
+        "lazarus": 0.9, "kimsuky": 0.8, "turla": 0.8, "carbanak": 0.8,
+        
+        # Malware and backdoors
+        "malware": 0.7, "trojan": 0.7, "backdoor": 0.7, "rat": 0.7,
+        "stealer": 0.7, "loader": 0.7, "cryptominer": 0.6,
+        
+        # Active IOCs and threat intel
+        "ioc": 0.6, "indicator": 0.6, "hash": 0.5, "c2": 0.7, "command and control": 0.7,
+        
+        # Special threat actor indicators
+        "darkfeed": 0.8, "threat actor": 0.7, "campaign": 0.6, "operation": 0.6
     }
     
     high_keywords = {
-        "high": 0.2, "severe": 0.2, "vulnerability": 0.2, "malware": 0.2, "attack": 0.2,
-        "suspicious": 0.2, "trojan": 0.2, "backdoor": 0.2, "phishing": 0.2, "ddos": 0.2
+        # Vulnerabilities and exploits
+        "vulnerability": 0.6, "rce": 0.7, "remote code execution": 0.7,
+        "privilege escalation": 0.6, "buffer overflow": 0.6, "sql injection": 0.5,
+        
+        # Security incidents
+        "incident": 0.5, "suspicious": 0.5, "threat": 0.5,
+        "phishing": 0.5, "scam": 0.5, "fraud": 0.5,
+        
+        # Data breaches and leaks
+        "leak": 0.6, "stolen": 0.6, "database": 0.5, "credentials": 0.5,
+        "dump": 0.6, "exposed": 0.5,
+        
+        # DDoS and disruption
+        "ddos": 0.5, "dos": 0.5, "disruption": 0.4, "outage": 0.4,
+        
+        # Additional high-priority terms
+        "botnet": 0.6, "c2 server": 0.6, "payload": 0.5, "dropper": 0.5
     }
     
     medium_keywords = {
-        "medium": 0.1, "warning": 0.1, "advisory": 0.1, "patch": 0.1, "update": 0.1,
-        "security": 0.1, "alert": 0.1, "notice": 0.1
+        # General security terms
+        "security": 0.3, "patch": 0.4, "update": 0.3, "fix": 0.3,
+        "advisory": 0.4, "alert": 0.4, "warning": 0.4,
+        
+        # CVE and vulnerability tracking
+        "cve-": 0.5, "cwe-": 0.4, "nvd": 0.4,
+        
+        # General monitoring
+        "monitoring": 0.3, "detection": 0.3, "analysis": 0.3,
+        "intelligence": 0.3, "report": 0.2
     }
     
     # Calculate weighted threat score
-    threat_score = 0.0
+    keywords_found = []
     for keyword, weight in critical_keywords.items():
         if keyword in text_lower:
             threat_score += weight
+            keywords_found.append(f"{keyword}(+{weight})")
     
     for keyword, weight in high_keywords.items():
         if keyword in text_lower:
             threat_score += weight
+            keywords_found.append(f"{keyword}(+{weight})")
     
     for keyword, weight in medium_keywords.items():
         if keyword in text_lower:
             threat_score += weight
     
-    # Apply channel multiplier
+    if keywords_found:
+        logger.info(f"Keywords found: {', '.join(keywords_found[:5])}")
+    
+    # Apply channel-specific multipliers and context
     channel_meta = CHANNEL_METADATA.get(channel, {})
     multiplier = channel_meta.get('threat_multiplier', 1.0)
-    threat_score *= multiplier
+    channel_keywords = channel_meta.get('keywords', [])
     
-    # Determine threat level and urgency
-    if threat_score >= 0.7:
+    # Bonus for channel-specific keywords
+    channel_bonus = 0.0
+    for keyword in channel_keywords:
+        if keyword in text_lower:
+            channel_bonus += 0.2
+    
+    # Apply multipliers
+    threat_score = (threat_score + channel_bonus) * multiplier
+    
+    # Special handling for DarkfeedNews (premium threat intel)
+    if channel == "@DarkfeedNews":
+        threat_score += 0.4  # Base boost for premium intel
+        
+        # Extra boost for darkfeed-specific indicators
+        if any(word in text_lower for word in ["darkfeed", "threat actor", "campaign", "operation"]):
+            threat_score += 0.3
+            
+        # DarkfeedNews content is inherently higher threat
+        if threat_score < 0.4:
+            threat_score = 0.4
+    
+    # Special handling for breach detector
+    if channel == "@breachdetector":
+        if any(word in text_lower for word in ["breach", "leak", "stolen", "dump", "database"]):
+            threat_score += 0.3
+            
+        # Breach detector content is inherently medium+ threat
+        if threat_score < 0.3:
+            threat_score = 0.3
+    
+    # Special handling for SecHarvester
+    if channel == "@secharvester":
+        if any(word in text_lower for word in ["cve-", "vulnerability", "exploit"]):
+            threat_score += 0.2
+    
+    # Determine threat level and urgency with realistic thresholds
+    if threat_score >= 1.8:
         threat_level = "critical"
-        urgency_score = min(0.9, threat_score)
-    elif threat_score >= 0.4:
+        urgency_score = min(0.95, 0.5 + (threat_score * 0.2))
+    elif threat_score >= 1.0:
         threat_level = "high"
-        urgency_score = min(0.7, threat_score)
-    elif threat_score >= 0.2:
+        urgency_score = min(0.85, 0.4 + (threat_score * 0.2))
+    elif threat_score >= 0.5:
         threat_level = "medium"
-        urgency_score = min(0.5, threat_score)
+        urgency_score = min(0.65, 0.3 + (threat_score * 0.2))
+    elif threat_score >= 0.2:
+        threat_level = "low"
+        urgency_score = min(0.45, 0.2 + (threat_score * 0.2))
     else:
         threat_level = "low"
-        urgency_score = max(0.1, threat_score)
+        urgency_score = max(0.05, threat_score * 0.3)
     
-    # Enhanced category detection
+    # ENHANCED category detection with cybersecurity context
     category = "other"
-    category_keywords = {
-        "apt": ["apt", "advanced persistent", "nation state", "lazarus", "kimsuky", "turla"],
-        "ransomware": ["ransomware", "crypto", "encrypt", "lockbit", "maze", "ryuk", "conti", "novas"],
-        "data_breach": ["breach", "leak", "stolen", "database", "credential", "dump", "exposed"],
-        "malware": ["malware", "trojan", "virus", "backdoor", "rat", "stealer", "loader"],
-        "vulnerability": ["vulnerability", "cve-", "patch", "exploit", "rce", "privilege escalation"],
-        "phishing": ["phishing", "scam", "social engineering", "credential harvesting"]
+    category_scores = {}
+    
+    # Comprehensive category mapping
+    category_patterns = {
+        "ransomware": [
+            "ransomware", "crypto", "encrypt", "lockbit", "maze", "ryuk", "conti", 
+            "blackcat", "alphv", "revil", "darkside", "babuk", "novas", "ragnar",
+            "hive", "blackmatter", "grief", "egregor", "netwalker"
+        ],
+        "apt": [
+            "apt", "advanced persistent", "nation state", "lazarus", "kimsuky", 
+            "turla", "carbanak", "fin7", "sandworm", "equation", "darkhydrus",
+            "muddywater", "oceanlotus", "machete", "bronze butler", "stone panda"
+        ],
+        "data_breach": [
+            "breach", "leak", "stolen", "database", "credential", "dump", "exposed",
+            "hacked", "compromised", "data theft", "exfiltration", "personal data"
+        ],
+        "malware": [
+            "malware", "trojan", "virus", "backdoor", "rat", "stealer", "loader",
+            "botnet", "cryptominer", "keylogger", "spyware", "adware", "worm"
+        ],
+        "vulnerability": [
+            "vulnerability", "cve-", "exploit", "rce", "remote code execution",
+            "privilege escalation", "buffer overflow", "sql injection", "xss",
+            "csrf", "directory traversal", "deserialization"
+        ],
+        "phishing": [
+            "phishing", "scam", "social engineering", "credential harvesting",
+            "fake", "spoofed", "impersonation", "bec", "business email compromise"
+        ],
+        "ddos": [
+            "ddos", "dos", "denial of service", "amplification", "reflection",
+            "volumetric", "network attack", "bandwidth"
+        ],
+        "insider_threat": [
+            "insider", "rogue employee", "privilege abuse", "data theft employee",
+            "internal threat", "malicious insider"
+        ],
+        "supply_chain": [
+            "supply chain", "third party", "vendor", "software supply chain",
+            "dependency", "compromised library", "backdoored"
+        ]
     }
     
     # Score each category
-    category_scores = {}
-    for cat, keywords in category_keywords.items():
-        score = sum(1 for keyword in keywords if keyword in text_lower)
+    for cat, patterns in category_patterns.items():
+        score = 0
+        for pattern in patterns:
+            if pattern in text_lower:
+                score += 1
+                if pattern in ["lockbit", "maze", "ryuk", "conti"]:  # High-profile ransomware
+                    score += 2
+                elif pattern in ["lazarus", "apt28", "apt29"]:  # High-profile APTs
+                    score += 2
         if score > 0:
             category_scores[cat] = score
     
-    # Channel-specific category bias
-    channel_focus = channel_meta.get('focus', '')
-    if channel_focus == 'data_breaches' and 'data_breach' in category_scores:
-        category_scores['data_breach'] += 1
-    elif channel_focus == 'advanced_persistent_threats' and 'apt' in category_scores:
-        category_scores['apt'] += 1
+    # Apply channel context to category detection
+    if channel == "@DarkfeedNews":
+        # DarkfeedNews tends toward APT and advanced threats
+        if 'apt' in category_scores:
+            category_scores['apt'] += 2
+        if 'ransomware' in category_scores:
+            category_scores['ransomware'] += 2
+        # If no clear category but DarkfeedNews, likely APT/advanced
+        if not category_scores and threat_score > 0.3:
+            category_scores['apt'] = 1
+            
+    elif channel == "@breachdetector":
+        # Breach detector focuses on data breaches
+        if 'data_breach' in category_scores:
+            category_scores['data_breach'] += 3
+        # If no clear category but breach detector, likely breach
+        if not category_scores:
+            category_scores['data_breach'] = 1
+            
+    elif channel == "@secharvester":
+        # SecHarvester focuses on vulnerabilities and general security
+        if 'vulnerability' in category_scores:
+            category_scores['vulnerability'] += 2
+        if 'malware' in category_scores:
+            category_scores['malware'] += 1
     
+    # Select highest scoring category
     if category_scores:
         category = max(category_scores, key=category_scores.get)
+        logger.info(f"Category detected: {category} (score: {category_scores[category]})")
     
     # Enhanced sentiment detection
     sentiment = "neutral"
-    negative_indicators = ["critical", "severe", "dangerous", "urgent", "threat", "attack", "breach", "compromised", "exploit", "malicious"]
-    positive_indicators = ["fixed", "patched", "resolved", "secured", "protected", "mitigated", "blocked", "prevented"]
+    negative_indicators = [
+        "critical", "severe", "dangerous", "urgent", "threat", "attack", "breach",
+        "compromised", "exploit", "malicious", "vulnerable", "exposed", "stolen",
+        "emergency", "warning", "alert", "suspicious"
+    ]
+    positive_indicators = [
+        "fixed", "patched", "resolved", "secured", "protected", "mitigated",
+        "blocked", "prevented", "detected", "stopped", "quarantined", "updated"
+    ]
     
     negative_count = sum(1 for word in negative_indicators if word in text_lower)
     positive_count = sum(1 for word in positive_indicators if word in text_lower)
     
-    if negative_count > positive_count and negative_count > 0:
+    if negative_count > positive_count and negative_count >= 2:
         sentiment = "negative"
-    elif positive_count > negative_count and positive_count > 0:
+    elif positive_count > negative_count and positive_count >= 2:
         sentiment = "positive"
     
-    # Generate enhanced analysis based on content
+    # Generate ENHANCED analysis based on content and context
     analysis_parts = []
     
-    # Main threat assessment
+    # Main threat assessment with channel context
+    channel_name = channel.replace("@", "")
     if threat_level == "critical":
-        analysis_parts.append(f"Critical {category} threat detected from {channel} requiring immediate security response.")
+        analysis_parts.append(f"Critical {category} threat detected from {channel_name} requiring immediate security response and containment measures.")
     elif threat_level == "high":
-        analysis_parts.append(f"High-priority {category} identified from {channel} with significant security implications.")
+        analysis_parts.append(f"High-priority {category} identified from {channel_name} with significant security implications requiring prompt action.")
     elif threat_level == "medium":
-        analysis_parts.append(f"Medium-level {category} from {channel} requiring monitoring and assessment.")
+        analysis_parts.append(f"Medium-level {category} from {channel_name} requiring security monitoring and assessment.")
     else:
-        analysis_parts.append(f"{category.title()} intelligence from {channel} for situational awareness.")
+        analysis_parts.append(f"{category.title()} intelligence from {channel_name} providing valuable situational awareness.")
     
-    # Add specific threat details based on content
-    if any(word in text_lower for word in ["cve-", "vulnerability"]):
-        analysis_parts.append("Contains vulnerability information requiring patch management attention.")
+    # Add specific context based on detected content
+    context_added = False
     
-    if any(word in text_lower for word in ["exploit", "proof of concept", "poc"]):
-        analysis_parts.append("Includes exploitation details requiring immediate defensive measures.")
+    if any(word in text_lower for word in ["cve-", "vulnerability", "exploit"]):
+        analysis_parts.append("Contains vulnerability information requiring immediate patch management review and remediation.")
+        context_added = True
     
-    if any(word in text_lower for word in ["ioc", "indicator", "hash", "domain", "ip"]):
-        analysis_parts.append("Contains indicators of compromise for threat hunting operations.")
+    if any(word in text_lower for word in ["zero-day", "0day", "zero day"]):
+        analysis_parts.append("Involves zero-day exploitation requiring emergency response and advanced detection measures.")
+        context_added = True
     
-    # Extract basic intelligence data
-    intelligence_data = extract_cybersecurity_data(text)
+    if any(word in text_lower for word in ["ransomware", "encrypt", "lockbit", "maze"]):
+        analysis_parts.append("Ransomware activity detected requiring backup verification and endpoint protection review.")
+        context_added = True
     
-    # Add intelligence context to analysis
-    if intelligence_data["cve_references"]:
-        cve_count = len(intelligence_data["cve_references"])
-        analysis_parts.append(f"References {cve_count} CVE vulnerabilities requiring security attention.")
+    if any(word in text_lower for word in ["breach", "leak", "stolen", "dump"]):
+        analysis_parts.append("Data exposure incident requiring impact assessment and incident response activation.")
+        context_added = True
     
-    if intelligence_data["iocs_detected"]:
-        ioc_count = len(intelligence_data["iocs_detected"])
-        analysis_parts.append(f"Contains {ioc_count} indicators of compromise for defensive implementation.")
+    if any(word in text_lower for word in ["apt", "nation state", "advanced persistent"]):
+        analysis_parts.append("Advanced persistent threat activity requiring enhanced monitoring and threat hunting.")
+        context_added = True
+    
+    if any(word in text_lower for word in ["ioc", "indicator", "hash", "c2"]):
+        analysis_parts.append("Contains threat indicators requiring integration into security tools and hunting operations.")
+        context_added = True
+    
+    # Add channel-specific context if no specific context was added
+    if not context_added:
+        if channel == "@DarkfeedNews":
+            analysis_parts.append("Premium threat intelligence requiring security team review and threat landscape assessment.")
+        elif channel == "@breachdetector":
+            analysis_parts.append("Data security incident requiring breach response team evaluation.")
+        elif channel == "@secharvester":
+            analysis_parts.append("Security advisory requiring vulnerability management team review.")
     
     analysis_text = " ".join(analysis_parts)
     
-    # Extract key topics
+    # Extract comprehensive key topics
     key_topics = []
-    topic_keywords = ["vulnerability", "exploit", "malware", "ransomware", "breach", "apt", "phishing", "patch", "zero-day", "trojan"]
+    topic_keywords = [
+        "vulnerability", "exploit", "malware", "ransomware", "breach", "apt", 
+        "phishing", "patch", "zero-day", "trojan", "backdoor", "stealer",
+        "ddos", "c2", "botnet", "campaign", "threat actor", "ioc"
+    ]
+    
     for keyword in topic_keywords:
         if keyword in text_lower:
             key_topics.append(keyword)
     
+    # Add channel-specific topics
+    if channel == "@DarkfeedNews":
+        key_topics.extend(["threat-intelligence", "darkfeed"])
+    elif channel == "@breachdetector":
+        key_topics.extend(["data-breach", "breach-monitoring"])
+    elif channel == "@secharvester":
+        key_topics.extend(["security-news", "vulnerability-tracking"])
+    
+    # Extract MITRE techniques from content
+    mitre_techniques = []
+    if any(word in text_lower for word in ["phishing", "spearphishing"]):
+        mitre_techniques.append("T1566")  # Phishing
+    if any(word in text_lower for word in ["powershell", "command line"]):
+        mitre_techniques.append("T1059")  # Command and Scripting Interpreter
+    if any(word in text_lower for word in ["credential", "password", "hash"]):
+        mitre_techniques.append("T1003")  # OS Credential Dumping
+    if any(word in text_lower for word in ["lateral movement", "network"]):
+        mitre_techniques.append("T1021")  # Remote Services
+    if any(word in text_lower for word in ["persistence", "startup"]):
+        mitre_techniques.append("T1547")  # Boot or Logon Autostart Execution
+    
+    # Determine affected systems
+    affected_systems = []
+    system_keywords = {
+        "windows": ["windows", "microsoft", "powershell", "cmd", "exe", "dll"],
+        "linux": ["linux", "unix", "bash", "shell", "root", "sudo"],
+        "macos": ["macos", "mac", "apple", "osx", "darwin"],
+        "cloud": ["aws", "azure", "gcp", "cloud", "kubernetes", "docker"],
+        "mobile": ["android", "ios", "mobile", "phone", "app"],
+        "web": ["web", "browser", "javascript", "html", "php", "apache", "nginx"]
+    }
+    
+    for system, keywords in system_keywords.items():
+        if any(keyword in text_lower for keyword in keywords):
+            affected_systems.append(system)
+    
+    logger.info(f"Enhanced analysis complete: {threat_level}/{category} - score: {threat_score:.2f} - urgency: {urgency_score:.2f}")
+    
     return {
         "threat_level": threat_level,
         "category": category,
-        "threat_type": f"{category} intelligence",
+        "threat_type": f"{category} threat intelligence",
         "urgency_score": urgency_score,
         "sentiment": sentiment,
         "gemini_analysis": analysis_text,
-        "key_topics": key_topics[:5],
-        "mitre_techniques": intelligence_data.get("mitre_techniques", []),
-        "affected_systems": intelligence_data.get("affected_systems", []),
+        "key_topics": key_topics[:8],  # Limit to top 8 topics
+        "mitre_techniques": mitre_techniques,
+        "affected_systems": affected_systems,
         "vulnerabilities": [],  # Will be populated by extract_cybersecurity_data
         "attack_vectors": [],
         "geographical_targets": [],
-        "industry_targets": []
+        "industry_targets": [],
+        # Additional metadata
+        "analysis_confidence": min(0.95, 0.5 + (threat_score * 0.3)),
+        "processing_method": "enhanced_rule_based",
+        "threat_score_raw": threat_score
     }
 
-def extract_cybersecurity_data(text: str) -> Dict[str, List[str]]:
-    """Extract real cybersecurity indicators from text"""
+def extract_cybersecurity_data_enhanced(text: str) -> Dict[str, List[str]]:
+    """Enhanced cybersecurity indicator extraction"""
     extracted = {
         "cve_references": [],
+        "cwe_references": [],
         "iocs_detected": [],
         "malware_families": [],
         "threat_actors": [],
-        "affected_systems": []
+        "affected_systems": [],
+        "attack_vectors": [],
+        "vulnerabilities": [],
+        "campaign_names": [],
+        "geographical_targets": [],
+        "industry_targets": []
     }
     
     text_lower = text.lower()
     
-    # Extract CVEs
+    # Extract CVEs with enhanced pattern
     cve_matches = CYBERSEC_PATTERNS["cve"].findall(text)
-    extracted["cve_references"] = list(set(cve_matches))
+    extracted["cve_references"] = list(set(cve_matches))[:5]  # Limit to 5 most relevant
     
-    # Extract IOCs (excluding private IPs and common domains)
+    # Extract CWEs
+    cwe_matches = CYBERSEC_PATTERNS["cwe"].findall(text)
+    extracted["cwe_references"] = list(set(cwe_matches))[:3]
+    
+    # Extract IOCs with better filtering
+    # IPs (excluding private ranges)
     ip_matches = CYBERSEC_PATTERNS["ip_address"].findall(text)
     real_ips = []
     for ip in ip_matches:
         is_private = any(re.match(pattern, ip) for pattern in PRIVATE_IP_RANGES)
-        if not is_private:
+        if not is_private and ip not in ["0.0.0.0", "127.0.0.1", "255.255.255.255"]:
             real_ips.append(ip)
     
-    # Extract domains (excluding common ones)
+    # Domains (excluding common ones)
     domain_matches = CYBERSEC_PATTERNS["domain"].findall(text)
     real_domains = []
     for domain_parts in domain_matches:
         domain = '.'.join(domain_parts) if isinstance(domain_parts, tuple) else domain_parts
-        if domain.lower() not in EXCLUDED_DOMAINS and not any(excluded in domain.lower() for excluded in EXCLUDED_DOMAINS):
+        domain_lower = domain.lower()
+        
+        # Exclude common domains and obviously false positives
+        if (domain_lower not in EXCLUDED_DOMAINS and 
+            not any(excluded in domain_lower for excluded in EXCLUDED_DOMAINS) and
+            len(domain) > 4 and '.' in domain):
             real_domains.append(domain)
     
-    # Extract file hashes
+    # File hashes
     hashes = []
     for hash_type in ["md5", "sha1", "sha256", "sha512"]:
         if hash_type in CYBERSEC_PATTERNS:
-            hashes.extend(CYBERSEC_PATTERNS[hash_type].findall(text))
+            hash_matches = CYBERSEC_PATTERNS[hash_type].findall(text)
+            hashes.extend(hash_matches)
     
-    # Combine IOCs
-    all_iocs = real_ips + real_domains[:10] + hashes[:5]  # Limit to prevent noise
-    extracted["iocs_detected"] = all_iocs[:15]  # Max 15 IOCs
+    # Combine IOCs with reasonable limits
+    all_iocs = real_ips[:5] + real_domains[:8] + hashes[:5]
+    extracted["iocs_detected"] = all_iocs
     
-    # Extract malware families
-    extracted["malware_families"] = [malware for malware in MALWARE_FAMILIES 
-                                   if malware in text_lower][:5]
+    # Enhanced malware family detection
+    detected_malware = []
+    for malware in MALWARE_FAMILIES:
+        if malware in text_lower:
+            detected_malware.append(malware)
     
-    # Extract threat actors
-    extracted["threat_actors"] = [actor for actor in THREAT_ACTORS 
-                                if actor in text_lower][:3]
+    # Add common malware patterns not in the main list
+    additional_malware = ["emotet", "trickbot", "qakbot", "cobalt strike", "metasploit"]
+    for malware in additional_malware:
+        if malware in text_lower and malware not in detected_malware:
+            detected_malware.append(malware)
     
-    # Extract affected systems
-    systems = ["windows", "linux", "macos", "android", "ios", "docker", "kubernetes", "aws", "azure", "gcp"]
-    extracted["affected_systems"] = [system for system in systems if system in text_lower][:5]
+    extracted["malware_families"] = detected_malware[:5]
+    
+    # Enhanced threat actor detection
+    detected_actors = []
+    for actor in THREAT_ACTORS:
+        if actor in text_lower:
+            detected_actors.append(actor)
+    
+    extracted["threat_actors"] = detected_actors[:3]
+    
+    # Attack vector detection
+    attack_vectors = []
+    vector_patterns = {
+        "email": ["email", "phishing", "spearphishing", "attachment"],
+        "web": ["web", "browser", "javascript", "xss", "sql injection"],
+        "network": ["network", "lateral movement", "smb", "rdp", "ssh"],
+        "usb": ["usb", "removable media", "autorun"],
+        "supply_chain": ["supply chain", "third party", "vendor", "dependency"]
+    }
+    
+    for vector, keywords in vector_patterns.items():
+        if any(keyword in text_lower for keyword in keywords):
+            attack_vectors.append(vector)
+    
+    extracted["attack_vectors"] = attack_vectors[:4]
+    
+    # Vulnerability types
+    vuln_types = []
+    vuln_patterns = [
+        "rce", "remote code execution", "privilege escalation", "buffer overflow",
+        "sql injection", "xss", "csrf", "deserialization", "directory traversal"
+    ]
+    
+    for vuln in vuln_patterns:
+        if vuln in text_lower:
+            vuln_types.append(vuln.replace(" ", "_"))
+    
+    extracted["vulnerabilities"] = vuln_types[:4]
+    
+    # Campaign names (look for operation/campaign keywords)
+    campaign_keywords = ["operation", "campaign", "apt", "group"]
+    campaigns = []
+    
+    for keyword in campaign_keywords:
+        # Look for "Operation/Campaign [Name]" patterns
+        pattern = rf'{keyword}\s+([a-zA-Z][a-zA-Z0-9\s]{{2,20}})'
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        campaigns.extend(matches)
+    
+    extracted["campaign_names"] = campaigns[:3]
+    
+    # Geographic targets
+    countries = [
+        "united states", "usa", "china", "russia", "ukraine", "israel", "iran",
+        "north korea", "south korea", "japan", "germany", "france", "uk", "india"
+    ]
+    
+    geo_targets = []
+    for country in countries:
+        if country in text_lower:
+            geo_targets.append(country)
+    
+    extracted["geographical_targets"] = geo_targets[:4]
+    
+    # Industry targets
+    industries = [
+        "healthcare", "finance", "banking", "government", "education", "manufacturing",
+        "energy", "utilities", "telecommunications", "retail", "technology"
+    ]
+    
+    industry_targets = []
+    for industry in industries:
+        if industry in text_lower:
+            industry_targets.append(industry)
+    
+    extracted["industry_targets"] = industry_targets[:4]
+    
+    # Affected systems (enhanced)
+    systems = []
+    system_indicators = {
+        "windows": ["windows", "microsoft", "powershell", "cmd", "exe", "dll"],
+        "linux": ["linux", "unix", "bash", "shell", "root", "sudo"],
+        "macos": ["macos", "mac", "apple", "osx", "darwin"],
+        "android": ["android", "apk", "mobile"],
+        "ios": ["ios", "iphone", "ipad", "mobile"],
+        "docker": ["docker", "container", "kubernetes"],
+        "cloud": ["aws", "azure", "gcp", "cloud", "s3", "ec2"]
+    }
+    
+    for system, indicators in system_indicators.items():
+        if any(indicator in text_lower for indicator in indicators):
+            systems.append(system)
+    
+    extracted["affected_systems"] = systems[:5]
     
     return extracted
+
+# Use the enhanced function instead of the original
+def extract_cybersecurity_data(text: str) -> Dict[str, List[str]]:
+    """Extract cybersecurity indicators from text - Enhanced Version"""
+    return extract_cybersecurity_data_enhanced(text)
+
+# Use the enhanced function instead of the original
+def analyze_message_content(text: str, channel: str) -> Dict[str, Any]:
+    """Analyze message content without AI - Enhanced Version"""
+    return analyze_message_content_enhanced(text, channel)
 
 async def store_message_in_bigquery(message_data: Dict[str, Any]):
     """Store processed message in BigQuery - DEFENSIVE VERSION"""
@@ -1164,7 +1520,7 @@ async def get_threat_insights() -> Dict[str, Any]:
                  insight["urgency_score"] == 0.0)):
                 
                 logger.info(f"Re-analyzing message {insight['message_id']} with poor analysis")
-                enhanced_analysis = analyze_message_content(insight["message_text"], insight["chat_username"])
+                enhanced_analysis = analyze_message_content_enhanced(insight["message_text"], insight["chat_username"])
                 
                 # Update with better analysis
                 insight.update(enhanced_analysis)
