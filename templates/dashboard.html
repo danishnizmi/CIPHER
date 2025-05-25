@@ -37,21 +37,161 @@
         transform: translateX(4px);
     }
     
-    .loading-shimmer {
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
-        background-size: 200% 100%;
-        animation: shimmer 2s infinite;
+    .analysis-text {
+        background: rgba(0, 0, 0, 0.3);
+        border-left: 3px solid #6366f1;
+        padding: 16px;
+        border-radius: 0 8px 8px 0;
+        font-size: 14px;
+        line-height: 1.6;
     }
     
-    @keyframes shimmer {
-        0% { background-position: -200% 0; }
-        100% { background-position: 200% 0; }
+    .analysis-expanded {
+        background: rgba(0, 0, 0, 0.5);
+        border-left: 3px solid #00ff00;
+        max-height: none;
     }
     
-    .chart-container {
-        background: rgba(17, 25, 40, 0.7);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        backdrop-filter: blur(12px);
+    .intelligence-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 12px 0;
+    }
+    
+    .intel-tag {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .intel-tag:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+    }
+    
+    .cve-tag {
+        background: rgba(239, 68, 68, 0.2);
+        color: #f87171;
+        border: 1px solid rgba(239, 68, 68, 0.4);
+    }
+    
+    .cve-tag:hover {
+        background: rgba(239, 68, 68, 0.3);
+    }
+    
+    .ioc-tag {
+        background: rgba(245, 158, 11, 0.2);
+        color: #fbbf24;
+        border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+    
+    .ioc-tag:hover {
+        background: rgba(245, 158, 11, 0.3);
+    }
+    
+    .malware-tag {
+        background: rgba(220, 38, 127, 0.2);
+        color: #f472b6;
+        border: 1px solid rgba(220, 38, 127, 0.4);
+    }
+    
+    .malware-tag:hover {
+        background: rgba(220, 38, 127, 0.3);
+    }
+    
+    .actor-tag {
+        background: rgba(147, 51, 234, 0.2);
+        color: #a78bfa;
+        border: 1px solid rgba(147, 51, 234, 0.4);
+    }
+    
+    .actor-tag:hover {
+        background: rgba(147, 51, 234, 0.3);
+    }
+    
+    .system-tag {
+        background: rgba(59, 130, 246, 0.2);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.4);
+    }
+    
+    .system-tag:hover {
+        background: rgba(59, 130, 246, 0.3);
+    }
+    
+    .vector-tag {
+        background: rgba(16, 185, 129, 0.2);
+        color: #34d399;
+        border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+    
+    .vector-tag:hover {
+        background: rgba(16, 185, 129, 0.3);
+    }
+    
+    .copy-btn {
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        background: rgba(99, 102, 241, 0.1);
+        border: 1px solid #6366f1;
+        color: #6366f1;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        margin-left: 6px;
+        cursor: pointer;
+    }
+    
+    .intel-tag:hover .copy-btn {
+        opacity: 1;
+    }
+    
+    .copy-btn:hover {
+        background: rgba(99, 102, 241, 0.2);
+    }
+    
+    .threat-critical {
+        background: rgba(239, 68, 68, 0.2);
+        color: #f87171;
+        border: 1px solid #ef4444;
+        animation: criticalPulse 2s infinite;
+    }
+    
+    .threat-high {
+        background: rgba(245, 158, 11, 0.2);
+        color: #fbbf24;
+        border: 1px solid #f59e0b;
+    }
+    
+    .threat-medium {
+        background: rgba(234, 179, 8, 0.2);
+        color: #facc15;
+        border: 1px solid #eab308;
+    }
+    
+    .threat-low {
+        background: rgba(34, 197, 94, 0.2);
+        color: #4ade80;
+        border: 1px solid #22c55e;
+    }
+    
+    .threat-info {
+        background: rgba(99, 102, 241, 0.2);
+        color: #a5b4fc;
+        border: 1px solid #6366f1;
+    }
+    
+    @keyframes criticalPulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.8; transform: scale(1.02); }
     }
     
     .progress-bar {
@@ -94,6 +234,88 @@
         border: 2px solid rgba(239, 68, 68, 0.3);
         color: #f87171;
     }
+    
+    .urgency-meter {
+        width: 100px;
+        height: 8px;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    .urgency-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #22c55e, #eab308, #f59e0b, #ef4444);
+        border-radius: 4px;
+        transition: width 0.5s ease;
+    }
+    
+    .chart-container {
+        background: rgba(17, 25, 40, 0.7);
+        border: 1px solid rgba(99, 102, 241, 0.2);
+        backdrop-filter: blur(12px);
+    }
+    
+    .loading-shimmer {
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+        background-size: 200% 100%;
+        animation: shimmer 2s infinite;
+    }
+    
+    @keyframes shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+    }
+    
+    .reference-link {
+        color: #60a5fa;
+        text-decoration: none;
+        border-bottom: 1px dotted #60a5fa;
+        transition: all 0.2s ease;
+    }
+    
+    .reference-link:hover {
+        color: #93c5fd;
+        border-bottom-style: solid;
+    }
+    
+    .tooltip {
+        position: relative;
+        cursor: help;
+    }
+    
+    .tooltip::before {
+        content: attr(data-tooltip);
+        position: absolute;
+        bottom: 125%;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.9);
+        color: white;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        white-space: nowrap;
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+        z-index: 1000;
+        border: 1px solid rgba(99, 102, 241, 0.4);
+    }
+    
+    .tooltip:hover::before {
+        opacity: 1;
+        visibility: visible;
+    }
+    
+    .sentiment-positive { color: #4ade80; }
+    .sentiment-negative { color: #f87171; }
+    .sentiment-neutral { color: #9ca3af; }
+    
+    .confidence-high { border-left: 3px solid #22c55e; }
+    .confidence-medium { border-left: 3px solid #eab308; }
+    .confidence-low { border-left: 3px solid #ef4444; }
 </style>
 {% endblock %}
 
@@ -103,14 +325,13 @@
     <!-- Dashboard Header -->
     <header class="text-center mb-8">
         <div class="glass-effect rounded-2xl p-8 relative overflow-hidden">
-            <!-- Animated background -->
             <div class="absolute inset-0 bg-gradient-to-r from-cipher-blue/10 via-cipher-purple/10 to-cipher-green/10 animate-pulse"></div>
             
             <div class="relative z-10">
                 <h1 class="text-5xl font-bold neon-green mb-4">🛡️ CIPHER</h1>
                 <p class="text-xl text-gray-300 mb-4">Cybersecurity Intelligence Platform</p>
                 <p class="text-gray-400 max-w-2xl mx-auto">
-                    Real-time threat intelligence monitoring and analysis from premium cybersecurity channels
+                    Real-time threat intelligence monitoring and AI-powered analysis from premium cybersecurity channels
                 </p>
                 
                 <!-- Real-time Status Bar -->
@@ -124,8 +345,8 @@
                         <span class="text-sm font-mono">BigQuery</span>
                     </div>
                     <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
-                        <div :class="systemStatus.telegram_connected ? 'bg-green-400' : 'bg-gray-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
-                        <span class="text-sm font-mono">Telegram</span>
+                        <div :class="systemStatus.gemini_available ? 'bg-green-400' : 'bg-gray-400'" class="w-3 h-3 rounded-full animate-pulse"></div>
+                        <span class="text-sm font-mono">Gemini AI</span>
                     </div>
                     <div class="flex items-center space-x-2 px-4 py-2 bg-white/5 rounded-full">
                         <span class="text-sm font-mono" x-text="'Threat Level: ' + (systemStatus.threat_level || 'UNKNOWN')"></span>
@@ -170,9 +391,12 @@
                         <div class="metric-value text-3xl text-white" x-text="formatNumber(stats.total_messages || 0)"></div>
                     </div>
                 </div>
-                <div class="flex items-center text-sm">
-                    <span class="text-gray-400">Today:</span>
-                    <span class="text-white ml-2 font-mono" x-text="formatNumber(stats.processed_today || 0)"></span>
+                <div class="flex items-center justify-between text-sm">
+                    <div>
+                        <span class="text-gray-400">Today:</span>
+                        <span class="text-white ml-2 font-mono" x-text="formatNumber(stats.processed_today || 0)"></span>
+                    </div>
+                    <div class="text-xs text-gray-500" x-text="getDataAge()"></div>
                 </div>
             </div>
 
@@ -187,14 +411,16 @@
                         <div class="metric-value text-3xl text-red-400" x-text="formatNumber((stats.critical_threats || 0) + (stats.high_threats || 0))"></div>
                     </div>
                 </div>
-                <div class="flex items-center text-sm space-x-4">
-                    <div>
-                        <span class="text-gray-400">Critical:</span>
-                        <span class="text-red-400 ml-1 font-mono" x-text="stats.critical_threats || 0"></span>
-                    </div>
-                    <div>
-                        <span class="text-gray-400">High:</span>
-                        <span class="text-orange-400 ml-1 font-mono" x-text="stats.high_threats || 0"></span>
+                <div class="flex items-center justify-between text-sm">
+                    <div class="flex space-x-4">
+                        <div>
+                            <span class="text-gray-400">Critical:</span>
+                            <span class="text-red-400 ml-1 font-mono" x-text="stats.critical_threats || 0"></span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400">High:</span>
+                            <span class="text-orange-400 ml-1 font-mono" x-text="stats.high_threats || 0"></span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -210,28 +436,33 @@
                         <div class="metric-value text-3xl text-green-400" x-text="formatNumber(stats.cve_mentions || 0)"></div>
                     </div>
                 </div>
-                <div class="flex items-center text-sm space-x-4">
-                    <div>
-                        <span class="text-gray-400">Vulnerabilities:</span>
-                        <span class="text-green-400 ml-1 font-mono" x-text="stats.vulnerabilities || 0"></span>
+                <div class="flex items-center justify-between text-sm">
+                    <div class="flex space-x-4">
+                        <div>
+                            <span class="text-gray-400">Vulnerabilities:</span>
+                            <span class="text-green-400 ml-1 font-mono" x-text="stats.vulnerabilities || 0"></span>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <!-- System Health -->
+            <!-- AI Analysis Quality -->
             <div class="metric-card rounded-lg p-6 hover-lift">
                 <div class="flex items-center justify-between mb-4">
                     <div class="p-3 bg-cipher-purple/20 rounded-lg">
-                        <i class="fas fa-heartbeat text-cipher-purple text-xl"></i>
+                        <i class="fas fa-brain text-cipher-purple text-xl"></i>
                     </div>
                     <div class="text-right">
-                        <p class="text-gray-400 text-sm">Channels Active</p>
-                        <div class="metric-value text-3xl text-cipher-purple" x-text="(stats.unique_channels || 3) + '/3'"></div>
+                        <p class="text-gray-400 text-sm">Avg Urgency Score</p>
+                        <div class="metric-value text-3xl text-cipher-purple" x-text="(stats.avg_urgency || 0).toFixed(2)"></div>
                     </div>
                 </div>
-                <div class="flex items-center text-sm">
-                    <span class="text-gray-400">Avg Urgency:</span>
-                    <span class="text-cipher-purple ml-2 font-mono" x-text="(stats.avg_urgency || 0).toFixed(2)"></span>
+                <div class="flex items-center justify-between text-sm">
+                    <div>
+                        <span class="text-gray-400">Channels:</span>
+                        <span class="text-cipher-purple ml-2 font-mono" x-text="(stats.unique_channels || 3) + '/3'"></span>
+                    </div>
+                    <div class="text-xs text-cipher-purple" x-text="getUrgencyLevel(stats.avg_urgency)"></div>
                 </div>
             </div>
         </section>
@@ -303,71 +534,206 @@
             </div>
         </section>
 
-        <!-- Recent Threat Intelligence -->
+        <!-- Recent Threat Intelligence with AI Analysis -->
         <section class="mb-8">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-2xl font-bold text-cipher-blue flex items-center">
                     <i class="fas fa-shield-alt mr-3"></i>
-                    Recent Threat Intelligence
+                    Recent Threat Intelligence & AI Analysis
                 </h2>
                 <div class="flex items-center space-x-4">
                     <span class="text-sm text-gray-400" x-text="insights.total_count + ' insights processed'"></span>
+                    <a href="/api/export/threats?format=json" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm">
+                        <i class="fas fa-download mr-2"></i>Export JSON
+                    </a>
                     <button @click="refreshInsights()" class="px-4 py-2 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors text-sm">
                         <i class="fas fa-sync-alt mr-2"></i>Refresh
                     </button>
                 </div>
             </div>
 
-            <!-- Insights Grid -->
-            <div class="space-y-4 max-h-96 overflow-y-auto">
+            <!-- Insights Grid with Enhanced AI Analysis -->
+            <div class="space-y-6 max-h-[800px] overflow-y-auto">
                 <template x-for="insight in insights.data || []" :key="insight.message_id">
-                    <article class="insight-card rounded-lg p-6">
+                    <article class="insight-card rounded-lg p-6" :class="getConfidenceClass(insight.confidence_score)">
+                        <!-- Insight Header -->
                         <div class="flex justify-between items-start mb-4">
                             <div class="flex items-center space-x-3">
                                 <span x-text="insight.channel_icon || '📡'" class="text-2xl"></span>
                                 <div>
                                     <h4 class="font-semibold text-cipher-blue" x-text="insight.chat_username || '@Unknown'"></h4>
-                                    <p class="text-sm text-gray-400" x-text="insight.time_ago || 'Unknown time'"></p>
+                                    <div class="flex items-center space-x-2 text-sm text-gray-400">
+                                        <span x-text="insight.time_ago || 'Unknown time'"></span>
+                                        <span>•</span>
+                                        <span x-text="insight.formatted_date || 'No date'"></span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="flex items-center space-x-2">
                                 <span :class="insight.threat_badge_class || 'threat-low'" 
                                       class="px-3 py-1 rounded-full text-xs font-semibold uppercase"
                                       x-text="insight.threat_level || 'low'"></span>
-                                <span class="text-xs text-gray-400 font-mono" 
-                                      x-text="(insight.urgency_percentage || 0) + '%'"></span>
+                                <div class="flex items-center space-x-2">
+                                    <div class="urgency-meter">
+                                        <div class="urgency-fill" :style="`width: ${insight.urgency_percentage || 0}%`"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-400 font-mono" x-text="(insight.urgency_percentage || 0) + '%'"></span>
+                                </div>
                             </div>
                         </div>
                         
+                        <!-- AI Analysis Section -->
                         <div class="mb-4">
-                            <p class="text-gray-300 leading-relaxed" x-text="insight.truncated_analysis || 'No analysis available'"></p>
+                            <div class="flex items-center mb-2">
+                                <i class="fas fa-brain text-cipher-purple mr-2"></i>
+                                <span class="text-sm font-semibold text-cipher-purple">Gemini AI Analysis</span>
+                                <div class="flex items-center ml-2">
+                                    <span :class="getSentimentClass(insight.sentiment)" class="text-xs">
+                                        <i :class="getSentimentIcon(insight.sentiment)" class="mr-1"></i>
+                                        <span x-text="(insight.sentiment || 'neutral').toUpperCase()"></span>
+                                    </span>
+                                    <span x-show="insight.confidence_score" class="text-xs text-gray-400 ml-2">
+                                        (Confidence: <span x-text="Math.round((insight.confidence_score || 0) * 100)"></span>%)
+                                    </span>
+                                </div>
+                            </div>
                             
-                            <!-- Show more button for long analysis -->
-                            <button x-show="insight.has_more_analysis" 
-                                    @click="toggleInsightExpansion(insight.message_id)"
-                                    class="text-cipher-blue text-sm mt-2 hover:underline">
-                                Show full analysis
-                            </button>
+                            <div class="analysis-text" :class="expandedInsights.has(insight.message_id) ? 'analysis-expanded' : ''">
+                                <p class="leading-relaxed" 
+                                   x-text="expandedInsights.has(insight.message_id) ? (insight.gemini_analysis || 'No analysis available') : (insight.truncated_analysis || 'No analysis available')"></p>
+                                
+                                <!-- Show more/less button -->
+                                <button x-show="insight.has_more_analysis" 
+                                        @click="toggleInsightExpansion(insight.message_id)"
+                                        class="text-cipher-green text-sm mt-3 hover:underline flex items-center">
+                                    <i :class="expandedInsights.has(insight.message_id) ? 'fas fa-chevron-up' : 'fas fa-chevron-down'" class="mr-1"></i>
+                                    <span x-text="expandedInsights.has(insight.message_id) ? 'Show Less' : 'Show Full Analysis'"></span>
+                                </button>
+                            </div>
                         </div>
 
-                        <!-- Intelligence Summary -->
+                        <!-- Intelligence Tags and References -->
+                        <div x-show="hasIntelligenceData(insight)" class="intelligence-tags">
+                            
+                            <!-- CVE References -->
+                            <template x-for="cve in (insight.cve_references || [])" :key="cve">
+                                <div class="intel-tag cve-tag tooltip" :data-tooltip="'Common Vulnerabilities and Exposures - Click to view details'">
+                                    <i class="fas fa-bug mr-1"></i>
+                                    <a :href="getCVELink(cve)" target="_blank" rel="noopener" class="reference-link" x-text="cve"></a>
+                                    <button class="copy-btn" @click="copyToClipboard(cve)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                            
+                            <!-- IOC Indicators -->
+                            <template x-for="ioc in (insight.iocs_detected || []).slice(0, 5)" :key="ioc">
+                                <div class="intel-tag ioc-tag tooltip" :data-tooltip="'Indicator of Compromise - Click to copy'">
+                                    <i class="fas fa-crosshairs mr-1"></i>
+                                    <span x-text="truncateIOC(ioc)"></span>
+                                    <button class="copy-btn" @click="copyToClipboard(ioc)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                            
+                            <!-- Show IOC count if more than 5 -->
+                            <div x-show="(insight.iocs_detected || []).length > 5" class="intel-tag ioc-tag">
+                                <span x-text="'+' + ((insight.iocs_detected || []).length - 5) + ' more IOCs'"></span>
+                            </div>
+                            
+                            <!-- Malware Families -->
+                            <template x-for="malware in (insight.malware_families || [])" :key="malware">
+                                <div class="intel-tag malware-tag tooltip" :data-tooltip="'Malware Family - Click to search MITRE'">
+                                    <i class="fas fa-virus mr-1"></i>
+                                    <a :href="getMalwareLink(malware)" target="_blank" rel="noopener" class="reference-link" x-text="malware"></a>
+                                    <button class="copy-btn" @click="copyToClipboard(malware)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                            
+                            <!-- Threat Actors -->
+                            <template x-for="actor in (insight.threat_actors || [])" :key="actor">
+                                <div class="intel-tag actor-tag tooltip" :data-tooltip="'Threat Actor Group - Click to search MITRE ATT&CK'">
+                                    <i class="fas fa-user-secret mr-1"></i>
+                                    <a :href="getActorLink(actor)" target="_blank" rel="noopener" class="reference-link" x-text="actor"></a>
+                                    <button class="copy-btn" @click="copyToClipboard(actor)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                            
+                            <!-- Affected Systems -->
+                            <template x-for="system in (insight.affected_systems || []).slice(0, 3)" :key="system">
+                                <div class="intel-tag system-tag tooltip" :data-tooltip="'Affected System/Platform'">
+                                    <i class="fas fa-server mr-1"></i>
+                                    <span x-text="system"></span>
+                                    <button class="copy-btn" @click="copyToClipboard(system)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                            
+                            <!-- Attack Vectors -->
+                            <template x-for="vector in (insight.attack_vectors || []).slice(0, 2)" :key="vector">
+                                <div class="intel-tag vector-tag tooltip" :data-tooltip="'Attack Vector/Method'">
+                                    <i class="fas fa-route mr-1"></i>
+                                    <span x-text="vector"></span>
+                                    <button class="copy-btn" @click="copyToClipboard(vector)">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Advanced Intelligence Summary -->
                         <div x-show="insight.intelligence_summary && insight.intelligence_summary.has_intelligence" 
-                             class="flex items-center space-x-4 text-sm border-t border-white/10 pt-4">
-                            <div x-show="insight.intelligence_summary.cve_count > 0" class="flex items-center space-x-1">
-                                <i class="fas fa-bug text-red-400"></i>
-                                <span class="text-red-400" x-text="insight.intelligence_summary.cve_count + ' CVEs'"></span>
+                             class="flex items-center justify-between text-sm border-t border-white/10 pt-4 mt-4">
+                            <div class="flex items-center space-x-4">
+                                <div x-show="insight.intelligence_summary.cve_count > 0" class="flex items-center space-x-1">
+                                    <i class="fas fa-bug text-red-400"></i>
+                                    <span class="text-red-400" x-text="insight.intelligence_summary.cve_count + ' CVE' + (insight.intelligence_summary.cve_count > 1 ? 's' : '')"></span>
+                                </div>
+                                <div x-show="insight.intelligence_summary.ioc_count > 0" class="flex items-center space-x-1">
+                                    <i class="fas fa-crosshairs text-orange-400"></i>
+                                    <span class="text-orange-400" x-text="insight.intelligence_summary.ioc_count + ' IOC' + (insight.intelligence_summary.ioc_count > 1 ? 's' : '')"></span>
+                                </div>
+                                <div x-show="insight.intelligence_summary.malware_count > 0" class="flex items-center space-x-1">
+                                    <i class="fas fa-virus text-pink-400"></i>
+                                    <span class="text-pink-400" x-text="insight.intelligence_summary.malware_count + ' Malware'"></span>
+                                </div>
+                                <div x-show="insight.intelligence_summary.actor_count > 0" class="flex items-center space-x-1">
+                                    <i class="fas fa-user-secret text-purple-400"></i>
+                                    <span class="text-purple-400" x-text="insight.intelligence_summary.actor_count + ' Actor' + (insight.intelligence_summary.actor_count > 1 ? 's' : '')"></span>
+                                </div>
                             </div>
-                            <div x-show="insight.intelligence_summary.ioc_count > 0" class="flex items-center space-x-1">
-                                <i class="fas fa-crosshairs text-orange-400"></i>
-                                <span class="text-orange-400" x-text="insight.intelligence_summary.ioc_count + ' IOCs'"></span>
+                            <div class="flex items-center space-x-2">
+                                <span class="text-xs text-gray-400">Intelligence Score:</span>
+                                <div class="w-16 h-2 bg-gray-600 rounded-full">
+                                    <div class="h-full bg-gradient-to-r from-cipher-blue to-cipher-green rounded-full" 
+                                         :style="`width: ${(insight.intelligence_summary.intelligence_score || 0) * 100}%`"></div>
+                                </div>
+                                <span class="text-xs text-gray-400" x-text="Math.round((insight.intelligence_summary.intelligence_score || 0) * 100) + '%'"></span>
                             </div>
-                            <div x-show="insight.intelligence_summary.malware_count > 0" class="flex items-center space-x-1">
-                                <i class="fas fa-virus text-red-400"></i>
-                                <span class="text-red-400" x-text="insight.intelligence_summary.malware_count + ' Malware'"></span>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="flex items-center justify-between mt-4 pt-4 border-t border-white/10">
+                            <div class="flex items-center space-x-2">
+                                <button @click="copyFullInsight(insight)" class="text-xs text-cipher-blue hover:text-cipher-purple transition-colors">
+                                    <i class="fas fa-copy mr-1"></i>Copy All
+                                </button>
+                                <button @click="exportInsight(insight)" class="text-xs text-cipher-green hover:text-green-400 transition-colors">
+                                    <i class="fas fa-download mr-1"></i>Export
+                                </button>
+                                <a x-show="insight.message_id" :href="'/api/insights/' + insight.message_id" class="text-xs text-cipher-purple hover:text-purple-400 transition-colors">
+                                    <i class="fas fa-external-link-alt mr-1"></i>Details
+                                </a>
                             </div>
-                            <div x-show="insight.intelligence_summary.actor_count > 0" class="flex items-center space-x-1">
-                                <i class="fas fa-user-secret text-purple-400"></i>
-                                <span class="text-purple-400" x-text="insight.intelligence_summary.actor_count + ' Actors'"></span>
+                            <div class="text-xs text-gray-500">
+                                <span>ID: </span>
+                                <span class="font-mono" x-text="(insight.message_id || 'unknown').substring(0, 8)"></span>
                             </div>
                         </div>
                     </article>
@@ -384,6 +750,7 @@
                     <p>• Ensure Telegram monitoring is active</p>
                     <p>• Check that channels are accessible</p>
                     <p>• Verify BigQuery connection</p>
+                    <p>• Confirm Gemini AI is analyzing messages</p>
                 </div>
                 <button @click="refreshData()" class="mt-6 px-6 py-3 bg-cipher-blue hover:bg-cipher-purple text-white rounded-lg transition-colors">
                     <i class="fas fa-sync-alt mr-2"></i>Check for New Data
@@ -403,6 +770,9 @@
                              class="w-2 h-2 rounded-full animate-pulse"></div>
                         <span class="text-xs font-mono uppercase" x-text="channel.status"></span>
                     </div>
+                    <div class="mt-2 text-xs text-gray-500">
+                        <span x-text="'Priority: ' + (channel.priority || 'medium')"></span>
+                    </div>
                 </div>
             </template>
         </section>
@@ -415,6 +785,7 @@
                 <span>Data Source: <span class="text-cipher-blue font-mono" x-text="dataSource"></span></span>
                 <span>Last Updated: <span class="text-cipher-green font-mono" x-text="formatTimestamp(lastUpdated)"></span></span>
                 <span>Auto-refresh: <span class="text-cipher-purple font-mono">30s</span></span>
+                <span>Total Intelligence: <span class="text-cipher-orange font-mono" x-text="insights.total_count || 0"></span></span>
             </div>
         </div>
     </div>
@@ -446,19 +817,22 @@ function dashboardController() {
                 username: '@DarkfeedNews',
                 icon: '🔴',
                 description: 'Advanced Persistent Threats & Zero-day Exploits',
-                status: 'monitoring'
+                status: 'monitoring',
+                priority: 'critical'
             },
             {
                 username: '@breachdetector', 
                 icon: '🟠',
                 description: 'Data Breach Monitor & Credential Dumps',
-                status: 'monitoring'
+                status: 'monitoring',
+                priority: 'high'
             },
             {
                 username: '@secharvester',
                 icon: '🔵', 
                 description: 'Security News, CVEs & Patch Information',
-                status: 'monitoring'
+                status: 'monitoring',
+                priority: 'medium'
             }
         ],
 
@@ -566,6 +940,129 @@ function dashboardController() {
             }
         },
 
+        // Intelligence helper functions
+        hasIntelligenceData(insight) {
+            return (insight.cve_references && insight.cve_references.length > 0) ||
+                   (insight.iocs_detected && insight.iocs_detected.length > 0) ||
+                   (insight.malware_families && insight.malware_families.length > 0) ||
+                   (insight.threat_actors && insight.threat_actors.length > 0) ||
+                   (insight.affected_systems && insight.affected_systems.length > 0) ||
+                   (insight.attack_vectors && insight.attack_vectors.length > 0);
+        },
+
+        getCVELink(cve) {
+            return `https://nvd.nist.gov/vuln/detail/${cve}`;
+        },
+
+        getMalwareLink(malware) {
+            return `https://attack.mitre.org/search/?query=${encodeURIComponent(malware)}`;
+        },
+
+        getActorLink(actor) {
+            return `https://attack.mitre.org/groups/?query=${encodeURIComponent(actor)}`;
+        },
+
+        truncateIOC(ioc) {
+            if (ioc.length > 20) {
+                return ioc.substring(0, 17) + '...';
+            }
+            return ioc;
+        },
+
+        getSentimentClass(sentiment) {
+            const classes = {
+                positive: 'sentiment-positive',
+                negative: 'sentiment-negative',
+                neutral: 'sentiment-neutral'
+            };
+            return classes[sentiment] || 'sentiment-neutral';
+        },
+
+        getSentimentIcon(sentiment) {
+            const icons = {
+                positive: 'fas fa-smile',
+                negative: 'fas fa-frown',
+                neutral: 'fas fa-meh'
+            };
+            return icons[sentiment] || 'fas fa-meh';
+        },
+
+        getConfidenceClass(confidence) {
+            if (confidence >= 0.8) return 'confidence-high';
+            if (confidence >= 0.6) return 'confidence-medium';
+            return 'confidence-low';
+        },
+
+        getDataAge() {
+            if (!this.lastUpdated) return 'No data';
+            const now = new Date();
+            const updated = new Date(this.lastUpdated);
+            const ageMinutes = (now - updated) / (1000 * 60);
+            
+            if (ageMinutes < 1) return 'Just now';
+            if (ageMinutes < 60) return `${Math.floor(ageMinutes)}m ago`;
+            if (ageMinutes < 1440) return `${Math.floor(ageMinutes / 60)}h ago`;
+            return `${Math.floor(ageMinutes / 1440)}d ago`;
+        },
+
+        getUrgencyLevel(urgency) {
+            if (urgency >= 0.8) return 'CRITICAL';
+            if (urgency >= 0.6) return 'HIGH';
+            if (urgency >= 0.4) return 'MEDIUM';
+            return 'LOW';
+        },
+
+        // Copy functions
+        async copyToClipboard(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                // Could show a toast here
+                console.log('Copied to clipboard:', text);
+            } catch (error) {
+                console.error('Copy failed:', error);
+            }
+        },
+
+        async copyFullInsight(insight) {
+            const textToCopy = `🛡️ CIPHER Threat Intelligence Report
+Source: ${insight.chat_username || '@Unknown'}
+Threat Level: ${insight.threat_level || 'unknown'}
+Urgency: ${insight.urgency_percentage || 0}%
+Timestamp: ${insight.formatted_date || 'unknown'}
+
+AI Analysis:
+${insight.gemini_analysis || 'No analysis available'}
+
+Intelligence Data:
+${insight.cve_references ? `CVEs: ${insight.cve_references.join(', ')}` : ''}
+${insight.iocs_detected ? `IOCs: ${insight.iocs_detected.join(', ')}` : ''}
+${insight.malware_families ? `Malware: ${insight.malware_families.join(', ')}` : ''}
+${insight.threat_actors ? `Threat Actors: ${insight.threat_actors.join(', ')}` : ''}
+
+Generated by CIPHER Platform
+Message ID: ${insight.message_id || 'unknown'}`;
+
+            await this.copyToClipboard(textToCopy);
+        },
+
+        exportInsight(insight) {
+            const exportData = {
+                platform: 'CIPHER Cybersecurity Intelligence Platform',
+                export_timestamp: new Date().toISOString(),
+                insight: insight
+            };
+            
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `cipher_insight_${insight.message_id || 'unknown'}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        },
+
         // Utility functions
         formatNumber(num) {
             if (num >= 1000000) {
@@ -618,8 +1115,7 @@ function dashboardController() {
 <script>
     // Additional dashboard-specific scripts
     document.addEventListener('DOMContentLoaded', function() {
-        // Add any additional initialization here
-        console.log('🛡️ CIPHER Dashboard loaded and ready');
+        console.log('🛡️ CIPHER Dashboard with AI Analysis loaded and ready');
     });
 </script>
 {% endblock %}
