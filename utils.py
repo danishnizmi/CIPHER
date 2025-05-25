@@ -110,6 +110,60 @@ _monitoring_active = False
 _initialization_lock = asyncio.Lock()
 _session_string = None
 _monitoring_task = None
+_table_schema_cache = None
+
+async def get_table_schema() -> Dict[str, str]:
+    """Get actual table schema and cache it"""
+    global _table_schema_cache
+    
+    if _table_schema_cache:
+        return _table_schema_cache
+    
+    try:
+        if not _bigquery_available:
+            return {}
+        
+        table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
+        table = _bq_client.get_table(table_ref)
+        
+        schema_dict = {}
+        for field in table.schema:
+            schema_dict[field.name] = field.field_type
+        
+        _table_schema_cache = schema_dict
+        logger.info(f"Cached table schema with {len(schema_dict)} fields")
+        return schema_dict
+        
+    except Exception as e:
+        logger.error(f"Failed to get table schema: {e}")
+        return {}
+
+def build_safe_select_clause(requested_fields: List[str]) -> str:
+    """Build a safe SELECT clause using only fields that exist in the table"""
+    schema = _table_schema_cache or {}
+    
+    safe_fields = []
+    for field in requested_fields:
+        if field in schema:
+            safe_fields.append(field)
+        elif '(' in field:  # Handle expressions like COALESCE
+            safe_fields.append(field)
+        else:
+            # Provide safe defaults for missing fields
+            if field in ['urgency_score', 'confidence_score']:
+                safe_fields.append(f"0.0 as {field}")
+            elif field in ['threat_level']:
+                safe_fields.append(f"'low' as {field}")
+            elif field in ['category']:
+                safe_fields.append(f"'other' as {field}")
+            elif field in ['subcategory', 'threat_type', 'attack_stage', 'kill_chain_phase']:
+                safe_fields.append(f"'unknown' as {field}")
+            elif field.endswith('_references') or field.endswith('_detected') or field.endswith('_families'):
+                safe_fields.append(f"ARRAY<STRING>[] as {field}")
+            else:
+                safe_fields.append(f"NULL as {field}")
+    
+    return ', '.join(safe_fields)
 
 async def initialize_all_systems():
     """Initialize all Google Cloud and external systems with comprehensive error handling"""
@@ -264,13 +318,7 @@ async def setup_enhanced_bigquery_infrastructure():
             bigquery.SchemaField("geographical_targets", "STRING", mode="REPEATED", description="Geographic regions targeted"),
             bigquery.SchemaField("industry_targets", "STRING", mode="REPEATED", description="Industries targeted"),
             
-            # Temporal Analysis
-            bigquery.SchemaField("first_seen", "TIMESTAMP", description="First time this threat was seen"),
-            bigquery.SchemaField("last_updated", "TIMESTAMP", description="Last update to threat information"),
-            bigquery.SchemaField("timeline_events", "STRING", mode="REPEATED", description="Timeline of threat events"),
-            
             # Additional Context
-            bigquery.SchemaField("related_threats", "STRING", mode="REPEATED", description="Related threat IDs"),
             bigquery.SchemaField("source_reliability", "STRING", description="Source reliability assessment"),
             bigquery.SchemaField("information_type", "STRING", description="Type of intelligence information"),
             bigquery.SchemaField("sharing_level", "STRING", description="Information sharing level (TLP)"),
@@ -284,19 +332,15 @@ async def setup_enhanced_bigquery_infrastructure():
 
         # Create table with enhanced partitioning and clustering
         table_ref = dataset_ref.table(TABLE_ID)
+        table_exists = False
         try:
             table = _bq_client.get_table(table_ref)
+            table_exists = True
             logger.info(f"BigQuery table '{TABLE_ID}' exists with {len(table.schema)} fields")
             
-            # Check if we need to update schema
-            existing_fields = {field.name for field in table.schema}
-            new_fields = {field.name for field in schema}
-            missing_fields = new_fields - existing_fields
+            # Update schema cache
+            await get_table_schema()
             
-            if missing_fields:
-                logger.info(f"Adding {len(missing_fields)} new fields to existing schema")
-                # In production, you might want to create a new table version
-                
         except gcp_exceptions.NotFound:
             table = bigquery.Table(table_ref, schema=schema)
             table.description = "CIPHER Cybersecurity Intelligence Messages - Enhanced Schema"
@@ -313,8 +357,7 @@ async def setup_enhanced_bigquery_infrastructure():
                 "threat_level", 
                 "channel_type", 
                 "category", 
-                "threat_type", 
-                "urgency_score"
+                "threat_type"
             ]
             
             # Add labels for better organization
@@ -326,6 +369,9 @@ async def setup_enhanced_bigquery_infrastructure():
             
             _bq_client.create_table(table, timeout=60)
             logger.info(f"Created enhanced BigQuery table '{TABLE_ID}' with {len(schema)} fields")
+            
+            # Update schema cache
+            await get_table_schema()
 
         logger.info("✅ Enhanced BigQuery cybersecurity infrastructure ready")
         
@@ -752,8 +798,6 @@ async def analyze_message_with_gemini(text: str, channel: str) -> Dict[str, Any]
             "source_reliability": "A|B|C|D|F",
             "sharing_level": "TLP:RED|TLP:AMBER|TLP:GREEN|TLP:WHITE",
             "false_positive_risk": "low|medium|high",
-            "related_threats": ["similar threat indicators"],
-            "timeline_events": ["event timeline if applicable"],
             "tags": ["custom", "categorization", "tags"]
         }}
 
@@ -831,8 +875,6 @@ def validate_and_enhance_gemini_analysis(analysis: Dict[str, Any], text: str, ch
         "source_reliability": analysis.get("source_reliability", "C"),
         "sharing_level": analysis.get("sharing_level", "TLP:GREEN"),
         "false_positive_risk": analysis.get("false_positive_risk", "medium"),
-        "related_threats": analysis.get("related_threats", []),
-        "timeline_events": analysis.get("timeline_events", []),
         "tags": analysis.get("tags", [])
     }
     
@@ -1036,10 +1078,6 @@ def generate_enhanced_analysis_text(text: str, channel: str, cybersec_data: Dict
     
     if any(word in text_lower for word in ['exploit', 'proof of concept', 'poc', 'weaponized']):
         analysis_parts.append("Contains exploitation details requiring immediate defensive measures.")
-    
-    if cybersec_data["urls"]:
-        url_count = len(cybersec_data["urls"])
-        analysis_parts.append(f"Includes {url_count} reference URLs for additional intelligence.")
     
     return " ".join(analysis_parts)
 
@@ -1330,7 +1368,7 @@ def calculate_data_quality_score(message_data: Dict[str, Any]) -> float:
     return min(score, 1.0)
 
 async def store_enhanced_message_in_bigquery(message_data: Dict[str, Any]):
-    """Store processed message in BigQuery with enhanced schema and error handling"""
+    """Store processed message in BigQuery with safe field handling"""
     try:
         if not _bigquery_available:
             logger.warning("BigQuery not available for storing message")
@@ -1338,6 +1376,9 @@ async def store_enhanced_message_in_bigquery(message_data: Dict[str, Any]):
         
         table_ref = _bq_client.dataset(DATASET_ID).table(TABLE_ID)
         table = _bq_client.get_table(table_ref)
+        
+        # Get current schema
+        schema = await get_table_schema()
         
         # Helper function to convert datetime objects
         def convert_datetime(dt):
@@ -1349,27 +1390,19 @@ async def store_enhanced_message_in_bigquery(message_data: Dict[str, Any]):
                 return datetime.fromtimestamp(dt.timestamp()).isoformat()
             return str(dt)
         
-        # Get existing schema field names
-        existing_fields = {field.name for field in table.schema}
-        
-        # Build row with all available fields
+        # Build row with only fields that exist in the table
         row = {}
         
-        # Core fields (always present)
+        # Core required fields
         core_fields = {
             "message_id": str(message_data.get("message_id", "")),
             "chat_id": str(message_data.get("chat_id", "")),
-            "chat_username": message_data.get("chat_username", ""),
-            "user_id": str(message_data.get("user_id", "")),
-            "username": message_data.get("username", ""),
-            "message_text": message_data.get("message_text", ""),
-            "message_date": convert_datetime(message_data.get("message_date")),
             "processed_date": convert_datetime(message_data.get("processed_date")),
         }
         
-        # Add all fields that exist in both schema and data
+        # Add only fields that exist in the schema
         for field_name, field_value in message_data.items():
-            if field_name in existing_fields:
+            if field_name in schema:
                 if field_name.endswith('_date') or field_name in ['first_seen', 'last_updated']:
                     row[field_name] = convert_datetime(field_value)
                 elif isinstance(field_value, list):
@@ -1383,18 +1416,11 @@ async def store_enhanced_message_in_bigquery(message_data: Dict[str, Any]):
         # Ensure core fields are set
         row.update(core_fields)
         
-        # Set additional metadata
-        if "first_seen" in existing_fields and not row.get("first_seen"):
-            row["first_seen"] = row["processed_date"]
-        
-        if "last_updated" in existing_fields:
-            row["last_updated"] = row["processed_date"]
-        
         # Insert with error handling
         errors = _bq_client.insert_rows_json(table, [row])
         if errors:
             logger.error(f"BigQuery insert failed: {errors}")
-            logger.error(f"Row data sample: {[(k, type(v).__name__) for k, v in list(row.items())[:10]]}")
+            logger.error(f"Row fields: {list(row.keys())}")
         else:
             # Enhanced success logging with intelligence summary
             threat_level = row.get('threat_level', 'low')
@@ -1410,13 +1436,11 @@ async def store_enhanced_message_in_bigquery(message_data: Dict[str, Any]):
                 intelligence_summary += f" [{ioc_count} IOCs]"
             intelligence_summary += f" (urgency: {urgency:.2f})"
             
-            logger.info(f"✅ Stored: {row['chat_username']} - {intelligence_summary}")
+            logger.info(f"✅ Stored: {row.get('chat_username', 'unknown')} - {intelligence_summary}")
             
     except Exception as e:
         logger.error(f"Enhanced BigQuery storage failed: {e}")
-        if 'table' in locals():
-            logger.error(f"Available fields: {len(table.schema)} total")
-        logger.error(f"Message data keys: {list(message_data.keys())}")
+        logger.error(f"Available schema fields: {len(await get_table_schema())}")
 
 async def stop_monitoring_system():
     """Stop the CIPHER monitoring system with cleanup"""
@@ -1444,54 +1468,64 @@ async def stop_monitoring_system():
     except Exception as e:
         logger.error(f"Error stopping monitoring: {e}")
 
-# Enhanced API functions for comprehensive statistics and insights
+# FIXED: Enhanced API functions with defensive BigQuery queries
 
 async def get_comprehensive_stats() -> Dict[str, Any]:
-    """Get comprehensive system statistics with enhanced cybersecurity metrics"""
+    """Get comprehensive system statistics with defensive field checking"""
     try:
         if not _bigquery_available:
             return _get_default_stats()
         
-        # Enhanced statistics query
+        # Get available schema first
+        schema = await get_table_schema()
+        
+        # Build defensive query with only existing fields
+        available_fields = []
+        if 'urgency_score' in schema:
+            available_fields.append('AVG(COALESCE(urgency_score, 0)) as avg_urgency')
+        else:
+            available_fields.append('0.0 as avg_urgency')
+            
+        if 'threat_level' in schema:
+            available_fields.extend([
+                "COUNTIF(threat_level IN ('high', 'critical')) as high_threats",
+                "COUNTIF(threat_level = 'critical') as critical_threats"
+            ])
+        else:
+            available_fields.extend([
+                "0 as high_threats",
+                "0 as critical_threats"
+            ])
+            
+        if 'category' in schema:
+            available_fields.extend([
+                "COUNTIF(category = 'data_breach') as data_breaches",
+                "COUNTIF(category = 'malware') as malware_alerts",
+                "COUNTIF(category = 'vulnerability') as vulnerabilities",
+                "COUNTIF(category = 'apt') as apt_activity"
+            ])
+        else:
+            available_fields.extend([
+                "0 as data_breaches",
+                "0 as malware_alerts", 
+                "0 as vulnerabilities",
+                "0 as apt_activity"
+            ])
+            
+        if 'cve_references' in schema:
+            available_fields.append("COUNTIF(ARRAY_LENGTH(cve_references) > 0) as cve_mentions")
+        else:
+            available_fields.append("0 as cve_mentions")
+        
+        # Core stats query with defensive field handling
         stats_query = f"""
-        WITH threat_stats AS (
-            SELECT 
-                COUNT(*) as total_messages,
-                COUNTIF(DATE(processed_date) = CURRENT_DATE()) as processed_today,
-                COUNT(DISTINCT chat_username) as unique_channels,
-                AVG(COALESCE(urgency_score, 0)) as avg_urgency,
-                AVG(COALESCE(confidence_score, 0)) as avg_confidence,
-                
-                -- Threat level distribution
-                COUNTIF(threat_level IN ('high', 'critical')) as high_threats,
-                COUNTIF(threat_level = 'critical') as critical_threats,
-                COUNTIF(threat_level = 'high') as high_only_threats,
-                COUNTIF(threat_level = 'medium') as medium_threats,
-                COUNTIF(threat_level = 'low') as low_threats,
-                
-                -- Category distribution
-                COUNTIF(category = 'data_breach') as data_breaches,
-                COUNTIF(category = 'malware') as malware_alerts,
-                COUNTIF(category = 'vulnerability') as vulnerabilities,
-                COUNTIF(category = 'ransomware') as ransomware_alerts,
-                COUNTIF(category = 'apt') as apt_activity,
-                COUNTIF(category = 'phishing') as phishing_alerts,
-                COUNTIF(category = 'ddos') as ddos_alerts,
-                
-                -- Intelligence indicators
-                COUNTIF(ARRAY_LENGTH(cve_references) > 0) as cve_mentions,
-                COUNTIF(ARRAY_LENGTH(iocs_detected) > 0) as messages_with_iocs,
-                COUNTIF(ARRAY_LENGTH(malware_families) > 0) as malware_family_mentions,
-                COUNTIF(ARRAY_LENGTH(threat_actors) > 0) as threat_actor_mentions,
-                
-                -- Processing metrics
-                AVG(COALESCE(processing_time_ms, 0)) as avg_processing_time,
-                AVG(COALESCE(data_quality_score, 0)) as avg_data_quality
-                
-            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
-            WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-        )
-        SELECT * FROM threat_stats
+        SELECT 
+            COUNT(*) as total_messages,
+            COUNTIF(DATE(processed_date) = CURRENT_DATE()) as processed_today,
+            COUNT(DISTINCT chat_username) as unique_channels,
+            {', '.join(available_fields)}
+        FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
+        WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
         
         try:
@@ -1499,171 +1533,128 @@ async def get_comprehensive_stats() -> Dict[str, Any]:
             row = next(iter(query_job.result(timeout=30)), None)
             
             if row:
-                stats = {
-                    # Core metrics
+                return {
                     "total_messages": int(row.total_messages) if row.total_messages else 0,
                     "processed_today": int(row.processed_today) if row.processed_today else 0,
                     "unique_channels": int(row.unique_channels) if row.unique_channels else 3,
-                    "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                    "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
-                    
-                    # Threat levels
-                    "high_threats": int(row.high_threats) if row.high_threats else 0,
-                    "critical_threats": int(row.critical_threats) if row.critical_threats else 0,
-                    "high_only_threats": int(row.high_only_threats) if row.high_only_threats else 0,
-                    "medium_threats": int(row.medium_threats) if row.medium_threats else 0,
-                    "low_threats": int(row.low_threats) if row.low_threats else 0,
-                    
-                    # Categories
-                    "data_breaches": int(row.data_breaches) if row.data_breaches else 0,
-                    "malware_alerts": int(row.malware_alerts) if row.malware_alerts else 0,
-                    "vulnerabilities": int(row.vulnerabilities) if row.vulnerabilities else 0,
-                    "ransomware_alerts": int(row.ransomware_alerts) if row.ransomware_alerts else 0,
-                    "apt_activity": int(row.apt_activity) if row.apt_activity else 0,
-                    "phishing_alerts": int(row.phishing_alerts) if row.phishing_alerts else 0,
-                    "ddos_alerts": int(row.ddos_alerts) if row.ddos_alerts else 0,
-                    
-                    # Intelligence
-                    "cve_mentions": int(row.cve_mentions) if row.cve_mentions else 0,
-                    "messages_with_iocs": int(row.messages_with_iocs) if row.messages_with_iocs else 0,
-                    "malware_family_mentions": int(row.malware_family_mentions) if row.malware_family_mentions else 0,
-                    "threat_actor_mentions": int(row.threat_actor_mentions) if row.threat_actor_mentions else 0,
-                    
-                    # Performance
-                    "avg_processing_time": float(row.avg_processing_time) if row.avg_processing_time else 0.0,
-                    "avg_data_quality": float(row.avg_data_quality) if row.avg_data_quality else 0.0,
-                    
-                    # System status
+                    "avg_urgency": float(row.avg_urgency) if hasattr(row, 'avg_urgency') and row.avg_urgency else 0.0,
+                    "high_threats": int(row.high_threats) if hasattr(row, 'high_threats') and row.high_threats else 0,
+                    "critical_threats": int(row.critical_threats) if hasattr(row, 'critical_threats') and row.critical_threats else 0,
+                    "data_breaches": int(row.data_breaches) if hasattr(row, 'data_breaches') and row.data_breaches else 0,
+                    "malware_alerts": int(row.malware_alerts) if hasattr(row, 'malware_alerts') and row.malware_alerts else 0,
+                    "vulnerabilities": int(row.vulnerabilities) if hasattr(row, 'vulnerabilities') and row.vulnerabilities else 0,
+                    "apt_activity": int(row.apt_activity) if hasattr(row, 'apt_activity') and row.apt_activity else 0,
+                    "cve_mentions": int(row.cve_mentions) if hasattr(row, 'cve_mentions') and row.cve_mentions else 0,
                     "monitoring_active": _monitoring_active,
                     "data_source": "bigquery",
                     "last_updated": datetime.now(timezone.utc).isoformat()
                 }
-                
-                return stats
             else:
                 return _get_default_stats()
                 
         except Exception as e:
-            logger.error(f"Enhanced stats query failed: {e}")
+            logger.error(f"Stats query failed: {e}")
             return _get_default_stats()
         
     except Exception as e:
-        logger.error(f"Failed to get comprehensive stats: {e}")
+        logger.error(f"Failed to get stats: {e}")
         return _get_default_stats()
 
 async def get_threat_insights() -> Dict[str, Any]:
-    """Get enhanced threat intelligence insights with comprehensive data"""
+    """Get threat intelligence insights with defensive field handling"""
     try:
         if not _bigquery_available:
             return {"insights": [], "total": 0, "source": "bigquery_unavailable"}
         
-        # Enhanced insights query with all cybersecurity fields
+        # Get available schema
+        schema = await get_table_schema()
+        
+        # Build defensive field list
+        core_fields = [
+            "message_id",
+            "chat_username", 
+            "message_text",
+            "message_date",
+            "processed_date"
+        ]
+        
+        optional_fields = [
+            "gemini_analysis",
+            "sentiment", 
+            "urgency_score",
+            "threat_level",
+            "category", 
+            "threat_type",
+            "key_topics",
+            "cve_references",
+            "iocs_detected",
+            "malware_families",
+            "threat_actors",
+            "affected_systems"
+        ]
+        
+        # Only include fields that exist
+        select_fields = core_fields.copy()
+        for field in optional_fields:
+            if field in schema:
+                select_fields.append(field)
+            else:
+                # Provide defaults for missing fields
+                if field in ['urgency_score']:
+                    select_fields.append(f"0.0 as {field}")
+                elif field in ['threat_level']:
+                    select_fields.append(f"'low' as {field}")
+                elif field in ['category', 'threat_type']:
+                    select_fields.append(f"'other' as {field}")
+                elif field.endswith('_references') or field.endswith('_detected') or field.endswith('_families') or field in ['key_topics', 'threat_actors', 'affected_systems']:
+                    select_fields.append(f"ARRAY<STRING>[] as {field}")
+                else:
+                    select_fields.append(f"'' as {field}")
+        
         insights_query = f"""
-        SELECT 
-            message_id,
-            chat_username,
-            message_text,
-            message_date,
-            processed_date,
-            gemini_analysis,
-            sentiment,
-            urgency_score,
-            confidence_score,
-            COALESCE(threat_level, 'low') as threat_level,
-            COALESCE(category, 'other') as category,
-            COALESCE(subcategory, 'unknown') as subcategory,
-            COALESCE(threat_type, 'unknown') as threat_type,
-            attack_stage,
-            kill_chain_phase,
-            key_topics,
-            cve_references,
-            iocs_detected,
-            ip_addresses,
-            domains,
-            urls,
-            file_hashes,
-            malware_families,
-            threat_actors,
-            affected_systems,
-            affected_vendors,
-            vulnerabilities,
-            attack_vectors,
-            mitre_techniques,
-            geographical_targets,
-            industry_targets,
-            information_type,
-            source_reliability,
-            sharing_level,
-            tags
+        SELECT {', '.join(select_fields)}
         FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
         WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-        ORDER BY processed_date DESC, urgency_score DESC
-        LIMIT 100
+        ORDER BY processed_date DESC
+        LIMIT 50
         """
         
         query_job = _bq_client.query(insights_query)
-        results = query_job.result(timeout=45)
+        results = query_job.result(timeout=30)
         
         insights = []
         for row in results:
             insight = {
-                # Basic information
                 "message_id": row.message_id,
                 "chat_username": row.chat_username or "@Unknown",
-                "message_text": (row.message_text or "")[:2000],  # Increased limit
+                "message_text": (row.message_text or "")[:1000],
                 "message_date": row.message_date.isoformat() if row.message_date else None,
                 "processed_date": row.processed_date.isoformat() if row.processed_date else None,
-                
-                # AI Analysis
-                "gemini_analysis": row.gemini_analysis or "No analysis available",
-                "sentiment": row.sentiment or "neutral",
-                "urgency_score": float(row.urgency_score) if row.urgency_score is not None else 0.0,
-                "confidence_score": float(row.confidence_score) if row.confidence_score is not None else 0.0,
-                
-                # Threat Classification
-                "threat_level": row.threat_level,
-                "category": row.category,
-                "subcategory": row.subcategory,
-                "threat_type": row.threat_type,
-                "attack_stage": row.attack_stage,
-                "kill_chain_phase": row.kill_chain_phase,
-                
-                # Intelligence Data
-                "key_topics": row.key_topics or [],
-                "cve_references": row.cve_references or [],
-                "iocs_detected": row.iocs_detected or [],
-                "ip_addresses": row.ip_addresses or [],
-                "domains": row.domains or [],
-                "urls": row.urls or [],
-                "file_hashes": row.file_hashes or [],
-                "malware_families": row.malware_families or [],
-                "threat_actors": row.threat_actors or [],
-                "affected_systems": row.affected_systems or [],
-                "affected_vendors": row.affected_vendors or [],
-                "vulnerabilities": row.vulnerabilities or [],
-                "attack_vectors": row.attack_vectors or [],
-                "mitre_techniques": row.mitre_techniques or [],
-                "geographical_targets": row.geographical_targets or [],
-                "industry_targets": row.industry_targets or [],
-                
-                # Metadata
-                "information_type": row.information_type,
-                "source_reliability": row.source_reliability,
-                "sharing_level": row.sharing_level,
-                "tags": row.tags or []
+                "gemini_analysis": getattr(row, 'gemini_analysis', '') or "No analysis available",
+                "sentiment": getattr(row, 'sentiment', '') or "neutral",
+                "urgency_score": float(getattr(row, 'urgency_score', 0)) if hasattr(row, 'urgency_score') else 0.0,
+                "threat_level": getattr(row, 'threat_level', '') or "low",
+                "category": getattr(row, 'category', '') or "other",
+                "threat_type": getattr(row, 'threat_type', '') or "unknown",
+                "key_topics": getattr(row, 'key_topics', []) or [],
+                "cve_references": getattr(row, 'cve_references', []) or [],
+                "iocs_detected": getattr(row, 'iocs_detected', []) or [],
+                "malware_families": getattr(row, 'malware_families', []) or [],
+                "threat_actors": getattr(row, 'threat_actors', []) or [],
+                "affected_systems": getattr(row, 'affected_systems', []) or []
             }
             insights.append(insight)
         
-        logger.info(f"Retrieved {len(insights)} enhanced threat insights")
+        logger.info(f"Retrieved {len(insights)} threat insights with defensive queries")
         return {
             "insights": insights,
             "total": len(insights),
-            "source": "bigquery_enhanced",
+            "source": "bigquery_defensive",
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
-        logger.error(f"Failed to get enhanced threat insights: {e}")
+        logger.error(f"Failed to get threat insights: {e}")
         return {"insights": [], "total": 0, "source": "error", "error": str(e)}
 
 async def get_monitoring_status() -> Dict[str, Any]:
@@ -1705,95 +1696,65 @@ async def get_monitoring_status() -> Dict[str, Any]:
         
         status["channel_details"] = channel_status
         
-        # Add performance metrics if available
-        if _bigquery_available:
-            try:
-                perf_query = f"""
-                SELECT 
-                    AVG(processing_time_ms) as avg_processing_time,
-                    COUNT(*) as messages_last_hour,
-                    AVG(data_quality_score) as avg_quality
-                FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
-                WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-                """
-                
-                query_job = _bq_client.query(perf_query)
-                perf_row = next(iter(query_job.result(timeout=10)), None)
-                
-                if perf_row:
-                    status["performance"] = {
-                        "avg_processing_time_ms": float(perf_row.avg_processing_time) if perf_row.avg_processing_time else 0.0,
-                        "messages_last_hour": int(perf_row.messages_last_hour) if perf_row.messages_last_hour else 0,
-                        "avg_data_quality": float(perf_row.avg_quality) if perf_row.avg_quality else 0.0
-                    }
-            except Exception as e:
-                logger.warning(f"Performance metrics query failed: {e}")
-        
         return status
         
     except Exception as e:
-        logger.error(f"Error getting enhanced monitoring status: {e}")
+        logger.error(f"Error getting monitoring status: {e}")
         return {"active": False, "error": str(e)}
 
 async def get_threat_analytics() -> Dict[str, Any]:
-    """Get comprehensive threat analytics with enhanced visualizations"""
+    """Get threat analytics with defensive field handling"""
     try:
         if not _bigquery_available:
             return _get_empty_analytics()
         
-        # Comprehensive analytics query
+        # Get available schema
+        schema = await get_table_schema()
+        
+        # Build defensive analytics query
+        threat_level_fields = []
+        category_fields = []
+        
+        if 'threat_level' in schema:
+            threat_level_fields = [
+                "COUNTIF(threat_level = 'critical') as critical_count",
+                "COUNTIF(threat_level = 'high') as high_count", 
+                "COUNTIF(threat_level = 'medium') as medium_count",
+                "COUNTIF(threat_level = 'low') as low_count"
+            ]
+        else:
+            threat_level_fields = [
+                "0 as critical_count",
+                "0 as high_count",
+                "0 as medium_count", 
+                "0 as low_count"
+            ]
+            
+        if 'category' in schema:
+            category_fields = [
+                "COUNTIF(category = 'apt') as apt_count",
+                "COUNTIF(category = 'malware') as malware_count",
+                "COUNTIF(category = 'data_breach') as breach_count",
+                "COUNTIF(category = 'vulnerability') as vuln_count"
+            ]
+        else:
+            category_fields = [
+                "0 as apt_count",
+                "0 as malware_count", 
+                "0 as breach_count",
+                "0 as vuln_count"
+            ]
+        
+        urgency_field = "AVG(urgency_score)" if 'urgency_score' in schema else "0.0"
+        
         analytics_query = f"""
-        WITH threat_analysis AS (
-            SELECT 
-                threat_level,
-                category,
-                subcategory,
-                urgency_score,
-                confidence_score,
-                chat_username,
-                DATE(processed_date) as date,
-                EXTRACT(HOUR FROM processed_date) as hour,
-                ARRAY_LENGTH(cve_references) as cve_count,
-                ARRAY_LENGTH(iocs_detected) as ioc_count,
-                ARRAY_LENGTH(malware_families) as malware_count,
-                ARRAY_LENGTH(threat_actors) as actor_count
-            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
-            WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-        )
         SELECT 
-            -- Threat level distribution
-            COUNTIF(threat_level = 'critical') as critical_count,
-            COUNTIF(threat_level = 'high') as high_count,
-            COUNTIF(threat_level = 'medium') as medium_count,
-            COUNTIF(threat_level = 'low') as low_count,
-            COUNTIF(threat_level = 'info') as info_count,
-            
-            -- Category distribution
-            COUNTIF(category = 'apt') as apt_count,
-            COUNTIF(category = 'malware') as malware_count,
-            COUNTIF(category = 'ransomware') as ransomware_count,
-            COUNTIF(category = 'data_breach') as breach_count,
-            COUNTIF(category = 'vulnerability') as vuln_count,
-            COUNTIF(category = 'phishing') as phishing_count,
-            COUNTIF(category = 'ddos') as ddos_count,
-            COUNTIF(category = 'other') as other_count,
-            
-            -- Intelligence metrics
-            SUM(cve_count) as total_cves,
-            SUM(ioc_count) as total_iocs,
-            SUM(malware_count) as total_malware,
-            SUM(actor_count) as total_actors,
-            
-            -- Quality metrics
-            AVG(urgency_score) as avg_urgency,
-            AVG(confidence_score) as avg_confidence,
-            
-            -- Volume metrics
-            COUNT(*) as total_threats,
-            COUNTIF(urgency_score >= 0.8) as high_urgency_count,
-            COUNTIF(confidence_score >= 0.8) as high_confidence_count
-            
-        FROM threat_analysis
+            {', '.join(threat_level_fields)},
+            {', '.join(category_fields)},
+            {urgency_field} as avg_urgency,
+            COUNT(*) as total_threats
+        FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
+        WHERE processed_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         """
         
         query_job = _bq_client.query(analytics_query)
@@ -1804,43 +1765,22 @@ async def get_threat_analytics() -> Dict[str, Any]:
         
         analytics = {
             "threat_levels": {
-                "critical": int(row.critical_count) if row.critical_count else 0,
-                "high": int(row.high_count) if row.high_count else 0,
-                "medium": int(row.medium_count) if row.medium_count else 0,
-                "low": int(row.low_count) if row.low_count else 0,
-                "info": int(row.info_count) if row.info_count else 0
+                "critical": int(getattr(row, 'critical_count', 0)) if hasattr(row, 'critical_count') else 0,
+                "high": int(getattr(row, 'high_count', 0)) if hasattr(row, 'high_count') else 0,
+                "medium": int(getattr(row, 'medium_count', 0)) if hasattr(row, 'medium_count') else 0,
+                "low": int(getattr(row, 'low_count', 0)) if hasattr(row, 'low_count') else 0
             },
             "categories": {
-                "apt": int(row.apt_count) if row.apt_count else 0,
-                "malware": int(row.malware_count) if row.malware_count else 0,
-                "ransomware": int(row.ransomware_count) if row.ransomware_count else 0,
-                "data_breach": int(row.breach_count) if row.breach_count else 0,
-                "vulnerability": int(row.vuln_count) if row.vuln_count else 0,
-                "phishing": int(row.phishing_count) if row.phishing_count else 0,
-                "ddos": int(row.ddos_count) if row.ddos_count else 0,
-                "other": int(row.other_count) if row.other_count else 0
-            },
-            "intelligence_metrics": {
-                "total_cves": int(row.total_cves) if row.total_cves else 0,
-                "total_iocs": int(row.total_iocs) if row.total_iocs else 0,
-                "total_malware_families": int(row.total_malware) if row.total_malware else 0,
-                "total_threat_actors": int(row.total_actors) if row.total_actors else 0
-            },
-            "quality_metrics": {
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
-                "high_urgency_threats": int(row.high_urgency_count) if row.high_urgency_count else 0,
-                "high_confidence_threats": int(row.high_confidence_count) if row.high_confidence_count else 0
+                "apt": int(getattr(row, 'apt_count', 0)) if hasattr(row, 'apt_count') else 0,
+                "malware": int(getattr(row, 'malware_count', 0)) if hasattr(row, 'malware_count') else 0,
+                "data_breach": int(getattr(row, 'breach_count', 0)) if hasattr(row, 'breach_count') else 0,
+                "vulnerability": int(getattr(row, 'vuln_count', 0)) if hasattr(row, 'vuln_count') else 0
             },
             "summary": {
-                "total_threats": int(row.total_threats) if row.total_threats else 0,
-                "high_priority": (int(row.critical_count) if row.critical_count else 0) + (int(row.high_count) if row.high_count else 0),
-                "avg_urgency": float(row.avg_urgency) if row.avg_urgency else 0.0,
-                "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
-                "intelligence_coverage": {
-                    "cve_coverage": (int(row.total_cves) if row.total_cves else 0) / max(int(row.total_threats) if row.total_threats else 1, 1),
-                    "ioc_coverage": (int(row.total_iocs) if row.total_iocs else 0) / max(int(row.total_threats) if row.total_threats else 1, 1)
-                }
+                "total_threats": int(getattr(row, 'total_threats', 0)) if hasattr(row, 'total_threats') else 0,
+                "high_priority": (int(getattr(row, 'critical_count', 0)) if hasattr(row, 'critical_count') else 0) + 
+                               (int(getattr(row, 'high_count', 0)) if hasattr(row, 'high_count') else 0),
+                "avg_urgency": float(getattr(row, 'avg_urgency', 0.0)) if hasattr(row, 'avg_urgency') else 0.0
             },
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "data_period": "30_days"
@@ -1849,7 +1789,7 @@ async def get_threat_analytics() -> Dict[str, Any]:
         return analytics
         
     except Exception as e:
-        logger.error(f"Error calculating enhanced threat analytics: {e}")
+        logger.error(f"Error calculating threat analytics: {e}")
         return {"error": str(e), "status": "error"}
 
 def _get_default_stats() -> Dict[str, Any]:
@@ -1859,22 +1799,13 @@ def _get_default_stats() -> Dict[str, Any]:
         "processed_today": 0,
         "unique_channels": len(MONITORED_CHANNELS),
         "avg_urgency": 0.0,
-        "avg_confidence": 0.0,
         "high_threats": 0,
         "critical_threats": 0,
-        "medium_threats": 0,
-        "low_threats": 0,
         "data_breaches": 0,
         "malware_alerts": 0,
         "vulnerabilities": 0,
-        "ransomware_alerts": 0,
         "apt_activity": 0,
-        "phishing_alerts": 0,
-        "ddos_alerts": 0,
         "cve_mentions": 0,
-        "messages_with_iocs": 0,
-        "malware_family_mentions": 0,
-        "threat_actor_mentions": 0,
         "monitoring_active": _monitoring_active,
         "data_source": "system_default"
     }
@@ -1882,21 +1813,9 @@ def _get_default_stats() -> Dict[str, Any]:
 def _get_empty_analytics() -> Dict[str, Any]:
     """Enhanced empty analytics structure"""
     return {
-        "threat_levels": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-        "categories": {
-            "apt": 0, "malware": 0, "ransomware": 0, "data_breach": 0, 
-            "vulnerability": 0, "phishing": 0, "ddos": 0, "other": 0
-        },
-        "intelligence_metrics": {
-            "total_cves": 0, "total_iocs": 0, "total_malware_families": 0, "total_threat_actors": 0
-        },
-        "quality_metrics": {
-            "avg_urgency": 0.0, "avg_confidence": 0.0, "high_urgency_threats": 0, "high_confidence_threats": 0
-        },
-        "summary": {
-            "total_threats": 0, "high_priority": 0, "avg_urgency": 0.0, "avg_confidence": 0.0,
-            "intelligence_coverage": {"cve_coverage": 0.0, "ioc_coverage": 0.0}
-        }
+        "threat_levels": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "categories": {"apt": 0, "malware": 0, "data_breach": 0, "vulnerability": 0},
+        "summary": {"total_threats": 0, "high_priority": 0, "avg_urgency": 0.0}
     }
 
 # System state checkers
